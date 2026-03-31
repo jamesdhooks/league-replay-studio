@@ -1,0 +1,64 @@
+# Reference materials — not part of the project source
+reference/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+ENV/
+pip-wheel-metadata/
+
+# Node / Frontend
+node_modules/
+frontend/dist/
+frontend/build/
+.npm
+*.tsbuildinfo
+
+# PyInstaller
+*.spec
+backend/dist/
+backend/build/
+
+# SQLite
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# VS Code
+.vscode/settings.json
+.vscode/launch.json
+.vscode/extensions.json
+
+# PyWebview / Electron
+*.cache
+
+# Project data (user-generated, not source)
+backend/data/projects/
+
+# Build output
+backend/static/
