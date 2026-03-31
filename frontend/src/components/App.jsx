@@ -3,6 +3,7 @@ import { ToastProvider } from '../context/ToastContext'
 import { ModalProvider } from '../context/ModalContext'
 import { IRacingProvider } from '../context/IRacingContext'
 import { ProjectProvider } from '../context/ProjectContext'
+import { SettingsProvider } from '../context/SettingsContext'
 import { wsClient } from '../services/websocket'
 import AppShell from './layout/AppShell'
 
@@ -20,11 +21,13 @@ function App() {
   return (
     <ToastProvider>
       <ModalProvider>
-        <IRacingProvider>
-          <ProjectProvider>
-            <AppShell />
-          </ProjectProvider>
-        </IRacingProvider>
+        <SettingsProvider>
+          <IRacingProvider>
+            <ProjectProvider>
+              <AppShell />
+            </ProjectProvider>
+          </IRacingProvider>
+        </SettingsProvider>
       </ModalProvider>
     </ToastProvider>
   )

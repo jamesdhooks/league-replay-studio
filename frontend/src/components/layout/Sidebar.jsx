@@ -13,8 +13,9 @@ import {
  *
  * @param {Object} props
  * @param {boolean} props.collapsed - Whether the sidebar is collapsed
+ * @param {() => void} [props.onOpenSettings] - Callback to open settings panel
  */
-function Sidebar({ collapsed }) {
+function Sidebar({ collapsed, onOpenSettings }) {
   const navItems = [
     { icon: FolderOpen, label: 'Projects', id: 'projects', active: true },
     { icon: Film, label: 'Capture', id: 'capture' },
@@ -51,6 +52,7 @@ function Sidebar({ collapsed }) {
           icon={Settings}
           label="Settings"
           collapsed={collapsed}
+          onClick={onOpenSettings}
         />
       </div>
     </aside>
@@ -60,10 +62,11 @@ function Sidebar({ collapsed }) {
 /**
  * Single sidebar navigation item.
  */
-function SidebarItem({ icon: Icon, label, active = false, collapsed }) {
+function SidebarItem({ icon: Icon, label, active = false, collapsed, onClick }) {
   return (
     <li>
       <button
+        onClick={onClick}
         className={`w-full flex items-center gap-3 px-2 py-1.5 rounded-md text-sm
                     transition-colors ${
                       active

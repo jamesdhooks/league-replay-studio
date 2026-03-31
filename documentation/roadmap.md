@@ -169,19 +169,19 @@ Full project management backed by SQLite. New Project Wizard, project library (g
 
 ---
 
-### Feature 4 — Settings System `MUST` `📋 planned`
+### Feature 4 — Settings System `MUST` `✅ completed`
 **Spec:** `004-settings-system`
 **Dependencies:** feature-1
 
 JSON config persistence and settings panel UI. Categories: General, Camera Defaults, Encoding Defaults, Hotkeys, Pipeline Defaults. Accessible via REST API and reactive in the UI.
 
 **Acceptance Criteria**
-- [ ] Settings panel renders with organized categories (General, Camera, Encoding, Hotkeys, Pipeline)
-- [ ] Changes are persisted to a JSON config file and survive app restarts
-- [ ] Settings are accessible via GET/PUT REST API endpoints
-- [ ] Default values are sensible for new users (no mandatory initial configuration)
-- [ ] Theme selector (dark/light/system) applies immediately across the UI
-- [ ] Settings validation prevents invalid values (e.g., negative bitrates)
+- [x] Settings panel renders with organized categories (General, Camera, Encoding, Hotkeys, Pipeline)
+- [x] Changes are persisted to a JSON config file and survive app restarts
+- [x] Settings are accessible via GET/PUT REST API endpoints
+- [x] Default values are sensible for new users (no mandatory initial configuration)
+- [x] Theme selector (dark/light/system) applies immediately across the UI
+- [x] Settings validation prevents invalid values (e.g., negative bitrates)
 
 ---
 

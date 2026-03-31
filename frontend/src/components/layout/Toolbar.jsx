@@ -15,8 +15,9 @@ import {
  * @param {boolean} props.sidebarCollapsed
  * @param {() => void} props.onToggleSidebar
  * @param {string} [props.projectName] - Active project name (if any)
+ * @param {() => void} [props.onOpenSettings] - Callback to open settings panel
  */
-function Toolbar({ sidebarCollapsed, onToggleSidebar, projectName }) {
+function Toolbar({ sidebarCollapsed, onToggleSidebar, projectName, onOpenSettings }) {
   return (
     <header className="h-toolbar flex items-center px-3 bg-bg-secondary border-b border-border
                         select-none shrink-0">
@@ -59,7 +60,7 @@ function Toolbar({ sidebarCollapsed, onToggleSidebar, projectName }) {
         <ToolbarButton icon={Undo2} title="Undo (Ctrl+Z)" disabled />
         <ToolbarButton icon={Redo2} title="Redo (Ctrl+Y)" disabled />
         <ToolbarDivider />
-        <ToolbarButton icon={Settings} title="Settings" />
+        <ToolbarButton icon={Settings} title="Settings" onClick={onOpenSettings} />
         <ToolbarButton icon={HelpCircle} title="Help" />
       </div>
     </header>
