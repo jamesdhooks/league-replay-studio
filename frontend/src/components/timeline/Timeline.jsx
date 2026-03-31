@@ -16,7 +16,7 @@ import { Film } from 'lucide-react'
  * @param {number} props.projectId - Active project ID
  */
 export default function Timeline({ projectId }) {
-  const { loadRaceDuration, handleKeyDown, raceDuration } = useTimeline()
+  const { loadRaceDuration, handleKeyDown, raceDuration, setActiveProjectId } = useTimeline()
   const { fetchEvents, events } = useAnalysis()
 
   // Load race data on mount / project change
@@ -24,13 +24,12 @@ export default function Timeline({ projectId }) {
     if (projectId) {
       loadRaceDuration(projectId)
       fetchEvents(projectId, { limit: 1000 })
-      // Store project ID for canvas edge-drag commits
-      window.__timelineProjectId = projectId
+      setActiveProjectId(projectId)
     }
     return () => {
-      window.__timelineProjectId = null
+      setActiveProjectId(null)
     }
-  }, [projectId, loadRaceDuration, fetchEvents])
+  }, [projectId, loadRaceDuration, fetchEvents, setActiveProjectId])
 
   // Register keyboard shortcuts
   useEffect(() => {

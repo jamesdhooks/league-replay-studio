@@ -39,7 +39,7 @@ export default function TimelineCanvas() {
     handleZoomWheel, panBy, seekTo,
     playheadTime, events, selectedEventId, setSelectedEventId,
     inPoint, outPoint,
-    openContextMenu, updateEvent,
+    openContextMenu, updateEvent, activeProjectId,
   } = useTimeline()
 
   // ── Interaction state (refs to avoid re-renders during drag) ───────────
@@ -500,8 +500,8 @@ export default function TimelineCanvas() {
 
         // Get project ID from the event list URL pattern
         // We'll call updateEvent from the Timeline parent since we need project ID
-        if (window.__timelineProjectId) {
-          updateEvent(window.__timelineProjectId, drag.eventId, updates)
+        if (activeProjectId) {
+          updateEvent(activeProjectId, drag.eventId, updates)
         }
       }
     }

@@ -45,6 +45,9 @@ export function TimelineProvider({ children }) {
   const [raceDuration, setRaceDuration] = useState(0)         // total race time in seconds
   const [totalFrames, setTotalFrames] = useState(0)           // total replay frames
 
+  // ── Active project tracking ─────────────────────────────────────────────
+  const [activeProjectId, setActiveProjectId] = useState(null)
+
   // ── Playhead ────────────────────────────────────────────────────────────
   const [playheadTime, setPlayheadTime] = useState(0)         // seconds
   const [isPlaying, setIsPlaying] = useState(false)
@@ -308,6 +311,10 @@ export function TimelineProvider({ children }) {
     deleteEvent,
     splitEvent,
 
+    // Active project
+    activeProjectId,
+    setActiveProjectId,
+
     // Keyboard
     handleKeyDown,
 
@@ -321,7 +328,7 @@ export function TimelineProvider({ children }) {
     selectedEventId, inPoint, outPoint,
     setInPointAtPlayhead, setOutPointAtPlayhead, clearInOutPoints,
     contextMenu, openContextMenu, closeContextMenu,
-    updateEvent, deleteEvent, splitEvent, handleKeyDown, events,
+    updateEvent, deleteEvent, splitEvent, activeProjectId, handleKeyDown, events,
   ])
 
   return (
