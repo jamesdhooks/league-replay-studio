@@ -97,6 +97,16 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
     error_message   TEXT
 );
 
+-- Highlight configuration (one active row per project)
+CREATE TABLE IF NOT EXISTS highlight_config (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    weights         TEXT    NOT NULL DEFAULT '{}',
+    target_duration REAL,
+    min_severity    INTEGER NOT NULL DEFAULT 0,
+    overrides       TEXT    NOT NULL DEFAULT '{}',
+    updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
 -- ── Indexes ─────────────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_car_states_tick ON car_states(tick_id);
 CREATE INDEX IF NOT EXISTS idx_car_states_car  ON car_states(car_idx);
@@ -272,3 +282,107 @@ def get_analysis_status(conn: sqlite3.Connection) -> dict:
     if not row:
         return {"status": "none", "total_ticks": 0, "total_events": 0}
     return dict(row)
+
+
+# ── Highlight config helpers ─────────────────────────────────────────────────
+
+_DEFAULT_WEIGHTS = {
+    "incident": 80,
+    "battle": 60,
+    "overtake": 70,
+    "pit_stop": 20,
+    "fastest_lap": 50,
+    "leader_change": 90,
+    "first_lap": 100,
+    "last_lap": 100,
+}
+
+
+def get_highlight_config(conn: sqlite3.Connection) -> dict:
+    """Get the current highlight configuration for this project.
+
+    Returns default values if no config has been saved yet.
+    """
+    row = conn.execute(
+        "SELECT * FROM highlight_config ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if not row:
+        return {
+            "weights": dict(_DEFAULT_WEIGHTS),
+            "target_duration": None,
+            "min_severity": 0,
+            "overrides": {},
+        }
+    d = dict(row)
+    try:
+        d["weights"] = json.loads(d.get("weights", "{}"))
+    except (json.JSONDecodeError, TypeError):
+        d["weights"] = dict(_DEFAULT_WEIGHTS)
+    try:
+        d["overrides"] = json.loads(d.get("overrides", "{}"))
+    except (json.JSONDecodeError, TypeError):
+        d["overrides"] = {}
+    return d
+
+
+def save_highlight_config(
+    conn: sqlite3.Connection,
+    weights: dict,
+    target_duration: float | None = None,
+    min_severity: int = 0,
+    overrides: dict | None = None,
+) -> dict:
+    """Save (upsert) the highlight configuration for this project.
+
+    Always replaces the single config row with the new values.
+    """
+    conn.execute("DELETE FROM highlight_config")
+    conn.execute(
+        """INSERT INTO highlight_config (weights, target_duration, min_severity, overrides)
+           VALUES (?, ?, ?, ?)""",
+        (
+            json.dumps(weights),
+            target_duration,
+            max(0, min(10, min_severity)),
+            json.dumps(overrides or {}),
+        ),
+    )
+    conn.commit()
+    return get_highlight_config(conn)
+
+
+def batch_update_highlight_flags(
+    conn: sqlite3.Connection,
+    included_ids: list[int],
+    excluded_ids: list[int],
+) -> int:
+    """Batch-update the included_in_highlight flag for events.
+
+    Sets included=1 for included_ids, included=0 for excluded_ids.
+    Returns total number of rows updated.
+    """
+    count = 0
+    if included_ids:
+        placeholders = ",".join("?" for _ in included_ids)
+        cur = conn.execute(
+            f"UPDATE race_events SET included_in_highlight = 1 WHERE id IN ({placeholders})",
+            included_ids,
+        )
+        count += cur.rowcount
+    if excluded_ids:
+        placeholders = ",".join("?" for _ in excluded_ids)
+        cur = conn.execute(
+            f"UPDATE race_events SET included_in_highlight = 0 WHERE id IN ({placeholders})",
+            excluded_ids,
+        )
+        count += cur.rowcount
+    conn.commit()
+    return count
+
+
+def get_drivers(conn: sqlite3.Connection) -> list[dict]:
+    """Get all drivers for the project."""
+    rows = conn.execute(
+        "SELECT * FROM drivers WHERE is_spectator = 0 ORDER BY car_idx"
+    ).fetchall()
+    return [dict(r) for r in rows]

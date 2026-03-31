@@ -12,6 +12,13 @@ REST endpoints for the replay analysis engine.
   DELETE /api/projects/{id}/events/{eid} — Delete an event
   POST /api/projects/{id}/events/{eid}/split — Split an event at a timestamp
   GET  /api/projects/{id}/analysis/race-duration — Get total race duration
+  GET  /api/projects/{id}/highlights/config — Get highlight configuration
+  PUT  /api/projects/{id}/highlights/config — Save highlight configuration
+  POST /api/projects/{id}/highlights/apply — Batch apply highlight selections
+  GET  /api/projects/{id}/analysis/drivers — Get driver list
+  GET  /api/highlights/presets — List global highlight presets
+  POST /api/highlights/presets — Save a global highlight preset
+  DELETE /api/highlights/presets/{name} — Delete a global highlight preset
 """
 
 from __future__ import annotations
@@ -32,6 +39,10 @@ from server.services.analysis_db import (
     get_events,
     count_events,
     get_analysis_status as db_get_analysis_status,
+    get_highlight_config,
+    save_highlight_config,
+    batch_update_highlight_flags,
+    get_drivers,
 )
 
 logger = logging.getLogger(__name__)
@@ -482,3 +493,205 @@ async def get_race_duration(project_id: int):
     except Exception as exc:
         logger.error("[Analysis API] Race duration error: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Highlight configuration endpoints (Feature 9) ───────────────────────────
+
+class HighlightConfigRequest(BaseModel):
+    """Highlight configuration payload."""
+    weights: dict[str, int] = {}
+    target_duration: Optional[float] = None
+    min_severity: int = 0
+    overrides: dict[str, str] = {}  # event_id -> "include" | "exclude"
+
+
+class HighlightApplyRequest(BaseModel):
+    """Batch-apply highlight selections."""
+    included_ids: list[int] = []
+    excluded_ids: list[int] = []
+
+
+class PresetSaveRequest(BaseModel):
+    """Save a named highlight preset."""
+    name: str
+    weights: dict[str, int]
+    target_duration: Optional[float] = None
+    min_severity: int = 0
+
+
+@router.get("/projects/{project_id}/highlights/config")
+async def get_project_highlight_config(project_id: int):
+    """Get the highlight configuration for a project."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project["project_dir"]
+    try:
+        init_analysis_db(project_dir)
+        conn = get_project_db(project_dir)
+        try:
+            config = get_highlight_config(conn)
+            config["project_id"] = project_id
+            return config
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.error("[Highlights API] Config fetch error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.put("/projects/{project_id}/highlights/config")
+async def update_project_highlight_config(project_id: int, body: HighlightConfigRequest):
+    """Save the highlight configuration for a project."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project["project_dir"]
+    try:
+        init_analysis_db(project_dir)
+        conn = get_project_db(project_dir)
+        try:
+            config = save_highlight_config(
+                conn,
+                weights=body.weights,
+                target_duration=body.target_duration,
+                min_severity=body.min_severity,
+                overrides=body.overrides,
+            )
+            config["project_id"] = project_id
+            logger.info("[Highlights API] Saved config for project #%d", project_id)
+            return config
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.error("[Highlights API] Config save error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/projects/{project_id}/highlights/apply")
+async def apply_highlights(project_id: int, body: HighlightApplyRequest):
+    """Batch-apply highlight selections to events.
+
+    Sets included_in_highlight=1 for included_ids and 0 for excluded_ids.
+    """
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project["project_dir"]
+    try:
+        conn = get_project_db(project_dir)
+        try:
+            count = batch_update_highlight_flags(
+                conn,
+                included_ids=body.included_ids,
+                excluded_ids=body.excluded_ids,
+            )
+            logger.info(
+                "[Highlights API] Applied highlights for project #%d: %d events updated",
+                project_id, count,
+            )
+            return {
+                "status": "applied",
+                "project_id": project_id,
+                "included_count": len(body.included_ids),
+                "excluded_count": len(body.excluded_ids),
+                "rows_updated": count,
+            }
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.error("[Highlights API] Apply error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/projects/{project_id}/analysis/drivers")
+async def list_drivers(project_id: int):
+    """Get all non-spectator drivers for a project."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project["project_dir"]
+    try:
+        init_analysis_db(project_dir)
+        conn = get_project_db(project_dir)
+        try:
+            drivers = get_drivers(conn)
+            return {"project_id": project_id, "drivers": drivers}
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.error("[Analysis API] Drivers fetch error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Global highlight presets ─────────────────────────────────────────────────
+
+import os
+from server.config import DATA_DIR
+
+_PRESETS_PATH = DATA_DIR / "highlight_presets.json"
+
+
+def _load_presets() -> dict:
+    """Load global highlight presets from JSON file."""
+    if _PRESETS_PATH.exists():
+        try:
+            return json.loads(_PRESETS_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_presets(presets: dict) -> None:
+    """Persist global highlight presets to JSON file."""
+    _PRESETS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _PRESETS_PATH.write_text(
+        json.dumps(presets, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+@router.get("/highlights/presets")
+async def list_presets():
+    """List all named highlight presets."""
+    presets = _load_presets()
+    return {
+        "presets": [
+            {"name": name, **data}
+            for name, data in presets.items()
+        ]
+    }
+
+
+@router.post("/highlights/presets")
+async def save_preset(body: PresetSaveRequest):
+    """Save a named highlight preset (global, not project-specific)."""
+    if not body.name or not body.name.strip():
+        raise HTTPException(status_code=400, detail="Preset name is required")
+
+    presets = _load_presets()
+    presets[body.name.strip()] = {
+        "weights": body.weights,
+        "target_duration": body.target_duration,
+        "min_severity": body.min_severity,
+    }
+    _save_presets(presets)
+    logger.info("[Highlights API] Saved preset '%s'", body.name)
+    return {"status": "saved", "name": body.name.strip()}
+
+
+@router.delete("/highlights/presets/{name}")
+async def delete_preset(name: str):
+    """Delete a named highlight preset."""
+    presets = _load_presets()
+    if name not in presets:
+        raise HTTPException(status_code=404, detail="Preset not found")
+
+    del presets[name]
+    _save_presets(presets)
+    logger.info("[Highlights API] Deleted preset '%s'", name)
+    return {"status": "deleted", "name": name}

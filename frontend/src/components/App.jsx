@@ -6,6 +6,7 @@ import { ProjectProvider } from '../context/ProjectContext'
 import { SettingsProvider } from '../context/SettingsContext'
 import { AnalysisProvider } from '../context/AnalysisContext'
 import { TimelineProvider } from '../context/TimelineContext'
+import { HighlightProvider } from '../context/HighlightContext'
 import { wsClient } from '../services/websocket'
 import AppShell from './layout/AppShell'
 
@@ -28,7 +29,9 @@ function App() {
             <ProjectProvider>
               <AnalysisProvider>
                 <TimelineProvider>
-                  <AppShell />
+                  <HighlightProvider>
+                    <AppShell />
+                  </HighlightProvider>
                 </TimelineProvider>
               </AnalysisProvider>
             </ProjectProvider>

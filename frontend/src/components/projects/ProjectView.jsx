@@ -4,7 +4,7 @@ import { useProject } from '../../context/ProjectContext'
 import StepIndicator from './StepIndicator'
 import ProjectFileBrowser from './ProjectFileBrowser'
 import AnalysisPanel from '../analysis/AnalysisPanel'
-import Timeline from '../timeline/Timeline'
+import HighlightPanel from '../highlights/HighlightPanel'
 
 /**
  * Project view — shown when a project is open.
@@ -60,7 +60,7 @@ function ProjectView({ project, onBack }) {
         return <AnalysisPanel />
 
       case 'editing':
-        return <Timeline projectId={project.id} />
+        return <HighlightPanel projectId={project.id} />
 
       default:
         return (

@@ -268,7 +268,7 @@ Canvas-based multi-track timeline: Camera, Events, Overlays, Cuts, Audio tracks.
 
 ---
 
-### Feature 9 — Highlight Editing Suite `MUST` `📋 planned`
+### Feature 9 — Highlight Editing Suite `MUST` `🔄 in progress`
 **Spec:** `009-highlight-editing-suite`
 **Dependencies:** feature-7, feature-8
 
