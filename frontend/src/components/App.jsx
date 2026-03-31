@@ -4,6 +4,7 @@ import { ModalProvider } from '../context/ModalContext'
 import { IRacingProvider } from '../context/IRacingContext'
 import { ProjectProvider } from '../context/ProjectContext'
 import { SettingsProvider } from '../context/SettingsContext'
+import { AnalysisProvider } from '../context/AnalysisContext'
 import { wsClient } from '../services/websocket'
 import AppShell from './layout/AppShell'
 
@@ -24,7 +25,9 @@ function App() {
         <SettingsProvider>
           <IRacingProvider>
             <ProjectProvider>
-              <AppShell />
+              <AnalysisProvider>
+                <AppShell />
+              </AnalysisProvider>
             </ProjectProvider>
           </IRacingProvider>
         </SettingsProvider>

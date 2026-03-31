@@ -44,11 +44,18 @@ class EventType:
     IRACING_SESSION_INFO   = "iracing:session_info"
     IRACING_TELEMETRY      = "iracing:telemetry"
 
-    # Pipeline (future)
+    # Pipeline / Analysis
     PIPELINE_STARTED       = "pipeline:started"
     PIPELINE_STEP_COMPLETED = "pipeline:step_completed"
     PIPELINE_COMPLETED     = "pipeline:completed"
     PIPELINE_ERROR         = "pipeline:error"
+
+    # Analysis-specific (sub-events of pipeline)
+    ANALYSIS_STARTED       = "pipeline:started"       # stage=analysis
+    ANALYSIS_PROGRESS      = "pipeline:step_completed" # stage=analysis_scan
+    ANALYSIS_DETECT        = "pipeline:step_completed" # stage=analysis_detect
+    ANALYSIS_COMPLETED     = "pipeline:completed"      # stage=analysis
+    ANALYSIS_ERROR         = "pipeline:error"          # stage=analysis
 
     # Encoding (future)
     ENCODING_STARTED       = "encoding:started"

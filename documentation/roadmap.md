@@ -222,29 +222,29 @@ Tailwind CSS dark-first design system — color tokens, typography scale, spacin
 > Build the intelligence layer — the replay analysis engine, NLE-style timeline editor, highlight editing suite, event inspector, and undo/redo system.
 
 ### Milestones
-- [ ] **M2.1** Replay analysis detects all race events *(feature 7)*
+- [x] **M2.1** Replay analysis detects all race events *(feature 7)*
 - [ ] **M2.2** Events visualised on an interactive timeline *(features 8, 10)*
 - [ ] **M2.3** Highlight reel is fully tuneable with live metrics *(features 9, 11)*
 
 ---
 
-### Feature 7 — Replay Analysis Engine `MUST` `📋 planned`
+### Feature 7 — Replay Analysis Engine `MUST` `✅ completed`
 **Spec:** `007-replay-analysis-engine`
 **Dependencies:** feature-2, feature-3
 
 Core race event detection: incidents, battles, overtakes, pit stops, fastest laps, leader changes, first/last laps. Auto-generated severity scores (0–10), frame-accurate timestamps. Scans replay at 16× speed. Streams results to frontend via WebSocket and persists to SQLite.
 
 **Acceptance Criteria**
-- [ ] Analysis connects to iRacing and scans the replay at 16× speed
-- [ ] Incidents are detected with 15-second deduplication per car
-- [ ] Battles are detected using configurable gap threshold (default < 0.5 s)
-- [ ] Overtakes are detected with position change + proximity check
-- [ ] Pit stops, fastest laps, leader changes, first lap, and last lap are all detected
-- [ ] Each event has a severity score (0–10), frame-accurate start/end timestamps, and involved drivers
-- [ ] Analysis progress (events found, scan progress) streams to the frontend via WebSocket
-- [ ] Scan stops automatically when `SessionState == Checkered` and all cars finished
-- [ ] Events are persisted to SQLite and available immediately on project reopen
-- [ ] User can start editing before analysis completes (progressive availability)
+- [x] Analysis connects to iRacing and scans the replay at 16× speed
+- [x] Incidents are detected with 15-second deduplication per car
+- [x] Battles are detected using configurable gap threshold (default < 0.5 s)
+- [x] Overtakes are detected with position change + proximity check
+- [x] Pit stops, fastest laps, leader changes, first lap, and last lap are all detected
+- [x] Each event has a severity score (0–10), frame-accurate start/end timestamps, and involved drivers
+- [x] Analysis progress (events found, scan progress) streams to the frontend via WebSocket
+- [x] Scan stops automatically when `SessionState == Checkered` and all cars finished
+- [x] Events are persisted to SQLite and available immediately on project reopen
+- [x] User can start editing before analysis completes (progressive availability)
 
 ---
 

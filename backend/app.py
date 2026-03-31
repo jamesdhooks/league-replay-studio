@@ -45,6 +45,7 @@ from server.routes.api_settings import router as settings_router
 from server.routes.api_system import router as system_router
 from server.routes.api_iracing import router as iracing_router
 from server.routes.api_projects import router as projects_router
+from server.routes.api_analysis import router as analysis_router, set_broadcast_fn
 
 # Services
 from server.services.iracing_bridge import bridge as iracing_bridge
@@ -108,6 +109,14 @@ async def lifespan(app: FastAPI):
     iracing_bridge.start(loop)
     logger.info("[App] iRacing bridge started")
 
+    # ── Wire analysis broadcast ─────────────────────────────────────────────
+    def _analysis_broadcast(message: dict) -> None:
+        """Broadcast analysis progress events via WebSocket."""
+        if loop.is_running():
+            asyncio.run_coroutine_threadsafe(ws_manager.broadcast(message), loop)
+
+    set_broadcast_fn(_analysis_broadcast)
+
     logger.info("[App] Startup complete — v%s", __version__)
     yield
 
@@ -136,6 +145,7 @@ app.include_router(settings_router)
 app.include_router(system_router)
 app.include_router(iracing_router)
 app.include_router(projects_router)
+app.include_router(analysis_router)
 
 
 # ── WebSocket endpoint ──────────────────────────────────────────────────────
