@@ -28,6 +28,7 @@ logger.info("[App] League Replay Studio starting up")
 logger.info("[App] APP_DIR: %s", APP_DIR)
 
 # ── Imports ──────────────────────────────────────────────────────────────────
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,6 +43,7 @@ from server.config import STATIC_DIR, BUNDLE_DIR, CONFIG_PATH, ensure_directorie
 from server.routes.api_settings import router as settings_router
 from server.routes.api_system import router as system_router
 from server.routes.api_iracing import router as iracing_router
+from server.routes.api_projects import router as projects_router
 
 # Services
 from server.services.iracing_bridge import bridge as iracing_bridge
@@ -132,6 +134,7 @@ app.add_middleware(
 app.include_router(settings_router)
 app.include_router(system_router)
 app.include_router(iracing_router)
+app.include_router(projects_router)
 
 
 # ── WebSocket endpoint ──────────────────────────────────────────────────────

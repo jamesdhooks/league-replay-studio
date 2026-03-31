@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { ToastProvider } from '../context/ToastContext'
 import { ModalProvider } from '../context/ModalContext'
 import { IRacingProvider } from '../context/IRacingContext'
+import { ProjectProvider } from '../context/ProjectContext'
 import { wsClient } from '../services/websocket'
 import AppShell from './layout/AppShell'
 
@@ -20,7 +21,9 @@ function App() {
     <ToastProvider>
       <ModalProvider>
         <IRacingProvider>
-          <AppShell />
+          <ProjectProvider>
+            <AppShell />
+          </ProjectProvider>
         </IRacingProvider>
       </ModalProvider>
     </ToastProvider>

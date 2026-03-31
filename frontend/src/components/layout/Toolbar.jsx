@@ -14,8 +14,9 @@ import {
  * @param {Object} props
  * @param {boolean} props.sidebarCollapsed
  * @param {() => void} props.onToggleSidebar
+ * @param {string} [props.projectName] - Active project name (if any)
  */
-function Toolbar({ sidebarCollapsed, onToggleSidebar }) {
+function Toolbar({ sidebarCollapsed, onToggleSidebar, projectName }) {
   return (
     <header className="h-toolbar flex items-center px-3 bg-bg-secondary border-b border-border
                         select-none shrink-0">
@@ -46,7 +47,9 @@ function Toolbar({ sidebarCollapsed, onToggleSidebar }) {
 
       {/* Center section: project name (if any) */}
       <div className="flex-1 flex items-center justify-center">
-        <span className="text-sm text-text-tertiary">No project open</span>
+        <span className="text-sm text-text-tertiary">
+          {projectName || 'No project open'}
+        </span>
       </div>
 
       {/* Right section: action buttons */}

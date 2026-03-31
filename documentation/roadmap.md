@@ -152,20 +152,20 @@ Integrate pyirsdk shared memory for real-time telemetry and replay control. 60 H
 
 ---
 
-### Feature 3 — Project System with SQLite Storage `MUST` `📋 planned`
+### Feature 3 — Project System with SQLite Storage `MUST` `✅ completed`
 **Spec:** `003-project-system-with-sqlite-storage`
 **Dependencies:** feature-1
 
 Full project management backed by SQLite. New Project Wizard, project library (grid/list, search/filter), CRUD operations, and step-based workflow navigation: Setup → Capture → Analysis → Editing → Export → Upload.
 
 **Acceptance Criteria**
-- [ ] New Project Wizard creates a project with name, replay file, and working directory
-- [ ] Replay file picker auto-discovers `.rpy` files from the iRacing replays directory
-- [ ] Project metadata (track, date, drivers, step) is stored in SQLite and displayed in the library
-- [ ] Project library supports grid and list view with search and filter by track/date/status
-- [ ] Step indicator bar shows workflow progress (✅✅✅🔄⏳⏳) and allows navigation
-- [ ] Projects can be duplicated, deleted, and reopened across app sessions
-- [ ] Project file browser shows the project directory tree with all intermediary files
+- [x] New Project Wizard creates a project with name, replay file, and working directory
+- [x] Replay file picker auto-discovers `.rpy` files from the iRacing replays directory
+- [x] Project metadata (track, date, drivers, step) is stored in SQLite and displayed in the library
+- [x] Project library supports grid and list view with search and filter by track/date/status
+- [x] Step indicator bar shows workflow progress (✅✅✅🔄⏳⏳) and allows navigation
+- [x] Projects can be duplicated, deleted, and reopened across app sessions
+- [x] Project file browser shows the project directory tree with all intermediary files
 
 ---
 
