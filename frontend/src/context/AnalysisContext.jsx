@@ -65,8 +65,12 @@ export function AnalysisProvider({ children }) {
           })
           // Refresh events after completion
           if (data.project_id) {
-            _fetchEvents(data.project_id)
-            _fetchSummary(data.project_id)
+            apiGet(`/projects/${data.project_id}/events`)
+              .then(result => setEvents(result.events || []))
+              .catch(() => {})
+            apiGet(`/projects/${data.project_id}/events/summary`)
+              .then(result => setEventSummary(result))
+              .catch(() => {})
           }
           break
 
@@ -132,10 +136,6 @@ export function AnalysisProvider({ children }) {
 
   // ── Fetch events ────────────────────────────────────────────────────────
   const fetchEvents = useCallback(async (projectId, options = {}) => {
-    return _fetchEvents(projectId, options)
-  }, [])
-
-  async function _fetchEvents(projectId, options = {}) {
     try {
       const params = new URLSearchParams()
       if (options.eventType) params.set('event_type', options.eventType)
@@ -150,14 +150,10 @@ export function AnalysisProvider({ children }) {
       console.error('[Analysis] Events fetch error:', err)
       return { events: [], total: 0 }
     }
-  }
+  }, [])
 
   // ── Fetch event summary ─────────────────────────────────────────────────
   const fetchEventSummary = useCallback(async (projectId) => {
-    return _fetchSummary(projectId)
-  }, [])
-
-  async function _fetchSummary(projectId) {
     try {
       const result = await apiGet(`/projects/${projectId}/events/summary`)
       setEventSummary(result)
@@ -166,7 +162,7 @@ export function AnalysisProvider({ children }) {
       console.error('[Analysis] Summary fetch error:', err)
       return null
     }
-  }
+  }, [])
 
   // ── Context value ───────────────────────────────────────────────────────
   const value = useMemo(() => ({

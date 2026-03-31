@@ -247,7 +247,7 @@ export default function AnalysisPanel() {
 
 /** Format seconds as M:SS */
 function formatTime(seconds) {
-  if (seconds == null || seconds < 0) return '—'
+  if (seconds === null || seconds === undefined || seconds < 0) return '—'
   const m = Math.floor(seconds / 60)
   const s = Math.floor(seconds % 60)
   return `${m}:${s.toString().padStart(2, '0')}`

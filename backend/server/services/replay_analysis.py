@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -428,7 +429,6 @@ class ReplayAnalyzer:
         writer = TelemetryWriter(conn)
 
         # Generate ~100 mock ticks representing a short race segment
-        import random
         num_cars = 20
         total_laps = 10
         avg_lap_time = 90.0  # seconds

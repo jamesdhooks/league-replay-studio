@@ -120,7 +120,7 @@ class IncidentDetector(BaseDetector):
                 row["car_idx"], row["position"], row["lap"],
             )
 
-            # Skip spectators (car_idx 0 in some sessions)
+            # Skip cars not in valid race positions (e.g., pace car, spectators)
             if position <= 0:
                 continue
 
