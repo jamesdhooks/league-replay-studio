@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Base styles ── */
+@layer base {
+  html {
+    @apply bg-bg-primary text-text-primary;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+
+  body {
+    @apply m-0 p-0 overflow-hidden;
+    min-height: 100vh;
+  }
+
+  /* Scrollbar styling for dark theme */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-bg-primary;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-surface-active rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-border-strong;
+  }
+
+  /* Selection styling */
+  ::selection {
+    @apply bg-accent/30 text-text-primary;
+  }
+
+  /* Focus ring */
+  :focus-visible {
+    @apply outline-2 outline-border-focus outline-offset-2;
+  }
+}
+
+/* ── Utility classes ── */
+@layer utilities {
+  .transition-theme {
+    @apply transition-colors duration-200 ease-in-out;
+  }
+}
+
+/* ── Theme transition (no FOUC) ── */
+html.light {
+  color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
+}

@@ -59,6 +59,7 @@ desktop.ini
 
 # Project data (user-generated, not source)
 backend/data/projects/
+backend/config.json
 
 # Build output
 backend/static/
