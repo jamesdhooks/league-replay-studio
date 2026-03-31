@@ -41,8 +41,8 @@ def _validate_capture_software(value: Any) -> tuple[bool, str]:
 
 
 def _validate_hotkey(value: Any) -> tuple[bool, str]:
-    if not isinstance(value, str) or not value.strip():
-        return False, "hotkey must be a non-empty string"
+    if not isinstance(value, str):
+        return False, "hotkey must be a string"
     return True, ""
 
 

@@ -1,4 +1,4 @@
-import { createContext, useContext, useCallback, useState, useEffect, useMemo } from 'react'
+import { createContext, useContext, useCallback, useState, useEffect, useMemo, useRef } from 'react'
 import { apiGet, apiPut, apiPost } from '../services/api'
 
 const SettingsContext = createContext(null)
@@ -10,6 +10,12 @@ const SettingsContext = createContext(null)
 export function SettingsProvider({ children }) {
   const [settings, setSettings] = useState(null)
   const [loading, setLoading] = useState(true)
+  const settingsRef = useRef(null)
+
+  // Keep ref in sync for the system theme listener
+  useEffect(() => {
+    settingsRef.current = settings
+  }, [settings])
 
   // ── Fetch settings on mount ──────────────────────────────────────────────
   const fetchSettings = useCallback(async () => {
@@ -27,6 +33,18 @@ export function SettingsProvider({ children }) {
   useEffect(() => {
     fetchSettings()
   }, [fetchSettings])
+
+  // ── Listen for OS theme changes (system theme) ───────────────────────────
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)')
+    const handler = () => {
+      if (settingsRef.current?.theme === 'system') {
+        applyTheme('system')
+      }
+    }
+    mq.addEventListener('change', handler)
+    return () => mq.removeEventListener('change', handler)
+  }, [])
 
   // ── Update settings ──────────────────────────────────────────────────────
   const updateSettings = useCallback(async (updates) => {
@@ -106,17 +124,4 @@ function applyTheme(theme) {
     root.classList.toggle('dark', theme === 'dark')
     root.classList.toggle('light', theme === 'light')
   }
-}
-
-/**
- * Listen for OS theme changes when 'system' theme is active.
- * Call this once at app startup.
- */
-export function initSystemThemeListener(getTheme) {
-  const mq = window.matchMedia('(prefers-color-scheme: dark)')
-  mq.addEventListener('change', () => {
-    if (getTheme() === 'system') {
-      applyTheme('system')
-    }
-  })
 }
