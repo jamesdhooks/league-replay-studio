@@ -112,6 +112,7 @@ export function useSettings() {
 /**
  * Apply theme to the document element.
  * Supports 'dark', 'light', and 'system' (follows OS preference).
+ * Also persists to localStorage for FOUC prevention on next load.
  */
 function applyTheme(theme) {
   const root = document.documentElement
@@ -123,5 +124,12 @@ function applyTheme(theme) {
   } else {
     root.classList.toggle('dark', theme === 'dark')
     root.classList.toggle('light', theme === 'light')
+  }
+
+  // Persist for FOUC prevention (read by inline script in index.html)
+  try {
+    localStorage.setItem('lrs-theme', theme)
+  } catch (e) {
+    // localStorage may be unavailable — ignore
   }
 }

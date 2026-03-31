@@ -38,6 +38,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from version import __version__, APP_NAME
 from server.config import STATIC_DIR, BUNDLE_DIR, CONFIG_PATH, ensure_directories, load_config, save_config, DEFAULT_CONFIG
+from server.events import EventCategory, get_category
 
 # Routes
 from server.routes.api_settings import router as settings_router
@@ -141,20 +142,52 @@ app.include_router(projects_router)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """Main WebSocket endpoint for real-time communication."""
+    """Main WebSocket endpoint for real-time communication.
+
+    Incoming messages are routed by event category to the appropriate handler.
+    Unknown categories are logged and ignored.
+    """
     await ws_manager.connect(websocket)
     try:
         while True:
             data = await websocket.receive_json()
-            # Handle incoming messages from frontend
             event = data.get("event", "")
-            logger.info("[WebSocket] Received: %s", event)
-            # Future: route to appropriate handler based on event type
+            payload = data.get("data", {})
+            category = get_category(event)
+            logger.info("[WebSocket] Received: %s (category=%s)", event, category)
+
+            # ── Route by category ──────────────────────────────────────────
+            if category == EventCategory.IRACING:
+                await _handle_iracing_event(event, payload, websocket)
+            elif category == EventCategory.SYSTEM:
+                await _handle_system_event(event, payload, websocket)
+            else:
+                logger.debug("[WebSocket] No handler for category: %s", category)
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket)
     except Exception as exc:
         logger.error("[WebSocket] Error: %s", exc)
         ws_manager.disconnect(websocket)
+
+
+async def _handle_iracing_event(event: str, payload: dict, websocket: WebSocket) -> None:
+    """Handle incoming iRacing-related events from the frontend."""
+    if event == "iracing:request_status":
+        # Client requests current iRacing connection status
+        await websocket.send_json({
+            "event": "iracing:connected" if iracing_bridge.is_connected else "iracing:disconnected",
+            "data": iracing_bridge.session_data if iracing_bridge.is_connected else {},
+        })
+    else:
+        logger.debug("[WebSocket] Unhandled iRacing event: %s", event)
+
+
+async def _handle_system_event(event: str, payload: dict, websocket: WebSocket) -> None:
+    """Handle incoming system-related events from the frontend."""
+    if event == "system:ping":
+        await websocket.send_json({"event": "system:pong", "data": {}})
+    else:
+        logger.debug("[WebSocket] Unhandled system event: %s", event)
 
 
 # ── SPA serving ──────────────────────────────────────────────────────────────

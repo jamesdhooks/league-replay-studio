@@ -108,14 +108,14 @@ Do not consider the task finished until the roadmap reflects the completed state
 
 ---
 
-## Phase 1 — Foundation `📋 planned`
+## Phase 1 — Foundation `✅ completed`
 
 > Establish the application skeleton — desktop window, FastAPI backend, React frontend shell, iRacing SDK connection, project system, settings, and real-time communication.
 
 ### Milestones
-- [ ] **M1.1** App launches in native desktop window *(features 1, 6)*
-- [ ] **M1.2** iRacing connection is live *(features 2, 5)*
-- [ ] **M1.3** Users can create and manage projects *(features 3, 4)*
+- [x] **M1.1** App launches in native desktop window *(features 1, 6)*
+- [x] **M1.2** iRacing connection is live *(features 2, 5)*
+- [x] **M1.3** Users can create and manage projects *(features 3, 4)*
 
 ---
 
@@ -185,35 +185,35 @@ JSON config persistence and settings panel UI. Categories: General, Camera Defau
 
 ---
 
-### Feature 5 — Real-Time WebSocket Communication `MUST` `📋 planned`
+### Feature 5 — Real-Time WebSocket Communication `MUST` `✅ completed`
 **Spec:** `005-real-time-websocket-communication`
 **Dependencies:** feature-1
 
 Bidirectional WebSocket infrastructure: typed event system for progress updates (analysis, encoding, capture), live data streaming (telemetry, metrics), auto-reconnect with exponential backoff.
 
 **Acceptance Criteria**
-- [ ] WebSocket connection establishes automatically when the frontend loads
-- [ ] iRacing connection status updates appear in the UI within 1 second of state change
-- [ ] Typed event system supports subscribing to specific event categories
-- [ ] Automatic reconnection with exponential backoff on connection loss
-- [ ] Backend can broadcast to all connected clients (multi-tab support)
-- [ ] WebSocket messages are JSON-serialised with consistent schema
+- [x] WebSocket connection establishes automatically when the frontend loads
+- [x] iRacing connection status updates appear in the UI within 1 second of state change
+- [x] Typed event system supports subscribing to specific event categories
+- [x] Automatic reconnection with exponential backoff on connection loss
+- [x] Backend can broadcast to all connected clients (multi-tab support)
+- [x] WebSocket messages are JSON-serialised with consistent schema
 
 ---
 
-### Feature 6 — Dark Theme Design System `MUST` `📋 planned`
+### Feature 6 — Dark Theme Design System `MUST` `✅ completed`
 **Spec:** `006-dark-theme-design-system`
 **Dependencies:** feature-1
 
 Tailwind CSS dark-first design system — color tokens, typography scale, spacing system, component variants, smooth theme transitions.
 
 **Acceptance Criteria**
-- [ ] Tailwind config defines color tokens for backgrounds, surfaces, borders, text, and accent colors
-- [ ] Dark mode is the default theme with light mode available as an option
-- [ ] Theme can be set to dark, light, or system (follows OS preference)
-- [ ] Theme transitions are smooth (no flash of unstyled content)
-- [ ] Typography scale and spacing system are defined and documented
-- [ ] All existing UI components use design tokens consistently
+- [x] Tailwind config defines color tokens for backgrounds, surfaces, borders, text, and accent colors
+- [x] Dark mode is the default theme with light mode available as an option
+- [x] Theme can be set to dark, light, or system (follows OS preference)
+- [x] Theme transitions are smooth (no flash of unstyled content)
+- [x] Typography scale and spacing system are defined and documented
+- [x] All existing UI components use design tokens consistently
 
 ---
 

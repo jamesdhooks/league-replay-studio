@@ -8,63 +8,63 @@ export default {
   theme: {
     extend: {
       colors: {
-        // ── Background tiers ──
+        // ── Background tiers (theme-aware via CSS custom properties) ──
         bg: {
-          primary: '#0f0f14',      // App background (deepest)
-          secondary: '#16161e',    // Panels, cards
-          tertiary: '#1c1c28',     // Elevated surfaces
-          hover: '#22222e',        // Hover states
+          primary: 'rgb(var(--color-bg-primary) / <alpha-value>)',
+          secondary: 'rgb(var(--color-bg-secondary) / <alpha-value>)',
+          tertiary: 'rgb(var(--color-bg-tertiary) / <alpha-value>)',
+          hover: 'rgb(var(--color-bg-hover) / <alpha-value>)',
         },
         // ── Surface / interactive ──
         surface: {
-          DEFAULT: '#1c1c28',
-          hover: '#262636',
-          active: '#2e2e42',
-          border: '#2a2a3a',
+          DEFAULT: 'rgb(var(--color-surface) / <alpha-value>)',
+          hover: 'rgb(var(--color-surface-hover) / <alpha-value>)',
+          active: 'rgb(var(--color-surface-active) / <alpha-value>)',
+          border: 'rgb(var(--color-surface-border) / <alpha-value>)',
         },
         // ── Border tiers ──
         border: {
-          DEFAULT: '#2a2a3a',
-          subtle: '#1f1f2e',
-          strong: '#3a3a4e',
-          focus: '#5b8af5',
+          DEFAULT: 'rgb(var(--color-border) / <alpha-value>)',
+          subtle: 'rgb(var(--color-border-subtle) / <alpha-value>)',
+          strong: 'rgb(var(--color-border-strong) / <alpha-value>)',
+          focus: 'rgb(var(--color-border-focus) / <alpha-value>)',
         },
         // ── Text tiers ──
         text: {
-          primary: '#e8e8f0',
-          secondary: '#a0a0b8',
-          tertiary: '#6e6e88',
-          disabled: '#4a4a5e',
+          primary: 'rgb(var(--color-text-primary) / <alpha-value>)',
+          secondary: 'rgb(var(--color-text-secondary) / <alpha-value>)',
+          tertiary: 'rgb(var(--color-text-tertiary) / <alpha-value>)',
+          disabled: 'rgb(var(--color-text-disabled) / <alpha-value>)',
         },
         // ── Accent / brand ──
         accent: {
-          DEFAULT: '#5b8af5',
-          hover: '#7ba3ff',
-          muted: '#3d5fa0',
-          text: '#a3c4ff',
+          DEFAULT: 'rgb(var(--color-accent) / <alpha-value>)',
+          hover: 'rgb(var(--color-accent-hover) / <alpha-value>)',
+          muted: 'rgb(var(--color-accent-muted) / <alpha-value>)',
+          text: 'rgb(var(--color-accent-text) / <alpha-value>)',
         },
         // ── Status colors ──
         success: {
-          DEFAULT: '#4ade80',
-          muted: '#1a3a2a',
-          text: '#86efac',
+          DEFAULT: 'rgb(var(--color-success) / <alpha-value>)',
+          muted: 'rgb(var(--color-success-muted) / <alpha-value>)',
+          text: 'rgb(var(--color-success-text) / <alpha-value>)',
         },
         warning: {
-          DEFAULT: '#fbbf24',
-          muted: '#3a2e1a',
-          text: '#fcd34d',
+          DEFAULT: 'rgb(var(--color-warning) / <alpha-value>)',
+          muted: 'rgb(var(--color-warning-muted) / <alpha-value>)',
+          text: 'rgb(var(--color-warning-text) / <alpha-value>)',
         },
         danger: {
-          DEFAULT: '#f87171',
-          muted: '#3a1a1a',
-          text: '#fca5a5',
+          DEFAULT: 'rgb(var(--color-danger) / <alpha-value>)',
+          muted: 'rgb(var(--color-danger-muted) / <alpha-value>)',
+          text: 'rgb(var(--color-danger-text) / <alpha-value>)',
         },
         info: {
-          DEFAULT: '#60a5fa',
-          muted: '#1a2a3a',
-          text: '#93c5fd',
+          DEFAULT: 'rgb(var(--color-info) / <alpha-value>)',
+          muted: 'rgb(var(--color-info-muted) / <alpha-value>)',
+          text: 'rgb(var(--color-info-text) / <alpha-value>)',
         },
-        // ── Event type colors (for timeline) ──
+        // ── Event type colors (for timeline — fixed, not theme-dependent) ──
         event: {
           incident: '#ef4444',
           battle: '#f97316',
