@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useCallback } from 'react'
 import Toolbar from './Toolbar'
 import Sidebar from './Sidebar'
 import StatusBar from './StatusBar'
@@ -13,25 +13,15 @@ import { useProject } from '../../context/ProjectContext'
  */
 function AppShell() {
   const [sidebarCollapsed, setSidebarCollapsed] = useLocalStorage('sidebar_collapsed', false)
-  const { activeProject, closeProject } = useProject()
+  const { activeProject, openProject, closeProject } = useProject()
 
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed(prev => !prev)
   }, [setSidebarCollapsed])
 
-  const [openedProject, setOpenedProject] = useState(null)
-
-  // Use activeProject from context, or local state fallback
-  const currentProject = activeProject || openedProject
-
   const handleOpenProject = useCallback((project) => {
-    setOpenedProject(project)
-  }, [])
-
-  const handleBack = useCallback(() => {
-    closeProject()
-    setOpenedProject(null)
-  }, [closeProject])
+    openProject(project.id)
+  }, [openProject])
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-bg-primary">
@@ -39,7 +29,7 @@ function AppShell() {
       <Toolbar
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={toggleSidebar}
-        projectName={currentProject?.name}
+        projectName={activeProject?.name}
       />
 
       {/* Main content area */}
@@ -49,10 +39,10 @@ function AppShell() {
 
         {/* Main area */}
         <main className="flex-1 flex flex-col overflow-hidden bg-bg-primary">
-          {currentProject ? (
+          {activeProject ? (
             <ProjectView
-              project={currentProject}
-              onBack={handleBack}
+              project={activeProject}
+              onBack={closeProject}
             />
           ) : (
             <ProjectLibrary onOpenProject={handleOpenProject} />

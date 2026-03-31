@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { ChevronRight, ChevronDown, File, Folder, RefreshCw } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext'
+import { formatFileSize } from '../../utils/format'
 
 /**
  * Project file browser — shows the project directory tree organized by category.
@@ -40,13 +41,6 @@ function ProjectFileBrowser({ projectId }) {
     setExpandedCategories(prev => ({ ...prev, [name]: !prev[name] }))
   }
 
-  const formatSize = (bytes) => {
-    if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`
-    if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`
-    if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(0)} KB`
-    return `${bytes} B`
-  }
-
   if (loading && !fileData) {
     return (
       <div className="p-4 text-center text-xs text-text-tertiary">
@@ -70,7 +64,7 @@ function ProjectFileBrowser({ projectId }) {
         <span className="text-xs font-medium text-text-secondary">Project Files</span>
         <div className="flex items-center gap-2">
           <span className="text-xxs text-text-tertiary">
-            {formatSize(fileData.total_size)}
+            {formatFileSize(fileData.total_size)}
           </span>
           <button
             onClick={loadFiles}
@@ -126,7 +120,7 @@ function ProjectFileBrowser({ projectId }) {
                         {file.name}
                       </span>
                       <span className="text-xxs text-text-disabled shrink-0">
-                        {formatSize(file.size_bytes)}
+                        {formatFileSize(file.size_bytes)}
                       </span>
                     </div>
                   ))

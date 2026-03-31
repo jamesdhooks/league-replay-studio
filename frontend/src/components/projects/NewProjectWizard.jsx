@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { X, FolderOpen, FileSearch, ChevronRight } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext'
 import { useToast } from '../../context/ToastContext'
+import { formatFileSize } from '../../utils/format'
 
 /**
  * New Project Wizard — multi-step dialog for creating a new project.
@@ -218,11 +219,6 @@ function Step1_Name({ name, setName, trackName, setTrackName, sessionType, setSe
 }
 
 function Step2_Replay({ replayFile, setReplayFile, discoveredFiles, discovering, replaySearch, setReplaySearch }) {
-  const formatSize = (bytes) => {
-    if (bytes > 1e9) return `${(bytes / 1e9).toFixed(1)} GB`
-    if (bytes > 1e6) return `${(bytes / 1e6).toFixed(1)} MB`
-    return `${(bytes / 1e3).toFixed(0)} KB`
-  }
 
   return (
     <div className="space-y-3">
@@ -285,7 +281,7 @@ function Step2_Replay({ replayFile, setReplayFile, discoveredFiles, discovering,
             >
               <div className="font-medium truncate">{file.name}</div>
               <div className="text-xxs text-text-tertiary mt-0.5 flex items-center gap-2">
-                <span>{formatSize(file.size_bytes)}</span>
+                <span>{formatFileSize(file.size_bytes)}</span>
                 <span>·</span>
                 <span>{new Date(file.modified_at).toLocaleDateString()}</span>
               </div>

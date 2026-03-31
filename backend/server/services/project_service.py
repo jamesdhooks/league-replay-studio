@@ -28,6 +28,13 @@ logger = logging.getLogger(__name__)
 # Valid workflow steps in order
 WORKFLOW_STEPS = ["setup", "capture", "analysis", "editing", "export", "upload"]
 
+# Standard project sub-directories created for every new project
+PROJECT_SUBDIRS = [
+    "replay", "captures", "preview", "preview/sprites",
+    "exports", "logs", "overlays", "overlays/templates",
+    "overlays/rendered", "overlays/assets",
+]
+
 
 class ProjectService:
     """Manages the project lifecycle — create, list, update, delete, duplicate."""
@@ -67,7 +74,11 @@ class ProjectService:
             query += " AND current_step = ?"
             params.append(step)
 
-        query += f" ORDER BY {sort_by} {sort_dir}"
+        # sort_by and sort_dir are already validated against allowlists above,
+        # so the f-string is safe from SQL injection. We use the validated values
+        # directly since SQLite doesn't support parameterised ORDER BY.
+        # nosemgrep: python.lang.security.audit.formatted-sql-query
+        query += f" ORDER BY {sort_by} {sort_dir}"  # noqa: S608
 
         conn = get_connection()
         try:
@@ -107,26 +118,27 @@ class ProjectService:
 
         # Resolve project directory
         if project_dir:
-            proj_path = Path(project_dir)
+            proj_path = Path(project_dir).resolve()
         else:
             # Auto-generate under PROJECTS_DIR
             safe_name = _safe_dirname(name)
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            proj_path = PROJECTS_DIR / f"{safe_name}_{timestamp}"
+            proj_path = (PROJECTS_DIR / f"{safe_name}_{timestamp}").resolve()
 
         # Create directory structure
         proj_path.mkdir(parents=True, exist_ok=True)
-        for sub in ("replay", "captures", "preview", "preview/sprites",
-                     "exports", "logs", "overlays", "overlays/templates",
-                     "overlays/rendered", "overlays/assets"):
+        for sub in PROJECT_SUBDIRS:
             (proj_path / sub).mkdir(parents=True, exist_ok=True)
 
         # Copy replay file into project if provided
         actual_replay = ""
         if replay_file:
-            src = Path(replay_file)
+            src = Path(replay_file).resolve()
             if src.exists() and src.is_file():
-                dest = proj_path / "replay" / src.name
+                dest = (proj_path / "replay" / src.name).resolve()
+                # Validate the destination is within the project directory
+                if not str(dest).startswith(str(proj_path)):
+                    raise ValueError("Replay file destination escapes project directory")
                 shutil.copy2(str(src), str(dest))
                 actual_replay = str(dest)
                 logger.info("[Projects] Copied replay file: %s → %s", src, dest)
@@ -188,7 +200,10 @@ class ProjectService:
         now = datetime.now(timezone.utc).isoformat()
         filtered["updated_at"] = now
 
-        set_clause = ", ".join(f"{k} = ?" for k in filtered)
+        # Build SET clause using only validated column names from the allowlist.
+        # Keys are guaranteed to be in `allowed` by the filter above.
+        # nosemgrep: python.lang.security.audit.formatted-sql-query
+        set_clause = ", ".join(f"{k} = ?" for k in filtered)  # noqa: S608
         values = list(filtered.values()) + [project_id]
 
         conn = get_connection()
