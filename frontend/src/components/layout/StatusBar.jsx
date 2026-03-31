@@ -1,18 +1,31 @@
 import { Circle } from 'lucide-react'
+import { useIRacing } from '../../context/IRacingContext'
 
 /**
  * Bottom status bar showing connection status, GPU info, and encoding state.
  */
 function StatusBar() {
+  const { isConnected, sessionData } = useIRacing()
+
+  const iracingStatus = isConnected ? 'connected' : 'disconnected'
+  const iracingLabel = isConnected && sessionData.track_name
+    ? `iRacing — ${sessionData.track_name}`
+    : 'iRacing'
+
   return (
     <footer className="h-statusbar flex items-center px-3 bg-bg-secondary border-t border-border
                         text-xxs select-none shrink-0">
       {/* Left section: iRacing connection */}
       <div className="flex items-center gap-4">
         <StatusIndicator
-          label="iRacing"
-          status="disconnected"
+          label={iracingLabel}
+          status={iracingStatus}
         />
+        {isConnected && sessionData.drivers.length > 0 && (
+          <span className="text-text-tertiary">
+            {sessionData.drivers.length} drivers
+          </span>
+        )}
       </div>
 
       {/* Center: spacer */}

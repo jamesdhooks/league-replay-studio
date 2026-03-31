@@ -41,6 +41,10 @@ from server.config import STATIC_DIR, BUNDLE_DIR, CONFIG_PATH, ensure_directorie
 # Routes
 from server.routes.api_settings import router as settings_router
 from server.routes.api_system import router as system_router
+from server.routes.api_iracing import router as iracing_router
+
+# Services
+from server.services.iracing_bridge import bridge as iracing_bridge
 
 logger.info("[App] All imports OK")
 
@@ -84,8 +88,28 @@ async def lifespan(app: FastAPI):
         save_config(DEFAULT_CONFIG)
         logger.info("[App] Created default config.json")
 
+    # ── Start iRacing bridge ────────────────────────────────────────────────
+    loop = asyncio.get_event_loop()
+
+    async def _broadcast_iracing(message: dict) -> None:
+        await ws_manager.broadcast(message)
+
+    def _on_iracing_update(message: dict) -> None:
+        """Called from the bridge's poll thread — schedule broadcast on the loop."""
+        if loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                _broadcast_iracing(message), loop
+            )
+
+    iracing_bridge.on_update = _on_iracing_update
+    iracing_bridge.start(loop)
+    logger.info("[App] iRacing bridge started")
+
     logger.info("[App] Startup complete — v%s", __version__)
     yield
+
+    # ── Shutdown ────────────────────────────────────────────────────────────
+    iracing_bridge.stop()
     logger.info("[App] Shutting down")
 
 
@@ -107,6 +131,7 @@ app.add_middleware(
 # ── Register routers ────────────────────────────────────────────────────────
 app.include_router(settings_router)
 app.include_router(system_router)
+app.include_router(iracing_router)
 
 
 # ── WebSocket endpoint ──────────────────────────────────────────────────────

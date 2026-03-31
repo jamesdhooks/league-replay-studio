@@ -13,8 +13,8 @@ websockets>=14.0
 # Utilities
 python-multipart>=0.0.9
 
-# iRacing SDK (future - not required for shell)
-# irsdk>=1.3.0
+# iRacing SDK — shared memory telemetry + Broadcasting API
+irsdk>=1.3.0
 
 # Video encoding (future)
 # ffmpeg-python>=0.2.0

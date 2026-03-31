@@ -135,20 +135,20 @@ Scaffold the full application stack: Python/FastAPI backend, React 19 + Vite + T
 
 ---
 
-### Feature 2 — iRacing SDK Bridge `MUST` `📋 planned`
+### Feature 2 — iRacing SDK Bridge `MUST` `✅ completed`
 **Spec:** `002-iracing-sdk-bridge`
 **Dependencies:** feature-1
 
 Integrate pyirsdk shared memory for real-time telemetry and replay control. 60 Hz background polling thread, session info parsing (drivers, track, cameras from YAML), replay control (speed, seek, camera/car switching via Broadcasting API).
 
 **Acceptance Criteria**
-- [ ] App detects when iRacing is running and displays connection status in the UI
-- [ ] Session data (drivers, track name, camera groups, session type) is parsed and available via API
-- [ ] Replay speed can be set programmatically (1×, 2×, 4×, 8×, 16×)
-- [ ] Replay can seek to specific frame numbers
-- [ ] Camera can be switched to target a specific car from a specific camera group
-- [ ] Background polling thread reads telemetry at 60 Hz without blocking the UI
-- [ ] Graceful handling when iRacing disconnects mid-session
+- [x] App detects when iRacing is running and displays connection status in the UI
+- [x] Session data (drivers, track name, camera groups, session type) is parsed and available via API
+- [x] Replay speed can be set programmatically (1×, 2×, 4×, 8×, 16×)
+- [x] Replay can seek to specific frame numbers
+- [x] Camera can be switched to target a specific car from a specific camera group
+- [x] Background polling thread reads telemetry at 60 Hz without blocking the UI
+- [x] Graceful handling when iRacing disconnects mid-session
 
 ---
 
