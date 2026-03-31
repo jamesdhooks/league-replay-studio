@@ -248,23 +248,23 @@ Core race event detection: incidents, battles, overtakes, pit stops, fastest lap
 
 ---
 
-### Feature 8 — NLE-Style Timeline Editor `MUST` `📋 planned`
+### Feature 8 — NLE-Style Timeline Editor `MUST` `✅ completed`
 **Spec:** `008-nle-style-timeline-editor`
 **Dependencies:** feature-7
 
 Canvas-based multi-track timeline: Camera, Events, Overlays, Cuts, Audio tracks. Zoom/pan, draggable event edges, playhead cursor, snap-to-grid, right-click context menus, J/K/L shuttle controls, I/O in/out points.
 
 **Acceptance Criteria**
-- [ ] Canvas-based timeline renders multiple tracks (Camera, Events, Overlays, Cuts, Audio)
-- [ ] Events are color-coded by type (incidents red, battles orange, overtakes blue, etc.)
-- [ ] Mouse scroll zooms the timeline (1 px = 5 s overview → 1 px = 1 frame detail)
-- [ ] Middle-drag pans the timeline horizontally
-- [ ] Playhead cursor can be dragged to scrub through the race
-- [ ] Event edges are draggable to adjust start/end times (frame-accurate)
-- [ ] Right-click context menu offers split, delete, change camera, add marker
-- [ ] J/K/L keyboard shuttle controls work for playback speed
-- [ ] I/O keys set in/out points at the playhead position
-- [ ] Timeline updates in real-time as new events are detected during analysis
+- [x] Canvas-based timeline renders multiple tracks (Camera, Events, Overlays, Cuts, Audio)
+- [x] Events are color-coded by type (incidents red, battles orange, overtakes blue, etc.)
+- [x] Mouse scroll zooms the timeline (1 px = 5 s overview → 1 px = 1 frame detail)
+- [x] Middle-drag pans the timeline horizontally
+- [x] Playhead cursor can be dragged to scrub through the race
+- [x] Event edges are draggable to adjust start/end times (frame-accurate)
+- [x] Right-click context menu offers split, delete, change camera, add marker
+- [x] J/K/L keyboard shuttle controls work for playback speed
+- [x] I/O keys set in/out points at the playhead position
+- [x] Timeline updates in real-time as new events are detected during analysis
 
 ---
 

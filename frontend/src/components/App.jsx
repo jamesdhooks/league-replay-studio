@@ -5,6 +5,7 @@ import { IRacingProvider } from '../context/IRacingContext'
 import { ProjectProvider } from '../context/ProjectContext'
 import { SettingsProvider } from '../context/SettingsContext'
 import { AnalysisProvider } from '../context/AnalysisContext'
+import { TimelineProvider } from '../context/TimelineContext'
 import { wsClient } from '../services/websocket'
 import AppShell from './layout/AppShell'
 
@@ -26,7 +27,9 @@ function App() {
           <IRacingProvider>
             <ProjectProvider>
               <AnalysisProvider>
-                <AppShell />
+                <TimelineProvider>
+                  <AppShell />
+                </TimelineProvider>
               </AnalysisProvider>
             </ProjectProvider>
           </IRacingProvider>

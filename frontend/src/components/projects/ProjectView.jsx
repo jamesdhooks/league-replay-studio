@@ -3,6 +3,8 @@ import { ArrowLeft, ChevronRight } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext'
 import StepIndicator from './StepIndicator'
 import ProjectFileBrowser from './ProjectFileBrowser'
+import AnalysisPanel from '../analysis/AnalysisPanel'
+import Timeline from '../timeline/Timeline'
 
 /**
  * Project view — shown when a project is open.
@@ -37,7 +39,7 @@ function ProjectView({ project, onBack }) {
     setup: 'Configure project settings and select your replay file.',
     capture: 'Record the replay using OBS, ShadowPlay, or ReLive.',
     analysis: 'Scan the replay to detect race events and key moments.',
-    editing: 'Tune highlights, edit the timeline, and configure overlays.',
+    editing: 'Edit the timeline, tune highlights, and configure overlays.',
     export: 'Encode the final video with GPU-accelerated rendering.',
     upload: 'Upload to YouTube or other platforms.',
   }
@@ -49,6 +51,42 @@ function ProjectView({ project, onBack }) {
     editing: 'Export Video',
     export: 'Upload',
     upload: 'Complete',
+  }
+
+  // Determine what to show in the main content area based on current step
+  const renderStepContent = () => {
+    switch (project.current_step) {
+      case 'analysis':
+        return <AnalysisPanel />
+
+      case 'editing':
+        return <Timeline projectId={project.id} />
+
+      default:
+        return (
+          <div className="flex-1 flex flex-col items-center justify-center p-8">
+            <div className="text-center space-y-4 max-w-md">
+              <h3 className="text-lg font-semibold text-text-primary capitalize">
+                {project.current_step}
+              </h3>
+              <p className="text-sm text-text-secondary">
+                {stepDescriptions[project.current_step] || ''}
+              </p>
+
+              {project.current_step !== 'upload' && (
+                <button
+                  onClick={handleAdvance}
+                  className="flex items-center gap-1.5 mx-auto px-4 py-2 bg-accent hover:bg-accent-hover
+                             text-white rounded-lg text-sm font-medium transition-colors"
+                >
+                  {nextStepLabels[project.current_step] || 'Continue'}
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+          </div>
+        )
+    }
   }
 
   return (
@@ -85,27 +123,7 @@ function ProjectView({ project, onBack }) {
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden">
         {/* Step content */}
-        <div className="flex-1 flex flex-col items-center justify-center p-8">
-          <div className="text-center space-y-4 max-w-md">
-            <h3 className="text-lg font-semibold text-text-primary capitalize">
-              {project.current_step}
-            </h3>
-            <p className="text-sm text-text-secondary">
-              {stepDescriptions[project.current_step] || ''}
-            </p>
-
-            {project.current_step !== 'upload' && (
-              <button
-                onClick={handleAdvance}
-                className="flex items-center gap-1.5 mx-auto px-4 py-2 bg-accent hover:bg-accent-hover
-                           text-white rounded-lg text-sm font-medium transition-colors"
-              >
-                {nextStepLabels[project.current_step] || 'Continue'}
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            )}
-          </div>
-        </div>
+        {renderStepContent()}
 
         {/* File browser sidebar */}
         {showFileBrowser && (
