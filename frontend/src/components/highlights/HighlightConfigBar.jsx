@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useHighlight } from '../../context/HighlightContext'
+import { useToast } from '../../context/ToastContext'
 import {
   Save, Download, Trash2, GitCompare, ChevronDown,
   ToggleLeft, ToggleRight, FolderOpen,
@@ -16,6 +17,7 @@ export default function HighlightConfigBar({ projectId }) {
     abMode, activeConfig, startABCompare, stopABCompare, switchABConfig,
     applyHighlights, saveConfig,
   } = useHighlight()
+  const { addToast } = useToast()
 
   const [showPresetMenu, setShowPresetMenu] = useState(false)
   const [presetName, setPresetName] = useState('')
@@ -27,16 +29,18 @@ export default function HighlightConfigBar({ projectId }) {
       await savePreset(presetName.trim())
       setPresetName('')
       setShowSaveInput(false)
+      addToast('success', `Preset "${presetName.trim()}" saved`)
     } catch {
-      // Error logged in context
+      addToast('error', 'Failed to save preset')
     }
   }
 
   const handleApply = async () => {
     try {
       await applyHighlights(projectId)
+      addToast('success', 'Highlights applied to timeline')
     } catch {
-      // Error logged in context
+      addToast('error', 'Failed to apply highlights')
     }
   }
 

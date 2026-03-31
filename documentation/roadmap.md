@@ -268,26 +268,26 @@ Canvas-based multi-track timeline: Camera, Events, Overlays, Cuts, Audio tracks.
 
 ---
 
-### Feature 9 — Highlight Editing Suite `MUST` `🔄 in progress`
+### Feature 9 — Highlight Editing Suite `MUST` `✅ completed`
 **Spec:** `009-highlight-editing-suite`
 **Dependencies:** feature-7, feature-8
 
 **The crown-jewel differentiator.** Interactive rule weight tuning, event selection table with Reason column, manual override system, live metrics dashboard (duration, coverage %, balance, pacing, driver coverage), A/B compare mode, named config save/load.
 
 **Acceptance Criteria**
-- [ ] Interactive sliders for each event type priority (0–100) with real-time reprocessing on change
-- [ ] Event selection table shows all events with Score, Severity, Duration, Type, Reason columns
-- [ ] Table is sortable by any column and filterable by event type, inclusion status, severity range
-- [ ] Manual override checkboxes force-include or force-exclude events from highlights
-- [ ] Overridden events are visually distinct from algorithm-selected events
-- [ ] Live metrics update within 100 ms of any parameter change: duration, coverage %, balance, pacing, driver coverage
-- [ ] Target duration control shows warning when highlight is over/under target
-- [ ] Minimum severity threshold slider instantly filters low-severity events
-- [ ] Auto-balance button optimises weights for even event distribution across the race
-- [ ] Named weight configurations can be saved and loaded for reuse across projects
-- [ ] A/B compare mode saves two configurations and toggles between them
-- [ ] Highlight timeline preview shows the condensed highlight reel with event segments
-- [ ] Clicking an event in the table jumps the timeline playhead to that moment
+- [x] Interactive sliders for each event type priority (0–100) with real-time reprocessing on change
+- [x] Event selection table shows all events with Score, Severity, Duration, Type, Reason columns
+- [x] Table is sortable by any column and filterable by event type, inclusion status, severity range
+- [x] Manual override checkboxes force-include or force-exclude events from highlights
+- [x] Overridden events are visually distinct from algorithm-selected events
+- [x] Live metrics update within 100 ms of any parameter change: duration, coverage %, balance, pacing, driver coverage
+- [x] Target duration control shows warning when highlight is over/under target
+- [x] Minimum severity threshold slider instantly filters low-severity events
+- [x] Auto-balance button optimises weights for even event distribution across the race
+- [x] Named weight configurations can be saved and loaded for reuse across projects
+- [x] A/B compare mode saves two configurations and toggles between them
+- [x] Highlight timeline preview shows the condensed highlight reel with event segments
+- [x] Clicking an event in the table jumps the timeline playhead to that moment
 
 ---
 

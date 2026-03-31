@@ -52,6 +52,9 @@ function buildReason(event, score, overrides, minSeverity) {
   return `Score ${score} (sev ${event.severity} × weight)`
 }
 
+/** Allow 10% overshoot on target duration before excluding events */
+const TARGET_DURATION_TOLERANCE = 1.1
+
 /**
  * Run the highlight selection algorithm entirely on the client.
  *
@@ -103,7 +106,7 @@ function computeHighlightSelection(events, weights, targetDuration, minSeverity,
 
     // Apply target duration constraint
     if (targetDuration && targetDuration > 0) {
-      if (totalDuration + evt.duration > targetDuration * 1.1) {
+      if (totalDuration + evt.duration > targetDuration * TARGET_DURATION_TOLERANCE) {
         excludedIds.add(evt.id)
         continue
       }
