@@ -46,9 +46,11 @@ from server.routes.api_system import router as system_router
 from server.routes.api_iracing import router as iracing_router
 from server.routes.api_projects import router as projects_router
 from server.routes.api_analysis import router as analysis_router, set_broadcast_fn
+from server.routes.api_capture import router as capture_router
 
 # Services
 from server.services.iracing_bridge import bridge as iracing_bridge
+from server.services.capture_service import capture_service
 
 logger.info("[App] All imports OK")
 
@@ -117,6 +119,14 @@ async def lifespan(app: FastAPI):
 
     set_broadcast_fn(_analysis_broadcast)
 
+    # ── Wire capture service ───────────────────────────────────────────────
+    capture_service.set_loop(loop)
+
+    async def _broadcast_capture(message: dict) -> None:
+        await ws_manager.broadcast(message)
+
+    capture_service.set_broadcast_fn(_broadcast_capture)
+
     logger.info("[App] Startup complete — v%s", __version__)
     yield
 
@@ -146,6 +156,7 @@ app.include_router(system_router)
 app.include_router(iracing_router)
 app.include_router(projects_router)
 app.include_router(analysis_router)
+app.include_router(capture_router)
 
 
 # ── WebSocket endpoint ──────────────────────────────────────────────────────
@@ -169,6 +180,8 @@ async def websocket_endpoint(websocket: WebSocket):
             # ── Route by category ──────────────────────────────────────────
             if category == EventCategory.IRACING:
                 await _handle_iracing_event(event, payload, websocket)
+            elif category == EventCategory.CAPTURE:
+                await _handle_capture_event(event, payload, websocket)
             elif category == EventCategory.SYSTEM:
                 await _handle_system_event(event, payload, websocket)
             else:
@@ -198,6 +211,17 @@ async def _handle_system_event(event: str, payload: dict, websocket: WebSocket) 
         await websocket.send_json({"event": "system:pong", "data": {}})
     else:
         logger.debug("[WebSocket] Unhandled system event: %s", event)
+
+
+async def _handle_capture_event(event: str, payload: dict, websocket: WebSocket) -> None:
+    """Handle incoming capture-related events from the frontend."""
+    if event == "capture:request_status":
+        await websocket.send_json({
+            "event": "capture:status",
+            "data": capture_service.status,
+        })
+    else:
+        logger.debug("[WebSocket] Unhandled capture event: %s", event)
 
 
 # ── SPA serving ──────────────────────────────────────────────────────────────

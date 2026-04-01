@@ -5,6 +5,7 @@ import StepIndicator from './StepIndicator'
 import ProjectFileBrowser from './ProjectFileBrowser'
 import AnalysisPanel from '../analysis/AnalysisPanel'
 import HighlightPanel from '../highlights/HighlightPanel'
+import CapturePanel from '../capture/CapturePanel'
 
 /**
  * Project view — shown when a project is open.
@@ -56,6 +57,9 @@ function ProjectView({ project, onBack }) {
   // Determine what to show in the main content area based on current step
   const renderStepContent = () => {
     switch (project.current_step) {
+      case 'capture':
+        return <CapturePanel projectId={project.id} />
+
       case 'analysis':
         return <AnalysisPanel />
 

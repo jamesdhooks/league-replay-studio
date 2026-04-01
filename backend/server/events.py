@@ -66,6 +66,10 @@ class EventType:
     # Capture (future)
     CAPTURE_STARTED        = "capture:started"
     CAPTURE_STOPPED        = "capture:stopped"
+    CAPTURE_PROGRESS       = "capture:progress"
+    CAPTURE_FILE_DETECTED  = "capture:file_detected"
+    CAPTURE_HOTKEY_TEST    = "capture:hotkey_test"
+    CAPTURE_VALIDATED      = "capture:validated"
     CAPTURE_ERROR          = "capture:error"
 
     # Project

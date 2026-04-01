@@ -331,28 +331,28 @@ Unlimited undo/redo across timeline, event inspector, and highlight suite. Visib
 > Build the end-to-end video production pipeline — OBS/ShadowPlay capture, GPU-accelerated FFmpeg encoding, tiered preview system, and export presets.
 
 ### Milestones
-- [ ] **M3.1** Automated video capture from iRacing replay *(feature 12)*
+- [x] **M3.1** Automated video capture from iRacing replay *(feature 12)*
 - [ ] **M3.2** Users can preview recorded video with scrubbing *(feature 14)*
 - [ ] **M3.3** GPU-accelerated export produces final video *(features 13, 15)*
 
 ---
 
-### Feature 12 — Video Capture & OBS Integration `MUST` `📋 planned`
+### Feature 12 — Video Capture & OBS Integration `MUST` `✅ completed`
 **Spec:** `010-video-capture-obs-integration`
 **Dependencies:** feature-2, feature-3
 
 Auto-detect OBS Studio, NVIDIA ShadowPlay, AMD ReLive. Configurable hotkey mapping per software with validation. Automated capture orchestration synced with replay playback. Post-capture validation (integrity, resolution, duration).
 
 **Acceptance Criteria**
-- [ ] App auto-detects running OBS, ShadowPlay, and ReLive processes
-- [ ] User can configure start/stop hotkeys per capture software in settings
-- [ ] Validation step sends test hotkey and verifies recording started via file watcher
-- [ ] Capture orchestration automates start/stop synced with replay playback at 1× speed
-- [ ] Intro capture drives scenic cameras during qualifying for title sequences
-- [ ] Capture file path is auto-discovered from OBS/ShadowPlay configuration
-- [ ] Progress UI shows real-time capture status, elapsed time, and file size
-- [ ] Post-capture validation checks file integrity, resolution, and duration vs expected
-- [ ] Clear error messages when capture software is not detected or hotkey fails
+- [x] App auto-detects running OBS, ShadowPlay, and ReLive processes
+- [x] User can configure start/stop hotkeys per capture software in settings
+- [x] Validation step sends test hotkey and verifies recording started via file watcher
+- [x] Capture orchestration automates start/stop synced with replay playback at 1× speed
+- [x] Intro capture drives scenic cameras during qualifying for title sequences
+- [x] Capture file path is auto-discovered from OBS/ShadowPlay configuration
+- [x] Progress UI shows real-time capture status, elapsed time, and file size
+- [x] Post-capture validation checks file integrity, resolution, and duration vs expected
+- [x] Clear error messages when capture software is not detected or hotkey fails
 
 ---
 

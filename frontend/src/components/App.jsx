@@ -5,6 +5,7 @@ import { IRacingProvider } from '../context/IRacingContext'
 import { ProjectProvider } from '../context/ProjectContext'
 import { SettingsProvider } from '../context/SettingsContext'
 import { AnalysisProvider } from '../context/AnalysisContext'
+import { CaptureProvider } from '../context/CaptureContext'
 import { UndoRedoProvider } from '../context/UndoRedoContext'
 import { TimelineProvider } from '../context/TimelineContext'
 import { HighlightProvider } from '../context/HighlightContext'
@@ -29,13 +30,15 @@ function App() {
           <IRacingProvider>
             <ProjectProvider>
               <AnalysisProvider>
-                <UndoRedoProvider>
-                  <TimelineProvider>
-                    <HighlightProvider>
-                      <AppShell />
-                    </HighlightProvider>
-                  </TimelineProvider>
-                </UndoRedoProvider>
+                <CaptureProvider>
+                  <UndoRedoProvider>
+                    <TimelineProvider>
+                      <HighlightProvider>
+                        <AppShell />
+                      </HighlightProvider>
+                    </TimelineProvider>
+                  </UndoRedoProvider>
+                </CaptureProvider>
               </AnalysisProvider>
             </ProjectProvider>
           </IRacingProvider>
