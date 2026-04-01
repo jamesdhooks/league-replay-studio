@@ -17,6 +17,8 @@ export function EncodingProvider({ children }) {
   const [activeJobs, setActiveJobs] = useState([])
   const [queuedJobs, setQueuedJobs] = useState([])
   const [recentJobs, setRecentJobs] = useState([])
+  const [completedExports, setCompletedExports] = useState([])
+  const [autoShutdown, setAutoShutdown] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
@@ -77,6 +79,49 @@ export function EncodingProvider({ children }) {
     }
   }, [fetchPresets])
 
+  const duplicatePreset = useCallback(async (presetId) => {
+    try {
+      const result = await apiPost(`/encoding/presets/${presetId}/duplicate`)
+      if (result.success) {
+        await fetchPresets()
+      }
+      return result
+    } catch (err) {
+      return { success: false, error: err.message }
+    }
+  }, [fetchPresets])
+
+  // ── Auto-shutdown ──────────────────────────────────────────────────────
+  const fetchAutoShutdown = useCallback(async () => {
+    try {
+      const data = await apiGet('/encoding/auto-shutdown')
+      setAutoShutdown(data.auto_shutdown || false)
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  const toggleAutoShutdown = useCallback(async (enabled) => {
+    try {
+      const data = await apiPost('/encoding/auto-shutdown', { enabled })
+      setAutoShutdown(data.auto_shutdown || false)
+      return data
+    } catch (err) {
+      return { error: err.message }
+    }
+  }, [])
+
+  // ── Completed exports ──────────────────────────────────────────────────
+  const fetchExports = useCallback(async () => {
+    try {
+      const data = await apiGet('/encoding/exports')
+      setCompletedExports(data.exports || [])
+      return data.exports
+    } catch {
+      return []
+    }
+  }, [])
+
   // ── Status ──────────────────────────────────────────────────────────────
   const fetchStatus = useCallback(async () => {
     try {
@@ -84,6 +129,7 @@ export function EncodingProvider({ children }) {
       setActiveJobs(data.active_jobs || [])
       setQueuedJobs(data.queued_jobs || [])
       setRecentJobs(data.recent_jobs || [])
+      if (data.auto_shutdown !== undefined) setAutoShutdown(data.auto_shutdown)
       return data
     } catch (err) {
       console.error('[Encoding] Status fetch failed:', err)
@@ -158,6 +204,8 @@ export function EncodingProvider({ children }) {
           { ...data, state: 'completed', progress: { percentage: 100 } },
           ...prev.slice(0, 19),
         ])
+        // Refresh completed exports list
+        fetchExports()
       }),
 
       wsClient.subscribe('encoding:error', (data) => {
@@ -180,6 +228,8 @@ export function EncodingProvider({ children }) {
     activeJobs,
     queuedJobs,
     recentJobs,
+    completedExports,
+    autoShutdown,
     loading,
     error,
 
@@ -188,13 +238,19 @@ export function EncodingProvider({ children }) {
     fetchPresets,
     savePreset,
     deletePreset,
+    duplicatePreset,
     fetchStatus,
     startEncoding,
     cancelJob,
+    fetchAutoShutdown,
+    toggleAutoShutdown,
+    fetchExports,
   }), [
-    gpuInfo, presets, activeJobs, queuedJobs, recentJobs, loading, error,
+    gpuInfo, presets, activeJobs, queuedJobs, recentJobs,
+    completedExports, autoShutdown, loading, error,
     detectGpus, refreshGpus, fetchPresets, savePreset, deletePreset,
-    fetchStatus, startEncoding, cancelJob,
+    duplicatePreset, fetchStatus, startEncoding, cancelJob,
+    fetchAutoShutdown, toggleAutoShutdown, fetchExports,
   ])
 
   return (

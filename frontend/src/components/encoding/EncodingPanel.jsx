@@ -3,10 +3,14 @@ import { useEncoding } from '../../context/EncodingContext'
 import { useToast } from '../../context/ToastContext'
 import { formatFileSize } from '../../utils/format'
 import { formatTime } from '../../utils/time'
+import ExportPresetEditor from './ExportPresetEditor'
+import EncodingDashboard from './EncodingDashboard'
+import CompletedExports from './CompletedExports'
 import {
   Cpu, Play, Square, CheckCircle2, XCircle, AlertTriangle,
   Settings2, Clock, HardDrive, FileVideo, RefreshCw, Layers,
-  Zap, ChevronDown, Trash2, Plus, Film,
+  Zap, ChevronDown, Trash2, Plus, Film, Copy, Edit3, Power,
+  FolderOpen,
 } from 'lucide-react'
 
 /**
@@ -20,8 +24,10 @@ import {
  */
 export default function EncodingPanel({ projectId }) {
   const {
-    gpuInfo, presets, activeJobs, queuedJobs, recentJobs, loading, error,
+    gpuInfo, presets, activeJobs, queuedJobs, recentJobs, autoShutdown,
+    loading, error,
     detectGpus, refreshGpus, fetchPresets, startEncoding, cancelJob, fetchStatus,
+    duplicatePreset, toggleAutoShutdown,
   } = useEncoding()
   const { showSuccess, showError } = useToast()
 
@@ -29,6 +35,7 @@ export default function EncodingPanel({ projectId }) {
   const [jobType, setJobType] = useState('full')
   const [inputFile, setInputFile] = useState('')
   const [outputDir, setOutputDir] = useState('')
+  const [presetEditor, setPresetEditor] = useState(null) // { mode, preset }
 
   // Detect GPUs and fetch presets on mount
   useEffect(() => {
@@ -87,6 +94,19 @@ export default function EncodingPanel({ projectId }) {
     await refreshGpus()
     showSuccess('GPU detection refreshed')
   }, [refreshGpus, showSuccess])
+
+  const handleDuplicate = useCallback(async (presetId) => {
+    const result = await duplicatePreset(presetId)
+    if (result.success) {
+      showSuccess('Preset duplicated')
+    } else {
+      showError(result.error || 'Failed to duplicate')
+    }
+  }, [duplicatePreset, showSuccess, showError])
+
+  const handleAutoShutdown = useCallback(async () => {
+    await toggleAutoShutdown(!autoShutdown)
+  }, [toggleAutoShutdown, autoShutdown])
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -182,7 +202,7 @@ export default function EncodingPanel({ projectId }) {
                            focus:outline-none focus:ring-1 focus:ring-accent"
               >
                 {presets.map(p => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
+                  <option key={p.id} value={p.id}>{p.name}{p.is_builtin === false ? ' ✦' : ''}</option>
                 ))}
               </select>
               <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-tertiary pointer-events-none" />
@@ -209,6 +229,52 @@ export default function EncodingPanel({ projectId }) {
                 </div>
               </div>
             )}
+
+            {/* Preset management buttons */}
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => setPresetEditor({ mode: 'create', preset: null })}
+                className="flex items-center gap-1 px-2 py-1 rounded text-xxs font-medium
+                           text-text-secondary hover:text-text-primary hover:bg-bg-hover
+                           border border-border transition-colors"
+                title="Create new preset"
+              >
+                <Plus className="w-3 h-3" />
+                New
+              </button>
+              {selectedPreset && (
+                <>
+                  <button
+                    onClick={() => setPresetEditor({
+                      mode: selectedPreset.is_builtin !== false ? 'duplicate' : 'edit',
+                      preset: selectedPreset,
+                    })}
+                    className="flex items-center gap-1 px-2 py-1 rounded text-xxs font-medium
+                               text-text-secondary hover:text-text-primary hover:bg-bg-hover
+                               border border-border transition-colors"
+                    title={selectedPreset.is_builtin !== false ? 'Duplicate preset' : 'Edit preset'}
+                  >
+                    {selectedPreset.is_builtin !== false ? (
+                      <><Copy className="w-3 h-3" />Duplicate</>
+                    ) : (
+                      <><Edit3 className="w-3 h-3" />Edit</>
+                    )}
+                  </button>
+                  {selectedPreset.is_builtin !== false && (
+                    <button
+                      onClick={() => handleDuplicate(selectedPreset.id)}
+                      className="flex items-center gap-1 px-2 py-1 rounded text-xxs font-medium
+                                 text-text-secondary hover:text-text-primary hover:bg-bg-hover
+                                 border border-border transition-colors"
+                      title="Quick duplicate"
+                    >
+                      <Copy className="w-3 h-3" />
+                      Duplicate
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
           </div>
         </Section>
 
@@ -244,10 +310,19 @@ export default function EncodingPanel({ projectId }) {
           </p>
         </Section>
 
-        {/* ── Active Encoding ─────────────────────────────────────── */}
+        {/* ── Active Encoding — Dashboard ─────────────────────────── */}
         {projectActiveJob && (
-          <Section icon={Film} title="Encoding Progress">
-            <JobProgress job={projectActiveJob} onCancel={handleCancel} />
+          <Section icon={Film} title="Encoding Dashboard">
+            <EncodingDashboard job={projectActiveJob} gpuInfo={gpuInfo} />
+            {/* Cancel button */}
+            <button
+              onClick={() => handleCancel(projectActiveJob.job_id)}
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md text-xs
+                font-medium bg-danger hover:bg-danger/90 text-white transition-colors mt-2"
+            >
+              <Square className="w-3.5 h-3.5" />
+              Cancel Encoding
+            </button>
           </Section>
         )}
 
@@ -276,6 +351,31 @@ export default function EncodingPanel({ projectId }) {
                 </p>
               </div>
             )}
+
+            {/* Auto-shutdown toggle */}
+            <div className="flex items-center justify-between px-3 py-2 bg-bg-primary border border-border rounded-md mt-2">
+              <div className="flex items-center gap-2">
+                <Power className="w-3.5 h-3.5 text-text-tertiary" />
+                <div>
+                  <div className="text-xs text-text-secondary">Auto-shutdown</div>
+                  <div className="text-xxs text-text-tertiary">Shut down when all jobs complete</div>
+                </div>
+              </div>
+              <button
+                onClick={handleAutoShutdown}
+                className={`relative w-9 h-5 rounded-full transition-colors ${
+                  autoShutdown ? 'bg-accent' : 'bg-bg-hover border border-border'
+                }`}
+                role="switch"
+                aria-checked={autoShutdown}
+              >
+                <span
+                  className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+                    autoShutdown ? 'translate-x-4' : 'translate-x-0.5'
+                  }`}
+                />
+              </button>
+            </div>
           </Section>
         )}
 
@@ -353,6 +453,11 @@ export default function EncodingPanel({ projectId }) {
           </Section>
         )}
 
+        {/* ── Completed Exports ─────────────────────────────────────── */}
+        <Section icon={FolderOpen} title="Completed Exports">
+          <CompletedExports />
+        </Section>
+
         {/* ── Error Display ──────────────────────────────────────── */}
         {error && !projectActiveJob && (
           <div className="flex items-start gap-2 px-3 py-2.5 bg-danger/5 border border-danger/30 rounded-md">
@@ -365,6 +470,15 @@ export default function EncodingPanel({ projectId }) {
         )}
 
       </div>
+
+      {/* Preset Editor Modal */}
+      {presetEditor && (
+        <ExportPresetEditor
+          preset={presetEditor.preset}
+          mode={presetEditor.mode}
+          onClose={() => setPresetEditor(null)}
+        />
+      )}
     </div>
   )
 }
