@@ -333,7 +333,7 @@ Unlimited undo/redo across timeline, event inspector, and highlight suite. Visib
 ### Milestones
 - [x] **M3.1** Automated video capture from iRacing replay *(feature 12)*
 - [x] **M3.2** Users can preview recorded video with scrubbing *(feature 14)*
-- [ ] **M3.3** GPU-accelerated export produces final video *(features 13, 15)*
+- [x] **M3.3** GPU-accelerated export produces final video *(features 13, 15)*
 
 ---
 
@@ -398,18 +398,18 @@ Tiered preview: (1) keyframe index ~5 s; (2) sprite sheet thumbnails ~30–60 s;
 
 ---
 
-### Feature 15 — Export Presets & Encoding Dashboard `SHOULD` `🔍 under_review`
+### Feature 15 — Export Presets & Encoding Dashboard `SHOULD` `✅ done`
 **Dependencies:** feature-13
 
 Export preset CRUD UI and encoding dashboard: real-time FPS/percentage/ETA/file-size/GPU-utilisation metrics, auto-shutdown option, completed-exports file browser with play/reveal/copy/upload actions.
 
 **Acceptance Criteria**
-- [ ] Export presets are manageable: create, edit, duplicate, delete with sensible defaults
-- [ ] Encoding dashboard shows real-time FPS, percentage, ETA, output file size
-- [ ] GPU utilisation gauge shows current encoder load
-- [ ] Auto-shutdown toggle is available for overnight encoding
-- [ ] Completed exports appear in a file browser with play, reveal, copy path actions
-- [ ] Preset selection is available in the export step of the project workflow
+- [x] Export presets are manageable: create, edit, duplicate, delete with sensible defaults
+- [x] Encoding dashboard shows real-time FPS, percentage, ETA, output file size
+- [x] GPU utilisation gauge shows current encoder load
+- [x] Auto-shutdown toggle is available for overnight encoding
+- [x] Completed exports appear in a file browser with play, reveal, copy path actions
+- [x] Preset selection is available in the export step of the project workflow
 
 ---
 
