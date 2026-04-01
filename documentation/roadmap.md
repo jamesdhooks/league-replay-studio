@@ -418,27 +418,27 @@ Export preset CRUD UI and encoding dashboard: real-time FPS/percentage/ETA/file-
 > HTML/Tailwind overlay templates via headless Chromium, in-app overlay editor, YouTube channel integration, and one-click automated pipeline.
 
 ### Milestones
-- [ ] **M4.1** Broadcast-quality overlays render on video *(feature 16)*
+- [x] **M4.1** Broadcast-quality overlays render on video *(feature 16)*
 - [ ] **M4.2** Overlays are editable in-app with live preview *(feature 17)*
 - [ ] **M4.3** One-click pipeline from replay to YouTube *(features 18, 19)*
 
 ---
 
-### Feature 16 — HTML/Tailwind Overlay Template Engine `SHOULD` `🔍 under_review`
+### Feature 16 — HTML/Tailwind Overlay Template Engine `SHOULD` `✅ done`
 **Dependencies:** feature-13, feature-14
 
 Playwright headless Chromium + Jinja2 rendering. `render_frame()` ~5–15 ms/frame, `batch_render_for_export()`. Built-in template library: Broadcast, Minimal, Classic, Cinematic, Blank. Resolution-aware (1080p / 1440p / 4K). Per-project overrides.
 
 **Acceptance Criteria**
-- [ ] Playwright headless Chromium initialises with persistent browser context
-- [ ] Jinja2 templates render with per-frame data context (positions, driver, lap, etc.)
-- [ ] `render_frame()` produces transparent PNG overlay in ~5–15 ms per frame
-- [ ] `batch_render_for_export()` pre-renders full overlay sequence to PNG files
-- [ ] Built-in template library includes at least 4 styles: Broadcast, Minimal, Classic, Cinematic
-- [ ] Templates adapt to output resolution (1080p, 1440p, 4K)
-- [ ] Overlay compositing works in both preview and export pipelines
-- [ ] Per-project template overrides don't modify the original template files
-- [ ] Templates can be imported, exported, duplicated with version tracking
+- [x] Playwright headless Chromium initialises with persistent browser context
+- [x] Jinja2 templates render with per-frame data context (positions, driver, lap, etc.)
+- [x] `render_frame()` produces transparent PNG overlay in ~5–15 ms per frame
+- [x] `batch_render_for_export()` pre-renders full overlay sequence to PNG files
+- [x] Built-in template library includes at least 4 styles: Broadcast, Minimal, Classic, Cinematic
+- [x] Templates adapt to output resolution (1080p, 1440p, 4K)
+- [x] Overlay compositing works in both preview and export pipelines
+- [x] Per-project template overrides don't modify the original template files
+- [x] Templates can be imported, exported, duplicated with version tracking
 
 ---
 
