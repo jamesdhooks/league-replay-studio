@@ -83,6 +83,12 @@ class OverrideRequest(BaseModel):
     html_content: str
 
 
+class EditorPreviewRequest(BaseModel):
+    template_id: str
+    html_content: str
+    frame_data: dict[str, Any] = {}
+
+
 # ── Status ──────────────────────────────────────────────────────────────────
 
 @router.get("/status")
@@ -268,3 +274,37 @@ async def delete_override(project_id: int, template_id: str):
     if not deleted:
         raise HTTPException(status_code=404, detail="No override found")
     return {"success": True}
+
+
+# ── Editor endpoints ────────────────────────────────────────────────────────
+
+@router.post("/editor/preview")
+async def editor_preview(body: EditorPreviewRequest):
+    """Render a preview frame from raw HTML content (for the live editor).
+
+    Accepts arbitrary HTML so the editor can show instant previews
+    without persisting the template first.
+    """
+    try:
+        result = await overlay_service.render_preview(
+            body.template_id,
+            body.html_content,
+            body.frame_data,
+        )
+        return result
+    except Exception as exc:
+        logger.error("[Overlay API] Editor preview failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Editor preview rendering failed")
+
+
+@router.get("/editor/context/{template_id}")
+async def get_template_context(template_id: str):
+    """Get available Jinja2 template variables with sample values.
+
+    Returns the full data context that a template can use, with realistic
+    sample values so the editor can display a meaningful preview.
+    """
+    context = overlay_service.get_template_context(template_id)
+    if context is None:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return context

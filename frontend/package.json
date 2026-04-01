@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
     "framer-motion": "^11.0.0",
     "lucide-react": "^0.460.0",
     "react": "^19.0.0",

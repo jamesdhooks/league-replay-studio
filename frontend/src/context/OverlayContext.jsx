@@ -207,6 +207,27 @@ export function OverlayProvider({ children }) {
     }
   }, [])
 
+  // ── Editor methods ──────────────────────────────────────────────────────
+  const renderEditorPreview = useCallback(async (templateId, htmlContent, frameData) => {
+    try {
+      return await apiPost('/overlay/editor/preview', {
+        template_id: templateId,
+        html_content: htmlContent,
+        frame_data: frameData,
+      })
+    } catch (err) {
+      return { success: false, error: err.message }
+    }
+  }, [])
+
+  const getDataContext = useCallback(async (templateId) => {
+    try {
+      return await apiGet(`/overlay/editor/context/${templateId}`)
+    } catch {
+      return null
+    }
+  }, [])
+
   // ── WebSocket subscriptions ──────────────────────────────────────────────
   useEffect(() => {
     const unsubs = [
@@ -273,12 +294,15 @@ export function OverlayProvider({ children }) {
     saveOverride,
     getOverride,
     deleteOverride,
+    renderEditorPreview,
+    getDataContext,
   }), [
     templates, selectedTemplateId, engineStatus, batchProgress, loading, error,
     initEngine, shutdownEngine, fetchStatus, fetchTemplates, getTemplate,
     createTemplate, updateTemplate, deleteTemplate, duplicateTemplate,
     exportTemplate, renderFrame, startBatchRender, setResolution,
     saveOverride, getOverride, deleteOverride,
+    renderEditorPreview, getDataContext,
   ])
 
   return (

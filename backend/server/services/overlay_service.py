@@ -130,6 +130,56 @@ BUILTIN_TEMPLATES: list[dict[str, Any]] = [
 ]
 
 
+# ── Sample frame data for editor preview ────────────────────────────────────
+
+SAMPLE_FRAME_DATA: dict[str, Any] = {
+    "series_name": "IMSA SportsCar Championship",
+    "track_name": "Daytona International Speedway",
+    "current_lap": 7,
+    "total_laps": 20,
+    "session_time": "01:23:45",
+    "driver_name": "Max Verstappen",
+    "car_name": "Dallara P217 LMP2",
+    "position": 3,
+    "irating": 5421,
+    "team_color": "#E10600",
+    "last_lap_time": "1:34.567",
+    "best_lap_time": "1:33.891",
+    "flag": "green",
+    "incident_count": 2,
+    "standings": [
+        {"position": 1, "driver_name": "Lewis Hamilton", "gap": "Leader", "is_player": False, "car_number": "44"},
+        {"position": 2, "driver_name": "Charles Leclerc", "gap": "+1.234", "is_player": False, "car_number": "16"},
+        {"position": 3, "driver_name": "Max Verstappen", "gap": "+2.567", "is_player": True, "car_number": "1"},
+        {"position": 4, "driver_name": "Lando Norris", "gap": "+4.891", "is_player": False, "car_number": "4"},
+        {"position": 5, "driver_name": "Carlos Sainz", "gap": "+6.123", "is_player": False, "car_number": "55"},
+        {"position": 6, "driver_name": "Oscar Piastri", "gap": "+8.456", "is_player": False, "car_number": "81"},
+        {"position": 7, "driver_name": "George Russell", "gap": "+10.789", "is_player": False, "car_number": "63"},
+        {"position": 8, "driver_name": "Fernando Alonso", "gap": "+12.012", "is_player": False, "car_number": "14"},
+    ],
+}
+
+VARIABLE_DOCS: dict[str, str] = {
+    "frame.series_name": "Name of the racing series (e.g., 'IMSA SportsCar Championship')",
+    "frame.track_name": "Name of the track (e.g., 'Daytona International Speedway')",
+    "frame.current_lap": "Current lap number (integer)",
+    "frame.total_laps": "Total laps in the race (integer)",
+    "frame.session_time": "Elapsed session time (string, HH:MM:SS format)",
+    "frame.driver_name": "Name of the focused driver",
+    "frame.car_name": "Name/model of the car",
+    "frame.position": "Current race position (integer)",
+    "frame.irating": "Driver's iRating (integer)",
+    "frame.team_color": "Hex color code for the driver's team",
+    "frame.last_lap_time": "Last completed lap time (string, M:SS.mmm format)",
+    "frame.best_lap_time": "Best lap time in session (string)",
+    "frame.flag": "Current flag status ('green', 'yellow', 'red', 'checkered')",
+    "frame.incident_count": "Number of incidents (integer)",
+    "frame.standings": "Array of standing entries with position, driver_name, gap, is_player, car_number",
+    "resolution.width": "Rendering width in pixels (integer)",
+    "resolution.height": "Rendering height in pixels (integer)",
+}
+
+
 # ── Overlay Service ─────────────────────────────────────────────────────────
 
 class OverlayService:
@@ -423,6 +473,48 @@ class OverlayService:
             overlay_engine.set_custom_template_dirs([CUSTOM_TEMPLATES_DIR])
 
         return await overlay_engine.render_frame(template_id, frame_data)
+
+    async def render_preview(
+        self,
+        template_id: str,
+        html_content: str,
+        frame_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Render a preview frame from raw HTML content (for the editor).
+
+        Instead of reading from the template file, this renders the provided
+        HTML directly through the Playwright engine.
+
+        Args:
+            template_id: Template ID (for context resolution).
+            html_content: Raw HTML/Jinja2 content to render.
+            frame_data: Per-frame data context.
+
+        Returns:
+            Render result dict with base64-encoded PNG.
+        """
+        if not overlay_engine.initialized:
+            init = await self.initialize()
+            if not init.get("success"):
+                return init
+
+        return await overlay_engine.render_raw_html(html_content, frame_data)
+
+    def get_template_context(self, template_id: str) -> Optional[dict[str, Any]]:
+        """Get available Jinja2 template variables with sample values.
+
+        Returns a dict describing all template variables and their sample values
+        that the editor can use for live preview.
+        """
+        template = self.get_template(template_id)
+        if not template:
+            return None
+
+        return {
+            "template_id": template_id,
+            "variables": SAMPLE_FRAME_DATA,
+            "variable_docs": VARIABLE_DOCS,
+        }
 
     def start_batch_render(
         self,

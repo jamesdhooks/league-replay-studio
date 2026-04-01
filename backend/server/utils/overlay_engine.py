@@ -257,6 +257,85 @@ class OverlayEngine:
             logger.error("[Overlay] render_frame failed: %s (%.1fms)", exc, elapsed_ms)
             return {"success": False, "error": str(exc), "elapsed_ms": round(elapsed_ms, 2)}
 
+    # ── Raw HTML rendering (for editor) ────────────────────────────────────
+
+    async def render_raw_html(
+        self,
+        html_content: str,
+        frame_data: dict[str, Any],
+        output_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Render raw HTML content directly (bypassing template files).
+
+        Used by the in-app editor for live preview. The HTML is rendered
+        through Jinja2 string rendering, then set as page content.
+
+        Args:
+            html_content: Raw HTML/Jinja2 string to render.
+            frame_data: Per-frame context data.
+            output_path: Optional path to save PNG.
+
+        Returns:
+            Dict with rendering result including base64 PNG data.
+        """
+        import base64
+
+        if not self._initialized or not self._page:
+            return {"success": False, "error": "Engine not initialized"}
+
+        start = time.perf_counter()
+
+        try:
+            # Render Jinja2 expressions in the raw HTML
+            from jinja2 import Template as JinjaTemplate
+
+            try:
+                jinja_tmpl = JinjaTemplate(html_content)
+                rendered_html = jinja_tmpl.render(
+                    frame=frame_data,
+                    resolution=self._current_resolution,
+                )
+            except Exception as tmpl_exc:
+                return {
+                    "success": False,
+                    "error": f"Template error: {tmpl_exc}",
+                    "elapsed_ms": round((time.perf_counter() - start) * 1000, 2),
+                }
+
+            # Set the page content
+            await self._page.set_content(rendered_html, wait_until="domcontentloaded")
+
+            # Screenshot with transparent background
+            screenshot_opts: dict[str, Any] = {
+                "type": "png",
+                "omit_background": True,
+                "full_page": False,
+            }
+            if output_path:
+                screenshot_opts["path"] = output_path
+
+            png_bytes = await self._page.screenshot(**screenshot_opts)
+
+            elapsed_ms = (time.perf_counter() - start) * 1000
+
+            result: dict[str, Any] = {
+                "success": True,
+                "elapsed_ms": round(elapsed_ms, 2),
+                "width": self._current_resolution["width"],
+                "height": self._current_resolution["height"],
+                "size_bytes": len(png_bytes),
+                "png_base64": base64.b64encode(png_bytes).decode("ascii"),
+            }
+            if output_path:
+                result["output_path"] = output_path
+
+            return result
+
+        except Exception as exc:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            logger.error("[Overlay] render_raw_html failed: %s (%.1fms)", exc, elapsed_ms)
+            return {"success": False, "error": str(exc), "elapsed_ms": round(elapsed_ms, 2)}
+
     # ── Batch rendering ──────────────────────────────────────────────────────
 
     async def batch_render_for_export(

@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useOverlay } from '../../context/OverlayContext'
 import { useToast } from '../../context/ToastContext'
+import OverlayEditor from './OverlayEditor'
 import {
   Layers, Plus, Copy, Trash2, Download, Upload,
   Monitor, Film, Palette, Eye, ChevronRight, Settings,
-  Play, Square, Loader2, Check, AlertCircle,
+  Play, Square, Loader2, Check, AlertCircle, Code,
 } from 'lucide-react'
 
 /**
@@ -28,6 +29,7 @@ export default function OverlayPanel() {
   const [newTemplateName, setNewTemplateName] = useState('')
   const [newTemplateDesc, setNewTemplateDesc] = useState('')
   const [filter, setFilter] = useState('all') // 'all' | 'builtin' | 'custom'
+  const [editingTemplateId, setEditingTemplateId] = useState(null)
 
   // ── Load templates on mount ──────────────────────────────────────────────
   useEffect(() => {
@@ -136,6 +138,16 @@ export default function OverlayPanel() {
       addToast(result.error || 'Engine init failed', 'error')
     }
   }, [initEngine, resolution, addToast])
+
+  // ── If editing a template, show the editor ────────────────────────────────
+  if (editingTemplateId) {
+    return (
+      <OverlayEditor
+        templateId={editingTemplateId}
+        onClose={() => setEditingTemplateId(null)}
+      />
+    )
+  }
 
   return (
     <div className="flex flex-col h-full bg-bg-primary text-text-primary">
@@ -322,6 +334,13 @@ export default function OverlayPanel() {
                 {/* Actions */}
                 <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                   <button
+                    onClick={e => { e.stopPropagation(); setEditingTemplateId(template.id) }}
+                    className="p-1 rounded hover:bg-blue-700/50 text-text-tertiary hover:text-blue-400"
+                    title="Edit template"
+                  >
+                    <Code className="w-3.5 h-3.5" />
+                  </button>
+                  <button
                     onClick={e => { e.stopPropagation(); handleDuplicate(template.id) }}
                     className="p-1 rounded hover:bg-bg-secondary text-text-tertiary hover:text-text-primary"
                     title="Duplicate"
@@ -376,9 +395,17 @@ export default function OverlayPanel() {
               {templates.find(t => t.id === selectedTemplateId)?.name || selectedTemplateId}
             </span></span>
           </div>
-          <div className="flex items-center gap-1 text-xs text-text-tertiary">
-            <Settings className="w-3 h-3" />
-            {resolution}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setEditingTemplateId(selectedTemplateId)}
+              className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white"
+            >
+              <Code className="w-3 h-3" /> Edit
+            </button>
+            <div className="flex items-center gap-1 text-xs text-text-tertiary">
+              <Settings className="w-3 h-3" />
+              {resolution}
+            </div>
           </div>
         </div>
       )}
