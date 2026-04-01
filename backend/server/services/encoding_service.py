@@ -258,8 +258,11 @@ class EncodingService:
         Returns:
             Job info dict.
         """
-        # Validate input file
-        if not Path(input_file).exists():
+        # Validate input file — reject path traversal
+        input_path = Path(input_file).resolve()
+        if ".." in Path(input_file).parts:
+            return {"success": False, "error": "Invalid input file path"}
+        if not input_path.exists():
             return {"success": False, "error": f"Input file not found: {input_file}"}
 
         # Get preset
@@ -275,13 +278,16 @@ class EncodingService:
         codec_family = preset.get("codec_family", "h264")
         encoder = get_best_encoder(codec_family)
 
-        # Generate output filename
-        os.makedirs(output_dir, exist_ok=True)
-        input_name = Path(input_file).stem
+        # Generate output filename — reject path traversal in output_dir
+        output_path = Path(output_dir).resolve()
+        if ".." in Path(output_dir).parts:
+            return {"success": False, "error": "Invalid output directory path"}
+        os.makedirs(str(output_path), exist_ok=True)
+        input_name = input_path.stem
         suffix = "_highlight" if job_type == "highlight" else ""
         preset_tag = preset.get("id", "custom")
         output_file = str(
-            Path(output_dir) / f"{input_name}{suffix}_{preset_tag}.mp4"
+            output_path / f"{input_name}{suffix}_{preset_tag}.mp4"
         )
 
         # Create job
