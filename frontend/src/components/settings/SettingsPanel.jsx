@@ -11,10 +11,12 @@ import {
   Moon,
   Laptop,
   Youtube,
+  Wand2,
 } from 'lucide-react'
 import { useSettings } from '../../context/SettingsContext'
 import { useToast } from '../../context/ToastContext'
 import YouTubeSettings from '../youtube/YouTubeSettings'
+import SetupWizard from '../wizard/SetupWizard'
 
 /**
  * Settings category definitions.
@@ -26,6 +28,7 @@ const CATEGORIES = [
   { id: 'youtube', label: 'YouTube', icon: Youtube },
   { id: 'hotkeys', label: 'Hotkeys', icon: Keyboard },
   { id: 'pipeline', label: 'Pipeline', icon: Monitor },
+  { id: 'wizard', label: 'Setup Wizard', icon: Wand2 },
 ]
 
 /**
@@ -169,6 +172,9 @@ function SettingsPanel({ onClose }) {
           )}
           {activeCategory === 'pipeline' && (
             <PipelineSettings value={currentValue} onChange={setField} />
+          )}
+          {activeCategory === 'wizard' && (
+            <WizardSettings />
           )}
         </div>
       </div>
@@ -449,3 +455,49 @@ function ThemeSelector({ value, onChange }) {
 }
 
 export default SettingsPanel
+
+// ── Wizard Settings ──────────────────────────────────────────────────────────
+
+function WizardSettings() {
+  const { updateSettings } = useSettings()
+  const { showSuccess } = useToast()
+  const [showWizard, setShowWizard] = useState(false)
+
+  const handleComplete = async (collectedSettings) => {
+    try {
+      await fetch('/api/wizard/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ settings: collectedSettings }),
+      })
+      await updateSettings({ ...collectedSettings, wizard_completed: true })
+      showSuccess('Setup wizard completed and settings saved.')
+    } catch {
+      // Non-fatal
+    }
+    setShowWizard(false)
+  }
+
+  const handleSkip = () => {
+    setShowWizard(false)
+  }
+
+  return (
+    <div className="space-y-6 max-w-xl">
+      <SectionHeader
+        title="Setup Wizard"
+        description="Re-run the guided setup wizard to reconfigure your installation."
+      />
+      <button
+        onClick={() => setShowWizard(true)}
+        className="flex items-center gap-2 px-4 py-2 rounded-lg bg-accent text-white text-sm hover:bg-accent/90 transition-colors"
+      >
+        <Wand2 className="w-4 h-4" />
+        Launch Setup Wizard
+      </button>
+      {showWizard && (
+        <SetupWizard onComplete={handleComplete} onSkip={handleSkip} />
+      )}
+    </div>
+  )
+}

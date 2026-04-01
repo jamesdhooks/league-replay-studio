@@ -502,7 +502,7 @@ YouTube Data API v3. OAuth2 flow, channel status, Jinja2 description templates (
 
 ### Milestones
 - [x] **M5.1** App is scriptable from the command line *(feature 20)*
-- [ ] **M5.2** Distributable installer is available *(features 21, 22, 23)*
+- [ ] **M5.2** Distributable installer is available *(features 21, 22, 23)* — Feature 21 ✅
 - [ ] **M5.3** Application is production-quality *(features 24, 25)*
 
 ---
@@ -525,20 +525,20 @@ YouTube Data API v3. OAuth2 flow, channel status, Jinja2 description templates (
 
 ---
 
-### Feature 21 — First-Run Setup Wizard `COULD` `🔍 under_review`
+### Feature 21 — First-Run Setup Wizard `COULD` `✅ done`
 **Dependencies:** feature-4, feature-12
 
 Guided first-run: detect iRacing dir, discover OBS/ShadowPlay, configure + validate hotkeys, select GPU, set working directory, optionally connect YouTube. Re-launchable from Settings → Setup Wizard.
 
 **Acceptance Criteria**
-- [ ] Wizard appears automatically on first launch (not on subsequent launches)
-- [ ] Step 1: Detect iRacing installation and replay directory
-- [ ] Step 2: Detect capture software and configure hotkeys with validation test
-- [ ] Step 3: Detect GPU capabilities and recommend encoding settings
-- [ ] Step 4: Set default project working directory
-- [ ] Step 5: Optional YouTube channel connection
-- [ ] Wizard can be skipped at any step with sensible defaults
-- [ ] Wizard can be re-launched from Settings → Setup Wizard
+- [x] Wizard appears automatically on first launch (not on subsequent launches)
+- [x] Step 1: Detect iRacing installation and replay directory
+- [x] Step 2: Detect capture software and configure hotkeys with validation test
+- [x] Step 3: Detect GPU capabilities and recommend encoding settings
+- [x] Step 4: Set default project working directory
+- [x] Step 5: Optional YouTube channel connection
+- [x] Wizard can be skipped at any step with sensible defaults
+- [x] Wizard can be re-launched from Settings → Setup Wizard
 
 ---
 

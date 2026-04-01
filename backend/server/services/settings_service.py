@@ -95,6 +95,7 @@ VALIDATORS: dict[str, Any] = {
     "iracing_replay_dir": _validate_string_or_empty,
     "default_project_dir": _validate_string_or_empty,
     "pipeline_default_config": _validate_pipeline_config,
+    "wizard_completed": _validate_bool,
 }
 
 

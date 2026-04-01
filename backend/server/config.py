@@ -46,6 +46,7 @@ DEFAULT_CONFIG: dict = {
     "youtube_description_template": "Race highlights from {{ track_name }} in the {{ series_name }} series.\n\nDrivers: {{ drivers }}\nDate: {{ date }}",
     "youtube_default_tags": "iracing,sim racing,highlights",
     "pipeline_default_config": None,
+    "wizard_completed": False,
     "theme": "dark",
     "sidebar_collapsed": False,
 }
