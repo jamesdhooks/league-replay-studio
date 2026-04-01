@@ -459,22 +459,22 @@ Split-pane Monaco editor (HTML/CSS, Tailwind IntelliSense) + live preview. Data 
 
 ---
 
-### Feature 18 — YouTube Channel Integration `SHOULD` `🔍 under_review`
+### Feature 18 — YouTube Channel Integration `SHOULD` `✅ done`
 **Dependencies:** feature-13, feature-3
 
 YouTube Data API v3. OAuth2 flow, channel status, Jinja2 description templates (`{{track_name}}`, `{{drivers}}`), resumable upload with retry, video browser with project association, quota monitoring.
 
 **Acceptance Criteria**
-- [ ] OAuth2 flow connects the user's YouTube channel with token storage in OS keyring
-- [ ] Connection status shows in settings (connected/disconnected/expired) with refresh capability
-- [ ] Default upload settings configurable: privacy, playlist, title template, description template, tags
-- [ ] Jinja2 variables in title/description templates auto-fill from project data
-- [ ] Video upload is resumable — survives brief network interruptions
-- [ ] Upload progress (speed, percentage, ETA) displays in real-time
-- [ ] YouTube video browser lists uploaded videos with views, likes, and project link
-- [ ] Upload step in workflow pre-fills metadata from project and templates
-- [ ] Quota usage displayed in settings with warning when approaching daily limit
-- [ ] Retry with exponential backoff on upload failure
+- [x] OAuth2 flow connects the user's YouTube channel with token storage in OS keyring
+- [x] Connection status shows in settings (connected/disconnected/expired) with refresh capability
+- [x] Default upload settings configurable: privacy, playlist, title template, description template, tags
+- [x] Jinja2 variables in title/description templates auto-fill from project data
+- [x] Video upload is resumable — survives brief network interruptions
+- [x] Upload progress (speed, percentage, ETA) displays in real-time
+- [x] YouTube video browser lists uploaded videos with views, likes, and project link
+- [x] Upload step in workflow pre-fills metadata from project and templates
+- [x] Quota usage displayed in settings with warning when approaching daily limit
+- [x] Retry with exponential backoff on upload failure
 
 ---
 

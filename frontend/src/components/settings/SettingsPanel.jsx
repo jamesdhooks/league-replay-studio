@@ -10,9 +10,11 @@ import {
   Sun,
   Moon,
   Laptop,
+  Youtube,
 } from 'lucide-react'
 import { useSettings } from '../../context/SettingsContext'
 import { useToast } from '../../context/ToastContext'
+import YouTubeSettings from '../youtube/YouTubeSettings'
 
 /**
  * Settings category definitions.
@@ -21,6 +23,7 @@ const CATEGORIES = [
   { id: 'general', label: 'General', icon: Settings },
   { id: 'camera', label: 'Camera Defaults', icon: Film },
   { id: 'encoding', label: 'Encoding', icon: Cpu },
+  { id: 'youtube', label: 'YouTube', icon: Youtube },
   { id: 'hotkeys', label: 'Hotkeys', icon: Keyboard },
   { id: 'pipeline', label: 'Pipeline', icon: Monitor },
 ]
@@ -157,6 +160,9 @@ function SettingsPanel({ onClose }) {
           )}
           {activeCategory === 'encoding' && (
             <EncodingSettings value={currentValue} onChange={setField} />
+          )}
+          {activeCategory === 'youtube' && (
+            <YouTubeSettings value={currentValue} onChange={setField} />
           )}
           {activeCategory === 'hotkeys' && (
             <HotkeySettings value={currentValue} onChange={setField} />

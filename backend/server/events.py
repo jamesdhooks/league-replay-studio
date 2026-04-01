@@ -27,11 +27,13 @@ class EventCategory:
     CAPTURE = "capture"
     PREVIEW = "preview"
     OVERLAY = "overlay"
+    YOUTUBE = "youtube"
     PROJECT = "project"
     SYSTEM = "system"
 
     ALL: list[str] = [
-        "iracing", "pipeline", "encoding", "capture", "preview", "overlay", "project", "system"
+        "iracing", "pipeline", "encoding", "capture", "preview", "overlay",
+        "youtube", "project", "system",
     ]
 
 
@@ -85,6 +87,15 @@ class EventType:
     OVERLAY_RENDER_PROGRESS   = "overlay:render_progress"
     OVERLAY_RENDER_COMPLETED  = "overlay:render_completed"
     OVERLAY_ERROR             = "overlay:error"
+
+    # YouTube
+    YOUTUBE_CONNECTED         = "youtube:connected"
+    YOUTUBE_DISCONNECTED      = "youtube:disconnected"
+    YOUTUBE_UPLOAD_STARTED    = "youtube:upload_started"
+    YOUTUBE_UPLOAD_PROGRESS   = "youtube:upload_progress"
+    YOUTUBE_UPLOAD_COMPLETED  = "youtube:upload_completed"
+    YOUTUBE_UPLOAD_ERROR      = "youtube:upload_error"
+    YOUTUBE_QUOTA_WARNING     = "youtube:quota_warning"
 
     # Project
     PROJECT_UPDATED        = "project:updated"
