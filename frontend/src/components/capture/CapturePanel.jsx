@@ -1,6 +1,8 @@
 import { useEffect, useMemo } from 'react'
 import { useCapture } from '../../context/CaptureContext'
 import { useToast } from '../../context/ToastContext'
+import { formatFileSize } from '../../utils/format'
+import { formatTime } from '../../utils/time'
 import {
   Video, Play, Square, RotateCcw, CheckCircle2, XCircle,
   AlertTriangle, Monitor, Keyboard, FolderOpen, Clock,
@@ -191,7 +193,7 @@ export default function CapturePanel({ projectId }) {
                     <MetricBox
                       icon={Clock}
                       label="Elapsed"
-                      value={formatDuration(elapsedSeconds)}
+                      value={formatTime(elapsedSeconds)}
                     />
                     <MetricBox
                       icon={HardDrive}
@@ -231,7 +233,7 @@ export default function CapturePanel({ projectId }) {
                     <MetricBox
                       icon={Clock}
                       label="Duration"
-                      value={formatDuration(elapsedSeconds)}
+                      value={formatTime(elapsedSeconds)}
                     />
                     <MetricBox
                       icon={HardDrive}
@@ -411,23 +413,4 @@ function TestResultDisplay({ result }) {
       ))}
     </div>
   )
-}
-
-
-// ── Formatting helpers ─────────────────────────────────────────────────────
-
-function formatDuration(seconds) {
-  if (!seconds || seconds < 0) return '0:00'
-  const m = Math.floor(seconds / 60)
-  const s = Math.floor(seconds % 60)
-  return `${m}:${s.toString().padStart(2, '0')}`
-}
-
-
-function formatFileSize(bytes) {
-  if (!bytes || bytes <= 0) return '0 B'
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }

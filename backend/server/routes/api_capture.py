@@ -46,7 +46,7 @@ async def get_capture_software():
         }
     except Exception as exc:
         logger.error("[Capture API] Software detection error: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Capture software detection failed")
 
 
 # ── Status ──────────────────────────────────────────────────────────────────
@@ -71,7 +71,7 @@ async def test_capture_hotkey():
         return result
     except Exception as exc:
         logger.error("[Capture API] Hotkey test error: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Hotkey test failed")
 
 
 # ── Start capture ───────────────────────────────────────────────────────────
@@ -91,7 +91,7 @@ async def start_capture():
         raise
     except Exception as exc:
         logger.error("[Capture API] Start capture error: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Failed to start capture")
 
 
 # ── Stop capture ────────────────────────────────────────────────────────────
@@ -108,7 +108,7 @@ async def stop_capture():
         return result
     except Exception as exc:
         logger.error("[Capture API] Stop capture error: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Failed to stop capture")
 
 
 # ── Reset ───────────────────────────────────────────────────────────────────
