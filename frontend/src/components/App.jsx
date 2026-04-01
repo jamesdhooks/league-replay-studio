@@ -13,6 +13,7 @@ import { EncodingProvider } from '../context/EncodingContext'
 import { PreviewProvider } from '../context/PreviewContext'
 import { OverlayProvider } from '../context/OverlayContext'
 import { YouTubeProvider } from '../context/YouTubeContext'
+import { PipelineProvider } from '../context/PipelineContext'
 import { wsClient } from '../services/websocket'
 import AppShell from './layout/AppShell'
 
@@ -39,13 +40,15 @@ function App() {
                     <PreviewProvider>
                       <OverlayProvider>
                         <YouTubeProvider>
-                          <UndoRedoProvider>
-                          <TimelineProvider>
-                            <HighlightProvider>
-                              <AppShell />
-                            </HighlightProvider>
-                          </TimelineProvider>
-                          </UndoRedoProvider>
+                          <PipelineProvider>
+                            <UndoRedoProvider>
+                            <TimelineProvider>
+                              <HighlightProvider>
+                                <AppShell />
+                              </HighlightProvider>
+                            </TimelineProvider>
+                            </UndoRedoProvider>
+                          </PipelineProvider>
                         </YouTubeProvider>
                       </OverlayProvider>
                     </PreviewProvider>

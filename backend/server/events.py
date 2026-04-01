@@ -30,10 +30,11 @@ class EventCategory:
     YOUTUBE = "youtube"
     PROJECT = "project"
     SYSTEM = "system"
+    AUTOMATION = "automation"  # For one-click pipeline
 
     ALL: list[str] = [
         "iracing", "pipeline", "encoding", "capture", "preview", "overlay",
-        "youtube", "project", "system",
+        "youtube", "project", "system", "automation",
     ]
 
 
@@ -100,6 +101,20 @@ class EventType:
     # Project
     PROJECT_UPDATED        = "project:updated"
     PROJECT_STEP_CHANGED   = "project:step_changed"
+
+    # Automation Pipeline (one-click)
+    AUTOMATION_STARTED           = "automation:started"
+    AUTOMATION_PAUSED            = "automation:paused"
+    AUTOMATION_RESUMED           = "automation:resumed"
+    AUTOMATION_CANCELLED         = "automation:cancelled"
+    AUTOMATION_COMPLETED         = "automation:completed"
+    AUTOMATION_FAILED            = "automation:failed"
+    AUTOMATION_STEP_STARTED      = "automation:step_started"
+    AUTOMATION_STEP_PROGRESS     = "automation:step_progress"
+    AUTOMATION_STEP_COMPLETED    = "automation:step_completed"
+    AUTOMATION_STEP_ERROR        = "automation:step_error"
+    AUTOMATION_STEP_SKIPPED      = "automation:step_skipped"
+    AUTOMATION_WAITING           = "automation:waiting_intervention"
 
     # System
     SYSTEM_SETTINGS_CHANGED = "system:settings_changed"

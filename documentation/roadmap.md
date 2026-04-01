@@ -420,7 +420,7 @@ Export preset CRUD UI and encoding dashboard: real-time FPS/percentage/ETA/file-
 ### Milestones
 - [x] **M4.1** Broadcast-quality overlays render on video *(feature 16)*
 - [x] **M4.2** Overlays are editable in-app with live preview *(feature 17)*
-- [ ] **M4.3** One-click pipeline from replay to YouTube *(features 18, 19)*
+- [x] **M4.3** One-click pipeline from replay to YouTube *(features 18, 19)*
 
 ---
 
@@ -478,21 +478,21 @@ YouTube Data API v3. OAuth2 flow, channel status, Jinja2 description templates (
 
 ---
 
-### Feature 19 — One-Click Automated Pipeline `SHOULD` `🔍 under_review`
+### Feature 19 — One-Click Automated Pipeline `SHOULD` `✅ done`
 **Dependencies:** feature-7, feature-9, feature-12, feature-13, feature-18
 
 `PipelineEngine` sequencing: Capture → Analysis → Editing → Export → Upload. Pause/resume/cancel/retry per step. Pipeline presets CRUD. Failure recovery from failed step (not from scratch). Persistent state in SQLite. CLI support.
 
 **Acceptance Criteria**
-- [ ] Pipeline executes all steps sequentially: Capture → Analysis → Editing → Export → Upload
-- [ ] Each step can be paused, resumed, cancelled, or retried independently
-- [ ] Pipeline configuration presets allow saving different automation settings
-- [ ] Real-time pipeline progress UI shows current step, log output, and overall progress
-- [ ] Pipeline pauses on step failure by default (configurable: pause/skip/abort)
-- [ ] User can intervene mid-pipeline (e.g., tweak highlight weights between Analysis and Export)
-- [ ] Pipeline state persists in SQLite — survives app crash/restart and resumes from last step
-- [ ] Notification on pipeline completion (toast, system notification, or none — configurable)
-- [ ] Pipeline integrates with YouTube upload as optional final step
+- [x] Pipeline executes all steps sequentially: Capture → Analysis → Editing → Export → Upload
+- [x] Each step can be paused, resumed, cancelled, or retried independently
+- [x] Pipeline configuration presets allow saving different automation settings
+- [x] Real-time pipeline progress UI shows current step, log output, and overall progress
+- [x] Pipeline pauses on step failure by default (configurable: pause/skip/abort)
+- [x] User can intervene mid-pipeline (e.g., tweak highlight weights between Analysis and Export)
+- [x] Pipeline state persists in SQLite — survives app crash/restart and resumes from last step
+- [x] Notification on pipeline completion (toast, system notification, or none — configurable)
+- [x] Pipeline integrates with YouTube upload as optional final step
 
 ---
 

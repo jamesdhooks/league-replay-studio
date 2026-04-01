@@ -51,6 +51,7 @@ from server.routes.api_encoding import router as encoding_router
 from server.routes.api_preview import router as preview_router
 from server.routes.api_overlay import router as overlay_router
 from server.routes.api_youtube import router as youtube_router
+from server.routes.api_pipeline import router as pipeline_router
 
 # Services
 from server.services.iracing_bridge import bridge as iracing_bridge
@@ -59,6 +60,7 @@ from server.services.encoding_service import encoding_service
 from server.services.preview_service import preview_service
 from server.services.overlay_service import overlay_service
 from server.services.youtube_service import youtube_service
+from server.services.pipeline_service import pipeline_service
 
 logger.info("[App] All imports OK")
 
@@ -167,6 +169,14 @@ async def lifespan(app: FastAPI):
 
     youtube_service.set_broadcast_fn(_broadcast_youtube)
 
+    # ── Wire pipeline service ────────────────────────────────────────────
+    pipeline_service.set_loop(loop)
+
+    async def _broadcast_pipeline(message: dict) -> None:
+        await ws_manager.broadcast(message)
+
+    pipeline_service.set_broadcast_fn(_broadcast_pipeline)
+
     logger.info("[App] Startup complete — v%s", __version__)
     yield
 
@@ -201,6 +211,7 @@ app.include_router(encoding_router)
 app.include_router(preview_router)
 app.include_router(overlay_router)
 app.include_router(youtube_router)
+app.include_router(pipeline_router)
 
 
 # ── WebSocket endpoint ──────────────────────────────────────────────────────
@@ -234,6 +245,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 await _handle_overlay_event(event, payload, websocket)
             elif category == EventCategory.YOUTUBE:
                 await _handle_youtube_event(event, payload, websocket)
+            elif category == EventCategory.AUTOMATION:
+                await _handle_pipeline_event(event, payload, websocket)
             elif category == EventCategory.SYSTEM:
                 await _handle_system_event(event, payload, websocket)
             else:
@@ -324,6 +337,17 @@ async def _handle_youtube_event(event: str, payload: dict, websocket: WebSocket)
         })
     else:
         logger.debug("[WebSocket] Unhandled YouTube event: %s", event)
+
+
+async def _handle_pipeline_event(event: str, payload: dict, websocket: WebSocket) -> None:
+    """Handle incoming pipeline-related events from the frontend."""
+    if event == "automation:request_status":
+        await websocket.send_json({
+            "event": "automation:status",
+            "data": pipeline_service.status,
+        })
+    else:
+        logger.debug("[WebSocket] Unhandled pipeline event: %s", event)
 
 
 # ── SPA serving ──────────────────────────────────────────────────────────────
