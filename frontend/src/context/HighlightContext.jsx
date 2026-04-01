@@ -2,6 +2,7 @@ import { createContext, useContext, useState, useCallback, useMemo, useEffect, u
 import { apiGet, apiPut, apiPost, apiDelete } from '../services/api'
 import { useAnalysis } from './AnalysisContext'
 import { useTimeline } from './TimelineContext'
+import { useUndoRedo } from './UndoRedoContext'
 
 const HighlightContext = createContext(null)
 
@@ -245,6 +246,7 @@ export function HighlightProvider({ children }) {
   // ── Get data from sibling contexts ──────────────────────────────────────
   const { events } = useAnalysis()
   const { raceDuration, seekTo } = useTimeline()
+  const { pushAction } = useUndoRedo()
 
   // ── Computed selection (memoised, <100ms) ───────────────────────────────
   const selection = useMemo(
@@ -346,45 +348,118 @@ export function HighlightProvider({ children }) {
     }
   }, [])
 
-  // ── Weight mutation ────────────────────────────────────────────────────
+  // ── Weight mutation (with undo tracking) ────────────────────────────────
   const setWeight = useCallback((eventType, value) => {
+    const clampedValue = Math.max(0, Math.min(100, value))
+    setWeights(prev => {
+      const oldValue = prev[eventType]
+      // Only track if actually changed (avoid tracking slider drags that didn't move)
+      if (oldValue !== clampedValue) {
+        pushAction({
+          type: 'weight_change',
+          description: `${eventType} weight ${oldValue} → ${clampedValue}`,
+          undo: () => { setWeights(w => ({ ...w, [eventType]: oldValue })) },
+          redo: () => { setWeights(w => ({ ...w, [eventType]: clampedValue })) },
+        })
+      }
+      return { ...prev, [eventType]: clampedValue }
+    })
+  }, [pushAction])
+
+  // Raw setter without undo tracking (for undo/redo callbacks to avoid infinite loop)
+  const _rawSetWeight = useCallback((eventType, value) => {
     setWeights(prev => ({ ...prev, [eventType]: Math.max(0, Math.min(100, value)) }))
   }, [])
 
-  // ── Override mutation ──────────────────────────────────────────────────
+  // ── Override mutation (with undo tracking) ──────────────────────────────
   const toggleOverride = useCallback((eventId) => {
     setOverrides(prev => {
       const eid = String(eventId)
       const current = prev[eid]
       const next = { ...prev }
+      let newValue
       if (current === 'include') {
         next[eid] = 'exclude'
+        newValue = 'exclude'
       } else if (current === 'exclude') {
         delete next[eid]
+        newValue = null
       } else {
         next[eid] = 'include'
+        newValue = 'include'
       }
+
+      pushAction({
+        type: 'override_toggle',
+        description: `Override event #${eid}: ${current || 'auto'} → ${newValue || 'auto'}`,
+        undo: () => {
+          setOverrides(o => {
+            const r = { ...o }
+            if (current) { r[eid] = current } else { delete r[eid] }
+            return r
+          })
+        },
+        redo: () => {
+          setOverrides(o => {
+            const r = { ...o }
+            if (newValue) { r[eid] = newValue } else { delete r[eid] }
+            return r
+          })
+        },
+      })
+
       return next
     })
-  }, [])
+  }, [pushAction])
 
   const setOverrideValue = useCallback((eventId, value) => {
     setOverrides(prev => {
       const eid = String(eventId)
+      const oldValue = prev[eid] || null
       const next = { ...prev }
       if (value === null || value === undefined) {
         delete next[eid]
       } else {
         next[eid] = value
       }
+
+      if (oldValue !== value) {
+        pushAction({
+          type: 'override_change',
+          description: `Override event #${eid}: ${oldValue || 'auto'} → ${value || 'auto'}`,
+          undo: () => {
+            setOverrides(o => {
+              const r = { ...o }
+              if (oldValue) { r[eid] = oldValue } else { delete r[eid] }
+              return r
+            })
+          },
+          redo: () => {
+            setOverrides(o => {
+              const r = { ...o }
+              if (value) { r[eid] = value } else { delete r[eid] }
+              return r
+            })
+          },
+        })
+      }
+
       return next
     })
-  }, [])
+  }, [pushAction])
 
-  // ── Auto-balance ──────────────────────────────────────────────────────
+  // ── Auto-balance (with undo tracking) ──────────────────────────────────
   const autoBalance = useCallback(() => {
-    setWeights(autoBalanceWeights(events))
-  }, [events])
+    const oldWeights = { ...weights }
+    const newWeights = autoBalanceWeights(events)
+    setWeights(newWeights)
+    pushAction({
+      type: 'auto_balance',
+      description: 'Auto-balanced weights',
+      undo: () => { setWeights(oldWeights) },
+      redo: () => { setWeights(autoBalanceWeights(events)) },
+    })
+  }, [events, weights, pushAction])
 
   // ── A/B compare ───────────────────────────────────────────────────────
   const startABCompare = useCallback(() => {

@@ -217,14 +217,14 @@ Tailwind CSS dark-first design system — color tokens, typography scale, spacin
 
 ---
 
-## Phase 2 — Core Analysis & Editing `📋 planned`
+## Phase 2 — Core Analysis & Editing `✅ completed`
 
 > Build the intelligence layer — the replay analysis engine, NLE-style timeline editor, highlight editing suite, event inspector, and undo/redo system.
 
 ### Milestones
 - [x] **M2.1** Replay analysis detects all race events *(feature 7)*
 - [x] **M2.2** Events visualised on an interactive timeline *(features 8, 10)*
-- [ ] **M2.3** Highlight reel is fully tuneable with live metrics *(features 9, 11)*
+- [x] **M2.3** Highlight reel is fully tuneable with live metrics *(features 9, 11)*
 
 ---
 
@@ -310,19 +310,19 @@ Detail panel for selected timeline events: type, severity slider, frame-accurate
 
 ---
 
-### Feature 11 — Undo/Redo System `SHOULD` `🔍 under_review`
+### Feature 11 — Undo/Redo System `SHOULD` `✅ completed`
 **Dependencies:** feature-8, feature-9
 
 Unlimited undo/redo across timeline, event inspector, and highlight suite. Visible edit history panel. Ctrl+Z / Ctrl+Y. Session-scoped history that resets on project close.
 
 **Acceptance Criteria**
-- [ ] Ctrl+Z undoes the last editing operation across timeline, inspector, and highlight suite
-- [ ] Ctrl+Y / Ctrl+Shift+Z redoes an undone operation
-- [ ] Undo/redo works for: event property changes, event drag/resize, manual overrides, weight changes
-- [ ] Edit history panel shows a list of recent operations with descriptions
-- [ ] Undo depth is unlimited within the current session
-- [ ] Undo/redo state is consistent across timeline, inspector, and highlight suite views
-- [ ] Toolbar buttons for undo/redo show enabled/disabled state based on history
+- [x] Ctrl+Z undoes the last editing operation across timeline, inspector, and highlight suite
+- [x] Ctrl+Y / Ctrl+Shift+Z redoes an undone operation
+- [x] Undo/redo works for: event property changes, event drag/resize, manual overrides, weight changes
+- [x] Edit history panel shows a list of recent operations with descriptions
+- [x] Undo depth is unlimited within the current session
+- [x] Undo/redo state is consistent across timeline, inspector, and highlight suite views
+- [x] Toolbar buttons for undo/redo show enabled/disabled state based on history
 
 ---
 

@@ -5,6 +5,7 @@ import { IRacingProvider } from '../context/IRacingContext'
 import { ProjectProvider } from '../context/ProjectContext'
 import { SettingsProvider } from '../context/SettingsContext'
 import { AnalysisProvider } from '../context/AnalysisContext'
+import { UndoRedoProvider } from '../context/UndoRedoContext'
 import { TimelineProvider } from '../context/TimelineContext'
 import { HighlightProvider } from '../context/HighlightContext'
 import { wsClient } from '../services/websocket'
@@ -28,11 +29,13 @@ function App() {
           <IRacingProvider>
             <ProjectProvider>
               <AnalysisProvider>
-                <TimelineProvider>
-                  <HighlightProvider>
-                    <AppShell />
-                  </HighlightProvider>
-                </TimelineProvider>
+                <UndoRedoProvider>
+                  <TimelineProvider>
+                    <HighlightProvider>
+                      <AppShell />
+                    </HighlightProvider>
+                  </TimelineProvider>
+                </UndoRedoProvider>
               </AnalysisProvider>
             </ProjectProvider>
           </IRacingProvider>

@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import { apiGet, apiPut, apiPost, apiDelete } from '../services/api'
 import { useAnalysis } from './AnalysisContext'
+import { useUndoRedo } from './UndoRedoContext'
 
 const TimelineContext = createContext(null)
 
@@ -66,6 +67,14 @@ export function TimelineProvider({ children }) {
 
   // ── Get analysis events ────────────────────────────────────────────────
   const { events, fetchEvents } = useAnalysis()
+  const { pushAction } = useUndoRedo()
+
+  // Helper: fetch a single event snapshot for undo tracking
+  const getEventSnapshot = useCallback((eventId) => {
+    const evt = events.find(e => e.id === eventId)
+    if (!evt) return null
+    return { ...evt }
+  }, [events])
 
   // ── Load race duration ─────────────────────────────────────────────────
   const loadRaceDuration = useCallback(async (projectId) => {
@@ -181,42 +190,142 @@ export function TimelineProvider({ children }) {
     setOutPoint(null)
   }, [])
 
-  // ── Event editing ─────────────────────────────────────────────────────
+  // ── Event editing (with undo/redo tracking) ────────────────────────────
+
+  // Raw update (no undo tracking, used by undo/redo callbacks)
+  const _rawUpdateEvent = useCallback(async (projectId, eventId, updates) => {
+    const result = await apiPut(`/projects/${projectId}/events/${eventId}`, updates)
+    await fetchEvents(projectId, { limit: 1000 })
+    return result
+  }, [fetchEvents])
+
   const updateEvent = useCallback(async (projectId, eventId, updates) => {
     try {
-      const result = await apiPut(`/projects/${projectId}/events/${eventId}`, updates)
-      await fetchEvents(projectId, { limit: 1000 })
+      // Capture previous state for undo
+      const oldEvent = getEventSnapshot(eventId)
+      if (!oldEvent) throw new Error('Event not found locally')
+
+      const oldValues = {}
+      for (const key of Object.keys(updates)) {
+        oldValues[key] = oldEvent[key]
+      }
+
+      const result = await _rawUpdateEvent(projectId, eventId, updates)
+
+      // Build description
+      const fields = Object.keys(updates)
+      const desc = fields.length === 1 && fields[0] === 'severity'
+        ? `Changed severity ${oldValues.severity} → ${updates.severity}`
+        : fields.length === 1 && fields[0] === 'event_type'
+          ? `Changed type to ${updates.event_type}`
+          : `Updated event #${eventId}`
+
+      pushAction({
+        type: 'event_update',
+        description: desc,
+        undo: async () => { await _rawUpdateEvent(projectId, eventId, oldValues) },
+        redo: async () => { await _rawUpdateEvent(projectId, eventId, updates) },
+      })
+
       return result
     } catch (err) {
       console.error('[Timeline] Event update error:', err)
       throw err
     }
-  }, [fetchEvents])
+  }, [fetchEvents, getEventSnapshot, pushAction, _rawUpdateEvent])
 
   const deleteEvent = useCallback(async (projectId, eventId) => {
     try {
+      // Capture full event state before deleting
+      const oldEvent = getEventSnapshot(eventId)
+      if (!oldEvent) throw new Error('Event not found locally')
+
       const result = await apiDelete(`/projects/${projectId}/events/${eventId}`)
       setSelectedEventId(null)
       await fetchEvents(projectId, { limit: 1000 })
+
+      pushAction({
+        type: 'event_delete',
+        description: `Deleted ${oldEvent.event_type} event`,
+        undo: async () => {
+          // Re-create the event via POST endpoint
+          await apiPost(`/projects/${projectId}/events`, {
+            event_type: oldEvent.event_type,
+            start_time_seconds: oldEvent.start_time_seconds,
+            end_time_seconds: oldEvent.end_time_seconds,
+            start_frame: oldEvent.start_frame,
+            end_frame: oldEvent.end_frame,
+            lap_number: oldEvent.lap_number || 0,
+            severity: oldEvent.severity,
+            involved_drivers: oldEvent.involved_drivers || [],
+            position: oldEvent.position || 0,
+            included_in_highlight: !!oldEvent.included_in_highlight,
+            metadata: oldEvent.metadata || {},
+          })
+          await fetchEvents(projectId, { limit: 1000 })
+        },
+        redo: async () => {
+          // Find the recreated event by matching key fields and delete it
+          const evts = await apiGet(`/projects/${projectId}/events?limit=1000`)
+          const match = (evts.events || []).find(e =>
+            e.event_type === oldEvent.event_type &&
+            Math.abs(e.start_time_seconds - oldEvent.start_time_seconds) < 0.01 &&
+            Math.abs(e.end_time_seconds - oldEvent.end_time_seconds) < 0.01,
+          )
+          if (match) {
+            await apiDelete(`/projects/${projectId}/events/${match.id}`)
+          }
+          setSelectedEventId(null)
+          await fetchEvents(projectId, { limit: 1000 })
+        },
+      })
+
       return result
     } catch (err) {
       console.error('[Timeline] Event delete error:', err)
       throw err
     }
-  }, [fetchEvents])
+  }, [fetchEvents, getEventSnapshot, pushAction])
 
   const splitEvent = useCallback(async (projectId, eventId, splitTime) => {
     try {
+      // Capture original event before split
+      const oldEvent = getEventSnapshot(eventId)
+      if (!oldEvent) throw new Error('Event not found locally')
+
       const result = await apiPost(`/projects/${projectId}/events/${eventId}/split`, {
         split_time: splitTime,
       })
       await fetchEvents(projectId, { limit: 1000 })
+
+      const newEventId = result.new_id
+
+      pushAction({
+        type: 'event_split',
+        description: `Split ${oldEvent.event_type} event`,
+        undo: async () => {
+          // Delete the new event and restore original end time
+          await apiDelete(`/projects/${projectId}/events/${newEventId}`)
+          await apiPut(`/projects/${projectId}/events/${eventId}`, {
+            end_time_seconds: oldEvent.end_time_seconds,
+            end_frame: oldEvent.end_frame,
+          })
+          await fetchEvents(projectId, { limit: 1000 })
+        },
+        redo: async () => {
+          await apiPost(`/projects/${projectId}/events/${eventId}/split`, {
+            split_time: splitTime,
+          })
+          await fetchEvents(projectId, { limit: 1000 })
+        },
+      })
+
       return result
     } catch (err) {
       console.error('[Timeline] Event split error:', err)
       throw err
     }
-  }, [fetchEvents])
+  }, [fetchEvents, getEventSnapshot, pushAction])
 
   // ── Context menu ──────────────────────────────────────────────────────
   const openContextMenu = useCallback((x, y, eventId, time) => {

@@ -2,12 +2,14 @@ import { useEffect } from 'react'
 import { useHighlight, EVENT_TYPE_LABELS } from '../../context/HighlightContext'
 import { useAnalysis } from '../../context/AnalysisContext'
 import { useTimeline } from '../../context/TimelineContext'
+import { useUndoRedo } from '../../context/UndoRedoContext'
 import HighlightWeightSliders from './HighlightWeightSliders'
 import HighlightEventTable from './HighlightEventTable'
 import HighlightMetrics from './HighlightMetrics'
 import HighlightTimeline from './HighlightTimeline'
 import HighlightConfigBar from './HighlightConfigBar'
 import EventInspectorPanel from '../inspector/EventInspectorPanel'
+import EditHistoryPanel from '../history/EditHistoryPanel'
 import Timeline from '../timeline/Timeline'
 import { Sparkles } from 'lucide-react'
 
@@ -15,7 +17,7 @@ import { Sparkles } from 'lucide-react'
  * HighlightPanel — Main container for the Highlight Editing Suite.
  *
  * Orchestrates: weight sliders, event table, metrics, timeline preview,
- * config bar (presets + A/B), event inspector, and the NLE timeline at the bottom.
+ * config bar (presets + A/B), event inspector / edit history, and the NLE timeline.
  *
  * @param {Object} props
  * @param {number} props.projectId - Active project ID
@@ -24,6 +26,7 @@ export default function HighlightPanel({ projectId }) {
   const { loadConfig, loadDrivers, loadPresets } = useHighlight()
   const { fetchEvents } = useAnalysis()
   const { selectedEventId } = useTimeline()
+  const { history } = useUndoRedo()
 
   // Load highlight data on mount
   useEffect(() => {
@@ -34,6 +37,9 @@ export default function HighlightPanel({ projectId }) {
       loadPresets()
     }
   }, [projectId, loadConfig, loadDrivers, loadPresets, fetchEvents])
+
+  // Show right panel when event selected OR when there's history to show
+  const showRightPanel = selectedEventId || history.length > 0
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -72,10 +78,14 @@ export default function HighlightPanel({ projectId }) {
           </div>
         </div>
 
-        {/* Right panel: Event Inspector (visible when event selected) */}
-        {selectedEventId && (
+        {/* Right panel: Inspector (event selected) or Edit History */}
+        {showRightPanel && (
           <div className="w-72 shrink-0 border-l border-border bg-bg-secondary overflow-hidden">
-            <EventInspectorPanel projectId={projectId} />
+            {selectedEventId ? (
+              <EventInspectorPanel projectId={projectId} />
+            ) : (
+              <EditHistoryPanel />
+            )}
           </div>
         )}
       </div>

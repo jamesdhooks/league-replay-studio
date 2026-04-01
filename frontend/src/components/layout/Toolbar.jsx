@@ -16,8 +16,18 @@ import {
  * @param {() => void} props.onToggleSidebar
  * @param {string} [props.projectName] - Active project name (if any)
  * @param {() => void} [props.onOpenSettings] - Callback to open settings panel
+ * @param {boolean} [props.canUndo] - Whether undo is available
+ * @param {boolean} [props.canRedo] - Whether redo is available
+ * @param {() => void} [props.onUndo] - Undo callback
+ * @param {() => void} [props.onRedo] - Redo callback
+ * @param {string} [props.undoDescription] - Description of next undo operation
+ * @param {string} [props.redoDescription] - Description of next redo operation
  */
-function Toolbar({ sidebarCollapsed, onToggleSidebar, projectName, onOpenSettings }) {
+function Toolbar({
+  sidebarCollapsed, onToggleSidebar, projectName, onOpenSettings,
+  canUndo = false, canRedo = false, onUndo, onRedo,
+  undoDescription, redoDescription,
+}) {
   return (
     <header className="h-toolbar flex items-center px-3 bg-bg-secondary border-b border-border
                         select-none shrink-0">
@@ -57,8 +67,18 @@ function Toolbar({ sidebarCollapsed, onToggleSidebar, projectName, onOpenSetting
       <div className="flex items-center gap-1">
         <ToolbarButton icon={Save} title="Save (Ctrl+S)" disabled />
         <ToolbarDivider />
-        <ToolbarButton icon={Undo2} title="Undo (Ctrl+Z)" disabled />
-        <ToolbarButton icon={Redo2} title="Redo (Ctrl+Y)" disabled />
+        <ToolbarButton
+          icon={Undo2}
+          title={canUndo ? `Undo: ${undoDescription || 'last action'} (Ctrl+Z)` : 'Undo (Ctrl+Z)'}
+          disabled={!canUndo}
+          onClick={onUndo}
+        />
+        <ToolbarButton
+          icon={Redo2}
+          title={canRedo ? `Redo: ${redoDescription || 'last action'} (Ctrl+Y)` : 'Redo (Ctrl+Y)'}
+          disabled={!canRedo}
+          onClick={onRedo}
+        />
         <ToolbarDivider />
         <ToolbarButton icon={Settings} title="Settings" onClick={onOpenSettings} />
         <ToolbarButton icon={HelpCircle} title="Help" />

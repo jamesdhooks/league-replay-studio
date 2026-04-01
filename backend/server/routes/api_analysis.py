@@ -8,6 +8,8 @@ REST endpoints for the replay analysis engine.
   GET  /api/projects/{id}/analysis/status — Get analysis status
   GET  /api/projects/{id}/events       — List detected events
   GET  /api/projects/{id}/events/summary — Event count summary by type
+  POST /api/projects/{id}/events       — Create an event (undo support)
+  GET  /api/projects/{id}/events/{eid} — Get a single event
   PUT  /api/projects/{id}/events/{eid} — Update an event
   DELETE /api/projects/{id}/events/{eid} — Delete an event
   POST /api/projects/{id}/events/{eid}/split — Split an event at a timestamp
@@ -352,6 +354,116 @@ async def update_event(project_id: int, event_id: int, body: EventUpdateRequest)
         raise
     except Exception as exc:
         logger.error("[Analysis API] Event update error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+class EventCreateRequest(BaseModel):
+    """Fields for creating a new event (used by undo-delete)."""
+    event_type: str
+    start_time_seconds: float
+    end_time_seconds: float
+    start_frame: int = 0
+    end_frame: int = 0
+    lap_number: int = 0
+    severity: int = 5
+    involved_drivers: Optional[list[int]] = None
+    position: int = 0
+    included_in_highlight: bool = False
+    metadata: Optional[dict] = None
+
+
+@router.post("/projects/{project_id}/events")
+async def create_event(project_id: int, body: EventCreateRequest):
+    """Create a race event (e.g., undo a delete operation)."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project["project_dir"]
+    try:
+        conn = get_project_db(project_dir)
+        try:
+            drivers_json = json.dumps(body.involved_drivers or [])
+            metadata_json = json.dumps(body.metadata or {})
+            cursor = conn.execute(
+                """INSERT INTO race_events
+                   (event_type, start_time_seconds, end_time_seconds, start_frame, end_frame,
+                    lap_number, severity, involved_drivers, position,
+                    auto_detected, user_modified, included_in_highlight, metadata)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)""",
+                (
+                    body.event_type,
+                    body.start_time_seconds,
+                    body.end_time_seconds,
+                    body.start_frame,
+                    body.end_frame,
+                    body.lap_number,
+                    max(0, min(10, body.severity)),
+                    drivers_json,
+                    body.position,
+                    1 if body.included_in_highlight else 0,
+                    metadata_json,
+                ),
+            )
+            new_id = cursor.lastrowid
+            conn.commit()
+
+            # Return the created event
+            row = conn.execute("SELECT * FROM race_events WHERE id = ?", (new_id,)).fetchone()
+            d = dict(row)
+            try:
+                d["involved_drivers"] = json.loads(d.get("involved_drivers", "[]"))
+            except (json.JSONDecodeError, TypeError):
+                d["involved_drivers"] = []
+            try:
+                d["metadata"] = json.loads(d.get("metadata", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                d["metadata"] = {}
+
+            logger.info("[Analysis API] Created event #%d", new_id)
+            return d
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("[Analysis API] Event create error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/projects/{project_id}/events/{event_id}")
+async def get_single_event(project_id: int, event_id: int):
+    """Get a single race event by ID."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project["project_dir"]
+    try:
+        conn = get_project_db(project_dir)
+        try:
+            row = conn.execute(
+                "SELECT * FROM race_events WHERE id = ?", (event_id,)
+            ).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Event not found")
+
+            d = dict(row)
+            try:
+                d["involved_drivers"] = json.loads(d.get("involved_drivers", "[]"))
+            except (json.JSONDecodeError, TypeError):
+                d["involved_drivers"] = []
+            try:
+                d["metadata"] = json.loads(d.get("metadata", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                d["metadata"] = {}
+            return d
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("[Analysis API] Get event error: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
 
