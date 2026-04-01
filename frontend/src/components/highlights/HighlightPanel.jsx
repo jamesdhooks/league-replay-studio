@@ -11,6 +11,7 @@ import HighlightConfigBar from './HighlightConfigBar'
 import EventInspectorPanel from '../inspector/EventInspectorPanel'
 import EditHistoryPanel from '../history/EditHistoryPanel'
 import Timeline from '../timeline/Timeline'
+import PreviewPanel from '../preview/PreviewPanel'
 import { Sparkles } from 'lucide-react'
 
 /**
@@ -90,8 +91,15 @@ export default function HighlightPanel({ projectId }) {
         )}
       </div>
 
-      {/* NLE Timeline at bottom */}
-      <div className="h-56 shrink-0 border-t border-border">
+      {/* Preview + NLE Timeline at bottom */}
+      <div className="h-56 shrink-0 border-t border-border flex flex-col">
+        <div className="flex-1 min-h-0">
+          <PreviewPanel projectId={projectId} />
+        </div>
+      </div>
+
+      {/* NLE Timeline */}
+      <div className="h-40 shrink-0 border-t border-border">
         <Timeline projectId={projectId} />
       </div>
     </div>

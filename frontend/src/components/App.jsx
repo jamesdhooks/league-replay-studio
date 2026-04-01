@@ -10,6 +10,7 @@ import { UndoRedoProvider } from '../context/UndoRedoContext'
 import { TimelineProvider } from '../context/TimelineContext'
 import { HighlightProvider } from '../context/HighlightContext'
 import { EncodingProvider } from '../context/EncodingContext'
+import { PreviewProvider } from '../context/PreviewContext'
 import { wsClient } from '../services/websocket'
 import AppShell from './layout/AppShell'
 
@@ -33,13 +34,15 @@ function App() {
               <AnalysisProvider>
                 <CaptureProvider>
                   <EncodingProvider>
-                    <UndoRedoProvider>
-                      <TimelineProvider>
-                        <HighlightProvider>
-                          <AppShell />
-                        </HighlightProvider>
-                      </TimelineProvider>
-                    </UndoRedoProvider>
+                    <PreviewProvider>
+                      <UndoRedoProvider>
+                        <TimelineProvider>
+                          <HighlightProvider>
+                            <AppShell />
+                          </HighlightProvider>
+                        </TimelineProvider>
+                      </UndoRedoProvider>
+                    </PreviewProvider>
                   </EncodingProvider>
                 </CaptureProvider>
               </AnalysisProvider>

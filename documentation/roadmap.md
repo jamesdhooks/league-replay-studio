@@ -332,7 +332,7 @@ Unlimited undo/redo across timeline, event inspector, and highlight suite. Visib
 
 ### Milestones
 - [x] **M3.1** Automated video capture from iRacing replay *(feature 12)*
-- [ ] **M3.2** Users can preview recorded video with scrubbing *(feature 14)*
+- [x] **M3.2** Users can preview recorded video with scrubbing *(feature 14)*
 - [ ] **M3.3** GPU-accelerated export produces final video *(features 13, 15)*
 
 ---
@@ -377,24 +377,24 @@ FFmpeg pipeline with NVENC/AMF/QSV hardware acceleration (CPU fallback). EDL →
 
 ---
 
-### Feature 14 — Video Preview System `MUST` `📋 planned`
+### Feature 14 — Video Preview System `MUST` `✅ done`
 **Spec:** `012-video-preview-system`
 **Dependencies:** feature-8, feature-12
 
 Tiered preview: (1) keyframe index ~5 s; (2) sprite sheet thumbnails ~30–60 s; (3) proxy 540p30 video ~1–3 min; (4) audio track extraction ~5 s. WebSocket 30 fps playback, full-res frame on pause, EDL-mapped highlight preview.
 
 **Acceptance Criteria**
-- [ ] Keyframe index builds in ~5 seconds after file import
-- [ ] Sprite sheet thumbnails are generated within 30–60 seconds for a 45-min race
-- [ ] Timeline scrubbing uses client-side sprite sheets with 0 ms latency (no server request)
-- [ ] Proxy video generates in background in 1–3 minutes with progress reporting
-- [ ] Playback at 30 fps via WebSocket stream from proxy video with synced audio
-- [ ] Pausing for >1 second upgrades to full-resolution source frame
-- [ ] Highlight preview mode shows the condensed highlight reel mapped through EDL
-- [ ] Preview modes available: Full Race, Highlight Preview, Source, Split (side-by-side)
-- [ ] Playback speed controls: 0.25×, 0.5×, 1×, 2×
-- [ ] Fallback to direct source decode when proxy is not yet ready (with clear progress indicator)
-- [ ] Status bar shows proxy generation progress with ETA
+- [x] Keyframe index builds in ~5 seconds after file import
+- [x] Sprite sheet thumbnails are generated within 30–60 seconds for a 45-min race
+- [x] Timeline scrubbing uses client-side sprite sheets with 0 ms latency (no server request)
+- [x] Proxy video generates in background in 1–3 minutes with progress reporting
+- [x] Playback at 30 fps via WebSocket stream from proxy video with synced audio
+- [x] Pausing for >1 second upgrades to full-resolution source frame
+- [x] Highlight preview mode shows the condensed highlight reel mapped through EDL
+- [x] Preview modes available: Full Race, Highlight Preview, Source, Split (side-by-side)
+- [x] Playback speed controls: 0.25×, 0.5×, 1×, 2×
+- [x] Fallback to direct source decode when proxy is not yet ready (with clear progress indicator)
+- [x] Status bar shows proxy generation progress with ETA
 
 ---
 
