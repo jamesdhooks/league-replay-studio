@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, useMemo, useEffect, useRef } from 'react'
+import { createContext, useContext, useState, useCallback, useMemo, useEffect } from 'react'
 import { apiGet, apiPost, apiPut } from '../services/api'
 import { wsClient } from '../services/websocket'
 
@@ -25,7 +25,6 @@ export function YouTubeProvider({ children }) {
   const [quota, setQuota] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
-  const uploadRef = useRef(null)
 
   // ── Fetch connection status ─────────────────────────────────────────────
   const fetchStatus = useCallback(async () => {

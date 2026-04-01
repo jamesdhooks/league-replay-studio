@@ -259,8 +259,8 @@ function UploadTab({ uploadForm, setUploadForm, activeUpload, uploadHistory, onU
               </div>
               <div className="flex justify-between text-xs text-text-tertiary">
                 <span>{activeUpload.progress.toFixed(1)}%</span>
-                <span>{activeUpload.speed_mbps.toFixed(1)} MB/s</span>
-                <span>ETA: {formatEta(activeUpload.eta_seconds)}</span>
+                <span>{(activeUpload.speed_mbps ?? 0).toFixed(1)} MB/s</span>
+                <span>ETA: {formatEta(activeUpload.eta_seconds ?? 0)}</span>
               </div>
             </>
           )}
