@@ -13,9 +13,9 @@ set "FRONTEND=%ROOT%frontend"
 set "VENV=%BACKEND%\.venv"
 
 echo.
-echo  ╔═══════════════════════════════════════╗
-echo  ║     League Replay Studio  v0.1.0      ║
-echo  ╚═══════════════════════════════════════╝
+echo  ========================================
+echo       League Replay Studio  v0.1.0
+echo  ========================================
 echo.
 
 REM ── Python virtual environment ─────────────────────────────

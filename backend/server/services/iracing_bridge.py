@@ -1,15 +1,18 @@
 """
 iracing_bridge.py
 -----------------
-IRacingBridge — wraps the irsdk shared-memory interface and Broadcasting API.
+IRacingBridge — wraps the pyirsdk shared-memory interface and Broadcasting API.
+
+Install: pip install pyirsdk   (imports as `import irsdk`)
+Repo:    https://github.com/kutu/pyirsdk
 
 Runs a background polling thread at 60 Hz that:
   - Detects when iRacing starts / stops
-  - Parses session-info YAML on change (drivers, track, camera groups)
+  - Parses session-info data on change (drivers, track, camera groups)
   - Emits telemetry snapshots via an asyncio queue
 
 Replay control methods (set_replay_speed, seek_to_frame, cam_switch_pos,
-cam_switch_car) delegate directly to the irsdk Broadcasting API.
+cam_switch_car) delegate directly to the pyirsdk Broadcasting API.
 
 All interaction with the asyncio event loop goes through
 `asyncio.run_coroutine_threadsafe`, so the bridge is thread-safe.
@@ -119,15 +122,13 @@ class IRacingBridge:
     def seek_to_frame(self, frame: int) -> bool:
         """
         Seek the replay to a specific frame number.
-        Returns False if iRacing is not connected or irsdk unavailable.
+        Uses replay_set_play_position(RpyPosMode.begin, frame) per pyirsdk API.
+        Returns False if iRacing is not connected.
         """
         if not self._connected or self._ir is None:
             return False
         try:
-            if irsdk is not None:
-                self._ir.replay_search_frame(frame, irsdk.RpyPosMode.begin)
-            else:
-                self._ir.replay_search_frame(frame, 0)
+            self._ir.replay_set_play_position(irsdk.RpyPosMode.begin, frame)
             logger.debug("[IRacingBridge] Seek → frame %d", frame)
             return True
         except Exception as exc:
@@ -156,6 +157,55 @@ class IRacingBridge:
             logger.error("[IRacingBridge] cam_switch_car error: %s", exc)
             return False
 
+    def capture_snapshot(self) -> dict | None:
+        """
+        Capture a telemetry snapshot directly from shared memory.
+        Returns a flat dict with car state data, or None if not connected.
+
+        Used by the analysis pipeline when it needs an on-demand read
+        outside the normal 60 Hz push cycle.
+        """
+        if not self._connected or self._ir is None:
+            return None
+        try:
+            self._ir.freeze_var_buffer_latest()
+
+            positions  = list(self._ir["CarIdxPosition"]     or [])
+            lap_pcts   = list(self._ir["CarIdxLapDistPct"]   or [])
+            surfaces   = list(self._ir["CarIdxTrackSurface"] or [])
+            est_times  = list(self._ir["CarIdxEstTime"]       or [])
+            laps       = list(self._ir["CarIdxLap"]           or [])
+            class_pos  = list(self._ir["CarIdxClassPosition"] or [])
+            best_laps  = list(self._ir["CarIdxBestLapTime"]   or [])
+
+            NOT_IN_WORLD = -1
+            car_states: list[dict] = []
+            for i in range(len(positions)):
+                if positions[i] > 0 and (i >= len(surfaces) or surfaces[i] != NOT_IN_WORLD):
+                    car_states.append({
+                        "car_idx":        i,
+                        "position":       positions[i],
+                        "class_position": class_pos[i] if i < len(class_pos) else 0,
+                        "lap":            laps[i]      if i < len(laps)      else 0,
+                        "lap_pct":        lap_pcts[i]  if i < len(lap_pcts)  else 0.0,
+                        "surface":        surfaces[i]  if i < len(surfaces)  else 0,
+                        "est_time":       est_times[i] if i < len(est_times) else 0.0,
+                        "best_lap_time":  best_laps[i] if i < len(best_laps) else -1.0,
+                    })
+
+            return {
+                "session_time":  self._ir["SessionTime"]    or 0.0,
+                "session_state": self._ir["SessionState"]   or 0,
+                "replay_frame":  self._ir["ReplayFrameNum"] or 0,
+                "race_laps":     self._ir["RaceLaps"]       or 0,
+                "cam_car_idx":   self._ir["CamCarIdx"]      or 0,
+                "flags":         self._ir["SessionFlags"]   or 0,
+                "car_states":    car_states,
+            }
+        except Exception as exc:
+            logger.debug("[IRacingBridge] capture_snapshot error: %s", exc)
+            return None
+
     # ── Background Poll Loop ──────────────────────────────────────────────────
 
     def _poll_loop(self) -> None:
@@ -179,13 +229,13 @@ class IRacingBridge:
             # Take an atomic snapshot of the latest telemetry frame.
             self._ir.freeze_var_buffer_latest()
 
-            if not self._ir.is_connected:
+            if not (self._ir.is_initialized and self._ir.is_connected):
                 self._handle_disconnect()
                 continue
 
             # Check for session info update (drivers, cameras, track changed).
             try:
-                current_version = self._ir.session_info_update
+                current_version = self._ir.last_session_info_update
                 if current_version != self._session_info_version:
                     self._session_info_version = current_version
                     self._handle_session_info()
@@ -203,7 +253,7 @@ class IRacingBridge:
     def _attempt_connect(self) -> None:
         """Try to connect to iRacing shared memory."""
         try:
-            if self._ir is not None and self._ir.startup():
+            if self._ir is not None and self._ir.startup() and self._ir.is_initialized and self._ir.is_connected:
                 self._connected = True
                 logger.info("[IRacingBridge] iRacing connected")
                 self._push_update({"event": "iracing:connected", "data": {}})
@@ -227,20 +277,29 @@ class IRacingBridge:
         self._push_update({"event": "iracing:disconnected", "data": {}})
 
     def _handle_session_info(self) -> None:
-        """Parse and cache session info YAML; push update to frontend."""
+        """Parse and cache session info YAML; push update to frontend.
+
+        Session data is accessed via ir['SectionName'] subscript per pyirsdk API.
+        Each top-level key (WeekendInfo, DriverInfo, CameraInfo, SessionInfo)
+        is fetched and parsed separately.
+        """
         try:
-            raw = self._ir.session_info
-            if not raw:
+            weekend_info  = self._ir["WeekendInfo"]  or {}
+            driver_info   = self._ir["DriverInfo"]   or {}
+            camera_info   = self._ir["CameraInfo"]   or {}
+            session_info  = self._ir["SessionInfo"]  or {}
+
+            if not weekend_info and not driver_info:
                 return
 
-            drivers = self._parse_drivers(raw)
-            cameras = self._parse_cameras(raw)
+            drivers = self._parse_drivers(driver_info)
+            cameras = self._parse_cameras(camera_info)
             track_name = (
-                raw.get("WeekendInfo", {}).get("TrackDisplayName", "") or
-                raw.get("WeekendInfo", {}).get("TrackName", "")
+                weekend_info.get("TrackDisplayName", "") or
+                weekend_info.get("TrackName", "")
             )
             session_type = ""
-            sessions = raw.get("SessionInfo", {}).get("Sessions", [])
+            sessions = session_info.get("Sessions", [])
             if sessions:
                 session_type = sessions[0].get("SessionType", "")
             avg_lap_time = 0.0
@@ -271,9 +330,9 @@ class IRacingBridge:
             logger.warning("[IRacingBridge] Session info parse error: %s", exc)
 
     @staticmethod
-    def _parse_drivers(raw: dict) -> list[dict]:
-        """Extract driver list from session info YAML."""
-        drivers_raw = raw.get("DriverInfo", {}).get("Drivers", []) or []
+    def _parse_drivers(driver_info: dict) -> list[dict]:
+        """Extract driver list from DriverInfo section (ir['DriverInfo'])."""
+        drivers_raw = driver_info.get("Drivers", []) or []
         drivers = []
         for d in drivers_raw:
             try:
@@ -296,9 +355,9 @@ class IRacingBridge:
         return drivers
 
     @staticmethod
-    def _parse_cameras(raw: dict) -> list[dict]:
-        """Extract camera group list from session info YAML."""
-        groups_raw = raw.get("CameraInfo", {}).get("Groups", []) or []
+    def _parse_cameras(camera_info: dict) -> list[dict]:
+        """Extract camera group list from CameraInfo section (ir['CameraInfo'])."""
+        groups_raw = camera_info.get("Groups", []) or []
         cameras = []
         for g in groups_raw:
             try:

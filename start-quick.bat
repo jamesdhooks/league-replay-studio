@@ -12,10 +12,10 @@ set "BACKEND=%ROOT%backend"
 set "VENV=%BACKEND%\.venv"
 
 echo.
-echo  ╔═══════════════════════════════════════╗
-echo  ║     League Replay Studio  v0.1.0      ║
-echo  ║            (Quick Start)              ║
-echo  ╚═══════════════════════════════════════╝
+echo  ========================================
+echo      League Replay Studio  v0.1.0
+echo           (Quick Start)
+echo  ========================================
 echo.
 
 REM ── Activate virtual environment ───────────────────────────

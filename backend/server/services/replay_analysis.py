@@ -371,53 +371,10 @@ class ReplayAnalyzer:
     def _capture_snapshot(self) -> dict | None:
         """Capture a telemetry snapshot from the iRacing bridge.
 
+        Delegates to bridge.capture_snapshot() — avoids accessing private _ir.
         Returns a flat dict with telemetry fields, or None if unavailable.
         """
-        if not iracing_bridge.is_connected:
-            return None
-
-        ir = iracing_bridge._ir
-        if ir is None:
-            return None
-
-        try:
-            ir.freeze_var_buffer_latest()
-
-            positions = list(ir["CarIdxPosition"] or [])
-            lap_pcts = list(ir["CarIdxLapDistPct"] or [])
-            surfaces = list(ir["CarIdxTrackSurface"] or [])
-            est_times = list(ir["CarIdxEstTime"] or [])
-            laps = list(ir["CarIdxLap"] or [])
-            class_pos = list(ir["CarIdxClassPosition"] or [])
-            best_laps = list(ir["CarIdxBestLapTime"] or [])
-
-            NOT_IN_WORLD = -1
-            car_states = []
-            for i in range(len(positions)):
-                if positions[i] > 0 and (i >= len(surfaces) or surfaces[i] != NOT_IN_WORLD):
-                    car_states.append({
-                        "car_idx": i,
-                        "position": positions[i],
-                        "class_position": class_pos[i] if i < len(class_pos) else 0,
-                        "lap": laps[i] if i < len(laps) else 0,
-                        "lap_pct": lap_pcts[i] if i < len(lap_pcts) else 0.0,
-                        "surface": surfaces[i] if i < len(surfaces) else 0,
-                        "est_time": est_times[i] if i < len(est_times) else 0.0,
-                        "best_lap_time": best_laps[i] if i < len(best_laps) else -1.0,
-                    })
-
-            return {
-                "session_time": ir["SessionTime"] or 0.0,
-                "session_state": ir["SessionState"] or 0,
-                "replay_frame": ir["ReplayFrameNum"] or 0,
-                "race_laps": ir["RaceLaps"] or 0,
-                "cam_car_idx": ir["CamCarIdx"] or 0,
-                "flags": ir["SessionFlags"] or 0,
-                "car_states": car_states,
-            }
-        except Exception as exc:
-            logger.debug("[Analysis] Snapshot error: %s", exc)
-            return None
+        return iracing_bridge.capture_snapshot()
 
     def _mock_scan(self, conn: sqlite3.Connection) -> int:
         """Generate mock telemetry data when iRacing is not connected.
