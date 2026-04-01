@@ -81,18 +81,39 @@ export default {
         mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
       },
       fontSize: {
-        'xxs': ['0.625rem', { lineHeight: '0.875rem' }],  // 10px
+        'xxs': ['0.6875rem', { lineHeight: '1rem' }],     // 11px — status bar, badges
+        'xs':  ['0.75rem', { lineHeight: '1.125rem' }],    // 12px
+        'sm':  ['0.875rem', { lineHeight: '1.375rem' }],   // 14px — body text
+        'base': ['1rem', { lineHeight: '1.5rem' }],        // 16px
+        'lg':  ['1.125rem', { lineHeight: '1.75rem' }],    // 18px
+        'xl':  ['1.25rem', { lineHeight: '1.875rem' }],    // 20px
+        '2xl': ['1.5rem', { lineHeight: '2rem' }],         // 24px
+        '3xl': ['1.875rem', { lineHeight: '2.375rem' }],   // 30px
       },
       spacing: {
-        'toolbar': '3rem',     // 48px toolbar height
-        'statusbar': '1.75rem', // 28px status bar height
-        'sidebar': '16rem',    // 256px default sidebar width
+        'toolbar': '4rem',       // 64px — taller, more spacious
+        'statusbar': '2.25rem',  // 36px — roomier status bar
+        'sidebar': '17rem',      // 272px — slightly wider
+      },
+      borderRadius: {
+        'xl': '0.875rem',
+        '2xl': '1rem',
+        '3xl': '1.25rem',
+      },
+      boxShadow: {
+        'glow': '0 0 20px rgba(91,138,245,0.12)',
+        'glow-sm': '0 0 10px rgba(91,138,245,0.08)',
+        'card': '0 2px 8px rgba(0,0,0,0.2), 0 0 1px rgba(0,0,0,0.3)',
+        'elevated': '0 8px 24px rgba(0,0,0,0.35)',
+        'float': '0 16px 48px rgba(0,0,0,0.45)',
       },
       animation: {
-        'fade-in': 'fadeIn 0.2s ease-out',
-        'slide-up': 'slideUp 0.2s ease-out',
-        'slide-down': 'slideDown 0.2s ease-out',
-        'slide-right': 'slideRight 0.2s ease-out',
+        'fade-in': 'fadeIn 0.25s ease-out',
+        'slide-up': 'slideUp 0.25s ease-out',
+        'slide-down': 'slideDown 0.25s ease-out',
+        'slide-right': 'slideRight 0.25s ease-out',
+        'pulse-soft': 'pulseSoft 2s ease-in-out infinite',
+        'scale-in': 'scaleIn 0.2s ease-out',
       },
       keyframes: {
         fadeIn: {
@@ -100,16 +121,24 @@ export default {
           '100%': { opacity: '1' },
         },
         slideUp: {
-          '0%': { opacity: '0', transform: 'translateY(8px)' },
+          '0%': { opacity: '0', transform: 'translateY(12px)' },
           '100%': { opacity: '1', transform: 'translateY(0)' },
         },
         slideDown: {
-          '0%': { opacity: '0', transform: 'translateY(-8px)' },
+          '0%': { opacity: '0', transform: 'translateY(-12px)' },
           '100%': { opacity: '1', transform: 'translateY(0)' },
         },
         slideRight: {
-          '0%': { opacity: '0', transform: 'translateX(-8px)' },
+          '0%': { opacity: '0', transform: 'translateX(-12px)' },
           '100%': { opacity: '1', transform: 'translateX(0)' },
+        },
+        pulseSoft: {
+          '0%, 100%': { opacity: '1' },
+          '50%': { opacity: '0.6' },
+        },
+        scaleIn: {
+          '0%': { opacity: '0', transform: 'scale(0.95)' },
+          '100%': { opacity: '1', transform: 'scale(1)' },
         },
       },
     },

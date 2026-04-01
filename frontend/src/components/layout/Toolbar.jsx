@@ -6,10 +6,12 @@ import {
   Undo2,
   Redo2,
   Save,
+  PlayCircle,
 } from 'lucide-react'
 
 /**
  * Top toolbar with app title, navigation, and action buttons.
+ * Larger (64px), friendlier spacing, professional Clipchamp-inspired styling.
  *
  * @param {Object} props
  * @param {boolean} props.sidebarCollapsed
@@ -29,36 +31,43 @@ function Toolbar({
   undoDescription, redoDescription,
 }) {
   return (
-    <header className="h-toolbar flex items-center px-3 bg-bg-secondary border-b border-border
+    <header className="h-toolbar flex items-center px-4 bg-bg-secondary border-b border-border
                         select-none shrink-0">
       {/* Left section: sidebar toggle + app name */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-3">
         <button
           onClick={onToggleSidebar}
-          className="p-1.5 rounded-md hover:bg-surface-hover transition-colors text-text-secondary
-                     hover:text-text-primary"
+          className="p-2 rounded-xl hover:bg-surface-hover transition-all duration-150
+                     text-text-secondary hover:text-text-primary cursor-pointer
+                     active:scale-95"
           title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         >
           {sidebarCollapsed ? (
-            <PanelLeftOpen className="w-4 h-4" />
+            <PanelLeftOpen className="w-5 h-5" />
           ) : (
-            <PanelLeftClose className="w-4 h-4" />
+            <PanelLeftClose className="w-5 h-5" />
           )}
         </button>
 
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-semibold text-text-primary">
-            League Replay Studio
-          </span>
-          <span className="text-xxs text-text-tertiary font-mono">
-            v0.1.0
-          </span>
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-lg bg-accent/15
+                          flex items-center justify-center border border-accent/10">
+            <PlayCircle className="w-4.5 h-4.5 text-accent" />
+          </div>
+          <div className="flex items-baseline gap-2">
+            <span className="text-base font-bold text-text-primary tracking-tight">
+              League Replay Studio
+            </span>
+            <span className="text-xxs text-text-disabled font-mono bg-surface px-1.5 py-0.5 rounded">
+              v0.1.0
+            </span>
+          </div>
         </div>
       </div>
 
       {/* Center section: project name (if any) */}
       <div className="flex-1 flex items-center justify-center">
-        <span className="text-sm text-text-tertiary">
+        <span className="text-sm text-text-tertiary italic">
           {projectName || 'No project open'}
         </span>
       </div>
@@ -88,7 +97,7 @@ function Toolbar({
 }
 
 /**
- * Individual toolbar icon button.
+ * Individual toolbar icon button — larger (36px) with better hover state.
  */
 function ToolbarButton({ icon: Icon, title, disabled = false, onClick }) {
   return (
@@ -96,13 +105,13 @@ function ToolbarButton({ icon: Icon, title, disabled = false, onClick }) {
       onClick={onClick}
       disabled={disabled}
       title={title}
-      className={`p-1.5 rounded-md transition-colors ${
+      className={`p-2 rounded-xl transition-all duration-150 cursor-pointer ${
         disabled
-          ? 'text-text-disabled cursor-not-allowed'
-          : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary'
+          ? 'text-text-disabled cursor-not-allowed opacity-40'
+          : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary active:scale-95'
       }`}
     >
-      <Icon className="w-4 h-4" />
+      <Icon className="w-5 h-5" />
     </button>
   )
 }
@@ -111,7 +120,7 @@ function ToolbarButton({ icon: Icon, title, disabled = false, onClick }) {
  * Vertical divider between toolbar button groups.
  */
 function ToolbarDivider() {
-  return <div className="w-px h-5 bg-border mx-1" />
+  return <div className="w-px h-6 bg-border mx-1.5" />
 }
 
 export default Toolbar

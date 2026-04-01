@@ -143,8 +143,8 @@
 
   /* Scrollbar styling */
   ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+    width: 10px;
+    height: 10px;
   }
 
   ::-webkit-scrollbar-track {
@@ -153,6 +153,8 @@
 
   ::-webkit-scrollbar-thumb {
     @apply bg-surface-active rounded-full;
+    border: 2px solid transparent;
+    background-clip: padding-box;
   }
 
   ::-webkit-scrollbar-thumb:hover {
@@ -166,7 +168,7 @@
 
   /* Focus ring */
   :focus-visible {
-    @apply outline-2 outline-border-focus outline-offset-2;
+    @apply outline-2 outline-border-focus outline-offset-2 rounded-lg;
   }
 }
 
@@ -182,13 +184,14 @@
  *
  *  Name        Size    Line-height   Usage
  *  ─────────   ──────  ───────────   ──────────────────────────
- *  xxs         10px    14px          Status bar labels, badges
+ *  xxs         11px    15px          Status bar labels, badges
  *  xs          12px    16px          Captions, metadata
  *  sm          14px    20px          Body text, controls
  *  base        16px    24px          Default paragraph
  *  lg          18px    28px          Section headings
  *  xl          20px    28px          Panel titles
  *  2xl         24px    32px          Page headings
+ *  3xl         30px    36px          Hero headings
  *
  *  Fonts:
  *    sans  →  Inter, system-ui, -apple-system, sans-serif
@@ -198,9 +201,9 @@
  *
  *  Token       Value     Usage
  *  ──────────  ────────  ──────────────────────────
- *  toolbar     48px      Top toolbar height
- *  statusbar   28px      Bottom status bar height
- *  sidebar     256px     Default sidebar width (expanded)
+ *  toolbar     64px      Top toolbar height
+ *  statusbar   36px      Bottom status bar height
+ *  sidebar     272px     Default sidebar width (expanded)
  *  gap-1       4px       Tight element spacing
  *  gap-2       8px       Standard element spacing
  *  gap-3       12px      Component spacing
