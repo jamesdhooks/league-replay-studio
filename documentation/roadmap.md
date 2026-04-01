@@ -419,7 +419,7 @@ Export preset CRUD UI and encoding dashboard: real-time FPS/percentage/ETA/file-
 
 ### Milestones
 - [x] **M4.1** Broadcast-quality overlays render on video *(feature 16)*
-- [ ] **M4.2** Overlays are editable in-app with live preview *(feature 17)*
+- [x] **M4.2** Overlays are editable in-app with live preview *(feature 17)*
 - [ ] **M4.3** One-click pipeline from replay to YouTube *(features 18, 19)*
 
 ---
@@ -442,20 +442,20 @@ Playwright headless Chromium + Jinja2 rendering. `render_frame()` ~5–15 ms/fra
 
 ---
 
-### Feature 17 — In-App Overlay Editor `SHOULD` `🔍 under_review`
+### Feature 17 — In-App Overlay Editor `SHOULD` `✅ done`
 **Dependencies:** feature-16
 
 Split-pane Monaco editor (HTML/CSS, Tailwind IntelliSense) + live preview. Data context inspector, visual no-code controls (element picker, drag-reposition, resize handles), animation picker generating CSS keyframe animations.
 
 **Acceptance Criteria**
-- [ ] Split-pane layout: Monaco editor on left, live preview on right
-- [ ] Monaco provides HTML syntax highlighting and Tailwind CSS class completion
-- [ ] Data context inspector shows all available Jinja2 template variables with sample values
-- [ ] Visual element picker allows selecting and repositioning overlay elements
-- [ ] Resize handles work on selected elements for visual sizing
-- [ ] Animation picker generates CSS keyframe animations for overlay transitions
-- [ ] Preview updates within 200 ms of code change (debounced live reload)
-- [ ] Save button persists changes; revert restores to last saved state
+- [x] Split-pane layout: Monaco editor on left, live preview on right
+- [x] Monaco provides HTML syntax highlighting and Tailwind CSS class completion
+- [x] Data context inspector shows all available Jinja2 template variables with sample values
+- [x] Visual element picker allows selecting and repositioning overlay elements
+- [x] Resize handles work on selected elements for visual sizing
+- [x] Animation picker generates CSS keyframe animations for overlay transitions
+- [x] Preview updates within 200 ms of code change (debounced live reload)
+- [x] Save button persists changes; revert restores to last saved state
 
 ---
 
