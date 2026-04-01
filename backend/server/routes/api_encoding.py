@@ -106,6 +106,44 @@ async def delete_preset(preset_id: str):
     return {"success": True}
 
 
+@router.post("/presets/{preset_id}/duplicate")
+async def duplicate_preset(preset_id: str):
+    """Duplicate an existing preset as a new custom preset."""
+    try:
+        preset = encoding_service.duplicate_preset(preset_id)
+        if not preset:
+            raise HTTPException(status_code=404, detail="Source preset not found")
+        return {"success": True, "preset": preset}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("[Encoding API] Duplicate preset error: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to duplicate preset")
+
+
+# ── Auto-shutdown ───────────────────────────────────────────────────────────
+
+@router.get("/auto-shutdown")
+async def get_auto_shutdown():
+    """Get auto-shutdown setting."""
+    return {"auto_shutdown": encoding_service.auto_shutdown}
+
+
+@router.post("/auto-shutdown")
+async def set_auto_shutdown(body: dict):
+    """Toggle auto-shutdown after all jobs complete."""
+    encoding_service.auto_shutdown = bool(body.get("enabled", False))
+    return {"auto_shutdown": encoding_service.auto_shutdown}
+
+
+# ── Completed exports ───────────────────────────────────────────────────────
+
+@router.get("/exports")
+async def get_completed_exports():
+    """Get all completed export files with metadata."""
+    return {"exports": encoding_service.get_completed_exports()}
+
+
 # ── Status ──────────────────────────────────────────────────────────────────
 
 @router.get("/status")

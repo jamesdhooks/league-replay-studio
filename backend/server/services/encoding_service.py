@@ -144,6 +144,7 @@ class EncodingService:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._gpu_info: Optional[dict] = None
         self._custom_presets: list[dict[str, Any]] = []
+        self._auto_shutdown: bool = False
 
     # ── Properties ──────────────────────────────────────────────────────────
 
@@ -173,6 +174,7 @@ class EncodingService:
             "queued_jobs": queued,
             "recent_jobs": recent,
             "queue_length": len(queued),
+            "auto_shutdown": self._auto_shutdown,
         }
 
     # ── Wiring ──────────────────────────────────────────────────────────────
@@ -231,6 +233,66 @@ class EncodingService:
                 self._custom_presets.pop(i)
                 return True
         return False
+
+    def duplicate_preset(self, preset_id: str) -> Optional[dict[str, Any]]:
+        """Duplicate a preset (built-in or custom) as a new custom preset."""
+        source = self.get_preset(preset_id)
+        if not source:
+            return None
+        copy = dict(source)
+        copy["id"] = f"custom_{uuid.uuid4().hex[:8]}"
+        copy["name"] = f"{source.get('name', 'Preset')} (Copy)"
+        copy["is_builtin"] = False
+        self._custom_presets.append(copy)
+        return copy
+
+    # ── Auto-shutdown ───────────────────────────────────────────────────────
+
+    @property
+    def auto_shutdown(self) -> bool:
+        """Whether to shut down the system when all jobs are done."""
+        return self._auto_shutdown
+
+    @auto_shutdown.setter
+    def auto_shutdown(self, value: bool) -> None:
+        self._auto_shutdown = value
+
+    # ── Completed exports ──────────────────────────────────────────────────
+
+    def get_completed_exports(self) -> list[dict[str, Any]]:
+        """Return all completed jobs with output file info."""
+        completed = []
+        for job in self._jobs.values():
+            if job.state != EncodingState.COMPLETED:
+                continue
+            output_path = Path(job.output_file)
+            exists = output_path.exists()
+            size = output_path.stat().st_size if exists else 0
+            completed.append({
+                "job_id": job.job_id,
+                "project_id": job.project_id,
+                "output_file": job.output_file,
+                "output_dir": str(output_path.parent) if exists else "",
+                "file_name": output_path.name,
+                "file_exists": exists,
+                "file_size_bytes": size,
+                "preset": {
+                    "id": job.preset.get("id"),
+                    "name": job.preset.get("name"),
+                },
+                "encoder": {
+                    "id": job.encoder.get("id"),
+                    "label": job.encoder.get("label"),
+                },
+                "job_type": job.job_type,
+                "elapsed_seconds": round(
+                    (job.completed_at or 0) - (job.started_at or 0), 1
+                ) if job.started_at else 0,
+                "completed_at": job.completed_at,
+            })
+        # Most recent first
+        completed.sort(key=lambda x: x.get("completed_at") or 0, reverse=True)
+        return completed
 
     # ── Submit job ──────────────────────────────────────────────────────────
 
@@ -573,6 +635,16 @@ class EncodingService:
 
         # Process next in queue
         self._process_queue()
+
+        # Auto-shutdown check
+        if (self._auto_shutdown
+                and not self._active_jobs
+                and not self._queue):
+            logger.info("[Encoding] All jobs done — auto-shutdown requested")
+            self._emit(EventType.ENCODING_COMPLETED, {
+                "auto_shutdown": True,
+                "message": "All encoding jobs completed. System shutdown requested.",
+            })
 
     # ── Event emission ──────────────────────────────────────────────────────
 
