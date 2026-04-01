@@ -244,12 +244,15 @@ export function TimelineProvider({ children }) {
       setSelectedEventId(null)
       await fetchEvents(projectId, { limit: 1000 })
 
+      // Track the recreated event ID for redo
+      let recreatedId = null
+
       pushAction({
         type: 'event_delete',
         description: `Deleted ${oldEvent.event_type} event`,
         undo: async () => {
           // Re-create the event via POST endpoint
-          await apiPost(`/projects/${projectId}/events`, {
+          const created = await apiPost(`/projects/${projectId}/events`, {
             event_type: oldEvent.event_type,
             start_time_seconds: oldEvent.start_time_seconds,
             end_time_seconds: oldEvent.end_time_seconds,
@@ -262,18 +265,14 @@ export function TimelineProvider({ children }) {
             included_in_highlight: !!oldEvent.included_in_highlight,
             metadata: oldEvent.metadata || {},
           })
+          recreatedId = created.id
           await fetchEvents(projectId, { limit: 1000 })
         },
         redo: async () => {
-          // Find the recreated event by matching key fields and delete it
-          const evts = await apiGet(`/projects/${projectId}/events?limit=1000`)
-          const match = (evts.events || []).find(e =>
-            e.event_type === oldEvent.event_type &&
-            Math.abs(e.start_time_seconds - oldEvent.start_time_seconds) < 0.01 &&
-            Math.abs(e.end_time_seconds - oldEvent.end_time_seconds) < 0.01,
-          )
-          if (match) {
-            await apiDelete(`/projects/${projectId}/events/${match.id}`)
+          // Delete the recreated event by its stored ID
+          if (recreatedId) {
+            await apiDelete(`/projects/${projectId}/events/${recreatedId}`)
+            recreatedId = null
           }
           setSelectedEventId(null)
           await fetchEvents(projectId, { limit: 1000 })

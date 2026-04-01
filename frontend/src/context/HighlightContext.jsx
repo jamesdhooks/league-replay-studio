@@ -457,7 +457,7 @@ export function HighlightProvider({ children }) {
       type: 'auto_balance',
       description: 'Auto-balanced weights',
       undo: () => { setWeights(oldWeights) },
-      redo: () => { setWeights(autoBalanceWeights(events)) },
+      redo: () => { setWeights(newWeights) },
     })
   }, [events, weights, pushAction])
 
