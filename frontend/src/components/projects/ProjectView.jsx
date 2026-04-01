@@ -6,6 +6,7 @@ import ProjectFileBrowser from './ProjectFileBrowser'
 import AnalysisPanel from '../analysis/AnalysisPanel'
 import HighlightPanel from '../highlights/HighlightPanel'
 import CapturePanel from '../capture/CapturePanel'
+import EncodingPanel from '../encoding/EncodingPanel'
 
 /**
  * Project view — shown when a project is open.
@@ -65,6 +66,9 @@ function ProjectView({ project, onBack }) {
 
       case 'editing':
         return <HighlightPanel projectId={project.id} />
+
+      case 'export':
+        return <EncodingPanel projectId={project.id} />
 
       default:
         return (

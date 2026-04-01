@@ -356,24 +356,24 @@ Auto-detect OBS Studio, NVIDIA ShadowPlay, AMD ReLive. Configurable hotkey mappi
 
 ---
 
-### Feature 13 — GPU-Accelerated Encoding Engine `MUST` `📋 planned`
+### Feature 13 — GPU-Accelerated Encoding Engine `MUST` `✅ done`
 **Spec:** `011-gpu-accelerated-encoding-engine`
 **Dependencies:** feature-7, feature-9
 
 FFmpeg pipeline with NVENC/AMF/QSV hardware acceleration (CPU fallback). EDL → FFmpeg complex filtergraph. Multi-GPU simultaneous encode. Export presets: YouTube 1080p60, Discord 720p30, Archive 4K, Custom. Real-time progress via WebSocket.
 
 **Acceptance Criteria**
-- [ ] GPU capabilities are auto-detected on startup (NVENC, AMF, QSV, or CPU fallback)
-- [ ] FFmpeg encodes video using hardware acceleration when available
-- [ ] EDL from the highlight editing suite converts to FFmpeg complex filtergraph
-- [ ] Both highlight reel and full race video can be encoded
-- [ ] Multi-GPU systems can encode two outputs simultaneously on separate GPUs
-- [ ] Real-time progress (FPS, percentage, ETA) streams to the frontend via WebSocket
-- [ ] Export presets available: YouTube 1080p60, Discord 720p30, Archive 4K, Custom
-- [ ] Custom presets allow user-defined codec, bitrate, resolution, and quality settings
-- [ ] CPU fallback encoding works when no GPU encoder is available
-- [ ] Batch export queue processes multiple projects sequentially
-- [ ] Encoding produces valid, playable MP4 files verified by post-encode check
+- [x] GPU capabilities are auto-detected on startup (NVENC, AMF, QSV, or CPU fallback)
+- [x] FFmpeg encodes video using hardware acceleration when available
+- [x] EDL from the highlight editing suite converts to FFmpeg complex filtergraph
+- [x] Both highlight reel and full race video can be encoded
+- [x] Multi-GPU systems can encode two outputs simultaneously on separate GPUs
+- [x] Real-time progress (FPS, percentage, ETA) streams to the frontend via WebSocket
+- [x] Export presets available: YouTube 1080p60, Discord 720p30, Archive 4K, Custom
+- [x] Custom presets allow user-defined codec, bitrate, resolution, and quality settings
+- [x] CPU fallback encoding works when no GPU encoder is available
+- [x] Batch export queue processes multiple projects sequentially
+- [x] Encoding produces valid, playable MP4 files verified by post-encode check
 
 ---
 
