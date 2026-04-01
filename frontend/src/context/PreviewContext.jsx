@@ -29,7 +29,7 @@ export function PreviewProvider({ children }) {
 
   // ── Derived active job ─────────────────────────────────────────────────
   const activeJob = useMemo(
-    () => (activeProjectId != null ? previewJobs[activeProjectId] : null) || null,
+    () => (activeProjectId != null ? previewJobs[activeProjectId] : null),
     [previewJobs, activeProjectId],
   )
 

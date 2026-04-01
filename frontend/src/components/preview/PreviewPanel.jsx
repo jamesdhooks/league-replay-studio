@@ -450,7 +450,7 @@ function InitOverlay({ onInit, loading, hasInputFile }) {
 
 
 function SpriteTooltip({ time, spritesIndex, projectId }) {
-  if (!spritesIndex?.sheets?.length) return null
+  if (!spritesIndex?.sheets || spritesIndex.sheets.length === 0) return null
 
   const interval = spritesIndex.interval || 1
   const thumbIdx = Math.floor(time / interval)
