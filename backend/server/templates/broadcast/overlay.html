@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width={{ resolution.width }}, height={{ resolution.height }}">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: {{ resolution.width }}px; height: {{ resolution.height }}px; background: transparent; overflow: hidden; }
+    .overlay { width: 100%; height: 100%; position: relative; font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; }
+  </style>
+</head>
+<body>
+  <div class="overlay">
+
+    {# ── Top Bar: Race Info ─────────────────────────────────────────────── #}
+    <div class="absolute top-0 left-0 right-0 flex items-center justify-between px-6 py-3"
+         style="background: linear-gradient(180deg, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0) 100%);">
+      {# Series / Track #}
+      <div class="flex items-center gap-4">
+        <div class="text-white font-bold text-lg tracking-wide uppercase">
+          {{ frame.series_name | default('iRacing Series') }}
+        </div>
+        <div class="text-gray-300 text-sm">
+          {{ frame.track_name | default('Track Name') }}
+        </div>
+      </div>
+
+      {# Lap Counter #}
+      <div class="flex items-center gap-2">
+        <span class="text-gray-400 text-sm uppercase tracking-wider">Lap</span>
+        <span class="text-white font-bold text-xl tabular-nums">
+          {{ frame.current_lap | default(1) }}
+        </span>
+        <span class="text-gray-500 text-sm">/</span>
+        <span class="text-gray-300 text-lg tabular-nums">
+          {{ frame.total_laps | default(20) }}
+        </span>
+      </div>
+
+      {# Session Timer #}
+      <div class="flex items-center gap-2">
+        <span class="text-gray-400 text-sm uppercase tracking-wider">Time</span>
+        <span class="text-white font-mono text-lg tabular-nums">
+          {{ frame.session_time | default('00:00:00') }}
+        </span>
+      </div>
+    </div>
+
+    {# ── Timing Tower (Left side) ──────────────────────────────────────── #}
+    {% if frame.standings is defined and frame.standings %}
+    <div class="absolute top-16 left-4 w-64">
+      {% for entry in frame.standings[:10] %}
+      <div class="flex items-center gap-1 mb-0.5 rounded-sm overflow-hidden"
+           style="background: {% if entry.is_player | default(false) %}rgba(59,130,246,0.85){% else %}rgba(0,0,0,0.75){% endif %};">
+        {# Position #}
+        <div class="w-8 text-center py-1 font-bold text-sm
+                    {% if loop.index <= 3 %}text-yellow-400{% else %}text-white{% endif %}">
+          P{{ entry.position | default(loop.index) }}
+        </div>
+        {# Driver name #}
+        <div class="flex-1 py-1 text-white text-sm truncate px-2">
+          {{ entry.driver_name | default('Driver') }}
+        </div>
+        {# Gap #}
+        <div class="text-gray-300 text-xs font-mono px-2 py-1 tabular-nums">
+          {% if loop.index == 1 %}
+            Leader
+          {% else %}
+            {{ entry.gap | default('+0.000') }}
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {# ── Lower Third: Current Driver ──────────────────────────────────── #}
+    {% if frame.driver_name is defined %}
+    <div class="absolute bottom-8 left-8 flex items-end gap-4">
+      <div class="rounded-lg overflow-hidden" style="background: rgba(0,0,0,0.85);">
+        <div class="px-4 py-1 text-xs font-bold uppercase tracking-widest"
+             style="background: {{ frame.team_color | default('#3B82F6') }}; color: white;">
+          P{{ frame.position | default(1) }}
+        </div>
+        <div class="px-4 py-2">
+          <div class="text-white font-bold text-xl">
+            {{ frame.driver_name | default('Driver Name') }}
+          </div>
+          <div class="text-gray-400 text-sm">
+            {{ frame.car_name | default('Car') }} · {{ frame.irating | default(0) }} iR
+          </div>
+        </div>
+      </div>
+
+      {# Last lap time #}
+      {% if frame.last_lap_time is defined %}
+      <div class="rounded-lg px-4 py-2" style="background: rgba(0,0,0,0.85);">
+        <div class="text-gray-400 text-xs uppercase tracking-wider">Last Lap</div>
+        <div class="text-white font-mono text-lg tabular-nums">
+          {{ frame.last_lap_time | default('--:--.---') }}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {# ── Flags / Incidents (Bottom right) ─────────────────────────────── #}
+    {% if frame.flag is defined and frame.flag != 'green' %}
+    <div class="absolute bottom-8 right-8">
+      <div class="rounded-lg px-4 py-2 font-bold text-sm uppercase tracking-wider
+                  {% if frame.flag == 'yellow' %}bg-yellow-500 text-black
+                  {% elif frame.flag == 'red' %}bg-red-600 text-white
+                  {% elif frame.flag == 'checkered' %}bg-white text-black
+                  {% else %}bg-gray-700 text-white{% endif %}">
+        {{ frame.flag | upper }} FLAG
+      </div>
+    </div>
+    {% endif %}
+
+  </div>
+</body>
+</html>

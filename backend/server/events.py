@@ -26,11 +26,12 @@ class EventCategory:
     ENCODING = "encoding"
     CAPTURE = "capture"
     PREVIEW = "preview"
+    OVERLAY = "overlay"
     PROJECT = "project"
     SYSTEM = "system"
 
     ALL: list[str] = [
-        "iracing", "pipeline", "encoding", "capture", "preview", "project", "system"
+        "iracing", "pipeline", "encoding", "capture", "preview", "overlay", "project", "system"
     ]
 
 
@@ -78,6 +79,12 @@ class EventType:
     PREVIEW_TIER_READY     = "preview:tier_ready"
     PREVIEW_READY          = "preview:ready"
     PREVIEW_ERROR          = "preview:error"
+
+    # Overlay
+    OVERLAY_RENDER_STARTED    = "overlay:render_started"
+    OVERLAY_RENDER_PROGRESS   = "overlay:render_progress"
+    OVERLAY_RENDER_COMPLETED  = "overlay:render_completed"
+    OVERLAY_ERROR             = "overlay:error"
 
     # Project
     PROJECT_UPDATED        = "project:updated"

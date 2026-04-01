@@ -11,6 +11,7 @@ import { TimelineProvider } from '../context/TimelineContext'
 import { HighlightProvider } from '../context/HighlightContext'
 import { EncodingProvider } from '../context/EncodingContext'
 import { PreviewProvider } from '../context/PreviewContext'
+import { OverlayProvider } from '../context/OverlayContext'
 import { wsClient } from '../services/websocket'
 import AppShell from './layout/AppShell'
 
@@ -35,13 +36,15 @@ function App() {
                 <CaptureProvider>
                   <EncodingProvider>
                     <PreviewProvider>
-                      <UndoRedoProvider>
-                        <TimelineProvider>
-                          <HighlightProvider>
-                            <AppShell />
-                          </HighlightProvider>
-                        </TimelineProvider>
-                      </UndoRedoProvider>
+                      <OverlayProvider>
+                        <UndoRedoProvider>
+                          <TimelineProvider>
+                            <HighlightProvider>
+                              <AppShell />
+                            </HighlightProvider>
+                          </TimelineProvider>
+                        </UndoRedoProvider>
+                      </OverlayProvider>
                     </PreviewProvider>
                   </EncodingProvider>
                 </CaptureProvider>

@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width={{ resolution.width }}, height={{ resolution.height }}">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: {{ resolution.width }}px; height: {{ resolution.height }}px; background: transparent; overflow: hidden; }
+    .overlay { width: 100%; height: 100%; position: relative; font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; }
+  </style>
+</head>
+<body>
+  <div class="overlay">
+
+    {# ── Cinematic: Lower-third driver card ────────────────────────────── #}
+    {% if frame.driver_name is defined %}
+    <div class="absolute bottom-12 left-12 flex items-end">
+      {# Accent bar #}
+      <div class="w-1 h-20 rounded-full mr-4"
+           style="background: {{ frame.team_color | default('#3B82F6') }};"></div>
+
+      <div>
+        {# Position #}
+        <div class="text-5xl font-black text-white mb-1" style="text-shadow: 0 2px 20px rgba(0,0,0,0.8);">
+          P{{ frame.position | default(1) }}
+        </div>
+        {# Driver name #}
+        <div class="text-2xl font-bold text-white tracking-wide" style="text-shadow: 0 2px 10px rgba(0,0,0,0.6);">
+          {{ frame.driver_name | default('Driver Name') }}
+        </div>
+        {# Subtitle #}
+        <div class="text-sm text-gray-300 mt-1 tracking-wider uppercase"
+             style="text-shadow: 0 1px 8px rgba(0,0,0,0.6);">
+          {{ frame.car_name | default('Car') }}
+          {% if frame.irating is defined %} · {{ frame.irating }} iR{% endif %}
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    {# ── Cinematic: Lap info (bottom-right) ────────────────────────────── #}
+    {% if frame.current_lap is defined %}
+    <div class="absolute bottom-12 right-12 text-right">
+      <div class="text-gray-400 text-xs uppercase tracking-widest mb-1"
+           style="text-shadow: 0 1px 4px rgba(0,0,0,0.8);">
+        Lap
+      </div>
+      <div class="text-white text-3xl font-bold tabular-nums"
+           style="text-shadow: 0 2px 12px rgba(0,0,0,0.7);">
+        {{ frame.current_lap | default(1) }}
+        <span class="text-gray-500 text-lg">/{{ frame.total_laps | default(20) }}</span>
+      </div>
+      {% if frame.last_lap_time is defined %}
+      <div class="text-gray-300 font-mono text-sm mt-1 tabular-nums"
+           style="text-shadow: 0 1px 4px rgba(0,0,0,0.6);">
+        {{ frame.last_lap_time }}
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {# ── Cinematic: Flag (subtle top-center) ───────────────────────────── #}
+    {% if frame.flag is defined and frame.flag != 'green' %}
+    <div class="absolute top-6 left-1/2 -translate-x-1/2">
+      <div class="text-xs font-bold uppercase tracking-[0.3em] px-6 py-1.5 rounded-full
+                  {% if frame.flag == 'yellow' %}text-yellow-400{% elif frame.flag == 'red' %}text-red-400{% else %}text-white{% endif %}"
+           style="background: rgba(0,0,0,0.5); backdrop-filter: blur(4px); text-shadow: 0 1px 4px rgba(0,0,0,0.8);">
+        {{ frame.flag | upper }} FLAG
+      </div>
+    </div>
+    {% endif %}
+
+  </div>
+</body>
+</html>
