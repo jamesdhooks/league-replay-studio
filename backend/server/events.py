@@ -25,11 +25,12 @@ class EventCategory:
     PIPELINE = "pipeline"
     ENCODING = "encoding"
     CAPTURE = "capture"
+    PREVIEW = "preview"
     PROJECT = "project"
     SYSTEM = "system"
 
     ALL: list[str] = [
-        "iracing", "pipeline", "encoding", "capture", "project", "system"
+        "iracing", "pipeline", "encoding", "capture", "preview", "project", "system"
     ]
 
 
@@ -71,6 +72,12 @@ class EventType:
     CAPTURE_HOTKEY_TEST    = "capture:hotkey_test"
     CAPTURE_VALIDATED      = "capture:validated"
     CAPTURE_ERROR          = "capture:error"
+
+    # Preview
+    PREVIEW_PROGRESS       = "preview:progress"
+    PREVIEW_TIER_READY     = "preview:tier_ready"
+    PREVIEW_READY          = "preview:ready"
+    PREVIEW_ERROR          = "preview:error"
 
     # Project
     PROJECT_UPDATED        = "project:updated"
