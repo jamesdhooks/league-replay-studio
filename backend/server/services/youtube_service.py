@@ -25,7 +25,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from jinja2 import BaseLoader, Environment
+from jinja2 import BaseLoader
+from jinja2.sandbox import SandboxedEnvironment
 
 from server.config import DATA_DIR, load_config, save_config
 from server.events import EventType, make_event
@@ -131,7 +132,7 @@ class UploadJob:
 
 # ── Jinja2 template rendering ──────────────────────────────────────────────
 
-_jinja_env = Environment(loader=BaseLoader(), autoescape=True)
+_jinja_env = SandboxedEnvironment(loader=BaseLoader(), autoescape=True)
 
 
 def render_template_string(template_str: str, context: dict[str, Any]) -> str:
@@ -380,8 +381,10 @@ class YouTubeService:
         if self._state != YouTubeState.CONNECTED:
             return {"success": False, "error": "YouTube not connected"}
 
-        if not Path(file_path).exists():
-            return {"success": False, "error": f"File not found: {file_path}"}
+        # Validate file path — resolve to prevent path traversal
+        resolved_path = Path(file_path).resolve()
+        if not resolved_path.is_file():
+            return {"success": False, "error": "File not found"}
 
         if not self._quota.can_upload():
             return {"success": False, "error": "Daily quota exceeded. Try again tomorrow."}

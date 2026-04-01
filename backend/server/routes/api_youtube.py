@@ -18,10 +18,14 @@ GET    /api/youtube/videos           — list uploaded videos
 GET    /api/youtube/quota            — get quota usage
 """
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Query
 from typing import Any, Dict, Optional
 
 from server.services.youtube_service import youtube_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/youtube", tags=["youtube"])
 
@@ -69,7 +73,7 @@ async def auth_callback(body: Dict[str, Any]) -> dict:
         client_id, client_secret, code, redirect_uri
     )
     if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error", "Auth failed"))
+        raise HTTPException(status_code=400, detail="YouTube authentication failed")
     return result
 
 
@@ -82,7 +86,10 @@ async def disconnect() -> dict:
 @router.post("/refresh")
 async def refresh_connection() -> dict:
     """Refresh the YouTube connection (re-validate tokens)."""
-    return await youtube_service.refresh_connection()
+    result = await youtube_service.refresh_connection()
+    if not result.get("success") and "error" in result:
+        logger.warning("[YouTube] Refresh failed: %s", result["error"])
+    return {k: v for k, v in result.items() if k != "error"} if not result.get("success") else result
 
 
 # ── Upload settings ─────────────────────────────────────────────────────────
@@ -175,7 +182,7 @@ async def get_videos(
     """List uploaded videos from the connected YouTube channel."""
     result = await youtube_service.list_uploaded_videos(max_results, page_token)
     if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error", "Failed to list videos"))
+        raise HTTPException(status_code=400, detail="Failed to list videos")
     return result
 
 
