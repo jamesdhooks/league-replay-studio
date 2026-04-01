@@ -501,27 +501,27 @@ YouTube Data API v3. OAuth2 flow, channel status, Jinja2 description templates (
 > CLI/headless mode, PyInstaller `.exe` bundle, first-run wizard, auto-update, comprehensive error handling, configurable keyboard shortcuts.
 
 ### Milestones
-- [ ] **M5.1** App is scriptable from the command line *(feature 20)*
+- [x] **M5.1** App is scriptable from the command line *(feature 20)*
 - [ ] **M5.2** Distributable installer is available *(features 21, 22, 23)*
 - [ ] **M5.3** Application is production-quality *(features 24, 25)*
 
 ---
 
-### Feature 20 — CLI / Headless Mode `COULD` `🔍 under_review`
+### Feature 20 — CLI / Headless Mode `COULD` `✅ done`
 **Dependencies:** feature-7, feature-9, feature-13
 
 `lrs.bat` CLI: `--project`, `--highlights`, `--full-race`, `--preset`, `--output`, `--analyse-only`, `--full-pipeline`, `--upload`, `--gpu`, `--verbose/-v`, `--quiet/-q`. Bypasses FastAPI/pywebview entirely. Exit codes: 0=success, 1=project error, 2=iRacing not running, 3=encoding failed.
 
 **Acceptance Criteria**
-- [ ] `lrs.bat` with no arguments launches the GUI; with arguments launches CLI mode
-- [ ] CLI loads project from SQLite without starting FastAPI or pywebview
-- [ ] `--highlights` exports a highlight reel using saved project configuration
-- [ ] `--full-race` exports the full race video
-- [ ] `--preset` selects a specific export preset by name
-- [ ] `--full-pipeline` runs the complete automated pipeline
-- [ ] Progress reports to stdout: `Encoding... 45% (ETA: 2:31)`
-- [ ] Exit codes: 0=success, 1=project error, 2=iRacing not running, 3=encoding failed
-- [ ] `--quiet` suppresses all output except errors; `--verbose` enables debug logging
+- [x] `lrs.bat` with no arguments launches the GUI; with arguments launches CLI mode
+- [x] CLI loads project from SQLite without starting FastAPI or pywebview
+- [x] `--highlights` exports a highlight reel using saved project configuration
+- [x] `--full-race` exports the full race video
+- [x] `--preset` selects a specific export preset by name
+- [x] `--full-pipeline` runs the complete automated pipeline
+- [x] Progress reports to stdout: `Encoding... 45% (ETA: 2:31)`
+- [x] Exit codes: 0=success, 1=project error, 2=iRacing not running, 3=encoding failed
+- [x] `--quiet` suppresses all output except errors; `--verbose` enables debug logging
 
 ---
 

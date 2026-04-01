@@ -499,4 +499,23 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # ── CLI mode detection ──────────────────────────────────────────────────
+    # If any recognized CLI flags are present, route to the headless CLI
+    # instead of starting FastAPI + pywebview.
+    _cli_flags = {
+        "--project", "--highlights", "--full-race", "--analyse-only",
+        "--full-pipeline", "--preset", "--output", "--upload",
+        "--gpu", "-v", "--verbose", "-q", "--quiet",
+    }
+    if any(arg in _cli_flags or arg.startswith(("--project=", "--preset=", "--output=", "--gpu="))
+           for arg in sys.argv[1:]):
+        try:
+            from cli import main as cli_main
+            sys.exit(cli_main())
+        except SystemExit:
+            raise
+        except Exception as _cli_exc:
+            print(f"ERROR: CLI failed: {_cli_exc}", file=sys.stderr)
+            sys.exit(1)
+    # ── GUI mode ─────────────────────────────────────────────────────────────
     main()
