@@ -32,6 +32,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/preview", tags=["preview"])
 
 
+# ── Path validation ─────────────────────────────────────────────────────────
+
+def _validate_path(path_str: str) -> Path:
+    """Validate and resolve a file path, rejecting path traversal attempts."""
+    resolved = Path(path_str).resolve()
+    if ".." in Path(path_str).parts:
+        raise HTTPException(status_code=400, detail="Invalid path: traversal not allowed")
+    return resolved
+
+
 # ── Request models ──────────────────────────────────────────────────────────
 
 class PreviewInitRequest(BaseModel):
@@ -119,6 +129,9 @@ async def get_sprite_sheet(project_id: int, sheet_index: int):
         raise HTTPException(status_code=404, detail="No preview for this project")
 
     sheet_file = Path(job.sprites_dir) / f"sprite_{sheet_index:04d}.jpg"
+    # Ensure resolved path stays within sprites directory
+    if not sheet_file.resolve().is_relative_to(Path(job.sprites_dir).resolve()):
+        raise HTTPException(status_code=400, detail="Invalid sheet index")
     if not sheet_file.exists():
         raise HTTPException(status_code=404, detail=f"Sprite sheet {sheet_index} not found")
 
@@ -134,6 +147,7 @@ async def get_frame(
     input_file: str = Query(..., description="Source video file path"),
 ):
     """Extract and serve a full-resolution frame at the given timestamp."""
+    _validate_path(input_file)
     frame_path = preview_service.get_frame(project_id, t, input_file)
     if not frame_path or not Path(frame_path).exists():
         raise HTTPException(status_code=404, detail="Frame extraction failed")
@@ -189,10 +203,11 @@ async def get_video_info(
     """Get video metadata for a source file."""
     from server.utils.preview_utils import get_video_info as _get_info
 
-    if not Path(input_file).exists():
+    validated = _validate_path(input_file)
+    if not validated.exists():
         raise HTTPException(status_code=404, detail="Video file not found")
 
-    info = _get_info(input_file)
+    info = _get_info(str(validated))
     if not info:
         raise HTTPException(status_code=500, detail="Failed to read video info")
 
