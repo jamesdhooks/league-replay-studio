@@ -223,7 +223,7 @@ Tailwind CSS dark-first design system — color tokens, typography scale, spacin
 
 ### Milestones
 - [x] **M2.1** Replay analysis detects all race events *(feature 7)*
-- [ ] **M2.2** Events visualised on an interactive timeline *(features 8, 10)*
+- [x] **M2.2** Events visualised on an interactive timeline *(features 8, 10)*
 - [ ] **M2.3** Highlight reel is fully tuneable with live metrics *(features 9, 11)*
 
 ---
@@ -291,22 +291,22 @@ Canvas-based multi-track timeline: Camera, Events, Overlays, Cuts, Audio tracks.
 
 ---
 
-### Feature 10 — Event Inspector Panel `SHOULD` `🔍 under_review`
+### Feature 10 — Event Inspector Panel `SHOULD` `✅ completed`
 **Dependencies:** feature-7, feature-8
 
 Detail panel for selected timeline events: type, severity slider, frame-accurate timestamps, involved drivers, camera/car assignment, transition type, include-in-highlight toggle, slow motion flag. Actions: Apply, Revert, Split, Delete.
 
 **Acceptance Criteria**
-- [ ] Clicking an event on the timeline opens the inspector panel with all event properties
-- [ ] Event type can be changed via dropdown
-- [ ] Severity can be adjusted via slider (0–10)
-- [ ] Start/end timestamps can be edited with frame-accurate precision
-- [ ] Involved drivers are shown with checkboxes to include/exclude
-- [ ] Camera assignment and target car can be changed via dropdowns
-- [ ] Apply Changes saves edits; Revert restores original values
-- [ ] Split Event divides one event into two at the playhead position
-- [ ] Delete removes the event from the timeline and database
-- [ ] Changes trigger immediate timeline re-render and highlight metrics update
+- [x] Clicking an event on the timeline opens the inspector panel with all event properties
+- [x] Event type can be changed via dropdown
+- [x] Severity can be adjusted via slider (0–10)
+- [x] Start/end timestamps can be edited with frame-accurate precision
+- [x] Involved drivers are shown with checkboxes to include/exclude
+- [x] Camera assignment and target car can be changed via dropdowns
+- [x] Apply Changes saves edits; Revert restores original values
+- [x] Split Event divides one event into two at the playhead position
+- [x] Delete removes the event from the timeline and database
+- [x] Changes trigger immediate timeline re-render and highlight metrics update
 
 ---
 

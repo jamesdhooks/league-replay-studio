@@ -263,6 +263,7 @@ class EventUpdateRequest(BaseModel):
     severity: Optional[int] = None
     event_type: Optional[str] = None
     included_in_highlight: Optional[bool] = None
+    involved_drivers: Optional[list[int]] = None
 
 
 class EventSplitRequest(BaseModel):
@@ -312,6 +313,9 @@ async def update_event(project_id: int, event_id: int, body: EventUpdateRequest)
             if body.included_in_highlight is not None:
                 updates.append("included_in_highlight = ?")
                 params.append(1 if body.included_in_highlight else 0)
+            if body.involved_drivers is not None:
+                updates.append("involved_drivers = ?")
+                params.append(json.dumps(body.involved_drivers))
 
             if not updates:
                 raise HTTPException(status_code=400, detail="No fields to update")

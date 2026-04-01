@@ -1,11 +1,13 @@
 import { useEffect } from 'react'
 import { useHighlight, EVENT_TYPE_LABELS } from '../../context/HighlightContext'
 import { useAnalysis } from '../../context/AnalysisContext'
+import { useTimeline } from '../../context/TimelineContext'
 import HighlightWeightSliders from './HighlightWeightSliders'
 import HighlightEventTable from './HighlightEventTable'
 import HighlightMetrics from './HighlightMetrics'
 import HighlightTimeline from './HighlightTimeline'
 import HighlightConfigBar from './HighlightConfigBar'
+import EventInspectorPanel from '../inspector/EventInspectorPanel'
 import Timeline from '../timeline/Timeline'
 import { Sparkles } from 'lucide-react'
 
@@ -13,7 +15,7 @@ import { Sparkles } from 'lucide-react'
  * HighlightPanel — Main container for the Highlight Editing Suite.
  *
  * Orchestrates: weight sliders, event table, metrics, timeline preview,
- * config bar (presets + A/B), and the NLE timeline at the bottom.
+ * config bar (presets + A/B), event inspector, and the NLE timeline at the bottom.
  *
  * @param {Object} props
  * @param {number} props.projectId - Active project ID
@@ -21,6 +23,7 @@ import { Sparkles } from 'lucide-react'
 export default function HighlightPanel({ projectId }) {
   const { loadConfig, loadDrivers, loadPresets } = useHighlight()
   const { fetchEvents } = useAnalysis()
+  const { selectedEventId } = useTimeline()
 
   // Load highlight data on mount
   useEffect(() => {
@@ -56,7 +59,7 @@ export default function HighlightPanel({ projectId }) {
           <HighlightMetrics />
         </div>
 
-        {/* Right panel: event table + highlight timeline */}
+        {/* Center panel: event table + highlight timeline */}
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
           {/* Event selection table */}
           <div className="flex-1 min-h-0 overflow-hidden">
@@ -68,6 +71,13 @@ export default function HighlightPanel({ projectId }) {
             <HighlightTimeline />
           </div>
         </div>
+
+        {/* Right panel: Event Inspector (visible when event selected) */}
+        {selectedEventId && (
+          <div className="w-72 shrink-0 border-l border-border bg-bg-secondary overflow-hidden">
+            <EventInspectorPanel projectId={projectId} />
+          </div>
+        )}
       </div>
 
       {/* NLE Timeline at bottom */}
