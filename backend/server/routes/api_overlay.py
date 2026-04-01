@@ -101,7 +101,7 @@ async def init_engine(body: InitRequest):
         return result
     except Exception as exc:
         logger.error("[Overlay API] Init failed: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Overlay engine initialization failed")
 
 
 @router.post("/shutdown")
@@ -112,7 +112,7 @@ async def shutdown_engine():
         return {"success": True}
     except Exception as exc:
         logger.error("[Overlay API] Shutdown failed: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Overlay engine shutdown failed")
 
 
 # ── Template CRUD ───────────────────────────────────────────────────────────
@@ -146,7 +146,7 @@ async def create_template(body: TemplateRequest):
         return {"success": True, "template": result}
     except Exception as exc:
         logger.error("[Overlay API] Create template failed: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Failed to create template")
 
 
 @router.put("/templates/{template_id}")
@@ -200,7 +200,7 @@ async def render_frame(body: RenderRequest):
         return result
     except Exception as exc:
         logger.error("[Overlay API] Render failed: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Overlay frame rendering failed")
 
 
 @router.post("/batch")
@@ -220,7 +220,7 @@ async def start_batch_render(body: BatchRenderRequest):
         raise
     except Exception as exc:
         logger.error("[Overlay API] Batch render failed: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Batch render failed")
 
 
 @router.get("/batch/status")

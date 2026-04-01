@@ -38,6 +38,26 @@ from server.config import DATA_DIR
 logger = logging.getLogger(__name__)
 
 
+# ── Path sanitisation ────────────────────────────────────────────────────────
+
+import re
+
+_SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _safe_id(value: str) -> str:
+    """Validate and return a safe identifier for use in file paths.
+
+    Prevents directory traversal attacks by rejecting IDs that contain
+    path separators, dots, or other unsafe characters.
+
+    Raises:
+        ValueError: If the value contains unsafe characters.
+    """
+    if not value or not _SAFE_ID_RE.match(value):
+        raise ValueError(f"Invalid identifier: {value!r}")
+    return value
+
 # ── Template storage ─────────────────────────────────────────────────────────
 
 CUSTOM_TEMPLATES_DIR = DATA_DIR / "overlay_templates"
@@ -200,6 +220,7 @@ class OverlayService:
             The saved template metadata.
         """
         template_id = template_data.get("id") or f"custom_{uuid.uuid4().hex[:8]}"
+        template_id = _safe_id(template_id)
         template_data["id"] = template_id
         template_data["is_builtin"] = False
         template_data["version"] = template_data.get("version", "1.0.0")
@@ -233,6 +254,7 @@ class OverlayService:
         Returns:
             Template data dict with html_content, or None if not found.
         """
+        template_id = _safe_id(template_id)
         template = self.get_template(template_id)
         if not template:
             return None
@@ -268,6 +290,7 @@ class OverlayService:
 
     def delete_template(self, template_id: str) -> bool:
         """Delete a custom template (built-in templates cannot be deleted)."""
+        template_id = _safe_id(template_id)
         template = self.get_template(template_id)
         if not template or template.get("is_builtin"):
             return False
@@ -286,6 +309,7 @@ class OverlayService:
 
     def update_template(self, template_id: str, updates: dict[str, Any]) -> Optional[dict[str, Any]]:
         """Update a custom template's metadata or HTML content."""
+        template_id = _safe_id(template_id)
         template = self.get_template(template_id)
         if not template or template.get("is_builtin"):
             return None
@@ -323,7 +347,9 @@ class OverlayService:
         self, project_id: int, template_id: str, html_content: str
     ) -> dict[str, Any]:
         """Save a per-project template override (doesn't modify the original)."""
-        override_dir = OVERRIDES_DIR / str(project_id) / template_id
+        safe_tid = _safe_id(template_id)
+        safe_pid = _safe_id(str(project_id))
+        override_dir = OVERRIDES_DIR / safe_pid / safe_tid
         override_dir.mkdir(parents=True, exist_ok=True)
         (override_dir / "overlay.html").write_text(html_content, encoding="utf-8")
 
@@ -335,14 +361,18 @@ class OverlayService:
 
     def get_project_override(self, project_id: int, template_id: str) -> Optional[str]:
         """Get per-project override HTML content, or None if no override exists."""
-        override_path = OVERRIDES_DIR / str(project_id) / template_id / "overlay.html"
+        safe_tid = _safe_id(template_id)
+        safe_pid = _safe_id(str(project_id))
+        override_path = OVERRIDES_DIR / safe_pid / safe_tid / "overlay.html"
         if override_path.exists():
             return override_path.read_text(encoding="utf-8")
         return None
 
     def delete_project_override(self, project_id: int, template_id: str) -> bool:
         """Delete a per-project template override."""
-        override_dir = OVERRIDES_DIR / str(project_id) / template_id
+        safe_tid = _safe_id(template_id)
+        safe_pid = _safe_id(str(project_id))
+        override_dir = OVERRIDES_DIR / safe_pid / safe_tid
         if override_dir.exists():
             shutil.rmtree(override_dir)
             return True
@@ -368,6 +398,8 @@ class OverlayService:
         Returns:
             Render result dict.
         """
+        template_id = _safe_id(template_id)
+
         if not overlay_engine.initialized:
             init = await self.initialize()
             if not init.get("success"):
@@ -375,9 +407,10 @@ class OverlayService:
 
         # Set up per-project override if it exists
         if project_id:
+            safe_pid = _safe_id(str(project_id))
             override = self.get_project_override(project_id, template_id)
             if override:
-                override_dir = OVERRIDES_DIR / str(project_id)
+                override_dir = OVERRIDES_DIR / safe_pid
                 overlay_engine.set_custom_template_dirs([override_dir])
             else:
                 overlay_engine.set_custom_template_dirs([])
