@@ -40,6 +40,7 @@ static std::atomic<double>   g_fps{0.0};
 static DXGICapture g_capture;
 static WGCCapture  g_wgc;
 static std::atomic<bool>     g_use_wgc{false};
+static std::atomic<bool>     g_has_target{false};  // don't capture until set_hwnd/set_region
 static HANDLE g_shm_handle = nullptr;
 static void*  g_shm_ptr    = nullptr;
 
@@ -87,6 +88,14 @@ static void captureThread() {
     uint64_t fps_frames = 0;
 
     while (g_running) {
+        // Don't produce frames until Python sends set_hwnd or set_region.
+        // This prevents DXGI from writing full-desktop frames into SHM
+        // before WGC is configured, which would cause resolution flip-flopping.
+        if (!g_has_target.load()) {
+            Sleep(10);
+            continue;
+        }
+
         auto* header = static_cast<FrameHeader*>(g_shm_ptr);
         uint8_t* pixel_data = static_cast<uint8_t*>(g_shm_ptr) + sizeof(FrameHeader);
 
@@ -176,6 +185,7 @@ static std::string handleCommand(const std::string& json_cmd) {
             bool ok = g_wgc.setHwnd(hwnd);
             if (ok) {
                 g_use_wgc = true;
+                g_has_target = true;
                 fprintf(stderr, "[CMD] set_hwnd: WGC capturing HWND=%p\n", (void*)hwnd);
                 return "{\"status\":\"ok\",\"mode\":\"wgc\"}";
             } else {
@@ -194,6 +204,7 @@ static std::string handleCommand(const std::string& json_cmd) {
         int w = jsonGetInt(json_cmd, "w");
         int h = jsonGetInt(json_cmd, "h");
         g_use_wgc = false;
+        g_has_target = true;
         g_capture.setRegion(x, y, w, h);
         fprintf(stderr, "[CMD] set_region: %d,%d %dx%d\n", x, y, w, h);
         return "{\"status\":\"ok\"}";

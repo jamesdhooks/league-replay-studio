@@ -75,6 +75,17 @@ logger = logging.getLogger(__name__)
 _IS_WINDOWS = platform.system() == "Windows"
 
 # ---------------------------------------------------------------------------
+# JPEG encoder  (cv2.imencode — already a project dependency)
+# ---------------------------------------------------------------------------
+
+_cv2 = None
+try:
+    import cv2 as _cv2_mod
+    _cv2 = _cv2_mod
+except ImportError:
+    pass
+
+# ---------------------------------------------------------------------------
 # dxcam availability
 # ---------------------------------------------------------------------------
 
@@ -168,15 +179,12 @@ class CaptureEngine:
 
         # Threads / subprocess
         self._capture_thread: Optional[threading.Thread] = None
-        self._reader_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        self._ffmpeg_proc: Optional[subprocess.Popen] = None
 
         # Output: latest JPEG (swapped atomically, no lock needed for reads
         # because bytes objects are immutable and ref assignment is atomic in
-        # CPython.  We still use a lock for the write side to be safe.)
+        # CPython.)
         self._latest_jpeg: Optional[bytes] = None
-        self._jpeg_lock = threading.Lock()
 
         # Params (set by start())
         self._fps: int = 30
@@ -224,10 +232,8 @@ class CaptureEngine:
         self._record_codec: Optional[str] = None
         self._recording_mode: Optional[str] = None  # "gpu" | "cpu"
 
-        # Writer thread queues (decouple capture from pipe writes)
-        self._preview_queue: collections.deque = collections.deque(maxlen=2)
+        # Writer thread queues (for CPU recording only)
         self._record_queue: collections.deque = collections.deque(maxlen=2)
-        self._preview_writer: Optional[threading.Thread] = None
         self._record_writer: Optional[threading.Thread] = None
         self._frames_dropped: int = 0
 
@@ -304,18 +310,10 @@ class CaptureEngine:
             self._active_backend, self._fps, self._quality, self._max_width,
         )
 
-        self._preview_queue.clear()
-        self._frames_dropped = 0
-
         self._capture_thread = threading.Thread(
             target=self._capture_loop, daemon=True, name="cap-grab",
         )
         self._capture_thread.start()
-
-        self._preview_writer = threading.Thread(
-            target=self._preview_writer_loop, daemon=True, name="cap-preview-wr",
-        )
-        self._preview_writer.start()
 
     def stop(self) -> None:
         if not self._running:
@@ -326,19 +324,13 @@ class CaptureEngine:
 
         if self._capture_thread:
             self._capture_thread.join(timeout=5)
-        if self._preview_writer:
-            self._preview_writer.join(timeout=5)
         if self._record_writer:
             self._record_writer.join(timeout=5)
-        if self._reader_thread:
-            self._reader_thread.join(timeout=5)
 
-        self._kill_ffmpeg()
         self._kill_recorder()
         self._cleanup_native()
         self._cleanup_dxcam()
         self._release_pw_gdi()
-        self._preview_queue.clear()
         self._record_queue.clear()
         logger.info("[CaptureEngine] stopped")
 
@@ -687,9 +679,6 @@ class CaptureEngine:
         native_started_at: float = time.monotonic() if use_native else 0.0
         native_first_frame = False
 
-        # Lazily start FFmpeg once we know the frame dimensions
-        ffmpeg_started = False
-
         while not self._stop_event.is_set():
             t0 = time.monotonic()
             frame: Optional[np.ndarray] = None
@@ -777,20 +766,34 @@ class CaptureEngine:
 
             if frame is not None:
                 h, w = frame.shape[:2]
+                self._src_w, self._src_h = w, h
 
-                # (re)start FFmpeg if dimensions changed or not started
-                if not ffmpeg_started or w != self._src_w or h != self._src_h:
-                    self._preview_queue.clear()  # drop stale-resolution frames
-                    self._src_w, self._src_h = w, h
-                    self._out_w, self._out_h = _scale_dims(w, h, self._max_width)
-                    self._frame_nbytes = w * h * 3  # BGR24
-                    self._start_ffmpeg_mjpeg(w, h, self._out_w, self._out_h)
-                    ffmpeg_started = True
+                # ── Direct JPEG encode (replaces FFmpeg MJPEG pipe) ───
+                # Scale down if wider than max_width
+                out_frame = frame
+                if _cv2 is not None and w > self._max_width:
+                    out_w, out_h = _scale_dims(w, h, self._max_width)
+                    out_frame = _cv2.resize(frame, (out_w, out_h),
+                                            interpolation=_cv2.INTER_LINEAR)
+                    self._out_w, self._out_h = out_w, out_h
+                else:
+                    self._out_w, self._out_h = w & ~1, h & ~1
 
-                # Enqueue for preview writer (drops oldest frame if full)
-                if len(self._preview_queue) >= self._preview_queue.maxlen:
-                    self._frames_dropped += 1
-                self._preview_queue.append(frame)
+                # Encode JPEG directly — no subprocess, no pipe, no parsing
+                jpeg = self._encode_jpeg(out_frame)
+                if jpeg is not None:
+                    self._latest_jpeg = jpeg
+
+                    # Metrics
+                    with self._metrics_lock:
+                        self._frame_count += 1
+                        self._mw_frames += 1
+                        now2 = time.monotonic()
+                        window = now2 - self._mw_start
+                        if window >= 1.0:
+                            self._last_fps = self._mw_frames / window
+                            self._mw_start = now2
+                            self._mw_frames = 0
 
                 # Enqueue for CPU recording writer (if active)
                 if self._recording and self._recording_mode == "cpu":
@@ -808,34 +811,36 @@ class CaptureEngine:
                 time.sleep(0.002)
 
     # ======================================================================
-    # Writer threads (decouple capture from pipe I/O)
+    # Direct JPEG encoding  (replaces FFmpeg MJPEG subprocess pipeline)
     # ======================================================================
 
-    def _preview_writer_loop(self) -> None:
-        """Drain preview queue -> FFmpeg stdin.
+    def _encode_jpeg(self, frame: np.ndarray) -> Optional[bytes]:
+        """Encode a BGR numpy frame to JPEG bytes.
 
-        Runs in its own thread so a slow/blocked pipe never stalls the
-        capture thread.  If the pipe blocks, frames accumulate in the
-        deque (maxlen=2) and old frames are silently dropped by the
-        capture thread.
+        Uses cv2.imencode (backed by libjpeg-turbo SIMD) when available,
+        falls back to Pillow.  No subprocess, no pipe, no SOI/EOI parsing.
         """
-        while not self._stop_event.is_set():
-            try:
-                frame = self._preview_queue.popleft()
-            except IndexError:
-                time.sleep(0.001)
-                continue
+        if _cv2 is not None:
+            ok, buf = _cv2.imencode(
+                ".jpg", frame,
+                [_cv2.IMWRITE_JPEG_QUALITY, self._quality],
+            )
+            return buf.tobytes() if ok else None
 
-            proc = self._ffmpeg_proc
-            if proc is None or proc.stdin is None or proc.stdin.closed:
-                continue
+        # Pillow fallback (slower, but works)
+        try:
+            from PIL import Image
+            import io
+            img = Image.fromarray(frame[:, :, ::-1])  # BGR -> RGB
+            out = io.BytesIO()
+            img.save(out, "JPEG", quality=self._quality)
+            return out.getvalue()
+        except Exception:
+            return None
 
-            try:
-                proc.stdin.write(memoryview(frame))
-            except BrokenPipeError:
-                logger.warning("[CaptureEngine] preview pipe broken")
-            except Exception:
-                logger.debug("[CaptureEngine] preview write error", exc_info=True)
+    # ======================================================================
+    # Writer threads (for recording only -- preview uses direct encode now)
+    # ======================================================================
 
     def _record_writer_loop(self) -> None:
         """Drain record queue -> recording FFmpeg stdin (CPU pipe mode only).
@@ -860,144 +865,6 @@ class CaptureEngine:
                 logger.warning("[CaptureEngine] recording pipe broken")
                 self._recording = False
                 break
-
-    # ======================================================================
-    # FFmpeg MJPEG encoder (subprocess, reads stdout in a thread)
-    # ======================================================================
-
-    def _start_ffmpeg_mjpeg(
-        self, src_w: int, src_h: int, dst_w: int, dst_h: int,
-    ) -> None:
-        """(Re)start FFmpeg to convert raw BGR24 stdin -> MJPEG stdout.
-
-        The preview writer thread feeds raw frames to stdin; the reader
-        thread parses JPEG boundaries from stdout via SOI/EOI markers.
-        """
-        self._kill_ffmpeg()
-
-        ffmpeg = _find_ffmpeg()
-        if not ffmpeg:
-            logger.error("[CaptureEngine] ffmpeg not found -- cannot encode")
-            return
-
-        # Build command:
-        #   Input:  raw BGR24 on stdin at known resolution
-        #   Scale:  if src != dst, use fast bilinear scaler
-        #   Output: MJPEG frames written to stdout (image2pipe)
-        vf_parts: list[str] = []
-        # FFmpeg rawvideo format is bgr24 (matches numpy BGRA->BGR)
-        if src_w != dst_w or src_h != dst_h:
-            vf_parts.append(f"scale={dst_w}:{dst_h}:flags=fast_bilinear")
-
-        cmd = [
-            ffmpeg, "-hide_banner", "-loglevel", "error",
-            # Input
-            "-f", "rawvideo",
-            "-pixel_format", "bgr24",
-            "-video_size", f"{src_w}x{src_h}",
-            "-framerate", str(self._fps),
-            "-i", "pipe:0",
-        ]
-        if vf_parts:
-            cmd += ["-vf", ",".join(vf_parts)]
-        cmd += [
-            # Output: MJPEG frames to stdout (libjpeg-turbo SIMD encoding)
-            "-c:v", "mjpeg",
-            "-q:v", str(max(1, min(31, 32 - int(self._quality * 31 / 100)))),
-            "-f", "image2pipe",
-            "pipe:1",
-        ]
-
-        logger.info(
-            "[CaptureEngine] FFmpeg: %s",
-            " ".join(cmd[1:]),  # skip binary path for readability
-        )
-
-        self._ffmpeg_proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=src_w * src_h * 3 * 4,  # ~4 frames of pipe buffer
-        )
-
-        # Reader thread: pulls JPEG frames from FFmpeg stdout
-        self._reader_thread = threading.Thread(
-            target=self._read_ffmpeg_stdout, daemon=True, name="cap-read",
-        )
-        self._reader_thread.start()
-
-    def _read_ffmpeg_stdout(self) -> None:
-        """Read JPEG frames from FFmpeg's image2pipe stdout.
-
-        image2pipe with mjpeg outputs concatenated JPEG blobs. We detect
-        frame boundaries by scanning for the SOI (0xFFD8) and EOI (0xFFD9)
-        markers.
-        """
-        proc = self._ffmpeg_proc
-        if proc is None or proc.stdout is None:
-            return
-
-        buf = bytearray()
-        CHUNK = 65536
-        SOI = b"\xff\xd8"
-        EOI = b"\xff\xd9"
-
-        while not self._stop_event.is_set() and proc.poll() is None:
-            try:
-                data = proc.stdout.read(CHUNK)
-                if not data:
-                    break
-                buf.extend(data)
-            except Exception:
-                break
-
-            # Extract complete JPEG frames from buffer
-            while True:
-                soi = buf.find(SOI)
-                if soi == -1:
-                    buf.clear()
-                    break
-                eoi = buf.find(EOI, soi + 2)
-                if eoi == -1:
-                    # Incomplete frame -- trim before SOI and wait for more
-                    if soi > 0:
-                        del buf[:soi]
-                    break
-
-                # Complete frame: SOI...EOI+2
-                frame_end = eoi + 2
-                jpeg = bytes(buf[soi:frame_end])
-                del buf[:frame_end]
-
-                with self._jpeg_lock:
-                    self._latest_jpeg = jpeg
-
-                # Metrics
-                with self._metrics_lock:
-                    self._frame_count += 1
-                    self._mw_frames += 1
-                    now = time.monotonic()
-                    window = now - self._mw_start
-                    if window >= 1.0:
-                        self._last_fps = self._mw_frames / window
-                        self._mw_start = now
-                        self._mw_frames = 0
-
-    def _kill_ffmpeg(self) -> None:
-        proc = self._ffmpeg_proc
-        if proc is None:
-            return
-        try:
-            if proc.stdin and not proc.stdin.closed:
-                proc.stdin.close()
-        except Exception:
-            pass
-        try:
-            proc.wait(timeout=3)
-        except Exception:
-            proc.kill()
-        self._ffmpeg_proc = None
 
     # ======================================================================
     # Native C++ capture backend  (DXGI via shared memory)

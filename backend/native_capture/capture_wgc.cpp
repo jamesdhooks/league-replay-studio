@@ -193,8 +193,11 @@ bool WGCCapture::startCapture(HWND hwnd) {
         fprintf(stderr, "[WGC] Capturing HWND %p  (%dx%d)\n",
                 (void*)hwnd, size.Width, size.Height);
 
-        // Create a frame pool (2 frames to allow double-buffering)
-        auto pool = wgc::Direct3D11CaptureFramePool::Create(
+        // Create a frame pool using CreateFreeThreaded so that FrameArrived
+        // callbacks are delivered on a WinRT thread-pool thread.  The regular
+        // Create() requires a DispatcherQueue (message pump), which a console
+        // app does not have — causing callbacks to never fire.
+        auto pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(
             impl_->winrt_device,
             wgdx::DirectXPixelFormat::B8G8R8A8UIntNormalized,
             2,
@@ -231,6 +234,9 @@ bool WGCCapture::startCapture(HWND hwnd) {
         // Create session -- disable cursor so we see clean game content
         auto session = pool.CreateCaptureSession(item);
         session.IsCursorCaptureEnabled(false);
+
+        // Win11+: remove the yellow capture border if available
+        try { session.IsBorderRequired(false); } catch (...) {}
 
         // Store everything and start
         impl_->capture_item  = item;
