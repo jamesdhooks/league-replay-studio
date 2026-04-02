@@ -51,7 +51,7 @@ router = APIRouter(prefix="/api/iracing", tags=["iracing"])
 
 # Validates HLS filenames: only 'playlist.m3u8' or 'seg#####.ts' are accepted,
 # ruling out any path-separator or traversal characters.
-_SAFE_HLS_FILENAME = re.compile(r'^(?:playlist\.m3u8|seg\d{5}\.ts)$')
+_SAFE_HLS_FILENAME_RE = re.compile(r'^(?:playlist\.m3u8|seg\d{5}\.ts)$')
 
 
 # ── HLS session state ─────────────────────────────────────────────────────────
@@ -742,7 +742,7 @@ async def hls_file(
     """
     # Strictly validate filename: only allow 'playlist.m3u8' or 'seg#####.ts'
     # This rejects any path separators, dots, or other traversal characters.
-    if not _SAFE_HLS_FILENAME.match(filename):
+    if not _SAFE_HLS_FILENAME_RE.match(filename):
         raise HTTPException(status_code=404, detail="Not found")
 
     try:
