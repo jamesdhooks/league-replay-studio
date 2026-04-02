@@ -240,6 +240,7 @@ class CaptureEngine:
         # H.264 live stream feed queue (filled by capture loop, drained by endpoint thread)
         self._h264_queue: collections.deque = collections.deque(maxlen=4)
         self._h264_streaming: bool = False
+        self._h264_gen: int = 0  # generation token — prevents stale stop from killing a newer stream
 
     # -- Properties ---------------------------------------------------------
 
@@ -337,13 +338,26 @@ class CaptureEngine:
             self._quality, self._max_width, self._fps,
         )
 
-    def start_h264_feed(self) -> None:
-        """Enable the raw-frame queue so the H.264 endpoint can drain it."""
+    def start_h264_feed(self) -> int:
+        """Enable the raw-frame queue so the H.264 endpoint can drain it.
+
+        Returns a generation token that the caller must pass to stop_h264_feed()
+        to prevent a stale cleanup from killing a newer concurrent stream.
+        """
+        self._h264_gen += 1
         self._h264_queue.clear()
         self._h264_streaming = True
+        return self._h264_gen
 
-    def stop_h264_feed(self) -> None:
-        """Disable the raw-frame queue and discard any buffered frames."""
+    def stop_h264_feed(self, gen: int) -> None:
+        """Disable the raw-frame queue only if *gen* matches the current generation.
+
+        Passing the token returned by start_h264_feed() ensures that a delayed
+        cleanup from an old request never silences a newer stream that already
+        called start_h264_feed().
+        """
+        if gen != self._h264_gen:
+            return  # stale cleanup — a newer stream is already running
         self._h264_streaming = False
         self._h264_queue.clear()
 
@@ -852,9 +866,11 @@ class CaptureEngine:
                         self._frames_dropped += 1
                     self._record_queue.append(frame)
 
-                # Enqueue scaled frame for H.264 live stream feed (if active)
+                # Enqueue scaled frame for H.264 live stream feed (if active).
+                # Always copy: out_frame may be a view into a pre-allocated buffer
+                # (e.g. PrintWindow's self._pw_np_buf) that is overwritten next tick.
                 if self._h264_streaming:
-                    self._h264_queue.append(out_frame)
+                    self._h264_queue.append(out_frame.copy())
 
             # Pacing: native/dxcam have their own timing; PrintWindow needs manual
             if backend_used == "printwindow":

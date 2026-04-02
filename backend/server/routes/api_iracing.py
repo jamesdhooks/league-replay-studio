@@ -456,6 +456,10 @@ async def iracing_stream_h264(
         "-preset", "ultrafast",
         "-tune", "zerolatency",
         "-crf", str(crf),
+        # Every frame is an IDR keyframe so frag_keyframe emits a new
+        # fragment per frame instead of once per GOP (~12 s default).
+        "-g", "1",
+        "-keyint_min", "1",
         "-pix_fmt", "yuv420p",
         "-profile:v", "baseline",
         "-level:v", "4.0",
@@ -475,8 +479,10 @@ async def iracing_stream_h264(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to start FFmpeg: {exc}")
 
-    # Enable the capture engine's raw-frame feed queue
-    capture_engine.start_h264_feed()
+    # Enable the capture engine's raw-frame feed queue; save the generation
+    # token so our finally-block doesn't accidentally kill a newer stream that
+    # started after us (e.g., the user quickly changes CRF/resolution).
+    h264_gen = capture_engine.start_h264_feed()
 
     # Background thread: drain h264_queue → FFmpeg stdin
     import threading as _threading
@@ -517,7 +523,7 @@ async def iracing_stream_h264(
             pass
         finally:
             state["active"] = False
-            capture_engine.stop_h264_feed()
+            capture_engine.stop_h264_feed(h264_gen)
             try:
                 proc.kill()
             except Exception:

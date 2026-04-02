@@ -9,7 +9,7 @@ import {
   Fuel, Zap, Crown, Flag, FlagTriangleRight, Loader2, CheckCircle2,
   XCircle, Terminal, ChevronRight, ChevronDown, Camera, Video, Monitor,
   SkipBack, SkipForward, Rewind, FastForward, List, Trash2, Settings,
-  Eye, Users,
+  Eye, Users, RefreshCw,
 } from 'lucide-react'
 
 /**
@@ -125,6 +125,7 @@ function H264StreamPlayer({ src, className, onLoad, onError }) {
     <video
       ref={videoRef}
       className={className}
+      style={{ pointerEvents: 'none' }}
       autoPlay
       muted
       playsInline
@@ -332,6 +333,7 @@ export default function AnalysisPanel() {
 
   // ── Playback controls ─────────────────────────────────────────────────
   const handlePlayPause = async () => {
+    if (!isConnected) return   // guard: iRacing must be connected
     try {
       if (isPlaying) {
         await apiPost('/iracing/replay/speed', { speed: 0 })
@@ -346,6 +348,7 @@ export default function AnalysisPanel() {
   }
 
   const handleSetSpeed = async (speed) => {
+    if (!isConnected) return
     try {
       await apiPost('/iracing/replay/speed', { speed })
       setReplaySpeed(speed)
@@ -709,10 +712,10 @@ export default function AnalysisPanel() {
         <div className="flex-1 flex flex-col min-w-0 bg-bg-primary">
           {/* TV container — fills available space, centers the 16:9 stream */}
           <div className="flex-1 flex items-center justify-center p-4 min-h-0 relative">
-            <div className="relative h-full rounded-xl overflow-hidden border-2 border-border bg-black shadow-lg cursor-pointer"
-                 style={{ aspectRatio: '16/9', maxWidth: '100%' }}
-                 onClick={handlePlayPause}
-                 title={isPlaying ? 'Click to pause' : 'Click to play'}>
+            <div className="relative h-full rounded-xl overflow-hidden border-2 border-border bg-black shadow-lg"
+                 style={{ aspectRatio: '16/9', maxWidth: '100%', cursor: isConnected ? 'pointer' : 'default' }}
+                 onClick={isConnected ? handlePlayPause : undefined}
+                 title={isConnected ? (isPlaying ? 'Click to pause' : 'Click to play') : undefined}>
               {isConnected ? (
                 <>
                   {/* Stream: H.264 (MSE) or MJPEG depending on format setting */}
@@ -775,8 +778,17 @@ export default function AnalysisPanel() {
                 </div>
               )}
 
-              {/* Top-right controls: window picker + quality settings */}
+              {/* Top-right controls: restart + window picker + quality settings */}
               <div className="absolute top-3 right-3 flex items-center gap-1.5 z-10" onClick={e => e.stopPropagation()}>
+                <button
+                  onClick={() => setStreamKey(k => k + 1)}
+                  title="Restart preview stream"
+                  className="flex items-center gap-1 px-2 py-1 rounded-md text-xxs
+                             bg-black/70 backdrop-blur-sm text-white/70 hover:text-white border border-white/10
+                             transition-colors"
+                >
+                  <RefreshCw size={11} />
+                </button>
                 <button
                   onClick={() => { setShowQualitySettings(prev => !prev) }}
                   title="Stream quality settings"
@@ -812,7 +824,11 @@ export default function AnalysisPanel() {
                         {['mjpeg', 'h264'].map(fmt => (
                           <button
                             key={fmt}
-                            onClick={() => { setStreamFormat(fmt); setStreamKey(k => k + 1) }}
+                            onClick={() => {
+                              setStreamFormat(fmt)
+                              setStreamKey(k => k + 1)
+                              setShowQualitySettings(false)
+                            }}
                             className={`px-2 py-0.5 text-xxs transition-colors ${
                               streamFormat === fmt
                                 ? 'bg-accent text-white'
