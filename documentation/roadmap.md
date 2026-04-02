@@ -156,7 +156,7 @@ Integrate pyirsdk shared memory for real-time telemetry and replay control. 60 H
 **Spec:** `003-project-system-with-sqlite-storage`
 **Dependencies:** feature-1
 
-Full project management backed by SQLite. New Project Wizard, project library (grid/list, search/filter), CRUD operations, and step-based workflow navigation: Setup → Capture → Analysis → Editing → Export → Upload.
+Full project management backed by SQLite. New Project Wizard, project library (grid/list, search/filter), CRUD operations, and step-based workflow navigation: Setup → Analysis → Editing → Capture → Export → Upload.
 
 **Acceptance Criteria**
 - [x] New Project Wizard creates a project with name, replay file, and working directory
@@ -214,6 +214,11 @@ Tailwind CSS dark-first design system — color tokens, typography scale, spacin
 - [x] Theme transitions are smooth (no flash of unstyled content)
 - [x] Typography scale and spacing system are defined and documented
 - [x] All existing UI components use design tokens consistently
+- [x] Gradient accent palette (indigo→violet→blue) with Tailwind `gradient` color tokens and utility classes
+- [x] Gradient CTA buttons, progress bars, step indicators, logo icon, and empty-state heroes
+- [x] Richer card shadows (card/card-hover), glow shadows (glow/glow-sm/glow-lg), shimmer animation
+- [x] `.text-gradient`, `.border-gradient`, `.bg-noise` CSS utility classes
+- [x] Inter font loaded from Google Fonts CDN with full weight range (300–900)
 
 ---
 
@@ -245,6 +250,12 @@ Core race event detection: incidents, battles, overtakes, pit stops, fastest lap
 - [x] Scan stops automatically when `SessionState == Checkered` and all cars finished
 - [x] Events are persisted to SQLite and available immediately on project reopen
 - [x] User can start editing before analysis completes (progressive availability)
+- [x] Race session jumping via `replay_search_session_time()` skips practice/qualifying (falls back to legacy scan)
+- [x] Enriched progress events stream detail text, current lap, car count, and per-detector labels
+- [x] Individual `event_discovered` events stream to frontend as each event is found
+- [x] Live analysis log panel in UI with level-specific icons (info, detect, success, error)
+- [x] Live event particle feed shows animated chips for discovered events during analysis
+- [x] iRacing window screenshot embed visible in analysis panel during scan (polling /api/iracing/screenshot)
 
 ---
 
@@ -341,7 +352,7 @@ Unlimited undo/redo across timeline, event inspector, and highlight suite. Visib
 **Spec:** `010-video-capture-obs-integration`
 **Dependencies:** feature-2, feature-3
 
-Auto-detect OBS Studio, NVIDIA ShadowPlay, AMD ReLive. Configurable hotkey mapping per software with validation. Automated capture orchestration synced with replay playback. Post-capture validation (integrity, resolution, duration).
+Auto-detect OBS Studio, NVIDIA ShadowPlay, AMD ReLive. Configurable hotkey mapping per software with validation. Automated capture orchestration synced with replay playback. Post-capture validation (integrity, resolution, duration). Internal capture engine with dxcam (DXGI) + PrintWindow backends for self-contained capture without external software.
 
 **Acceptance Criteria**
 - [x] App auto-detects running OBS, ShadowPlay, and ReLive processes
@@ -353,6 +364,25 @@ Auto-detect OBS Studio, NVIDIA ShadowPlay, AMD ReLive. Configurable hotkey mappi
 - [x] Progress UI shows real-time capture status, elapsed time, and file size
 - [x] Post-capture validation checks file integrity, resolution, and duration vs expected
 - [x] Clear error messages when capture software is not detected or hotkey fails
+- [x] Internal CaptureEngine with multi-backend support (dxcam DXGI -> PrintWindow GDI fallback)
+- [x] Zero-copy FFmpeg MJPEG pipeline (no PIL in hot path, libjpeg-turbo SIMD encoding)
+- [x] Buffer protocol writes via memoryview() -- eliminates .tobytes() frame copy
+- [x] dxcam target_fps native pacing (no Python sleep jitter)
+- [x] Pre-allocated numpy buffers for PrintWindow (zero per-frame allocation)
+- [x] Dedicated capture + reader threads with FFmpeg subprocess stdin/stdout
+- [x] Dual-output: MJPEG preview + GPU H.264 NVENC recording simultaneously
+- [x] start_recording() / stop_recording() with auto-detected GPU encoder (NVENC > AMF > QSV > CPU)
+- [x] MJPEG streaming endpoint serves live preview from CaptureEngine singleton
+- [x] Stream metrics endpoint exposes FPS, backend, uptime, resolution, recording state
+- [x] Stream start/stop + record start/stop REST endpoints
+- [x] Writer threads decouple capture from pipe I/O (no backpressure coupling)
+- [x] Frame dropping via deque(maxlen=2) -- prefer dropping frames over latency
+- [x] GPU-native recording mode via FFmpeg gdigrab (zero Python in recording hot path)
+- [x] CPU pipe recording mode as fallback (capture -> queue -> writer -> FFmpeg stdin)
+- [x] Auto-detect recording mode: tries GPU first, falls back to CPU
+- [x] Graceful recorder shutdown (CTRL_BREAK on Windows for GPU mode, stdin close for CPU)
+- [x] frames_dropped + recording_mode exposed in stream metrics
+- [x] OBS/ShadowPlay hotkey-based capture still fully supported alongside internal capture
 
 ---
 
@@ -481,15 +511,15 @@ YouTube Data API v3. OAuth2 flow, channel status, Jinja2 description templates (
 ### Feature 19 — One-Click Automated Pipeline `SHOULD` `✅ done`
 **Dependencies:** feature-7, feature-9, feature-12, feature-13, feature-18
 
-`PipelineEngine` sequencing: Capture → Analysis → Editing → Export → Upload. Pause/resume/cancel/retry per step. Pipeline presets CRUD. Failure recovery from failed step (not from scratch). Persistent state in SQLite. CLI support.
+`PipelineEngine` sequencing: Analysis → Editing → Capture → Export → Upload. Pause/resume/cancel/retry per step. Pipeline presets CRUD. Failure recovery from failed step (not from scratch). Persistent state in SQLite. CLI support.
 
 **Acceptance Criteria**
-- [x] Pipeline executes all steps sequentially: Capture → Analysis → Editing → Export → Upload
+- [x] Pipeline executes all steps sequentially: Analysis → Editing → Capture → Export → Upload
 - [x] Each step can be paused, resumed, cancelled, or retried independently
 - [x] Pipeline configuration presets allow saving different automation settings
 - [x] Real-time pipeline progress UI shows current step, log output, and overall progress
 - [x] Pipeline pauses on step failure by default (configurable: pause/skip/abort)
-- [x] User can intervene mid-pipeline (e.g., tweak highlight weights between Analysis and Export)
+- [x] User can intervene mid-pipeline (e.g., tweak highlight weights between Analysis and Capture)
 - [x] Pipeline state persists in SQLite — survives app crash/restart and resumes from last step
 - [x] Notification on pipeline completion (toast, system notification, or none — configurable)
 - [x] Pipeline integrates with YouTube upload as optional final step

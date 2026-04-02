@@ -41,7 +41,9 @@ A ground-up rewrite of the legacy iRacingReplayDirector (.NET WinForms) into a m
 
 **Total time for a 45-minute race: 2–4 hours**
 
-In League Replay Studio, this becomes a **step-based workflow** (Setup → Capture → Analysis → Editing → Export → Upload) that can be run interactively step-by-step, or fully automated via a **one-click pipeline** (see Sections 4.1, 7.12, 7.13).
+In League Replay Studio, this becomes a **step-based workflow** (Setup → Analysis → Editing → Capture → Export → Upload) that can be run interactively step-by-step, or fully automated via a **one-click pipeline** (see Sections 4.1, 7.12, 7.13).
+
+> **Critical workflow insight from the legacy app:** The original iRacingReplayDirector **always** analysed the replay first (rewinding to the race start and fast-forwarding at 16× to detect all events), and **then** captured video at 1× speed using those analysis results to direct cameras. Video capture never comes before analysis. Our enhanced workflow inserts an Editing step between Analysis and Capture so the user can tune highlights, configure cameras, and make manual overrides before the guided capture begins.
 
 ### 1.3 Features to Preserve
 
@@ -78,7 +80,7 @@ In League Replay Studio, this becomes a **step-based workflow** (Setup → Captu
 | No undo/redo | Destructive workflow |
 | Cannot save/resume projects | Must redo everything from scratch each session |
 
-> **Note:** Recording the replay at 1× speed is an accepted constraint — iRacing does not expose raw frames and we need the in-game audio. The capture itself goes through OBS/Nvidia ShadowPlay via hotkeys, which is unavoidable. The real wins are in the **encoding pipeline**, **preview system**, and **highlight editing workflow**.
+> **Note:** Recording the replay at 1× speed is an accepted constraint — iRacing does not expose raw frames and we need the in-game audio. Capture can be done internally via our CaptureEngine (dxcam DXGI capture → FFmpeg NVENC encoding) or externally through OBS/Nvidia ShadowPlay via hotkeys. The internal capture engine supports automatic backend selection: dxcam for GPU-accelerated capture (60+ FPS) when the iRacing window is unoccluded, with automatic fallback to PrintWindow (GDI) for reliable behind-window capture. The real wins are in the **encoding pipeline**, **preview system**, and **highlight editing workflow**.
 
 ---
 
@@ -100,7 +102,7 @@ In League Replay Studio, this becomes a **step-based workflow** (Setup → Captu
 8. **Modern web UI** — React + Tailwind CSS in a native desktop window (pywebview)
 9. **HTML/Tailwind overlay engine** — Every overlay is an editable `.html` file with Tailwind CSS, rendered via headless Chromium. Design, tweak, and preview overlays in-app with a Monaco editor and live preview — or create entirely new templates from scratch
 10. **YouTube channel integration** — Link your YouTube channel, browse uploaded videos alongside their source projects, and auto-upload highlights/full race directly from the export step
-11. **Step-based project workflow** — Every race is a project with clear phases: Capture → Analysis → Editing → Export → Upload. The UI flows intuitively between steps, with a file browser for all intermediary and output files
+11. **Step-based project workflow** — Every race is a project with clear phases: Analysis → Editing → Capture → Export → Upload. The UI flows intuitively between steps, with a file browser for all intermediary and output files
 12. **One-click automated pipeline** — Hit "Go" and the app steps through the entire workflow automatically, with the ability to pause, intervene, tweak, and resume at any point — plus full failure recovery per step
 
 ---
@@ -144,9 +146,9 @@ In League Replay Studio, this becomes a **step-based workflow** (Setup → Captu
 │  ┌─────────────────────────────────────────────────────────┐  │
 │  │                   SYSTEM LAYER                           │  │
 │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────┐ │  │
-│  │  │ iRacing  │ │ GPU      │ │ FFmpeg   │ │ OBS /     │ │  │
-│  │  │ SDK/Mem  │ │ (NVENC/  │ │ (libx264 │ │ ShadowPlay│ │  │
-│  │  │ Map      │ │  AMF/QSV)│ │  /libx265│ │ (capture) │ │  │
+│  │  │ iRacing  │ │ GPU      │ │ FFmpeg   │ │ Capture   │ │  │
+│  │  │ SDK/Mem  │ │ (NVENC/  │ │ (libx264 │ │ Engine    │ │  │
+│  │  │ Map      │ │  AMF/QSV)│ │  /libx265│ │ (dxcam/PW)│ │  │
 │  │  └──────────┘ └──────────┘ │  /AV1)   │ └───────────┘ │  │
 │  │                             └──────────┘               │  │
 │  └─────────────────────────────────────────────────────────┘  │
@@ -160,8 +162,8 @@ In League Replay Studio, this becomes a **step-based workflow** (Setup → Captu
 | **Web Framework** | FastAPI | Async REST API + WebSocket for real-time updates |
 | **iRacing Interface** | irsdk (`pip install irsdk`) | Python iRacing SDK — shared memory telemetry + Broadcasting API for replay/camera control |
 | **Video Encoding** | FFmpeg (via ffmpeg-python) | GPU-accelerated encoding (NVENC, AMF, QSV) |
-| **Frame Capture** | OBS / Nvidia ShadowPlay (via configurable hotkeys) | Screen capture through user's preferred recording software |
-| **Capture Control** | pyautogui / pynput + process detection | Configurable hotkey automation with validation |
+| **Frame Capture** | dxcam (DXGI Desktop Duplication) + PrintWindow fallback; OBS / Nvidia ShadowPlay optional | Internal high-performance capture with automatic backend selection; external capture via user's recording software |
+| **Capture Control** | CaptureEngine (multi-threaded) + pyautogui / pynput | Internal capture engine or configurable hotkey automation with validation |
 | **Image Processing** | Pillow / OpenCV | Frame manipulation, overlay compositing (alpha_composite) |
 | **Overlay Rendering** | Playwright (headless Chromium) + Jinja2 | HTML/Tailwind templates → transparent PNG frames (see Section 7.6) |
 | **Template Editing** | Monaco Editor (frontend) | In-app HTML/Tailwind overlay editor with live preview |
@@ -304,7 +306,7 @@ The frontend includes a **project file browser** panel that provides clear visib
 │ 🏁 REPLAY                                                    │
 │   └── race.rpy                          (245 MB, copied)    │
 │                                                              │
-│ 🎬 CAPTURES                                    Step 2       │
+│ 🎬 CAPTURES                                    Step 4       │
 │   ├── intro_001.mp4                     (120 MB, 0:32)      │
 │   └── race_001.mp4                      (8.4 GB, 44:21)     │
 │                                                              │
@@ -347,7 +349,7 @@ CREATE TABLE project_meta (
     num_laps INTEGER,
     num_drivers INTEGER,
     replay_file_path TEXT,
-    current_step TEXT DEFAULT 'setup',  -- 'setup', 'capture', 'analysis', 'editing', 'export', 'upload'
+    current_step TEXT DEFAULT 'setup',  -- 'setup', 'analysis', 'editing', 'capture', 'export', 'upload'
     pipeline_config_id INTEGER REFERENCES pipeline_configs(id),  -- active config preset
     version TEXT DEFAULT '1.0.0'
 );
@@ -639,6 +641,14 @@ There are two data streams in this interface:
 | **Session info string** | On change | YAML blob with static session data — drivers, track, car classes, camera groups |
 
 Critically: **telemetry is emitted during replay playback just as it is during live racing.** When you scrub a replay to frame N and set it to 16× speed, iRacing writes telemetry at 60Hz reflecting what was happening at those replay frames. This is exactly how the legacy app worked and how League Replay Studio will work.
+
+#### Race Session Jumping
+
+The `replay_search_session_time(session_num, session_time_ms)` Broadcasting API call lets us jump directly to the start of the race session without scanning through practice/qualifying. The bridge detects the race `session_num` from `SessionInfo.Sessions` YAML and uses it to skip ahead immediately. A fallback to scanning from frame 0 is used when session jumping is unavailable.
+
+#### iRacing Window Screenshot Endpoint
+
+`GET /api/iracing/screenshot` captures the iRacing window via `mss` + `Pillow` (ctypes `FindWindowW` + `GetWindowRect` for the region) and returns JPEG bytes. The AnalysisPanel polls this endpoint at 2 Hz during analysis to show a live iRacing preview embed.
 
 #### 4.3.2 Python Library: `irsdk`
 
@@ -977,7 +987,7 @@ The analyser runs the analysis loop against a live 16× replay and produces the 
 
 **Two-pass approach:**
 
-1. **Analysis Scan** (1-3 minutes): Set replay to 16× speed, run the full analysis loop. Each `freeze_var_buffer_latest()` call produces one `race_ticks` row and N `car_states` rows (one per active car). This produces a complete, queryable record of the entire race.
+1. **Analysis Scan** (1-3 minutes): Jump directly to the race session via `replay_search_session_time(race_session_num, 0)` to skip practice/qualifying, then set replay to 16× speed and run the full analysis loop. Each `freeze_var_buffer_latest()` call produces one `race_ticks` row and N `car_states` rows (one per active car). This produces a complete, queryable record of the entire race. Falls back to legacy frame-0 scan if session jumping is unavailable.
 2. **Event Detection** (seconds, from cached data): Run all detectors against the normalised tables — no iRacing connection needed after this point. Results populate the `race_events` table. The Highlight Editing Suite reprocesses this same cached data instantly.
 
 > **Key insight:** After the scan is complete, all event detection and highlight editing operates entirely on cached SQLite data. Reprocessing the highlight algorithm takes milliseconds because it never touches iRacing or the video file.
@@ -1387,6 +1397,107 @@ class EncodingEngine:
         
         return cmd
 ```
+
+### 4.6.1 Internal Capture Engine Architecture
+
+The CaptureEngine (v4) provides high-performance internal screen capture with a decoupled pipeline. Writer threads isolate capture from pipe I/O so a blocked encoder never stalls frame grabbing. Frames are dropped rather than queued to prefer latency over completeness. Dual recording modes: GPU-native (FFmpeg gdigrab, zero Python in hot path) or CPU pipe (capture → queue → writer → FFmpeg stdin).
+
+```
+ +-----------------------------------------------------------------+
+ |                CAPTURE ENGINE ARCHITECTURE (v4)                  |
+ +-----------------------------------------------------------------+
+ |                                                                  |
+ |  Backend Selection (auto / manual)                               |
+ |  +-- Tier 1: dxcam (DXGI Desktop Duplication API)               |
+ |  |   +-- GPU-backed capture, 60-240 FPS capable                 |
+ |  |   +-- Uses camera.start(target_fps=N) for jitter-free pacing |
+ |  |   +-- output_color="BGR" -- numpy arrays, no conversion      |
+ |  |   +-- Auto-fallback on 30+ consecutive failures              |
+ |  |                                                               |
+ |  +-- Tier 2: PrintWindow (Win32 GDI)                             |
+ |      +-- Captures window content regardless of Z-order          |
+ |      +-- GetDIBits writes into pre-allocated numpy buffer       |
+ |      +-- BGRA[:,:,:3] slice to BGR -- zero extra allocation     |
+ |      +-- ~10-20 FPS (GDI overhead, acceptable for preview)      |
+ |                                                                  |
+ |  Decoupled Pipeline (writer threads + frame dropping)            |
+ |                                                                  |
+ |   Capture Thread      deque(2)     Preview Writer   Reader Thrd |
+ |   +--------------+  +--------+   +--------------+ +----------+  |
+ |   | dxcam / PW   |->| frames |==>| FFmpeg stdin |>| SOI/EOI  |  |
+ |   | -> numpy BGR |  | (drop) |   | -c:v mjpeg   | | scanner  |  |
+ |   +--------------+  +--------+   +--------------+ +----------+  |
+ |          |                                              |        |
+ |          |                                       latest_jpeg     |
+ |          |                                       (atomic swap)   |
+ |          |                                                       |
+ |          |  CPU recording mode:                                  |
+ |          |  +-- deque(2) --> Record Writer --> FFmpeg stdin       |
+ |          |      (frame drop)    thread       -c:v h264_nvenc     |
+ |          |                                    --> output.mp4     |
+ |          |                                                       |
+ |          |  GPU recording mode (alternative):                    |
+ |          |  +-- FFmpeg subprocess (standalone)                   |
+ |          |      -f gdigrab -> h264_nvenc --> output.mp4          |
+ |          |      Zero Python in recording hot path                |
+ |          |      Python = control plane only (spawn/stop)         |
+ |                                                                  |
+ |  Key design decisions:                                           |
+ |  - NO PIL/Pillow in capture or encoding loop                    |
+ |  - memoryview(frame) for stdin writes (no .tobytes() copy)      |
+ |  - Writer threads decouple capture from pipe I/O                |
+ |  - Frame dropping > latency (deque maxlen=2, oldest dropped)    |
+ |  - GPU recording via gdigrab = zero Python in hot path          |
+ |  - CPU recording via queue + writer thread as fallback          |
+ |  - dxcam drives FPS natively (no Python sleep jitter)           |
+ |  - FFmpeg handles scaling via fast_bilinear filter              |
+ |  - Recording auto-detects best GPU: NVENC > AMF > QSV > CPU    |
+ |  - Graceful recorder shutdown (CTRL_BREAK on Windows)           |
+ |  - OBS/ShadowPlay still supported via existing hotkey system    |
+ |                                                                  |
+ |  REST API                                                        |
+ |  +-- GET  /api/iracing/stream              -- MJPEG preview     |
+ |  +-- GET  /api/iracing/stream/metrics      -- FPS, drops, etc   |
+ |  +-- POST /api/iracing/stream/start        -- start engine      |
+ |  +-- POST /api/iracing/stream/stop         -- stop engine       |
+ |  +-- POST /api/iracing/stream/record/start -- recording (mode)  |
+ |  +-- POST /api/iracing/stream/record/stop  -- stop recording    |
+ |                                                                  |
+ +-----------------------------------------------------------------+
+```
+
+**Performance evolution:**
+
+| Metric | v1 (PIL pipeline) | v2 (FFmpeg MJPEG) | v3 (dual output) | v4 (current) |
+|--------|-------------------|-------------------|-------------------|--------------|
+| Frame path | numpy→PIL→JPEG | numpy.tobytes()→FFmpeg | memoryview→FFmpeg | capture→deque→writer→FFmpeg |
+| Encoder | Pillow (1 thread) | libjpeg-turbo SIMD | libjpeg-turbo SIMD | libjpeg-turbo SIMD |
+| Copy cost | 3 copies | 1 copy | 0 Python copies | 0 Python copies |
+| Recording | N/A | N/A | CPU pipe (same thread) | GPU gdigrab OR CPU pipe (separate thread) |
+| Backpressure | blocks capture | blocks capture | blocks capture | frame drop (deque maxlen=2) |
+| Pipe writes | N/A | capture thread | capture thread (2 pipes) | dedicated writer threads |
+| FPS (dxcam) | 15-25 | 40-60 | 60+ | 60+ (isolated from encoding) |
+
+**Capture Mode Comparison:**
+
+| Mode | FPS | Window Behind Others | GPU Load | Install Requirement |
+|------|-----|---------------------|----------|-------------------|
+| dxcam (DXGI) | 60-240 | No (captures desktop) | Very low | `pip install dxcam` |
+| PrintWindow (GDI) | 10-20 | Yes (captures window) | Low | Built-in (Win32) |
+| OBS (external) | Configurable | Yes (game capture) | Medium | OBS Studio |
+| ShadowPlay (external) | Configurable | Yes (game capture) | Low | GeForce Experience |
+
+**Known Constraints:**
+- dxcam captures the composited desktop, not a specific window -- if iRacing is behind another window, the capture will include the overlapping app. Ideal for fullscreen iRacing.
+- dxcam requires GPU access and will not work over Remote Desktop (no DXGI).
+- PrintWindow is the only option that captures specific window content behind other windows, but limited to ~10-20 FPS due to GDI overhead.
+- FFmpeg must be installed and in PATH. Required for both MJPEG preview encoding and GPU H.264 recording.
+- The engine uses a singleton pattern -- multiple MJPEG stream consumers share the same capture, avoiding duplicate captures.
+- GPU recording mode uses gdigrab desktop-region capture; if iRacing window is moved during recording, the capture region will be stale. CPU recording mode is unaffected.
+- Writer threads use `deque(maxlen=2)` -- frames are dropped (oldest first) when encoders can't keep up. The `frames_dropped` metric tracks this.
+- OBS/ShadowPlay remain fully supported via the existing hotkey-based capture orchestration system.
+- Remaining bottleneck for CPU recording mode: `memoryview(frame)` still incurs one kernel-level memcpy (~6MB/frame at 1080p). GPU recording mode avoids this entirely by keeping capture inside FFmpeg's native gdigrab pipeline.
+- True zero-copy (DXGI texture → NVENC directly) would require a C++/Rust bridge. GPU recording mode is the practical alternative that eliminates Python from the recording hot path.
 
 ### 4.7 Video Preview System — Engineering for Multi-GB Files
 
@@ -2106,7 +2217,7 @@ GET     /api/system/health                     # Health check
 **Project Library:**
 - Grid or list view of all projects
 - Thumbnail preview (first frame of captured video, or track map if no capture yet)
-- Project metadata: track, date, number of drivers, **current step** (setup/capture/analysis/editing/export/upload)
+- Project metadata: track, date, number of drivers, **current step** (setup/analysis/editing/capture/export/upload)
 - **Step indicator** shows workflow progress at a glance: ✅✅✅🔄⏳⏳
 - Search and filter by track, date, status, step
 - Quick actions: open, duplicate, delete, export, **run pipeline**
@@ -3204,17 +3315,17 @@ Once a project's configuration settings are dialled in (camera weights, highligh
 ┌─────────────────────────────────────────────────────────────────┐
 │                    AUTOMATED PIPELINE                            │
 │                                                                  │
-│  ┌──────┐   ┌────────┐   ┌───────┐   ┌──────┐   ┌──────────┐  │
-│  │CAPTURE│──▸│ANALYSIS│──▸│EDITING│──▸│EXPORT│──▸│  UPLOAD   │  │
-│  │  OBS  │   │  16× + │   │ Apply │   │ GPU  │   │  YouTube  │  │
-│  │  rec  │   │ detect │   │ config│   │ enc  │   │  (opt.)   │  │
-│  └──┬───┘   └───┬────┘   └──┬────┘   └──┬───┘   └─────┬────┘  │
-│     │           │            │           │             │        │
-│  ┌──▼───┐   ┌───▼────┐   ┌──▼────┐   ┌──▼───┐   ┌────▼────┐  │
-│  │Pause?│   │Pause?  │   │Pause? │   │Pause?│   │ Done!   │  │
-│  │Tweak │   │Review  │   │Adjust │   │Cancel│   │ Video   │  │
-│  │Resume│   │events  │   │cuts   │   │Retry │   │ live!   │  │
-│  └──────┘   └────────┘   └───────┘   └──────┘   └─────────┘  │
+│  ┌────────┐   ┌───────┐   ┌──────┐   ┌──────┐   ┌──────────┐  │
+│  │ANALYSIS│──▸│EDITING│──▸│CAPTURE│──▸│EXPORT│──▸│  UPLOAD   │  │
+│  │  16× + │   │ Tune  │   │ OBS  │   │ GPU  │   │  YouTube  │  │
+│  │ detect │   │ config│   │ rec  │   │ enc  │   │  (opt.)   │  │
+│  └───┬────┘   └──┬────┘   └──┬───┘   └──┬───┘   └─────┬────┘  │
+│      │           │           │           │             │        │
+│  ┌───▼────┐   ┌──▼────┐   ┌──▼───┐   ┌──▼───┐   ┌────▼────┐  │
+│  │Pause?  │   │Pause? │   │Pause?│   │Pause?│   │ Done!   │  │
+│  │Review  │   │Adjust │   │Tweak │   │Cancel│   │ Video   │  │
+│  │events  │   │cuts   │   │Resume│   │Retry │   │ live!   │  │
+│  └────────┘   └───────┘   └──────┘   └──────┘   └─────────┘  │
 │                                                                  │
 │  [▶ GO]  [⏸ PAUSE]  [⏹ STOP]  [↻ RETRY STEP]                   │
 └─────────────────────────────────────────────────────────────────┘
@@ -3230,7 +3341,7 @@ Users can save and version their pipeline configurations:
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
 │ 📋 League Race Default             ★ Active                  │
-│    Capture + Analyse + Highlights (5 min) + Upload (unlisted)│
+│    Analyse + Capture + Highlights (5 min) + Upload (unlisted)│
 │    Last modified: 2026-03-31                                 │
 │    [Edit] [Duplicate] [Set Active]                           │
 │                                                              │
@@ -3240,7 +3351,7 @@ Users can save and version their pipeline configurations:
 │    [Edit] [Duplicate] [Set Active]                           │
 │                                                              │
 │ 📋 Full Broadcast Package                                    │
-│    Capture + Full analysis + Highlights (10 min) +           │
+│    Full analysis + Capture + Highlights (10 min) +           │
 │    Full race + Upload both (public)                          │
 │    Last modified: 2026-03-25                                 │
 │    [Edit] [Duplicate] [Set Active]                           │
@@ -3891,7 +4002,7 @@ Capture remains via OBS/ShadowPlay (an unavoidable constraint — iRacing doesn'
 - **Encoding**: from 60-90 minutes (CPU) to 3-8 minutes (GPU)
 - **Preview**: from nothing to full-length video preview with overlay compositing
 - **Editing**: from a black-box algorithm to a full interactive highlight editing suite
-- **Workflow**: from start-and-pray to a **step-based project workflow** (Setup → Capture → Analysis → Editing → Export → Upload) with file browser, replay picker, and intuitive navigation
+- **Workflow**: from start-and-pray to a **step-based project workflow** (Setup → Analysis → Editing → Capture → Export → Upload) with file browser, replay picker, and intuitive navigation
 - **Pipeline**: from manual multi-step process to **one-click "Go"** with pause/resume/intervene, failure recovery, and saveable configuration presets
 - **YouTube**: from manual upload to **integrated YouTube channel** — auto-upload with templated metadata, video browser, project association
 - **CLI**: once configured, `lrs.bat --project ... --highlights` spits out the video — no UI needed
