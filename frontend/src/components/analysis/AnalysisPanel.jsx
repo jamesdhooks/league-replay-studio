@@ -9,7 +9,7 @@ import {
   Fuel, Zap, Crown, Flag, FlagTriangleRight, Loader2, CheckCircle2,
   XCircle, Terminal, ChevronRight, ChevronDown, Camera, Video, Monitor,
   SkipBack, SkipForward, Rewind, FastForward, List, Trash2, Settings,
-  Eye, Users, Flame, RotateCcw, CircleDot, ShieldAlert, WifiOff, AlertCircle,
+  Eye, Users, Flame, RotateCcw, CircleDot, ShieldAlert, WifiOff, AlertCircle, Minus, Plus,
 } from 'lucide-react'
 
 /**
@@ -188,16 +188,18 @@ export default function AnalysisPanel() {
   const [streamLoaded, setStreamLoaded] = useState(false)
   const [streamError, setStreamError] = useState(null)
 
+  // Timeline scrubber state
+  const [raceDuration, setRaceDuration] = useState(0)
+  const scrubberRef = useRef(null)
+
   // Reset loaded state whenever the stream is recycled
   useEffect(() => { setStreamLoaded(false); setStreamError(null) }, [streamKey])
 
   // Drivers list for camera switching
   const [drivers, setDrivers] = useState([])
-  const [showDriverPicker, setShowDriverPicker] = useState(false)
 
   // Camera groups
   const [cameraGroups, setCameraGroups] = useState([])
-  const [showCameraPicker, setShowCameraPicker] = useState(false)
 
   const fetchWindows = useCallback(async () => {
     setLoadingWindows(true)
@@ -255,6 +257,14 @@ export default function AnalysisPanel() {
       fetchEventSummary(activeProject.id)
     }
   }, [activeProject?.id, fetchAnalysisStatus, fetchEvents, fetchEventSummary])
+
+  // Fetch race duration for timeline scrubber
+  useEffect(() => {
+    if (!activeProject?.id) return
+    apiGet(`/projects/${activeProject.id}/analysis/race-duration`)
+      .then(data => setRaceDuration(data?.duration || 0))
+      .catch(() => {})
+  }, [activeProject?.id, events])
 
   // Auto-scroll log to bottom
   useEffect(() => {
@@ -366,7 +376,6 @@ export default function AnalysisPanel() {
     const camGroup = cameraGroups.length > 0 ? cameraGroups[0].group_num : 0
     try {
       await apiPost('/iracing/replay/camera', { car_idx: carIdx, group_num: camGroup })
-      setShowDriverPicker(false)
     } catch {}
   }
 
@@ -374,7 +383,6 @@ export default function AnalysisPanel() {
     const carIdx = replayState?.cam_car_idx ?? 0
     try {
       await apiPost('/iracing/replay/camera', { car_idx: carIdx, group_num: groupNum })
-      setShowCameraPicker(false)
     } catch {}
   }
 
@@ -995,6 +1003,73 @@ export default function AnalysisPanel() {
             </div>
           </div>
 
+          {/* ── Timeline scrubber ─────────────────────────────────────── */}
+          {isConnected && raceDuration > 0 && replayState && (
+            <div className="shrink-0 px-4 pt-2 bg-bg-primary">
+              <div
+                ref={scrubberRef}
+                className="relative h-5 group cursor-pointer select-none"
+                onMouseDown={(e) => {
+                  const bar = e.currentTarget
+                  const rect = bar.getBoundingClientRect()
+                  const seekTo = (clientX) => {
+                    const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+                    const timeMs = Math.round(pct * raceDuration * 1000)
+                    apiPost('/iracing/replay/seek-time', { session_num: 0, session_time_ms: timeMs })
+                  }
+                  seekTo(e.clientX)
+                  let lastSeek = Date.now()
+                  const onMove = (ev) => {
+                    if (Date.now() - lastSeek < 200) return
+                    lastSeek = Date.now()
+                    seekTo(ev.clientX)
+                  }
+                  const onUp = (ev) => {
+                    seekTo(ev.clientX)
+                    document.removeEventListener('mousemove', onMove)
+                    document.removeEventListener('mouseup', onUp)
+                  }
+                  document.addEventListener('mousemove', onMove)
+                  document.addEventListener('mouseup', onUp)
+                }}
+              >
+                {/* Track */}
+                <div className="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-1.5 bg-surface rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-gradient-from via-gradient-via to-gradient-to rounded-full transition-all duration-200"
+                    style={{ width: `${raceDuration > 0 ? Math.min(100, (replayState.session_time / raceDuration) * 100) : 0}%` }}
+                  />
+                </div>
+                {/* Event markers */}
+                {(isAnalyzing ? discoveredEvents : events).map((ev, i) => {
+                  const time = ev.startTime ?? ev.start_time_seconds ?? 0
+                  if (time <= 0 || raceDuration <= 0) return null
+                  const pct = Math.min(100, (time / raceDuration) * 100)
+                  return (
+                    <div
+                      key={`marker-${i}`}
+                      className="absolute top-1/2 -translate-y-1/2 w-0.5 h-3 rounded-full bg-white/30 pointer-events-none"
+                      style={{ left: `${pct}%` }}
+                    />
+                  )
+                })}
+                {/* Thumb */}
+                <div
+                  className="absolute top-1/2 w-3 h-3 rounded-full bg-accent border-2 border-white shadow-md
+                             opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
+                  style={{
+                    left: `${raceDuration > 0 ? Math.min(100, (replayState.session_time / raceDuration) * 100) : 0}%`,
+                    transform: 'translate(-50%, -50%)',
+                  }}
+                />
+              </div>
+              <div className="flex justify-between -mt-0.5 pb-0.5">
+                <span className="text-xxs text-text-disabled font-mono">{formatTime(replayState.session_time)}</span>
+                <span className="text-xxs text-text-disabled font-mono">{formatTime(raceDuration)}</span>
+              </div>
+            </div>
+          )}
+
           {/* ── Full playback controls beneath the TV ─────────────────── */}
           {isConnected && (
             <div className="shrink-0 border-t border-border bg-bg-secondary px-4 py-2">
@@ -1005,8 +1080,25 @@ export default function AnalysisPanel() {
                     {formatTime(replayState.session_time)}
                   </span>
                   {replayState.race_laps > 0 && (
-                    <span className="text-xxs text-text-disabled">
-                      · Lap {replayState.race_laps}
+                    <span className="text-xxs text-text-disabled flex items-center gap-1">
+                      ·
+                      <button
+                        onClick={() => handleReplaySearch('prev_lap')}
+                        title="Previous lap"
+                        className="w-4 h-4 rounded flex items-center justify-center hover:bg-bg-hover
+                                   text-text-disabled hover:text-text-primary transition-colors"
+                      >
+                        <Minus size={10} />
+                      </button>
+                      <span>Lap {replayState.race_laps}</span>
+                      <button
+                        onClick={() => handleReplaySearch('next_lap')}
+                        title="Next lap"
+                        className="w-4 h-4 rounded flex items-center justify-center hover:bg-bg-hover
+                                   text-text-disabled hover:text-text-primary transition-colors"
+                      >
+                        <Plus size={10} />
+                      </button>
                     </span>
                   )}
                 </div>
@@ -1055,60 +1147,63 @@ export default function AnalysisPanel() {
                   className="p-1.5 rounded-md hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors">
                   <SkipForward size={14} />
                 </button>
-
-                {/* Separator */}
-                <div className="w-px h-5 bg-border mx-1" />
-
-                {/* Camera switcher */}
-                <div className="relative">
-                  <button onClick={() => { setShowCameraPicker(prev => !prev); setShowDriverPicker(false) }}
-                    title="Switch camera"
-                    className="p-1.5 rounded-md hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors">
-                    <Eye size={14} />
-                  </button>
-                  {showCameraPicker && (
-                    <div className="absolute bottom-full mb-1 right-0 w-48 max-h-40 overflow-y-auto
-                                    bg-bg-secondary border border-border rounded-lg shadow-xl z-20 animate-fade-in">
-                      {cameraGroups.map(cam => (
-                        <button key={cam.group_num}
-                          onClick={() => handleSwitchCamera(cam.group_num)}
-                          className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-xxs
-                                     hover:bg-bg-hover transition-colors text-text-secondary">
-                          <Eye size={10} />
-                          <span>{cam.group_name}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Driver switcher */}
-                <div className="relative">
-                  <button onClick={() => { setShowDriverPicker(prev => !prev); setShowCameraPicker(false) }}
-                    title="Switch to driver"
-                    className="p-1.5 rounded-md hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors">
-                    <Users size={14} />
-                  </button>
-                  {showDriverPicker && (
-                    <div className="absolute bottom-full mb-1 right-0 w-56 max-h-52 overflow-y-auto
-                                    bg-bg-secondary border border-border rounded-lg shadow-xl z-20 animate-fade-in">
-                      {drivers.filter(d => !d.is_spectator).map(d => (
-                        <button key={d.car_idx}
-                          onClick={() => handleSwitchDriver(d.car_idx)}
-                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xxs
-                                     hover:bg-bg-hover transition-colors
-                                     ${replayState?.cam_car_idx === d.car_idx ? 'bg-accent/10 text-accent' : 'text-text-secondary'}`}>
-                          <span className="font-mono shrink-0 w-5 text-right">#{d.car_number}</span>
-                          <span className="truncate">{d.user_name}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
               </div>
             </div>
           )}
         </div>
+
+        {/* ── Right sidebar (Cameras + Drivers) ───────────────────────── */}
+        {isConnected && (
+          <div className="w-48 flex flex-col overflow-hidden border-l border-border bg-bg-primary/50 shrink-0">
+            {/* Cameras section */}
+            <div className="flex flex-col overflow-hidden" style={{ maxHeight: '45%' }}>
+              <div className="shrink-0 px-3 py-2 border-b border-border bg-bg-secondary/50">
+                <span className="text-xxs font-medium text-text-primary flex items-center gap-1.5">
+                  <Eye size={11} />
+                  Cameras
+                </span>
+              </div>
+              <div className="flex-1 overflow-y-auto">
+                {cameraGroups.map(cam => (
+                  <button key={cam.group_num}
+                    onClick={() => handleSwitchCamera(cam.group_num)}
+                    className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xxs
+                               hover:bg-bg-hover transition-colors border-b border-border-subtle/30
+                               ${replayState?.cam_group_num === cam.group_num
+                                 ? 'bg-accent/10 text-accent font-medium'
+                                 : 'text-text-secondary'}`}>
+                    <Eye size={10} className={replayState?.cam_group_num === cam.group_num ? 'text-accent' : 'text-text-disabled'} />
+                    <span className="truncate">{cam.group_name}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            {/* Drivers section */}
+            <div className="flex-1 flex flex-col overflow-hidden border-t border-border">
+              <div className="shrink-0 px-3 py-2 border-b border-border bg-bg-secondary/50">
+                <span className="text-xxs font-medium text-text-primary flex items-center gap-1.5">
+                  <Users size={11} />
+                  Drivers
+                </span>
+              </div>
+              <div className="flex-1 overflow-y-auto">
+                {drivers.filter(d => !d.is_spectator).map(d => (
+                  <button key={d.car_idx}
+                    onClick={() => handleSwitchDriver(d.car_idx)}
+                    className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xxs
+                               hover:bg-bg-hover transition-colors border-b border-border-subtle/30
+                               ${replayState?.cam_car_idx === d.car_idx
+                                 ? 'bg-accent/10 text-accent font-medium'
+                                 : 'text-text-secondary'}`}>
+                    <span className="font-mono shrink-0 w-5 text-right">#{d.car_number}</span>
+                    <span className="truncate">{d.user_name}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
       </div>
     </div>
   )
