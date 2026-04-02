@@ -7,10 +7,12 @@ import { apiPost, apiGet, apiDelete } from '../../services/api'
 import {
   Play, Pause, Square, BarChart3, AlertTriangle, Swords, ArrowUpDown,
   Fuel, Zap, Crown, Flag, FlagTriangleRight, Loader2, CheckCircle2,
-  XCircle, Terminal, ChevronRight, ChevronDown, Camera, Video, Monitor,
+  XCircle, Terminal, ChevronRight, ChevronDown, ChevronLeft, Camera, Video, Monitor,
   SkipBack, SkipForward, Rewind, FastForward, List, Trash2, Settings,
   Eye, Users, Flame, RotateCcw, CircleDot, ShieldAlert, WifiOff, AlertCircle, Minus, Plus,
+  Folder,
 } from 'lucide-react'
+import ProjectFileBrowser from '../projects/ProjectFileBrowser'
 
 /**
  * Event type display configuration — icons, labels, and colors.
@@ -139,7 +141,7 @@ function H264StreamPlayer({ src, className, onLoad, onError }) {
 /**
  * AnalysisPanel — Full layout with:
  *  - Fixed top bar: controls + progress + clear analysis
- *  - Full-height middle: wide tabbed sidebar (Log/Events) + 16:9 MJPEG TV + playback controls
+ *  - Full-height middle: resizable/collapsible tabbed sidebar (Log/Events/Files) + 16:9 MJPEG TV + playback controls
  *  - Particle event cards overlaid on the TV
  *  - Clicking events seeks the replay; separate expand button for details
  */
@@ -157,9 +159,15 @@ export default function AnalysisPanel() {
   const eventsEndRef = useRef(null)
   const [expandedEvent, setExpandedEvent] = useState(null)
 
-  // Sidebar tab: 'log' | 'events'
+  // Sidebar tab: 'log' | 'events' | 'files'
   const [sidebarTab, setSidebarTab] = useLocalStorage('lrs:analysis:sidebarTab', 'log')
   const wasAnalyzingRef = useRef(false)
+
+  // Sidebar resize / collapse
+  const [sidebarWidth, setSidebarWidth] = useLocalStorage('lrs:analysis:sidebarWidth', 384)
+  const [sidebarCollapsed, setSidebarCollapsed] = useLocalStorage('lrs:analysis:sidebarCollapsed', false)
+  const [sidebarOverlay, setSidebarOverlay] = useState(false)
+  const isDragging = useRef(false)
 
   // Camera follow toggle
   const [cameraFollow, setCameraFollow] = useLocalStorage('lrs:analysis:cameraFollow', false)
@@ -309,6 +317,35 @@ export default function AnalysisPanel() {
       </div>
     )
   }
+
+  // Sidebar drag-resize handler
+  const handleDragStart = useCallback((e) => {
+    isDragging.current = true
+    const startX = e.clientX
+    const startWidth = sidebarWidth
+
+    const onMove = (moveEvt) => {
+      const newWidth = startWidth + (moveEvt.clientX - startX)
+      if (newWidth < 150) {
+        setSidebarCollapsed(true)
+        setSidebarWidth(384)
+        isDragging.current = false
+        document.removeEventListener('mousemove', onMove)
+        document.removeEventListener('mouseup', onUp)
+      } else {
+        setSidebarWidth(Math.min(600, Math.max(200, newWidth)))
+      }
+    }
+
+    const onUp = () => {
+      isDragging.current = false
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
+
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }, [sidebarWidth, setSidebarCollapsed, setSidebarWidth])
 
   const handleStart = async () => {
     setSidebarTab('log')
@@ -541,182 +578,359 @@ export default function AnalysisPanel() {
       </div>
 
       {/* ── Main area: sidebar + TV + controls (fills remaining height) ── */}
-      <div className="flex-1 flex overflow-hidden min-h-0">
+      <div className="flex-1 flex overflow-hidden min-h-0 relative">
 
-        {/* ── Tabbed sidebar (Log / Events) — wider ───────────────────── */}
-        <div className="w-96 flex flex-col overflow-hidden border-r border-border bg-bg-primary/50 shrink-0">
-          {/* Tab bar */}
-          <div className="flex shrink-0 border-b border-border">
+        {/* ── Tabbed sidebar (Log / Events / Files) — resizable & collapsible ── */}
+        {sidebarCollapsed ? (
+          /* Collapsed: narrow icon bar */
+          <div className="w-10 flex flex-col items-center py-2 gap-2 border-r border-border bg-bg-secondary shrink-0">
             <button
-              onClick={() => setSidebarTab('log')}
-              className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-medium
-                         transition-colors border-b-2
-                         ${sidebarTab === 'log'
-                           ? 'border-accent text-accent bg-accent/5'
-                           : 'border-transparent text-text-tertiary hover:text-text-secondary'
-                         }`}
+              onClick={() => { setSidebarTab('log'); setSidebarOverlay(true) }}
+              title="Log"
+              className="p-1.5 rounded-md hover:bg-surface-hover text-text-tertiary hover:text-text-secondary transition-colors"
             >
-              <Terminal size={13} />
-              Log ({analysisLog.length})
+              <Terminal size={16} />
             </button>
             <button
-              onClick={() => setSidebarTab('events')}
-              className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-medium
-                         transition-colors border-b-2
-                         ${sidebarTab === 'events'
-                           ? 'border-accent text-accent bg-accent/5'
-                           : 'border-transparent text-text-tertiary hover:text-text-secondary'
-                         }`}
+              onClick={() => { setSidebarTab('events'); setSidebarOverlay(true) }}
+              title="Events"
+              className="p-1.5 rounded-md hover:bg-surface-hover text-text-tertiary hover:text-text-secondary transition-colors"
             >
-              <List size={13} />
-              Events ({discoveredEvents.length || eventSummary?.total_events || 0})
+              <List size={16} />
+            </button>
+            <button
+              onClick={() => { setSidebarTab('files'); setSidebarOverlay(true) }}
+              title="Files"
+              className="p-1.5 rounded-md hover:bg-surface-hover text-text-tertiary hover:text-text-secondary transition-colors"
+            >
+              <Folder size={16} />
+            </button>
+            <button
+              onClick={() => setSidebarCollapsed(false)}
+              title="Expand sidebar"
+              className="mt-auto p-1.5 rounded-md hover:bg-surface-hover text-text-tertiary hover:text-text-secondary transition-colors"
+            >
+              <ChevronRight size={16} />
             </button>
           </div>
+        ) : (
+          /* Expanded: full sidebar with resize handle */
+          <div className="flex flex-col overflow-hidden border-r border-border bg-bg-primary/50 shrink-0 relative"
+               style={{ width: sidebarWidth }}>
+            {/* Tab bar */}
+            <div className="flex shrink-0 border-b border-border">
+              <button
+                onClick={() => setSidebarTab('log')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-2 text-xs font-medium
+                           transition-colors border-b-2
+                           ${sidebarTab === 'log'
+                             ? 'border-accent text-accent bg-accent/5'
+                             : 'border-transparent text-text-tertiary hover:text-text-secondary'
+                           }`}
+              >
+                <Terminal size={13} />
+                Log ({analysisLog.length})
+              </button>
+              <button
+                onClick={() => setSidebarTab('events')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-2 text-xs font-medium
+                           transition-colors border-b-2
+                           ${sidebarTab === 'events'
+                             ? 'border-accent text-accent bg-accent/5'
+                             : 'border-transparent text-text-tertiary hover:text-text-secondary'
+                           }`}
+              >
+                <List size={13} />
+                Events ({discoveredEvents.length || eventSummary?.total_events || 0})
+              </button>
+              <button
+                onClick={() => setSidebarTab('files')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-2 text-xs font-medium
+                           transition-colors border-b-2
+                           ${sidebarTab === 'files'
+                             ? 'border-accent text-accent bg-accent/5'
+                             : 'border-transparent text-text-tertiary hover:text-text-secondary'
+                           }`}
+              >
+                <Folder size={13} />
+                Files
+              </button>
+              <button
+                onClick={() => setSidebarCollapsed(true)}
+                title="Collapse sidebar"
+                className="px-2 py-2 text-text-tertiary hover:text-text-secondary transition-colors"
+              >
+                <ChevronLeft size={13} />
+              </button>
+            </div>
 
-          {/* Tab content */}
-          <div className="flex-1 overflow-y-auto">
-            {sidebarTab === 'log' ? (
-              /* ── Log tab ─────────────────────────────────────────── */
-              <div className="font-mono">
-                {analysisLog.length === 0 && !isAnalyzing && (
-                  <div className="flex items-center justify-center py-8 text-text-disabled text-xs">
-                    No log entries yet
-                  </div>
-                )}
-                {analysisLog.map(entry => (
-                  <div
-                    key={entry.id}
-                    className="flex gap-2 px-3 py-1.5 text-xxs border-b border-border-subtle/30 animate-fade-in"
-                  >
-                    <span className="shrink-0 select-none mt-0.5">
-                      {entry.level === 'success' ? (
-                        <CheckCircle2 size={11} className="text-success" />
-                      ) : entry.level === 'error' ? (
-                        <XCircle size={11} className="text-danger" />
-                      ) : entry.level === 'detect' ? (
-                        <Zap size={11} className="text-warning" />
-                      ) : (
-                        <span className="text-text-disabled">›</span>
-                      )}
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <span className="text-text-secondary">{entry.message}</span>
-                      {entry.detail && (
-                        <span className="text-text-disabled ml-1">— {entry.detail}</span>
-                      )}
+            {/* Tab content */}
+            <div className="flex-1 overflow-y-auto">
+              {sidebarTab === 'log' ? (
+                /* ── Log tab ─────────────────────────────────────────── */
+                <div className="font-mono">
+                  {analysisLog.length === 0 && !isAnalyzing && (
+                    <div className="flex items-center justify-center py-8 text-text-disabled text-xs">
+                      No log entries yet
                     </div>
-                  </div>
-                ))}
-                <div ref={logEndRef} />
-              </div>
-            ) : (
-              /* ── Events tab ──────────────────────────────────────── */
-              <div>
-                {/* Filter chips */}
-                {eventSummary && eventSummary.total_events > 0 && (
-                  <div className="px-3 py-2 border-b border-border-subtle flex flex-wrap gap-1">
-                    {eventSummary.by_type.map(({ event_type, count }) => {
-                      const cfg = EVENT_CONFIG[event_type] || {}
-                      const Icon = cfg.icon || BarChart3
-                      const isActive = activeFilter === event_type
-                      return (
-                        <button
-                          key={event_type}
-                          onClick={() => handleFilterChange(event_type)}
-                          className={`flex items-center gap-1 px-1.5 py-0.5 text-xxs rounded
-                                     transition-colors border
-                                     ${isActive
-                                       ? 'border-accent bg-accent/10 text-accent'
-                                       : 'border-border text-text-tertiary hover:text-text-secondary'
-                                     }`}
-                        >
-                          <Icon size={9} className={cfg.color} />
-                          <span>{count}</span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
-
-                {/* Event list */}
-                {(isAnalyzing ? discoveredEvents : events).map((ev) => {
-                  const isDiscovered = isAnalyzing
-                  const type = isDiscovered ? ev.type : ev.event_type
-                  const cfg = EVENT_CONFIG[type] || {}
-                  const Icon = cfg.icon || BarChart3
-                  const names = isDiscovered ? (ev.driverNames || []) : (ev.driver_names || [])
-                  const startSec = isDiscovered ? ev.startTime : ev.start_time_seconds
-                  const sev = ev.severity
-                  const eventId = isDiscovered ? ev.id : ev.id
-                  const isExpanded = expandedEvent === `sidebar-${eventId}`
-
-                  return (
-                    <div key={`${isDiscovered ? 'd' : 'e'}-${eventId}`}
-                         className="border-b border-border-subtle/30 animate-slide-right">
-                      <div className="flex items-center hover:bg-bg-hover transition-colors">
-                        {/* Main clickable area — seeks the replay */}
-                        <button
-                          onClick={() => seekToEvent(ev)}
-                          title="Seek replay to this event"
-                          className="flex-1 flex items-center gap-2 px-3 py-2.5 text-left min-w-0"
-                        >
-                          <Icon size={14} className={cfg.color || 'text-text-tertiary'} />
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-1.5">
-                              <span className="text-xs font-medium text-text-primary truncate">
-                                {cfg.label || type}
-                              </span>
-                              {names.length > 0 && (
-                                <span className="text-xxs text-text-disabled truncate max-w-[100px]">
-                                  {names[0]}
-                                </span>
-                              )}
-                            </div>
-                            <span className="text-xxs text-text-disabled font-mono">
-                              {formatTime(startSec)}
-                            </span>
-                          </div>
-                          <span className={`shrink-0 w-5 h-5 rounded-full flex items-center justify-center
-                                          text-xxs font-bold ${severityColor(sev)}`}>
-                            {sev}
-                          </span>
-                        </button>
-                        {/* Separate expand button */}
-                        {!isDiscovered && (
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              setExpandedEvent(prev => prev === `sidebar-${eventId}` ? null : `sidebar-${eventId}`)
-                            }}
-                            title={isExpanded ? 'Collapse details' : 'Expand details'}
-                            className="shrink-0 w-8 h-8 flex items-center justify-center mr-1
-                                       rounded-md hover:bg-surface-active text-text-disabled
-                                       hover:text-text-secondary transition-colors"
-                          >
-                            <ChevronDown size={14}
-                              className={`transition-transform duration-150 ${isExpanded ? 'rotate-180' : ''}`} />
-                          </button>
+                  )}
+                  {analysisLog.map(entry => (
+                    <div
+                      key={entry.id}
+                      className="flex gap-2 px-3 py-1.5 text-xxs border-b border-border-subtle/30 animate-fade-in"
+                    >
+                      <span className="shrink-0 select-none mt-0.5">
+                        {entry.level === 'success' ? (
+                          <CheckCircle2 size={11} className="text-success" />
+                        ) : entry.level === 'error' ? (
+                          <XCircle size={11} className="text-danger" />
+                        ) : entry.level === 'detect' ? (
+                          <Zap size={11} className="text-warning" />
+                        ) : (
+                          <span className="text-text-disabled">›</span>
+                        )}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <span className="text-text-secondary">{entry.message}</span>
+                        {entry.detail && (
+                          <span className="text-text-disabled ml-1">— {entry.detail}</span>
                         )}
                       </div>
-                      {isExpanded && !isDiscovered && (
-                        <div className="px-3 pt-2 pb-2 bg-bg-secondary/50 border-t border-border-subtle animate-fade-in">
-                          <EventDetail event={ev} />
-                        </div>
-                      )}
                     </div>
-                  )
-                })}
+                  ))}
+                  <div ref={logEndRef} />
+                </div>
+              ) : sidebarTab === 'events' ? (
+                /* ── Events tab ──────────────────────────────────────── */
+                <div>
+                  {/* Filter chips */}
+                  {eventSummary && eventSummary.total_events > 0 && (
+                    <div className="px-3 py-2 border-b border-border-subtle flex flex-wrap gap-1">
+                      {eventSummary.by_type.map(({ event_type, count }) => {
+                        const cfg = EVENT_CONFIG[event_type] || {}
+                        const Icon = cfg.icon || BarChart3
+                        const isActive = activeFilter === event_type
+                        return (
+                          <button
+                            key={event_type}
+                            onClick={() => handleFilterChange(event_type)}
+                            className={`flex items-center gap-1 px-1.5 py-0.5 text-xxs rounded
+                                       transition-colors border
+                                       ${isActive
+                                         ? 'border-accent bg-accent/10 text-accent'
+                                         : 'border-border text-text-tertiary hover:text-text-secondary'
+                                       }`}
+                          >
+                            <Icon size={9} className={cfg.color} />
+                            <span>{count}</span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
 
-                {(isAnalyzing ? discoveredEvents : events).length === 0 && (
-                  <div className="flex items-center justify-center py-8 text-text-disabled text-xs">
-                    {isAnalyzing ? 'Waiting for events...' : 'No events detected'}
-                  </div>
-                )}
-                <div ref={eventsEndRef} />
-              </div>
-            )}
+                  {/* Event list — compact rows */}
+                  {(isAnalyzing ? discoveredEvents : events).map((ev) => {
+                    const isDiscovered = isAnalyzing
+                    const type = isDiscovered ? ev.type : ev.event_type
+                    const cfg = EVENT_CONFIG[type] || {}
+                    const Icon = cfg.icon || BarChart3
+                    const startSec = isDiscovered ? ev.startTime : ev.start_time_seconds
+                    const sev = ev.severity
+                    const eventId = isDiscovered ? ev.id : ev.id
+                    const isExpanded = expandedEvent === `sidebar-${eventId}`
+
+                    return (
+                      <div key={`${isDiscovered ? 'd' : 'e'}-${eventId}`}
+                           className="border-b border-border-subtle/30 animate-slide-right">
+                        <div className="flex items-center hover:bg-bg-hover transition-colors">
+                          <button
+                            onClick={() => seekToEvent(ev)}
+                            title="Seek replay to this event"
+                            className="flex-1 flex items-center gap-1.5 px-3 py-1.5 text-left min-w-0"
+                          >
+                            <Icon size={12} className={cfg.color || 'text-text-tertiary'} />
+                            <span className="text-xs font-medium text-text-primary truncate">
+                              {cfg.label || type}
+                            </span>
+                            <span className="text-xxs text-text-disabled font-mono ml-auto">
+                              {formatTime(startSec)}
+                            </span>
+                            <span className={`shrink-0 w-4 h-4 rounded-full flex items-center justify-center
+                                            text-xxs font-bold ${severityColor(sev)}`}>
+                              {sev}
+                            </span>
+                          </button>
+                          {!isDiscovered && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setExpandedEvent(prev => prev === `sidebar-${eventId}` ? null : `sidebar-${eventId}`)
+                              }}
+                              title={isExpanded ? 'Collapse details' : 'Expand details'}
+                              className="shrink-0 w-6 h-6 flex items-center justify-center mr-1
+                                         rounded-md hover:bg-surface-active text-text-disabled
+                                         hover:text-text-secondary transition-colors"
+                            >
+                              <ChevronDown size={12}
+                                className={`transition-transform duration-150 ${isExpanded ? 'rotate-180' : ''}`} />
+                            </button>
+                          )}
+                        </div>
+                        {isExpanded && !isDiscovered && (
+                          <div className="px-3 pt-2 pb-2 bg-bg-secondary/50 border-t border-border-subtle animate-fade-in">
+                            <EventDetail event={ev} />
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+
+                  {(isAnalyzing ? discoveredEvents : events).length === 0 && (
+                    <div className="flex items-center justify-center py-8 text-text-disabled text-xs">
+                      {isAnalyzing ? 'Waiting for events...' : 'No events detected'}
+                    </div>
+                  )}
+                  <div ref={eventsEndRef} />
+                </div>
+              ) : (
+                /* ── Files tab ──────────────────────────────────────── */
+                <ProjectFileBrowser projectId={activeProject.id} />
+              )}
+            </div>
+
+            {/* Drag handle */}
+            <div
+              onMouseDown={handleDragStart}
+              className="absolute top-0 right-0 bottom-0 w-1 cursor-col-resize hover:bg-accent/40 transition-colors z-10"
+            />
           </div>
-        </div>
+        )}
+
+        {/* Overlay sidebar when collapsed and tab clicked */}
+        {sidebarCollapsed && sidebarOverlay && (
+          <>
+            <div className="fixed inset-0 z-30" onClick={() => setSidebarOverlay(false)} />
+            <div className="absolute left-10 top-0 bottom-0 z-40 w-96 bg-bg-secondary border-r border-border shadow-xl flex flex-col overflow-hidden">
+              {/* Overlay tab bar */}
+              <div className="flex shrink-0 border-b border-border">
+                <button
+                  onClick={() => setSidebarTab('log')}
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-2 text-xs font-medium
+                             transition-colors border-b-2
+                             ${sidebarTab === 'log'
+                               ? 'border-accent text-accent bg-accent/5'
+                               : 'border-transparent text-text-tertiary hover:text-text-secondary'
+                             }`}
+                >
+                  <Terminal size={13} />
+                  Log
+                </button>
+                <button
+                  onClick={() => setSidebarTab('events')}
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-2 text-xs font-medium
+                             transition-colors border-b-2
+                             ${sidebarTab === 'events'
+                               ? 'border-accent text-accent bg-accent/5'
+                               : 'border-transparent text-text-tertiary hover:text-text-secondary'
+                             }`}
+                >
+                  <List size={13} />
+                  Events
+                </button>
+                <button
+                  onClick={() => setSidebarTab('files')}
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-2 text-xs font-medium
+                             transition-colors border-b-2
+                             ${sidebarTab === 'files'
+                               ? 'border-accent text-accent bg-accent/5'
+                               : 'border-transparent text-text-tertiary hover:text-text-secondary'
+                             }`}
+                >
+                  <Folder size={13} />
+                  Files
+                </button>
+              </div>
+
+              {/* Overlay tab content */}
+              <div className="flex-1 overflow-y-auto">
+                {sidebarTab === 'log' ? (
+                  <div className="font-mono">
+                    {analysisLog.length === 0 && !isAnalyzing && (
+                      <div className="flex items-center justify-center py-8 text-text-disabled text-xs">
+                        No log entries yet
+                      </div>
+                    )}
+                    {analysisLog.map(entry => (
+                      <div
+                        key={entry.id}
+                        className="flex gap-2 px-3 py-1.5 text-xxs border-b border-border-subtle/30 animate-fade-in"
+                      >
+                        <span className="shrink-0 select-none mt-0.5">
+                          {entry.level === 'success' ? (
+                            <CheckCircle2 size={11} className="text-success" />
+                          ) : entry.level === 'error' ? (
+                            <XCircle size={11} className="text-danger" />
+                          ) : entry.level === 'detect' ? (
+                            <Zap size={11} className="text-warning" />
+                          ) : (
+                            <span className="text-text-disabled">›</span>
+                          )}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <span className="text-text-secondary">{entry.message}</span>
+                          {entry.detail && (
+                            <span className="text-text-disabled ml-1">— {entry.detail}</span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : sidebarTab === 'events' ? (
+                  <div>
+                    {(isAnalyzing ? discoveredEvents : events).map((ev) => {
+                      const isDiscovered = isAnalyzing
+                      const type = isDiscovered ? ev.type : ev.event_type
+                      const cfg = EVENT_CONFIG[type] || {}
+                      const Icon = cfg.icon || BarChart3
+                      const startSec = isDiscovered ? ev.startTime : ev.start_time_seconds
+                      const sev = ev.severity
+                      const eventId = ev.id
+
+                      return (
+                        <div key={`overlay-${eventId}`} className="border-b border-border-subtle/30">
+                          <button
+                            onClick={() => seekToEvent(ev)}
+                            className="w-full flex items-center gap-1.5 px-3 py-1.5 text-left min-w-0 hover:bg-bg-hover transition-colors"
+                          >
+                            <Icon size={12} className={cfg.color || 'text-text-tertiary'} />
+                            <span className="text-xs font-medium text-text-primary truncate">
+                              {cfg.label || type}
+                            </span>
+                            <span className="text-xxs text-text-disabled font-mono ml-auto">
+                              {formatTime(startSec)}
+                            </span>
+                            <span className={`shrink-0 w-4 h-4 rounded-full flex items-center justify-center
+                                            text-xxs font-bold ${severityColor(sev)}`}>
+                              {sev}
+                            </span>
+                          </button>
+                        </div>
+                      )
+                    })}
+                    {(isAnalyzing ? discoveredEvents : events).length === 0 && (
+                      <div className="flex items-center justify-center py-8 text-text-disabled text-xs">
+                        {isAnalyzing ? 'Waiting for events...' : 'No events detected'}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <ProjectFileBrowser projectId={activeProject.id} />
+                )}
+              </div>
+            </div>
+          </>
+        )}
 
         {/* ── TV Preview area + playback controls ─────────────────────── */}
         <div className="flex-1 flex flex-col min-w-0 bg-bg-primary">
