@@ -22,6 +22,7 @@ import random
 import sqlite3
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from server.services.analysis_db import (
@@ -39,13 +40,28 @@ logger = logging.getLogger(__name__)
 # ── Constants ────────────────────────────────────────────────────────────────
 
 SCAN_SPEED = 16          # Replay speed during scanning
-TICK_INTERVAL = 0.05     # Seconds between telemetry samples (20 Hz during 16× scan)
+
+# Seconds between telemetry samples during the 16× scan.
+# At 16× replay speed, iRacing's shared memory updates at 60 Hz real-time.
+# To avoid missing short incidents/overtakes we need enough samples per
+# race-second.  Formula: samples_per_race_second = (1/TICK_INTERVAL) / SCAN_SPEED
+#   0.05 s → 20 Hz → 1.25  samples / race-second  (original — too low)
+#   0.02 s → 50 Hz → 3.125 samples / race-second  (close to reference's 3.75)
+# Going below 0.02 risks saturating pyirsdk; 50 Hz is a good trade-off.
+TICK_INTERVAL = 0.02
+
 BATCH_SIZE = 100         # Commit telemetry in batches
 PROGRESS_INTERVAL = 2.0  # Seconds between progress broadcasts
 
 # iRacing session states
+SESSION_STATE_RACING = 4
 SESSION_STATE_CHECKERED = 5
 SESSION_STATE_COOLDOWN = 6
+
+# iRacing track surface constants (used for race-end detection)
+SURFACE_OFF_TRACK = 0
+SURFACE_IN_PIT    = 1
+SURFACE_PIT_APRON = 2
 
 
 # ── Telemetry Writer ─────────────────────────────────────────────────────────
@@ -199,8 +215,45 @@ class ReplayAnalyzer:
         self.project_id = project_id
         self.project_dir = project_dir
         self.session_info = session_info or {}
-        self.on_progress = on_progress or (lambda *a: None)
+        self._raw_on_progress = on_progress or (lambda *a: None)
         self._cancelled = False
+        self._log_entries: list[dict] = []
+        # Build car_idx → driver_name map for real-time event streaming
+        self._driver_map: dict[int, str] = {}
+        for d in self.session_info.get("drivers", []):
+            idx = d.get("car_idx")
+            if idx is not None:
+                self._driver_map[idx] = d.get("user_name", f"#{d.get('car_number', idx)}")
+
+    def on_progress(self, event_type: str, data: dict) -> None:
+        """Forward progress event and record it for the analysis log file."""
+        self._log_entries.append({
+            "event": event_type,
+            "ts": time.time(),
+            **data,
+        })
+        self._raw_on_progress(event_type, data)
+
+    def _save_analysis_log(self) -> None:
+        """Persist the full analysis log to a JSON file in the project directory."""
+        try:
+            log_path = Path(self.project_dir) / "analysis_log.json"
+            log_path.write_text(json.dumps(self._log_entries, indent=2, default=str))
+            logger.info("[Analysis] Saved analysis log to %s", log_path)
+        except Exception as exc:
+            logger.warning("[Analysis] Failed to save analysis log: %s", exc)
+
+    def _save_preview_screenshot(self) -> None:
+        """Capture a screenshot of the iRacing window and save as the project preview."""
+        try:
+            from server.utils.window_capture import capture_iracing_screenshot
+            frame = capture_iracing_screenshot(max_width=1280, quality=85)
+            if frame:
+                preview_path = Path(self.project_dir) / "preview.jpg"
+                preview_path.write_bytes(frame)
+                logger.info("[Analysis] Saved preview screenshot to %s", preview_path)
+        except Exception as exc:
+            logger.warning("[Analysis] Failed to save preview: %s", exc)
 
     def cancel(self) -> None:
         """Signal the analysis to stop at the next check point."""
@@ -230,6 +283,9 @@ class ReplayAnalyzer:
                 "description": "Starting replay analysis",
             })
 
+            # Capture a preview screenshot at the start for project thumbnail
+            self._save_preview_screenshot()
+
             # Clear previous data
             clear_analysis_data(conn)
 
@@ -249,8 +305,9 @@ class ReplayAnalyzer:
             self.on_progress("step_completed", {
                 "project_id": self.project_id,
                 "stage": "analysis_detect",
-                "description": "Running event detection...",
-                "progress_percent": 90,
+                "description": "Running event detectors on telemetry data...",
+                "detail": f"Analysing {total_ticks:,} telemetry samples with 8 event detectors",
+                "progress_percent": 85,
             })
             total_events = self._detect_events(conn)
 
@@ -263,6 +320,8 @@ class ReplayAnalyzer:
                 "events_detected": total_events,
                 "telemetry_rows": total_ticks,
                 "duration_seconds": round(scan_duration, 1),
+                "description": f"Analysis complete — {total_events} events found in {_format_time(scan_duration)}",
+                "detail": f"Processed {total_ticks:,} telemetry samples across the full race",
             })
 
             logger.info(
@@ -288,30 +347,169 @@ class ReplayAnalyzer:
             logger.error("[Analysis] Error: %s", exc)
             raise
         finally:
+            self._save_analysis_log()
             conn.close()
 
     async def _scan_telemetry(self, conn: sqlite3.Connection) -> int:
-        """Pass 1: Scan the replay at 16× speed, capturing telemetry."""
+        """Pass 1: Scan the replay at 16× speed, capturing telemetry.
+
+        Optimised race start detection:
+          1. Read SessionInfo to find the race session index
+          2. Use replay_search_session_time() to jump directly to the race session
+          3. Scan forward from there for SessionState == Racing (very short)
+          4. Subtract 20 seconds for pre-race grid
+          5. Seek back and do the real scan at 16×
+
+        Falls back to legacy frame-0 scan if session jumping is unavailable.
+        """
         if not iracing_bridge.is_connected:
             logger.warning("[Analysis] iRacing not connected — using mock scan")
             return self._mock_scan(conn)
 
         writer = TelemetryWriter(conn)
 
-        # Set replay to beginning and 16× speed
-        iracing_bridge.seek_to_frame(0)
+        # ── Phase A: Jump to race session & find start frame ─────────────
+        self.on_progress("step_completed", {
+            "project_id": self.project_id,
+            "stage": "analysis_scan",
+            "description": "Locating race session...",
+            "detail": "Reading session info to identify race, qualifying, and practice sessions",
+            "progress_percent": 0,
+        })
+
+        # Try to find the race session index from session info
+        session_data = iracing_bridge.session_data
+        race_session_num = session_data.get("race_session_num")
+        all_sessions = session_data.get("sessions", [])
+
+        if all_sessions:
+            session_names = ", ".join(
+                f"{s.get('name', s.get('type', '?'))} (#{s['index']})"
+                for s in all_sessions
+            )
+            logger.info("[Analysis] Available sessions: %s", session_names)
+
+        jumped_to_race = False
+        if race_session_num is not None:
+            self.on_progress("step_completed", {
+                "project_id": self.project_id,
+                "stage": "analysis_scan",
+                "description": f"Jumping to race session #{race_session_num}...",
+                "detail": f"Skipping practice/qualifying — jumping directly to race session (found {len(all_sessions)} sessions)",
+                "progress_percent": 2,
+            })
+
+            # Jump directly to the start of the race session
+            if iracing_bridge.replay_search_session_time(race_session_num, 0):
+                await asyncio.sleep(1.0)  # Wait for iRacing to seek
+                jumped_to_race = True
+                logger.info(
+                    "[Analysis] Jumped to race session #%d via replay_search_session_time",
+                    race_session_num,
+                )
+            else:
+                logger.warning("[Analysis] replay_search_session_time failed, falling back")
+
+        if not jumped_to_race:
+            # Fallback: seek to beginning and scan forward
+            self.on_progress("step_completed", {
+                "project_id": self.project_id,
+                "stage": "analysis_scan",
+                "description": "Seeking to replay start...",
+                "detail": "Could not identify race session — scanning from beginning at 16× speed",
+                "progress_percent": 1,
+            })
+            iracing_bridge.seek_to_frame(0)
+            await asyncio.sleep(0.5)
+
+        # Now scan forward at 16× to find the exact moment SessionState==Racing
+        iracing_bridge.set_replay_speed(SCAN_SPEED)
+
+        self.on_progress("step_completed", {
+            "project_id": self.project_id,
+            "stage": "analysis_scan",
+            "description": "Scanning for race start (green flag)...",
+            "detail": "Fast-forwarding at 16× speed, waiting for SessionState to change to Racing (green flag drop)",
+            "progress_percent": 5,
+        })
+
+        race_start_frame = 0
+        race_start_session_time = 0.0
+        scan_limit = 1500 if jumped_to_race else 6000  # Much shorter limit when we jumped to race
+        for tick in range(scan_limit):
+            if self._cancelled:
+                iracing_bridge.set_replay_speed(0)
+                return 0
+
+            snapshot = self._capture_snapshot()
+            if snapshot and snapshot.get("session_state") == SESSION_STATE_RACING:
+                race_start_frame = snapshot.get("replay_frame", 0)
+                race_start_session_time = snapshot.get("session_time", 0.0)
+                break
+
+            # Periodic progress during race-start search
+            if tick > 0 and tick % 250 == 0:
+                elapsed_race_s = (snapshot or {}).get("session_time", 0.0)
+                self.on_progress("step_completed", {
+                    "project_id": self.project_id,
+                    "stage": "analysis_scan",
+                    "description": "Still searching for green flag...",
+                    "detail": f"Scanned {_format_time(elapsed_race_s)} of replay so far — waiting for racing to begin",
+                    "progress_percent": 5,
+                })
+
+            await asyncio.sleep(TICK_INTERVAL)
+
+        # Subtract 20 seconds (1200 frames at 60fps) to capture pre-race grid,
+        # matching the original AnalyseRace.cs offset
+        PRE_RACE_OFFSET_FRAMES = 60 * 20  # 20 seconds at 60fps
+        PRE_RACE_OFFSET_SECONDS = 20.0
+        race_start_frame = max(0, race_start_frame - PRE_RACE_OFFSET_FRAMES)
+        race_start_session_time = max(0.0, race_start_session_time - PRE_RACE_OFFSET_SECONDS)
+
+        logger.info(
+            "[Analysis] Race start found: frame=%d, session_time=%.1fs (with %.0fs pre-race offset)",
+            race_start_frame, race_start_session_time, PRE_RACE_OFFSET_SECONDS,
+        )
+
+        self.on_progress("step_completed", {
+            "project_id": self.project_id,
+            "stage": "analysis_scan",
+            "description": "Race start identified!",
+            "detail": f"Green flag at frame {race_start_frame + PRE_RACE_OFFSET_FRAMES:,} — rewinding 20 seconds for formation lap",
+            "progress_percent": 10,
+        })
+
+        # Store for use during capture phase
+        conn.execute(
+            "INSERT OR REPLACE INTO analysis_meta (key, value) VALUES (?, ?)",
+            ("race_start_frame", str(race_start_frame)),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO analysis_meta (key, value) VALUES (?, ?)",
+            ("race_start_session_time", str(race_start_session_time)),
+        )
+        conn.commit()
+
+        # ── Phase B: Seek back to race start and begin captured scan ────────
+        iracing_bridge.set_replay_speed(0)
+        await asyncio.sleep(0.3)
+        iracing_bridge.seek_to_frame(race_start_frame)
         await asyncio.sleep(0.5)
         iracing_bridge.set_replay_speed(SCAN_SPEED)
 
         last_progress = time.monotonic()
         all_finished = False
         last_session_time = 0.0
+        first_session_time = race_start_session_time
+        last_lap_num = 0
 
         self.on_progress("step_completed", {
             "project_id": self.project_id,
             "stage": "analysis_scan",
-            "description": f"Scanning replay at {SCAN_SPEED}× speed...",
-            "progress_percent": 0,
+            "description": f"Recording telemetry at {SCAN_SPEED}× speed...",
+            "detail": "Capturing car positions, surfaces, gaps, and camera switches every 20ms",
+            "progress_percent": 12,
         })
 
         while not self._cancelled:
@@ -333,28 +531,72 @@ class ReplayAnalyzer:
             # Track progress
             if session_time > last_session_time:
                 last_session_time = session_time
+            current_lap = snapshot.get("race_laps", 0) or 0
 
             # Send progress update periodically
             now = time.monotonic()
             if now - last_progress >= PROGRESS_INTERVAL:
+                elapsed_race = session_time - first_session_time
+                # Build a description of what we're seeing
+                if current_lap != last_lap_num and current_lap > 0:
+                    lap_msg = f"Lap {current_lap}"
+                else:
+                    lap_msg = f"Lap {current_lap}" if current_lap > 0 else "Formation"
+                last_lap_num = current_lap
+
+                car_count = len(snapshot.get("car_states", []))
+                detail = f"Tracking {car_count} cars · {writer.total_ticks:,} telemetry samples captured"
+
                 self.on_progress("step_completed", {
                     "project_id": self.project_id,
                     "stage": "analysis_scan",
+                    "description": f"{lap_msg} — {_format_time(session_time)} into race",
+                    "detail": detail,
                     "current_time": round(session_time, 1),
                     "total_ticks": writer.total_ticks,
+                    "current_lap": current_lap,
+                    "car_count": car_count,
                     "message": f"Scanned {_format_time(session_time)} of race...",
                 })
                 last_progress = now
 
-            # Check for race end: checkered flag + cooldown
+            # Check for race end: checkered flag + wait for cars to finish.
+            # Reference: waits until all cars have seen the checkered OR
+            # have retired / are off-track.  We poll for up to 30 real
+            # seconds (= ~480 race seconds at 16×) after first seeing
+            # checkered, which is a generous window for stragglers.
             if session_state >= SESSION_STATE_CHECKERED:
-                # Continue scanning for a few more seconds to capture finish
-                await asyncio.sleep(5.0)
-                # Take final samples
-                for _ in range(10):
+                self.on_progress("step_completed", {
+                    "project_id": self.project_id,
+                    "stage": "analysis_scan",
+                    "description": "Checkered flag! Waiting for all cars to finish...",
+                    "detail": "Continuing to record telemetry while remaining cars cross the line",
+                    "progress_percent": 80,
+                    "total_ticks": writer.total_ticks,
+                })
+                finish_poll_start = time.monotonic()
+                MAX_FINISH_WAIT = 30.0  # real seconds (480 race seconds at 16×)
+
+                while time.monotonic() - finish_poll_start < MAX_FINISH_WAIT:
+                    if self._cancelled:
+                        break
                     snap = self._capture_snapshot()
                     if snap:
                         writer.write_tick(snap)
+                        # Check if all positioned cars have finished
+                        car_states = snap.get("car_states", [])
+                        if car_states:
+                            all_done = all(
+                                cs.get("surface") in (SURFACE_OFF_TRACK, SURFACE_IN_PIT, SURFACE_PIT_APRON)
+                                or cs.get("lap_pct", 0) < 0.05  # crossed finish
+                                for cs in car_states
+                                if cs.get("position", 0) > 0
+                            )
+                            if all_done:
+                                break
+                        # If session moved to cooldown, all cars are definitely done
+                        if snap.get("session_state", 0) >= SESSION_STATE_COOLDOWN:
+                            break
                     await asyncio.sleep(TICK_INTERVAL)
                 break
 
@@ -431,15 +673,45 @@ class ReplayAnalyzer:
         return writer.total_ticks
 
     def _detect_events(self, conn: sqlite3.Connection) -> int:
-        """Pass 2: Run all event detectors on cached telemetry data."""
+        """Pass 2: Run all event detectors on cached telemetry data.
+
+        Emits individual progress events as each detector completes, including
+        a summary of discovered events for the live event feed on the frontend.
+        """
         total_events = 0
         session_info = dict(self.session_info)
+        num_detectors = len(ALL_DETECTORS)
+
+        # Detector display names for UI
+        DETECTOR_LABELS = {
+            "IncidentDetector": ("Incidents", "Scanning camera switches for off-track cars"),
+            "BattleDetector": ("Battles", "Finding cars within close proximity for extended periods"),
+            "OvertakeDetector": ("Overtakes", "Detecting position swaps with proximity verification"),
+            "PitStopDetector": ("Pit Stops", "Identifying cars on pit surface for 5+ seconds"),
+            "FastestLapDetector": ("Fastest Laps", "Finding new personal and session best lap times"),
+            "LeaderChangeDetector": ("Leader Changes", "Tracking P1 position changes on track"),
+            "FirstLapDetector": ("First Lap", "Marking the opening lap of the race"),
+            "LastLapDetector": ("Last Lap", "Marking the final lap before checkered"),
+        }
 
         # Get avg_lap_time from session data or estimate from telemetry
         if not session_info.get("avg_lap_time"):
             session_info["avg_lap_time"] = self._estimate_avg_lap_time(conn)
 
-        for detector in ALL_DETECTORS:
+        for i, detector in enumerate(ALL_DETECTORS):
+            detector_name = detector.__class__.__name__
+            label, detail = DETECTOR_LABELS.get(detector_name, (detector_name, ""))
+            progress_pct = 85 + int((i / num_detectors) * 12)  # 85% → 97%
+
+            self.on_progress("step_completed", {
+                "project_id": self.project_id,
+                "stage": "analysis_detect",
+                "description": f"Detecting {label.lower()}...",
+                "detail": detail,
+                "detector": detector_name,
+                "progress_percent": progress_pct,
+            })
+
             try:
                 events = detector.detect(conn, session_info)
                 if events:
@@ -447,13 +719,31 @@ class ReplayAnalyzer:
                     total_events += count
                     conn.commit()
                     logger.info(
-                        "[Analysis] %s: %d events",
-                        detector.__class__.__name__, count,
+                        "[Analysis] %s: %d events", detector_name, count,
                     )
+
+                    # Emit each discovered event for the live frontend feed
+                    for ev in events:
+                        car_indices = ev.get("involved_drivers", [])
+                        self.on_progress("event_discovered", {
+                            "project_id": self.project_id,
+                            "event_type": ev.get("event_type", "unknown"),
+                            "severity": ev.get("severity", 0),
+                            "start_time": ev.get("start_time_seconds", 0),
+                            "end_time": ev.get("end_time_seconds", 0),
+                            "lap": ev.get("lap_number", 0),
+                            "drivers": car_indices,
+                            "driver_names": [
+                                self._driver_map.get(idx, f"Car {idx}")
+                                for idx in car_indices
+                            ],
+                            "detector": detector_name,
+                        })
+                else:
+                    logger.info("[Analysis] %s: 0 events", detector_name)
             except Exception as exc:
                 logger.error(
-                    "[Analysis] %s failed: %s",
-                    detector.__class__.__name__, exc,
+                    "[Analysis] %s failed: %s", detector_name, exc,
                 )
 
         return total_events

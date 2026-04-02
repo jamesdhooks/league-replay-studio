@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS projects (
     num_laps        INTEGER DEFAULT 0,
     replay_file     TEXT    DEFAULT '',
     project_dir     TEXT    NOT NULL,
-    current_step    TEXT    NOT NULL DEFAULT 'setup',
+    current_step    TEXT    NOT NULL DEFAULT 'analysis',
     version         TEXT    DEFAULT '1.0.0'
 );
 """

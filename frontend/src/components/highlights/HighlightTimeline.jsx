@@ -3,19 +3,24 @@ import { useHighlight } from '../../context/HighlightContext'
 import { useTimeline, EVENT_COLORS } from '../../context/TimelineContext'
 
 /**
- * HighlightTimeline — Condensed mini-timeline showing highlight segments.
+ * HighlightTimeline — Condensed mini-timeline showing all events.
  *
- * Renders a horizontal bar representing the full race with colored segments
- * for each included event. Gives a visual overview of the highlight reel.
+ * Included events are bright and fully opaque.
+ * Excluded events are dimmed with striped pattern, showing what was NOT selected.
+ * Gives a clear visual overview of the editing decisions.
  */
 export default function HighlightTimeline() {
   const { selection, metrics } = useHighlight()
   const { raceDuration, seekTo, playheadTime } = useTimeline()
 
-  const includedEvents = useMemo(
-    () => selection.scoredEvents.filter(e => e.included).sort((a, b) => a.start_time_seconds - b.start_time_seconds),
-    [selection.scoredEvents],
-  )
+  const { highlightEvents, fullVideoEvents, excludedEvents } = useMemo(() => {
+    const sorted = [...selection.scoredEvents].sort((a, b) => a.start_time_seconds - b.start_time_seconds)
+    return {
+      highlightEvents: sorted.filter(e => e.inclusion === 'highlight'),
+      fullVideoEvents: sorted.filter(e => e.inclusion === 'full-video'),
+      excludedEvents: sorted.filter(e => e.inclusion === 'excluded'),
+    }
+  }, [selection.scoredEvents])
 
   if (raceDuration <= 0) {
     return (
@@ -36,38 +41,91 @@ export default function HighlightTimeline() {
 
   return (
     <div className="h-full flex flex-col px-3 py-1.5 bg-bg-secondary">
-      {/* Label */}
+      {/* Label row with legend */}
       <div className="flex items-center justify-between mb-1">
-        <span className="text-xxs text-text-tertiary font-medium">
-          Highlight Preview
-        </span>
+        <div className="flex items-center gap-3">
+          <span className="text-xxs text-text-tertiary font-medium">
+            Highlight Timeline
+          </span>
+          <span className="flex items-center gap-1 text-xxs text-text-disabled">
+            <span className="inline-block w-2 h-2 rounded-sm bg-accent" /> Highlight
+          </span>
+          <span className="flex items-center gap-1 text-xxs text-text-disabled">
+            <span className="inline-block w-2 h-2 rounded-sm bg-info opacity-50" /> Full-video
+          </span>
+          <span className="flex items-center gap-1 text-xxs text-text-disabled">
+            <span className="inline-block w-2 h-2 rounded-sm bg-text-disabled opacity-20" /> Excluded
+          </span>
+        </div>
         <span className="text-xxs text-text-disabled font-mono">
-          {metrics.eventCount} clips · {formatCompactDuration(metrics.duration)}
+          {metrics.eventCount} highlight + {metrics.fullVideoCount || 0} full · {formatCompactDuration(metrics.duration)}
         </span>
       </div>
 
       {/* Timeline bar */}
       <div
-        className="flex-1 relative bg-bg-primary rounded cursor-pointer overflow-hidden min-h-[12px]"
+        className="flex-1 relative bg-bg-primary rounded cursor-pointer overflow-hidden min-h-[16px]"
         onClick={handleClick}
       >
-        {/* Event segments */}
-        {includedEvents.map(evt => {
+        {/* Excluded event segments (background, dimmed) */}
+        {excludedEvents.map(evt => {
+          const left = (evt.start_time_seconds / raceDuration) * 100
+          const width = Math.max(0.15, ((evt.end_time_seconds - evt.start_time_seconds) / raceDuration) * 100)
+          const color = EVENT_COLORS[evt.event_type] || '#666'
+
+          return (
+            <div
+              key={`ex-${evt.id}`}
+              className="absolute top-0 bottom-0 rounded-sm"
+              style={{
+                left: `${left}%`,
+                width: `${width}%`,
+                backgroundColor: color,
+                opacity: 0.12,
+              }}
+              title={`✗ ${evt.event_type} (score ${evt.score}) — ${evt.reason}`}
+            />
+          )
+        })}
+
+        {/* Full-video event segments (mid brightness) */}
+        {fullVideoEvents.map(evt => {
+          const left = (evt.start_time_seconds / raceDuration) * 100
+          const width = Math.max(0.15, ((evt.end_time_seconds - evt.start_time_seconds) / raceDuration) * 100)
+          const color = EVENT_COLORS[evt.event_type] || '#666'
+
+          return (
+            <div
+              key={`fv-${evt.id}`}
+              className="absolute top-0 bottom-0 rounded-sm border border-white/10"
+              style={{
+                left: `${left}%`,
+                width: `${width}%`,
+                backgroundColor: color,
+                opacity: 0.4,
+              }}
+              title={`○ ${evt.event_type} (score ${evt.score}) — full-video only`}
+            />
+          )
+        })}
+
+        {/* Highlight event segments (foreground, bright) */}
+        {highlightEvents.map(evt => {
           const left = (evt.start_time_seconds / raceDuration) * 100
           const width = Math.max(0.2, ((evt.end_time_seconds - evt.start_time_seconds) / raceDuration) * 100)
           const color = EVENT_COLORS[evt.event_type] || '#666'
 
           return (
             <div
-              key={evt.id}
-              className="absolute top-0 bottom-0 rounded-sm"
+              key={`hl-${evt.id}`}
+              className="absolute top-0 bottom-0 rounded-sm ring-1 ring-white/20"
               style={{
                 left: `${left}%`,
                 width: `${width}%`,
                 backgroundColor: color,
-                opacity: 0.8,
+                opacity: 0.85,
               }}
-              title={`${evt.event_type} (${evt.score})`}
+              title={`✓ ${evt.event_type} (score ${evt.score})`}
             />
           )
         })}

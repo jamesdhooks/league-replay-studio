@@ -26,6 +26,7 @@ VALID_ENCODING_PRESETS = {
     "twitter_1080p", "archive_high", "archive_low", "custom",
 }
 VALID_GPU = {"auto", "nvidia", "amd", "intel", "cpu"}
+VALID_PREVIEW_BACKENDS = {"auto", "native", "dxcam", "printwindow"}
 
 
 def _validate_theme(value: Any) -> tuple[bool, str]:
@@ -55,6 +56,24 @@ def _validate_encoding_preset(value: Any) -> tuple[bool, str]:
 def _validate_gpu(value: Any) -> tuple[bool, str]:
     if value not in VALID_GPU:
         return False, f"preferred_gpu must be one of {sorted(VALID_GPU)}"
+    return True, ""
+
+
+def _validate_preview_backend(value: Any) -> tuple[bool, str]:
+    if value not in VALID_PREVIEW_BACKENDS:
+        return False, f"preview_backend must be one of {sorted(VALID_PREVIEW_BACKENDS)}"
+    return True, ""
+
+
+def _validate_native_output_index(value: Any) -> tuple[bool, str]:
+    if not isinstance(value, int) or value < 0 or value > 7:
+        return False, "native_output_index must be an integer 0–7"
+    return True, ""
+
+
+def _validate_native_capture_fps(value: Any) -> tuple[bool, str]:
+    if not isinstance(value, int) or value < 0 or value > 240:
+        return False, "native_capture_fps must be 0 (auto) or 1–240"
     return True, ""
 
 
@@ -89,6 +108,9 @@ VALIDATORS: dict[str, Any] = {
     "capture_hotkey_stop": _validate_hotkey,
     "encoding_preset": _validate_encoding_preset,
     "preferred_gpu": _validate_gpu,
+    "preview_backend": _validate_preview_backend,
+    "native_output_index": _validate_native_output_index,
+    "native_capture_fps": _validate_native_capture_fps,
     "youtube_default_privacy": _validate_privacy,
     "youtube_auto_upload": _validate_bool,
     "sidebar_collapsed": _validate_bool,

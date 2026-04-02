@@ -352,7 +352,7 @@ Unlimited undo/redo across timeline, event inspector, and highlight suite. Visib
 **Spec:** `010-video-capture-obs-integration`
 **Dependencies:** feature-2, feature-3
 
-Auto-detect OBS Studio, NVIDIA ShadowPlay, AMD ReLive. Configurable hotkey mapping per software with validation. Automated capture orchestration synced with replay playback. Post-capture validation (integrity, resolution, duration). Internal capture engine with dxcam (DXGI) + PrintWindow backends for self-contained capture without external software.
+Auto-detect OBS Studio, NVIDIA ShadowPlay, AMD ReLive. Configurable hotkey mapping per software with validation. Automated capture orchestration synced with replay playback. Post-capture validation (integrity, resolution, duration). Internal capture engine with native C++ DXGI service, dxcam (DXGI), and PrintWindow backends for self-contained live preview without external software.
 
 **Acceptance Criteria**
 - [x] App auto-detects running OBS, ShadowPlay, and ReLive processes
@@ -364,9 +364,16 @@ Auto-detect OBS Studio, NVIDIA ShadowPlay, AMD ReLive. Configurable hotkey mappi
 - [x] Progress UI shows real-time capture status, elapsed time, and file size
 - [x] Post-capture validation checks file integrity, resolution, and duration vs expected
 - [x] Clear error messages when capture software is not detected or hotkey fails
-- [x] Internal CaptureEngine with multi-backend support (dxcam DXGI -> PrintWindow GDI fallback)
+- [x] Internal CaptureEngine with 3-tier backend support: native C++ DXGI → dxcam DXGI → PrintWindow GDI
+- [x] Native C++ service (`lrs_capture.exe`) via DXGI Desktop Duplication API and D3D11 staging texture
+- [x] Named pipe IPC for control commands + shared memory frame transport (~33 MB, zero copy into Python)
+- [x] `build-native.bat` standalone build script; `start.bat` auto-builds native service if VS 2022 detected
+- [x] `GET /api/iracing/stream/capabilities` returns live availability of all preview and capture backends
+- [x] Settings panel shows capability status badges (green/grey) for each preview and capture backend
+- [x] `preview_backend` setting: auto / native / dxcam / printwindow
+- [x] `native_output_index` (0–7) and `native_capture_fps` (0 = auto, max 240) settings for native backend tuning
 - [x] Zero-copy FFmpeg MJPEG pipeline (no PIL in hot path, libjpeg-turbo SIMD encoding)
-- [x] Buffer protocol writes via memoryview() -- eliminates .tobytes() frame copy
+- [x] Buffer protocol writes via memoryview() — eliminates .tobytes() frame copy
 - [x] dxcam target_fps native pacing (no Python sleep jitter)
 - [x] Pre-allocated numpy buffers for PrintWindow (zero per-frame allocation)
 - [x] Dedicated capture + reader threads with FFmpeg subprocess stdin/stdout
@@ -376,9 +383,9 @@ Auto-detect OBS Studio, NVIDIA ShadowPlay, AMD ReLive. Configurable hotkey mappi
 - [x] Stream metrics endpoint exposes FPS, backend, uptime, resolution, recording state
 - [x] Stream start/stop + record start/stop REST endpoints
 - [x] Writer threads decouple capture from pipe I/O (no backpressure coupling)
-- [x] Frame dropping via deque(maxlen=2) -- prefer dropping frames over latency
+- [x] Frame dropping via deque(maxlen=2) — prefer dropping frames over latency
 - [x] GPU-native recording mode via FFmpeg gdigrab (zero Python in recording hot path)
-- [x] CPU pipe recording mode as fallback (capture -> queue -> writer -> FFmpeg stdin)
+- [x] CPU pipe recording mode as fallback (capture → queue → writer → FFmpeg stdin)
 - [x] Auto-detect recording mode: tries GPU first, falls back to CPU
 - [x] Graceful recorder shutdown (CTRL_BREAK on Windows for GPU mode, stdin close for CPU)
 - [x] frames_dropped + recording_mode exposed in stream metrics

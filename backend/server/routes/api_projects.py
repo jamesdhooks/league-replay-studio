@@ -50,7 +50,7 @@ class ProjectUpdate(BaseModel):
 
 
 class StepUpdate(BaseModel):
-    step: Optional[str] = Field(None, description="Target step (setup/capture/analysis/editing/export/upload)")
+    step: Optional[str] = Field(None, description="Target step (setup/analysis/editing/capture/export/upload)")
     action: Optional[str] = Field(None, description="Action: 'advance' to move to next step")
 
 

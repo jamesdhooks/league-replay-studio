@@ -16,13 +16,13 @@ from server.services.settings_service import settings_service, SettingsValidatio
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
-@router.get("/")
+@router.get("")
 async def get_settings() -> dict:
     """Get all application settings."""
     return settings_service.get_all()
 
 
-@router.put("/")
+@router.put("")
 async def update_settings(updates: Dict[str, Any]) -> dict:
     """Update application settings (partial update).
 

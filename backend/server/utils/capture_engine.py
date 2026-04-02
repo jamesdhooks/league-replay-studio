@@ -30,8 +30,9 @@ Architecture::
     +-------------------------------------------------------------+
 
 Capture backends:
-  1. dxcam  -- DXGI Desktop Duplication, 60-240 FPS, GPU-backed.
-  2. PrintWindow -- Win32 GDI, ~10-20 FPS, captures behind other windows.
+  1. native -- C++ DXGI Desktop Duplication service (shared memory, best).
+  2. dxcam  -- Python DXGI Desktop Duplication, 60-240 FPS, GPU-backed.
+  3. PrintWindow -- Win32 GDI, ~10-20 FPS, last resort (black for DX games).
 
 Recording modes:
   - "gpu":  FFmpeg gdigrab captures directly -> NVENC.  Zero Python hot path.
@@ -79,6 +80,7 @@ _IS_WINDOWS = platform.system() == "Windows"
 
 _dxcam = None
 _dxcam_available = False
+_native_available = False
 
 if _IS_WINDOWS:
     try:
@@ -87,9 +89,19 @@ if _IS_WINDOWS:
         _dxcam_available = True
         logger.info("[CaptureEngine] dxcam available")
     except ImportError:
-        logger.info("[CaptureEngine] dxcam not installed -- PrintWindow only")
+        logger.info("[CaptureEngine] dxcam not installed")
     except Exception as exc:
         logger.warning("[CaptureEngine] dxcam import failed: %s", exc)
+
+    try:
+        from server.utils.native_capture_bridge import NativeCaptureBridge, _find_native_exe
+        _native_available = _find_native_exe() is not None
+        if _native_available:
+            logger.info("[CaptureEngine] native capture service available")
+        else:
+            logger.info("[CaptureEngine] native capture exe not found")
+    except Exception as exc:
+        logger.info("[CaptureEngine] native capture bridge not available: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +204,10 @@ class CaptureEngine:
         self._pw_bmi = _BITMAPINFOHEADER()
         self._pw_last_hwnd_check: float = 0.0
 
+        # Native capture bridge (C++ DXGI service)
+        self._native_bridge: Optional[object] = None
+        self._native_region_set: bool = False
+
         # Metrics
         self._frame_count: int = 0
         self._start_time: float = 0.0
@@ -262,6 +278,15 @@ class CaptureEngine:
             logger.warning("[CaptureEngine] already running")
             return
 
+        # Read capture_backend preference from settings (if available)
+        try:
+            from server.services.settings_service import settings_service
+            pref = settings_service.get("preview_backend", "auto")
+            if pref and isinstance(pref, str):
+                self._backend_pref = pref
+        except Exception:
+            pass  # keep default
+
         self._fps = max(1, min(fps, 60))
         self._quality = max(10, min(quality, 95))
         self._max_width = max(320, min(max_width, 1920))
@@ -309,6 +334,7 @@ class CaptureEngine:
 
         self._kill_ffmpeg()
         self._kill_recorder()
+        self._cleanup_native()
         self._cleanup_dxcam()
         self._release_pw_gdi()
         self._preview_queue.clear()
@@ -318,10 +344,36 @@ class CaptureEngine:
     # -- Backend selection --------------------------------------------------
 
     def _choose_backend(self) -> str:
-        if self._backend_pref == "dxcam" and _dxcam_available:
+        """Select capture backend.
+
+        Priority order (configurable via backend preference):
+          1. native  -- C++ DXGI Desktop Duplication service (best)
+          2. dxcam   -- Python DXGI library (good, default fallback)
+          3. printwindow -- Win32 GDI (last resort, black for DX games)
+
+        When backend_pref is "auto", the first available is used.
+        """
+        pref = self._backend_pref
+
+        # Explicit preference
+        if pref == "native" and _native_available:
+            return "native"
+        if pref == "dxcam" and _dxcam_available:
             return "dxcam"
-        if self._backend_pref == "printwindow":
+        if pref == "printwindow":
             return "printwindow"
+
+        # Auto: try native first, then dxcam, then printwindow
+        if pref == "auto":
+            if _native_available:
+                return "native"
+            if _dxcam_available:
+                return "dxcam"
+            return "printwindow"
+
+        # Fallback for any unrecognised pref
+        if _native_available:
+            return "native"
         if _dxcam_available:
             return "dxcam"
         return "printwindow"
@@ -600,40 +652,127 @@ class CaptureEngine:
     def _capture_loop(self) -> None:
         """Grab frames and enqueue for writer threads.
 
-        This thread ONLY captures and manages FFmpeg lifecycle -- it never
-        writes to pipes directly.  That isolation means a blocked encoder
-        cannot stall capture.
-        """
-        consecutive_failures = 0
-        backend = self._active_backend
+        Backend fallback chain:
+          1. native  -- C++ DXGI Desktop Duplication service (shared memory,
+                        works regardless of window focus, best performance)
+          2. dxcam   -- Python DXGI library (good, captures screen region)
+          3. printwindow -- Win32 GDI (last resort; returns black for DX games)
 
-        # We lazily start FFmpeg once we know the frame dimensions
+        Each backend is tried until it fails permanently, then we fall through
+        to the next one.  Once a backend succeeds, it stays active until it
+        crashes or produces no frames for 3 seconds.
+        """
+        # Determine starting backend tier
+        use_native = (self._active_backend == "native")
+        use_dxcam  = (self._active_backend == "dxcam")
+        native_dead = False
+        dxcam_dead  = False
+        dxcam_started_at: float = 0.0
+        dxcam_first_frame = False
+
+        # Start native bridge if that's our backend
+        if use_native:
+            if not self._start_native_bridge():
+                logger.warning("[CaptureEngine] native bridge failed to start, "
+                               "falling back to dxcam")
+                native_dead = True
+                use_native = False
+                if _dxcam_available:
+                    use_dxcam = True
+                    self._active_backend = "dxcam"
+                else:
+                    self._active_backend = "printwindow"
+
+        native_started_at: float = time.monotonic() if use_native else 0.0
+        native_first_frame = False
+
+        # Lazily start FFmpeg once we know the frame dimensions
         ffmpeg_started = False
 
         while not self._stop_event.is_set():
             t0 = time.monotonic()
             frame: Optional[np.ndarray] = None
+            backend_used = "printwindow"  # default for pacing
 
             try:
-                if backend == "dxcam":
-                    frame = self._grab_dxcam()
-                    if frame is None:
-                        consecutive_failures += 1
-                        if consecutive_failures > 30:
+                # ── Tier 1: Native C++ capture ────────────────────────
+                if use_native and not native_dead:
+                    backend_used = "native"
+                    frame = self._grab_native()
+
+                    if frame is not None:
+                        if not native_first_frame:
+                            logger.info("[CaptureEngine] native: first frame received")
+                            native_first_frame = True
+                        native_started_at = time.monotonic()
+                    else:
+                        if native_started_at == 0.0:
+                            native_started_at = time.monotonic()
+                        if (
+                            not native_first_frame
+                            and (time.monotonic() - native_started_at) > 5.0
+                        ):
                             logger.warning(
-                                "[CaptureEngine] dxcam failed %d times, fallback to PrintWindow",
-                                consecutive_failures,
+                                "[CaptureEngine] native: no frame in 5 s, "
+                                "falling back to dxcam"
+                            )
+                            self._cleanup_native()
+                            native_dead = True
+                            use_native = False
+                            if _dxcam_available:
+                                use_dxcam = True
+                                self._active_backend = "dxcam"
+                            else:
+                                self._active_backend = "printwindow"
+
+                # ── Tier 2: dxcam ─────────────────────────────────────
+                elif use_dxcam and not dxcam_dead:
+                    backend_used = "dxcam"
+                    frame = self._grab_dxcam()
+
+                    if frame is not None:
+                        if not dxcam_first_frame:
+                            logger.info("[CaptureEngine] dxcam: first frame received")
+                            dxcam_first_frame = True
+                        dxcam_started_at = time.monotonic()
+                    else:
+                        if dxcam_started_at == 0.0:
+                            dxcam_started_at = time.monotonic()
+                        if (
+                            not dxcam_first_frame
+                            and (time.monotonic() - dxcam_started_at) > 3.0
+                        ):
+                            logger.warning(
+                                "[CaptureEngine] dxcam: no frame in 3 s, "
+                                "falling back to PrintWindow"
                             )
                             self._cleanup_dxcam()
-                            backend = "printwindow"
-                            self._active_backend = backend
-                            consecutive_failures = 0
-                    else:
-                        consecutive_failures = 0
+                            dxcam_dead = True
+                            use_dxcam = False
+                            self._active_backend = "printwindow"
+
+                # ── Tier 3: PrintWindow (last resort) ─────────────────
                 else:
+                    backend_used = "printwindow"
                     frame = self._grab_printwindow()
+
             except Exception:
-                logger.debug("[CaptureEngine] grab error", exc_info=True)
+                logger.warning("[CaptureEngine] grab exception (%s)",
+                               backend_used, exc_info=True)
+                if backend_used == "native":
+                    self._cleanup_native()
+                    native_dead = True
+                    use_native = False
+                    if _dxcam_available:
+                        use_dxcam = True
+                        self._active_backend = "dxcam"
+                    else:
+                        self._active_backend = "printwindow"
+                elif backend_used == "dxcam":
+                    self._cleanup_dxcam()
+                    dxcam_dead = True
+                    use_dxcam = False
+                    self._active_backend = "printwindow"
 
             if frame is not None:
                 h, w = frame.shape[:2]
@@ -658,13 +797,13 @@ class CaptureEngine:
                         self._frames_dropped += 1
                     self._record_queue.append(frame)
 
-            # PrintWindow needs manual pacing; dxcam is paced by grab()
-            if backend == "printwindow":
+            # Pacing: native/dxcam have their own timing; PrintWindow needs manual
+            if backend_used == "printwindow":
                 elapsed = time.monotonic() - t0
                 sleep_time = max(0.001, (1.0 / self._fps) - elapsed)
                 time.sleep(sleep_time)
             elif frame is None:
-                # dxcam returned None (no new frame) -- brief yield
+                # native/dxcam: no new frame this tick -- brief yield
                 time.sleep(0.002)
 
     # ======================================================================
@@ -860,6 +999,57 @@ class CaptureEngine:
         self._ffmpeg_proc = None
 
     # ======================================================================
+    # Native C++ capture backend  (DXGI via shared memory)
+    # ======================================================================
+
+    def _start_native_bridge(self) -> bool:
+        """Launch the C++ capture service and connect."""
+        try:
+            from server.utils.native_capture_bridge import NativeCaptureBridge
+            bridge = NativeCaptureBridge()
+            if not bridge.start():
+                return False
+            self._native_bridge = bridge
+            self._native_region_set = False
+            return True
+        except Exception:
+            logger.warning("[CaptureEngine] native bridge start failed", exc_info=True)
+            return False
+
+    def _grab_native(self) -> Optional[np.ndarray]:
+        """Grab a frame from the C++ capture service via shared memory."""
+        bridge = self._native_bridge
+        if bridge is None:
+            return None
+
+        # Set region to iRacing window (refreshed periodically)
+        if not self._native_region_set or (time.monotonic() - self._pw_last_hwnd_check > 2.0):
+            from server.utils.window_capture import _find_iracing_hwnd, _get_window_rect
+            hwnd = _find_iracing_hwnd()
+            if hwnd is not None:
+                rect = _get_window_rect(hwnd)
+                if rect:
+                    bridge.set_region(
+                        rect["left"], rect["top"],
+                        rect["width"], rect["height"],
+                    )
+                    self._native_region_set = True
+                    self._pw_last_hwnd_check = time.monotonic()
+
+        return bridge.grab_frame()
+
+    def _cleanup_native(self) -> None:
+        """Stop and release the native capture bridge."""
+        bridge = self._native_bridge
+        if bridge is not None:
+            try:
+                bridge.stop()
+            except Exception:
+                pass
+        self._native_bridge = None
+        self._native_region_set = False
+
+    # ======================================================================
     # dxcam backend -- returns numpy BGR24 array, NO PIL
     # ======================================================================
 
@@ -908,7 +1098,7 @@ class CaptureEngine:
             return frame
 
         except Exception:
-            logger.debug("[CaptureEngine] dxcam grab error", exc_info=True)
+            logger.warning("[CaptureEngine] dxcam grab error", exc_info=True)
             return None
 
     def _cleanup_dxcam(self) -> None:

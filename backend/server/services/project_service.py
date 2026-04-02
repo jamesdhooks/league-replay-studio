@@ -26,7 +26,7 @@ from server.services.db import get_connection, init_db, row_to_dict
 logger = logging.getLogger(__name__)
 
 # Valid workflow steps in order
-WORKFLOW_STEPS = ["setup", "capture", "analysis", "editing", "export", "upload"]
+WORKFLOW_STEPS = ["analysis", "editing", "capture", "export", "upload"]
 
 # Standard project sub-directories created for every new project
 PROJECT_SUBDIRS = [
@@ -153,7 +153,7 @@ class ProjectService:
             "version": "1.0.0",
             "created_at": now,
             "updated_at": now,
-            "current_step": "setup",
+            "current_step": "analysis",
             "track_name": track_name,
             "session_type": session_type,
             "replay_file": actual_replay,
@@ -169,7 +169,7 @@ class ProjectService:
                 """INSERT INTO projects
                    (name, created_at, updated_at, track_name, session_type,
                     num_drivers, num_laps, replay_file, project_dir, current_step)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'setup')""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'analysis')""",
                 (name, now, now, track_name, session_type,
                  num_drivers, num_laps, actual_replay, str(proj_path)),
             )

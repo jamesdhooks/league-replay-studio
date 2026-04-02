@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import {
   X,
   Settings,
@@ -16,7 +16,7 @@ import {
 } from 'lucide-react'
 import { useSettings } from '../../context/SettingsContext'
 import { useToast } from '../../context/ToastContext'
-import { apiPost } from '../../services/api'
+import { apiGet, apiPost } from '../../services/api'
 import YouTubeSettings from '../youtube/YouTubeSettings'
 import SetupWizard from '../wizard/SetupWizard'
 
@@ -215,19 +215,21 @@ function GeneralSettings({ value, onChange }) {
           browseTitle="Select Default Project Directory"
         />
       </SettingGroup>
-
-      {/* Sidebar collapsed */}
-      <SettingGroup label="Sidebar Collapsed" description="Start with the sidebar collapsed.">
-        <Toggle
-          checked={value('sidebar_collapsed')}
-          onChange={(v) => onChange('sidebar_collapsed', v)}
-        />
-      </SettingGroup>
     </div>
   )
 }
 
 function CameraSettings({ value, onChange }) {
+  const [caps, setCaps] = useState(null)
+
+  useEffect(() => {
+    apiGet('/iracing/stream/capabilities')
+      .then(data => setCaps(data))
+      .catch(() => setCaps(null))
+  }, [])
+
+  const captureSoftAvail = caps?.capture ?? {}
+
   return (
     <div className="space-y-6 max-w-xl">
       <SectionHeader
@@ -235,7 +237,7 @@ function CameraSettings({ value, onChange }) {
         description="Default camera settings for new projects. These can be overridden per-project."
       />
 
-      <SettingGroup label="Capture Software" description="Default recording application.">
+      <SettingGroup label="Capture Software" description="Default recording application used to record the iRacing window.">
         <Select
           value={value('capture_software')}
           onChange={(v) => onChange('capture_software', v)}
@@ -246,18 +248,121 @@ function CameraSettings({ value, onChange }) {
             { value: 'manual', label: 'Manual Recording' },
           ]}
         />
+        {caps && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            <CapBadge label="OBS" available={captureSoftAvail.obs?.available} desc={captureSoftAvail.obs?.reason} />
+            <CapBadge label="ShadowPlay" available={captureSoftAvail.shadowplay?.available} desc={captureSoftAvail.shadowplay?.reason} />
+            <CapBadge label="ReLive" available={captureSoftAvail.relive?.available} desc={captureSoftAvail.relive?.reason} />
+          </div>
+        )}
       </SettingGroup>
     </div>
   )
 }
 
 function EncodingSettings({ value, onChange }) {
+  const [caps, setCaps] = useState(null)
+  const [capsLoading, setCapsLoading] = useState(false)
+
+  useEffect(() => {
+    setCapsLoading(true)
+    apiGet('/iracing/stream/capabilities')
+      .then(data => setCaps(data))
+      .catch(() => setCaps(null))
+      .finally(() => setCapsLoading(false))
+  }, [])
+
+  const previewBackend = value('preview_backend') || 'auto'
+  const showNativeSettings = previewBackend === 'native' || previewBackend === 'auto'
+  const previewAvail = caps?.preview ?? {}
+
   return (
     <div className="space-y-6 max-w-xl">
       <SectionHeader
         title="Encoding"
-        description="Default encoding presets and GPU preferences for video export."
+        description="Default encoding presets, GPU preferences, and live preview capture settings."
       />
+
+      {/* ── Live Preview Engine ───────────────────────────────────── */}
+      <SectionSubHeader title="Live Preview Engine" />
+
+      <SettingGroup
+        label="Preview Backend"
+        description="Method used to capture the iRacing window for the live preview feed. Native C++ gives the lowest latency."
+      >
+        <Select
+          value={previewBackend}
+          onChange={(v) => onChange('preview_backend', v)}
+          options={[
+            { value: 'auto', label: 'Auto-detect (recommended)' },
+            { value: 'native', label: 'Native C++ (DXGI — best performance)' },
+            { value: 'dxcam', label: 'dxcam (Python DXGI)' },
+            { value: 'printwindow', label: 'PrintWindow (GDI — legacy fallback)' },
+          ]}
+        />
+        {capsLoading && (
+          <p className="mt-2 text-xs text-text-tertiary">Checking availability…</p>
+        )}
+        {!capsLoading && caps && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            <CapBadge
+              label="Native C++"
+              available={previewAvail.native?.available}
+              desc={previewAvail.native?.reason}
+            />
+            <CapBadge
+              label="dxcam"
+              available={previewAvail.dxcam?.available}
+              desc={previewAvail.dxcam?.reason}
+            />
+            <CapBadge
+              label="PrintWindow"
+              available={previewAvail.printwindow?.available}
+              desc={previewAvail.printwindow?.reason}
+            />
+          </div>
+        )}
+      </SettingGroup>
+
+      {showNativeSettings && (
+        <>
+          <SettingGroup
+            label="Native — Output Index"
+            description="Which GPU output to capture from (0 = primary monitor). Only used by the Native C++ backend."
+          >
+            <Select
+              value={String(value('native_output_index') ?? 0)}
+              onChange={(v) => onChange('native_output_index', parseInt(v, 10))}
+              options={[
+                { value: '0', label: '0 — Primary monitor' },
+                { value: '1', label: '1' },
+                { value: '2', label: '2' },
+                { value: '3', label: '3' },
+                { value: '4', label: '4' },
+                { value: '5', label: '5' },
+                { value: '6', label: '6' },
+                { value: '7', label: '7' },
+              ]}
+            />
+          </SettingGroup>
+
+          <SettingGroup
+            label="Native — FPS Cap"
+            description="Maximum capture frame rate for the Native backend (0 = match display refresh rate)."
+          >
+            <NumberInput
+              value={value('native_capture_fps') ?? 0}
+              onChange={(v) => onChange('native_capture_fps', v)}
+              min={0}
+              max={240}
+              placeholder="0 (match display)"
+            />
+          </SettingGroup>
+        </>
+      )}
+
+      {/* ── Video Encoding ────────────────────────────────────────── */}
+      <SectionSubHeader title="Video Encoding" />
 
       <SettingGroup label="Encoding Preset" description="Default video encoding quality preset.">
         <Select
@@ -357,6 +462,55 @@ function SectionHeader({ title, description }) {
         <p className="mt-1 text-sm text-text-tertiary">{description}</p>
       )}
     </div>
+  )
+}
+
+function SectionSubHeader({ title }) {
+  return (
+    <h4 className="text-xs font-semibold text-text-tertiary uppercase tracking-widest pt-2">
+      {title}
+    </h4>
+  )
+}
+
+function CapBadge({ label, available, desc }) {
+  return (
+    <span
+      title={desc || ''}
+      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium border ${
+        available
+          ? 'bg-green-500/10 text-green-400 border-green-500/25'
+          : 'bg-surface text-text-disabled border-border'
+      }`}
+    >
+      <span
+        className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+          available ? 'bg-green-400' : 'bg-text-disabled'
+        }`}
+      />
+      {label}
+    </span>
+  )
+}
+
+function NumberInput({ value, onChange, min, max, placeholder }) {
+  return (
+    <input
+      type="number"
+      value={value ?? ''}
+      onChange={(e) => {
+        const v = parseInt(e.target.value, 10)
+        if (!isNaN(v) && v >= min && v <= max) onChange(v)
+        else if (e.target.value === '') onChange(min)
+      }}
+      min={min}
+      max={max}
+      placeholder={placeholder}
+      className="w-full px-3 py-2 text-sm bg-bg-primary border border-border rounded-lg
+                 text-text-primary placeholder:text-text-disabled
+                 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent
+                 transition-colors"
+    />
   )
 }
 

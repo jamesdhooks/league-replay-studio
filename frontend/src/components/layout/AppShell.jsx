@@ -1,12 +1,11 @@
 import { useState, useCallback } from 'react'
 import Toolbar from './Toolbar'
-import Sidebar from './Sidebar'
-import StatusBar from './StatusBar'
 import ProjectLibrary from '../projects/ProjectLibrary'
 import ProjectView from '../projects/ProjectView'
 import SettingsPanel from '../settings/SettingsPanel'
-import { useLocalStorage } from '../../hooks/useLocalStorage'
+import HelpPanel from '../help/HelpPanel'
 import { useProject } from '../../context/ProjectContext'
+import { useAnalysis } from '../../context/AnalysisContext'
 import { useUndoRedo } from '../../context/UndoRedoContext'
 
 /**
@@ -14,34 +13,52 @@ import { useUndoRedo } from '../../context/UndoRedoContext'
  * Renders: toolbar (top), sidebar (left), main area (center), status bar (bottom).
  */
 function AppShell() {
-  const [sidebarCollapsed, setSidebarCollapsed] = useLocalStorage('sidebar_collapsed', false)
-  const { activeProject, openProject, closeProject } = useProject()
+  const { activeProject, openProject, closeProject, setStep } = useProject()
+  const { events, eventSummary } = useAnalysis()
   const [showSettings, setShowSettings] = useState(false)
   const { undo, redo, canUndo, canRedo, history, currentIndex } = useUndoRedo()
-
-  const toggleSidebar = useCallback(() => {
-    setSidebarCollapsed(prev => !prev)
-  }, [setSidebarCollapsed])
 
   const handleOpenProject = useCallback((project) => {
     openProject(project.id)
   }, [openProject])
 
+  const handleStepClick = useCallback(async (stepId) => {
+    if (activeProject) {
+      try { await setStep(activeProject.id, stepId) } catch {}
+    }
+  }, [activeProject, setStep])
+
+  const [showHelp, setShowHelp] = useState(false)
   const openSettings = useCallback(() => setShowSettings(true), [])
   const closeSettings = useCallback(() => setShowSettings(false), [])
+  const openHelp = useCallback(() => setShowHelp(true), [])
+  const closeHelp = useCallback(() => setShowHelp(false), [])
 
   // Compute undo/redo descriptions for toolbar tooltips
   const undoDescription = canUndo ? history[currentIndex]?.description : undefined
   const redoDescription = canRedo ? history[currentIndex + 1]?.description : undefined
 
+  // Compute step readiness based on available data
+  const hasAnalysis = (events?.length > 0) || (eventSummary?.total_events > 0)
+  const stepReadiness = {
+    analysis: true,
+    editing: hasAnalysis,
+    capture: hasAnalysis,
+    export: true,
+    upload: true,
+  }
+
   return (
+    <>
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-bg-primary">
       {/* Top toolbar */}
       <Toolbar
-        sidebarCollapsed={sidebarCollapsed}
-        onToggleSidebar={toggleSidebar}
-        projectName={activeProject?.name}
+        activeProject={activeProject}
+        onBack={closeProject}
+        onStepClick={handleStepClick}
+        stepReadiness={stepReadiness}
         onOpenSettings={openSettings}
+        onOpenHelp={openHelp}
         canUndo={canUndo}
         canRedo={canRedo}
         onUndo={undo}
@@ -52,11 +69,6 @@ function AppShell() {
 
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Left sidebar — only show when not viewing a project */}
-        {!activeProject && !showSettings && (
-          <Sidebar collapsed={sidebarCollapsed} onOpenSettings={openSettings} />
-        )}
-
         {/* Main area */}
         <main className="flex-1 flex flex-col overflow-hidden bg-bg-primary">
           {showSettings ? (
@@ -64,17 +76,16 @@ function AppShell() {
           ) : activeProject ? (
             <ProjectView
               project={activeProject}
-              onBack={closeProject}
             />
           ) : (
             <ProjectLibrary onOpenProject={handleOpenProject} />
           )}
         </main>
       </div>
-
-      {/* Bottom status bar */}
-      <StatusBar />
     </div>
+
+    {showHelp && <HelpPanel onClose={closeHelp} />}
+    </>
   )
 }
 

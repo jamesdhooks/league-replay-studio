@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { apiGet, apiPost } from '../services/api'
+import { apiGet, apiPost, apiDelete } from '../services/api'
 import { wsClient } from '../services/websocket'
 
 const AnalysisContext = createContext(null)
@@ -18,7 +18,10 @@ export function AnalysisProvider({ children }) {
   const [eventSummary, setEventSummary] = useState(null)
   const [analysisStatus, setAnalysisStatus] = useState(null)
   const [error, setError] = useState(null)
+  const [analysisLog, setAnalysisLog] = useState([])
+  const [discoveredEvents, setDiscoveredEvents] = useState([])
   const activeProjectRef = useRef(null)
+  const logIdRef = useRef(0)
 
   // ── WebSocket subscription for pipeline events ──────────────────────────
   useEffect(() => {
@@ -28,37 +31,85 @@ export function AnalysisProvider({ children }) {
         return
       }
 
+      // Handle discovered events (separate from pipeline category filtering)
+      if (eventName === 'pipeline:event_discovered') {
+        const id = ++logIdRef.current
+        setDiscoveredEvents(prev => [...prev, {
+          id,
+          type: data.event_type,
+          severity: data.severity,
+          startTime: data.start_time,
+          endTime: data.end_time,
+          lap: data.lap,
+          driverNames: data.driver_names || [],
+          carIndices: data.drivers || [],
+          carIdx: (data.drivers && data.drivers.length > 0) ? data.drivers[0] : null,
+          detector: data.detector,
+          ts: Date.now(),
+        }])
+        return
+      }
+
       if (data.stage && !data.stage.startsWith('analysis')) {
         return
+      }
+
+      // Helper to append a log entry
+      const appendLog = (desc, detail, level = 'info') => {
+        const id = ++logIdRef.current
+        setAnalysisLog(prev => [...prev, {
+          id, level, ts: Date.now(),
+          message: desc || '',
+          detail: detail || '',
+        }])
       }
 
       switch (eventName) {
         case 'pipeline:started':
           setIsAnalyzing(true)
           setError(null)
+          setAnalysisLog([])
+          setDiscoveredEvents([])
+          logIdRef.current = 0
+          appendLog(data.description || 'Starting analysis...', data.detail)
           setProgress({
             percent: 0,
             message: data.description || 'Starting analysis...',
+            detail: data.detail || '',
             currentTime: 0,
             totalTicks: 0,
           })
           break
 
         case 'pipeline:step_completed':
+          appendLog(
+            data.description || data.message || 'Analyzing...',
+            data.detail || '',
+            data.stage === 'analysis_detect' ? 'detect' : 'info',
+          )
           setProgress(prev => ({
             ...prev,
             percent: data.progress_percent ?? prev?.percent ?? 0,
             message: data.message || data.description || 'Analyzing...',
+            detail: data.detail || prev?.detail || '',
             currentTime: data.current_time ?? prev?.currentTime ?? 0,
             totalTicks: data.total_ticks ?? prev?.totalTicks ?? 0,
+            currentLap: data.current_lap ?? prev?.currentLap,
+            carCount: data.car_count ?? prev?.carCount,
           }))
           break
 
         case 'pipeline:completed':
           setIsAnalyzing(false)
+          appendLog(
+            data.description || `Analysis complete — ${data.events_detected ?? 0} events detected`,
+            data.detail || '',
+            'success',
+          )
           setProgress({
             percent: 100,
             message: `Analysis complete — ${data.events_detected ?? 0} events detected`,
+            detail: data.detail || '',
             totalTicks: data.telemetry_rows ?? 0,
             eventsDetected: data.events_detected ?? 0,
             duration: data.duration_seconds ?? 0,
@@ -76,6 +127,7 @@ export function AnalysisProvider({ children }) {
 
         case 'pipeline:error':
           setIsAnalyzing(false)
+          appendLog(data.message || 'Analysis failed', '', 'error')
           setError(data.message || 'Analysis failed')
           setProgress(null)
           break
@@ -93,6 +145,9 @@ export function AnalysisProvider({ children }) {
     setError(null)
     setEvents([])
     setEventSummary(null)
+    setAnalysisLog([])
+    setDiscoveredEvents([])
+    logIdRef.current = 0
     activeProjectRef.current = projectId
 
     try {
@@ -111,6 +166,26 @@ export function AnalysisProvider({ children }) {
       const result = await apiPost(`/projects/${projectId}/analyze/cancel`)
       setIsAnalyzing(false)
       setProgress(null)
+      return result
+    } catch (err) {
+      setError(err.message)
+      throw err
+    }
+  }, [])
+
+  // ── Clear analysis ──────────────────────────────────────────────────────
+  const clearAnalysis = useCallback(async (projectId) => {
+    try {
+      const result = await apiDelete(`/projects/${projectId}/analysis`)
+      setIsAnalyzing(false)
+      setProgress(null)
+      setEvents([])
+      setEventSummary(null)
+      setAnalysisLog([])
+      setDiscoveredEvents([])
+      setAnalysisStatus(null)
+      setError(null)
+      logIdRef.current = 0
       return result
     } catch (err) {
       setError(err.message)
@@ -172,14 +247,18 @@ export function AnalysisProvider({ children }) {
     eventSummary,
     analysisStatus,
     error,
+    analysisLog,
+    discoveredEvents,
     startAnalysis,
     cancelAnalysis,
+    clearAnalysis,
     fetchAnalysisStatus,
     fetchEvents,
     fetchEventSummary,
   }), [
     isAnalyzing, progress, events, eventSummary, analysisStatus, error,
-    startAnalysis, cancelAnalysis, fetchAnalysisStatus, fetchEvents, fetchEventSummary,
+    analysisLog, discoveredEvents,
+    startAnalysis, cancelAnalysis, clearAnalysis, fetchAnalysisStatus, fetchEvents, fetchEventSummary,
   ])
 
   return (

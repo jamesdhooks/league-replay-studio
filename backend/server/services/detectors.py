@@ -80,11 +80,16 @@ class BaseDetector:
 # ── Incident Detector ────────────────────────────────────────────────────────
 
 class IncidentDetector(BaseDetector):
-    """Detect incidents: camera auto-switches to off-track cars.
+    """Detect incidents via iRacing's auto-director camera switching.
 
-    Uses iRacing's auto-director behaviour — when a car goes off track,
-    the director camera often switches to that car.  We detect camera target
-    changes where the new target is off-track (surface == 0).
+    Mirrors the original iRacingReplayDirector AnalyseRace.cs pattern:
+    when iRacing's auto-director switches the camera to a car that is
+    off-track, that signals a genuine incident.  This is far more reliable
+    than simply looking for any off-track car, because iRacing only switches
+    the camera for significant incidents (not grass clips / minor offs).
+
+    We detect ticks where ``cam_car_idx`` changed AND the car that the camera
+    switched *to* has surface == OffTrack in that same tick.
 
     Deduplicates within 15 seconds per car.
     """
@@ -95,34 +100,42 @@ class IncidentDetector(BaseDetector):
     FOLLOW_OUT = 8.0  # seconds after incident
 
     def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
-        # Find ticks where any car's surface changed to off-track
+        # Find ticks where the camera switched to a car that is off-track.
+        # LAG(cam_car_idx) gives the previous camera target; when it differs
+        # from the current one, we have a camera switch.  We then join the
+        # car_states for the *new* target to check its surface.
         rows = db.execute("""
-            WITH off_track AS (
-                SELECT t.id, t.session_time, t.replay_frame, cs.car_idx, cs.position,
-                       cs.lap
+            WITH cam_switches AS (
+                SELECT t.id AS tick_id,
+                       t.session_time,
+                       t.replay_frame,
+                       t.cam_car_idx,
+                       LAG(t.cam_car_idx) OVER (ORDER BY t.session_time) AS prev_cam
                 FROM race_ticks t
-                JOIN car_states cs ON cs.tick_id = t.id
-                WHERE cs.surface = ?
-                  AND t.session_state IN (?, ?)
+                WHERE t.session_state IN (?, ?)
             )
-            SELECT session_time, replay_frame, car_idx, position, lap
-            FROM off_track
-            ORDER BY session_time
-        """, (SURFACE_OFF_TRACK, SESSION_STATE_RACING, SESSION_STATE_CHECKERED)).fetchall()
+            SELECT sw.session_time, sw.replay_frame, sw.cam_car_idx,
+                   cs.position, cs.lap
+            FROM cam_switches sw
+            JOIN car_states cs ON cs.tick_id = sw.tick_id
+                              AND cs.car_idx = sw.cam_car_idx
+            WHERE sw.prev_cam IS NOT NULL
+              AND sw.cam_car_idx != sw.prev_cam
+              AND cs.surface = ?
+              AND cs.position > 0
+            ORDER BY sw.session_time
+        """, (SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
+              SURFACE_OFF_TRACK)).fetchall()
 
         events: list[dict] = []
-        # Group by car with deduplication window
         seen: dict[int, float] = {}  # car_idx → last event end_time
 
         for row in rows:
-            time_s, frame, car_idx, position, lap = (
-                row["session_time"], row["replay_frame"],
-                row["car_idx"], row["position"], row["lap"],
-            )
-
-            # Skip cars not in valid race positions (e.g., pace car, spectators)
-            if position <= 0:
-                continue
+            time_s = row["session_time"]
+            frame = row["replay_frame"]
+            car_idx = row["cam_car_idx"]
+            position = row["position"]
+            lap = row["lap"]
 
             last = seen.get(car_idx, -999)
             if time_s - last < self.DEDUP_SECONDS:
@@ -142,10 +155,10 @@ class IncidentDetector(BaseDetector):
                 "start_frame": max(0, frame),
                 "end_frame": frame,
                 "lap_number": lap,
-                "severity": 6,  # Medium-high by default
+                "severity": 6,
                 "involved_drivers": [car_idx],
                 "position": position,
-                "metadata": {"detected_by": "off_track_surface"},
+                "metadata": {"detected_by": "cam_switch_off_track"},
             })
             seen[car_idx] = time_s + self.FOLLOW_OUT
 
@@ -160,6 +173,11 @@ class BattleDetector(BaseDetector):
 
     A battle exists when two cars in adjacent positions maintain a gap
     below the threshold for a minimum duration.
+
+    Uses MIN(ABS(diff), 1-ABS(diff)) on lap_pct to handle wrapping
+    at the start/finish line — without this fix, two cars 0.5s apart
+    at the S/F line would calculate as ~lap_time apart (catastrophic
+    false negative).
     """
 
     event_type = EVENT_BATTLE
@@ -170,7 +188,9 @@ class BattleDetector(BaseDetector):
         gap_threshold = session_info.get("battle_gap_threshold", 0.5)
         avg_lap_time = session_info.get("avg_lap_time", 90.0) or 90.0
 
-        # Find adjacent-position car pairs that are close together
+        # Find adjacent-position car pairs that are close together.
+        # The MIN(...) expression handles the start/finish wrapping case
+        # where leader_pct ≈ 0.01 and follower_pct ≈ 0.99 (or vice-versa).
         rows = db.execute("""
             SELECT t.session_time, t.replay_frame,
                    leader.car_idx AS leader_idx, leader.position AS leader_pos,
@@ -185,7 +205,10 @@ class BattleDetector(BaseDetector):
               AND leader.surface = ?
               AND follower.surface = ?
               AND leader.position > 0
-              AND ABS(leader.lap_pct - follower.lap_pct) * ? < ?
+              AND MIN(
+                  ABS(leader.lap_pct - follower.lap_pct),
+                  1.0 - ABS(leader.lap_pct - follower.lap_pct)
+              ) * ? < ?
             ORDER BY t.session_time
         """, (
             SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
@@ -243,39 +266,67 @@ class BattleDetector(BaseDetector):
 # ── Overtake Detector ────────────────────────────────────────────────────────
 
 class OvertakeDetector(BaseDetector):
-    """Detect position changes (overtakes).
+    """Detect position changes (overtakes) with proximity verification.
+
+    Mirrors the iRacingReplayDirector approach: overtakes are only counted
+    when a car gains position AND is close to the car it passed.  Without
+    this proximity requirement, pit stops and retirements would register
+    as overtakes.
 
     Uses SQL window functions to find ticks where a car's position
-    decreased (improved) compared to the previous sample, while both
-    cars are on track and close together.
+    decreased (improved) compared to the previous sample, then verifies
+    that the car that *lost* the position was on track and close by.
     """
 
     event_type = EVENT_OVERTAKE
     DEDUP_SECONDS = 10.0
+    PROXIMITY_FACTOR = 1.5  # max gap (seconds) to count as a real overtake
 
     def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
         avg_lap_time = session_info.get("avg_lap_time", 90.0) or 90.0
 
+        # Find position gains where the overtaking car is close to
+        # a car that now sits in the old position (i.e. the car that was
+        # passed).  We join to find the car that currently occupies the
+        # overtaker's old position, and verify it's on-track and nearby.
         rows = db.execute("""
             WITH pos_changes AS (
                 SELECT cs.car_idx, cs.position, cs.lap, cs.lap_pct,
-                       t.session_time, t.replay_frame,
+                       cs.surface,
+                       t.session_time, t.replay_frame, t.id AS tick_id,
                        LAG(cs.position) OVER (
                            PARTITION BY cs.car_idx ORDER BY t.session_time
                        ) AS prev_position
                 FROM car_states cs
                 JOIN race_ticks t ON cs.tick_id = t.id
                 WHERE t.session_state IN (?, ?)
-                  AND cs.surface = ?
                   AND cs.position > 0
             )
-            SELECT session_time, replay_frame, car_idx, position, prev_position, lap
-            FROM pos_changes
-            WHERE prev_position IS NOT NULL
-              AND position < prev_position
-              AND prev_position - position <= 3
-            ORDER BY session_time
-        """, (SESSION_STATE_RACING, SESSION_STATE_CHECKERED, SURFACE_ON_TRACK)).fetchall()
+            SELECT pc.session_time, pc.replay_frame, pc.car_idx,
+                   pc.position, pc.prev_position, pc.lap,
+                   passed.car_idx AS passed_car_idx
+            FROM pos_changes pc
+            -- Join to find the car now in the overtaker's old position
+            JOIN car_states passed ON passed.tick_id = pc.tick_id
+                AND passed.position = pc.prev_position
+                AND passed.car_idx != pc.car_idx
+                AND passed.surface = ?
+            WHERE pc.prev_position IS NOT NULL
+              AND pc.position < pc.prev_position
+              AND pc.prev_position - pc.position <= 3
+              AND pc.surface = ?
+              -- Proximity check: both cars must be close (handles S/F wrapping)
+              AND MIN(
+                  ABS(pc.lap_pct - passed.lap_pct),
+                  1.0 - ABS(pc.lap_pct - passed.lap_pct)
+              ) * ? < ?
+            ORDER BY pc.session_time
+        """, (
+            SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
+            SURFACE_ON_TRACK,
+            SURFACE_ON_TRACK,
+            avg_lap_time, self.PROXIMITY_FACTOR,
+        )).fetchall()
 
         events: list[dict] = []
         seen: dict[int, float] = {}
@@ -287,6 +338,7 @@ class OvertakeDetector(BaseDetector):
             new_pos = row["position"]
             old_pos = row["prev_position"]
             lap = row["lap"]
+            passed_car = row["passed_car_idx"]
 
             if time_s - seen.get(car_idx, -999) < self.DEDUP_SECONDS:
                 continue
@@ -302,12 +354,13 @@ class OvertakeDetector(BaseDetector):
                 "end_frame": frame,
                 "lap_number": lap,
                 "severity": severity,
-                "involved_drivers": [car_idx],
+                "involved_drivers": [car_idx, passed_car],
                 "position": new_pos,
                 "metadata": {
                     "old_position": old_pos,
                     "new_position": new_pos,
                     "places_gained": places_gained,
+                    "passed_car_idx": passed_car,
                 },
             })
             seen[car_idx] = time_s

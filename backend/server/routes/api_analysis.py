@@ -38,6 +38,7 @@ from server.services.replay_analysis import analysis_manager
 from server.services.analysis_db import (
     get_project_db,
     init_analysis_db,
+    clear_analysis_data,
     get_events,
     count_events,
     get_analysis_status as db_get_analysis_status,
@@ -146,6 +147,41 @@ async def cancel_analysis(project_id: int):
     return {"status": "cancelled", "project_id": project_id}
 
 
+@router.delete("/projects/{project_id}/analysis")
+async def clear_analysis(project_id: int):
+    """Clear all analysis data for a project (events, telemetry, runs)."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if analysis_manager.is_running(project_id):
+        analysis_manager.cancel(project_id)
+
+    project_dir = project["project_dir"]
+    try:
+        init_analysis_db(project_dir)
+        conn = get_project_db(project_dir)
+        try:
+            clear_analysis_data(conn)
+            # Clear analysis runs too
+            conn.execute("DELETE FROM analysis_runs")
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Remove analysis log file
+        from pathlib import Path
+        log_path = Path(project_dir) / "analysis_log.json"
+        if log_path.exists():
+            log_path.unlink()
+
+        logger.info("[Analysis API] Cleared analysis for project #%d", project_id)
+        return {"status": "cleared", "project_id": project_id}
+    except Exception as exc:
+        logger.error("[Analysis API] Clear error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.get("/projects/{project_id}/analysis/status")
 async def get_analysis_status(project_id: int):
     """Get the current analysis status for a project."""
@@ -252,6 +288,26 @@ async def event_summary(project_id: int):
     except Exception as exc:
         logger.error("[Analysis API] Event summary error: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/projects/{project_id}/analysis/log")
+async def get_analysis_log(project_id: int):
+    """Load the persisted analysis log from the project directory."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    from pathlib import Path
+    log_path = Path(project["project_dir"]) / "analysis_log.json"
+    if not log_path.exists():
+        return {"entries": []}
+
+    import json as _json
+    try:
+        entries = _json.loads(log_path.read_text())
+        return {"entries": entries}
+    except Exception:
+        return {"entries": []}
 
 
 # ── Event editing endpoints (Feature 8: Timeline Editor) ─────────────────────
@@ -619,6 +675,7 @@ class HighlightConfigRequest(BaseModel):
     target_duration: Optional[float] = None
     min_severity: int = 0
     overrides: dict[str, str] = {}  # event_id -> "include" | "exclude"
+    params: dict = {}  # detection/camera tuning parameters
 
 
 class HighlightApplyRequest(BaseModel):
@@ -675,6 +732,7 @@ async def update_project_highlight_config(project_id: int, body: HighlightConfig
                 target_duration=body.target_duration,
                 min_severity=body.min_severity,
                 overrides=body.overrides,
+                params=body.params,
             )
             config["project_id"] = project_id
             logger.info("[Highlights API] Saved config for project #%d", project_id)

@@ -23,17 +23,17 @@
 
   /* ── Dark theme (default) ──────────────────────────────────────────────── */
   :root {
-    /* Background tiers */
-    --color-bg-primary:    15 15 20;
-    --color-bg-secondary:  22 22 30;
-    --color-bg-tertiary:   28 28 40;
-    --color-bg-hover:      34 34 46;
+    /* Background tiers — deep navy-black for cinematic feel */
+    --color-bg-primary:    12 12 18;
+    --color-bg-secondary:  18 18 28;
+    --color-bg-tertiary:   24 24 36;
+    --color-bg-hover:      32 32 48;
 
     /* Surface / interactive */
-    --color-surface:        28 28 40;
-    --color-surface-hover:  38 38 54;
-    --color-surface-active: 46 46 66;
-    --color-surface-border: 42 42 58;
+    --color-surface:        24 24 38;
+    --color-surface-hover:  34 34 52;
+    --color-surface-active: 44 44 64;
+    --color-surface-border: 40 40 56;
 
     /* Border tiers */
     --color-border:        42 42 58;
@@ -47,11 +47,11 @@
     --color-text-tertiary:  110 110 136;
     --color-text-disabled:  74 74 94;
 
-    /* Accent / brand */
-    --color-accent:       91 138 245;
-    --color-accent-hover: 123 163 255;
-    --color-accent-muted: 61 95 160;
-    --color-accent-text:  163 196 255;
+    /* Accent / brand — indigo-shifted for richness */
+    --color-accent:       99 102 241;
+    --color-accent-hover: 129 140 248;
+    --color-accent-muted: 67 56 202;
+    --color-accent-text:  165 180 252;
 
     /* Status: success */
     --color-success:       74 222 128;
@@ -102,11 +102,11 @@
     --color-text-tertiary:  136 136 160;
     --color-text-disabled:  176 176 196;
 
-    /* Accent / brand */
-    --color-accent:       74 122 238;
-    --color-accent-hover: 58 106 223;
-    --color-accent-muted: 197 214 247;
-    --color-accent-text:  42 90 192;
+    /* Accent / brand — indigo-shifted */
+    --color-accent:       79 70 229;
+    --color-accent-hover: 67 56 202;
+    --color-accent-muted: 199 210 254;
+    --color-accent-text:  55 48 163;
 
     /* Status: success */
     --color-success:       34 197 94;
@@ -176,6 +176,32 @@
 @layer utilities {
   .transition-theme {
     @apply transition-colors duration-200 ease-in-out;
+  }
+
+  /* Gradient text utility — apply to any text element */
+  .text-gradient {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-gradient-from via-gradient-via to-gradient-to;
+  }
+
+  /* Gradient border — 1px gradient border effect via background trick */
+  .border-gradient {
+    border: 1px solid transparent;
+    background-clip: padding-box;
+    position: relative;
+  }
+  .border-gradient::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    border-radius: inherit;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6, #3b82f6);
+    z-index: -1;
+    opacity: 0.5;
+  }
+
+  /* Subtle noise texture overlay */
+  .bg-noise {
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.03'/%3E%3C/svg%3E");
   }
 }
 

@@ -97,6 +97,12 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
     error_message   TEXT
 );
 
+-- Key-value metadata for the analysis run
+CREATE TABLE IF NOT EXISTS analysis_meta (
+    key     TEXT PRIMARY KEY,
+    value   TEXT NOT NULL
+);
+
 -- Highlight configuration (one active row per project)
 CREATE TABLE IF NOT EXISTS highlight_config (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,6 +110,7 @@ CREATE TABLE IF NOT EXISTS highlight_config (
     target_duration REAL,
     min_severity    INTEGER NOT NULL DEFAULT 0,
     overrides       TEXT    NOT NULL DEFAULT '{}',
+    params          TEXT    NOT NULL DEFAULT '{}',
     updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -138,6 +145,10 @@ def init_analysis_db(project_dir: str) -> None:
     conn = get_project_db(project_dir)
     try:
         conn.executescript(_ANALYSIS_SCHEMA)
+        # Migration: add params column to highlight_config if missing
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(highlight_config)").fetchall()]
+        if "params" not in cols:
+            conn.execute("ALTER TABLE highlight_config ADD COLUMN params TEXT NOT NULL DEFAULT '{}'")
         conn.commit()
         logger.info("[AnalysisDB] Initialised project database at %s", project_dir)
     finally:
@@ -148,10 +159,11 @@ def init_analysis_db(project_dir: str) -> None:
 
 def clear_analysis_data(conn: sqlite3.Connection) -> None:
     """Delete all analysis data to prepare for a fresh scan."""
+    # Delete child tables before parents to satisfy FK constraints
     conn.execute("DELETE FROM car_states")
+    conn.execute("DELETE FROM lap_completions")
     conn.execute("DELETE FROM race_ticks")
     conn.execute("DELETE FROM race_events")
-    conn.execute("DELETE FROM lap_completions")
     conn.execute("DELETE FROM drivers")
     conn.commit()
     logger.info("[AnalysisDB] Cleared previous analysis data")
@@ -246,6 +258,14 @@ def get_events(
     params.extend([limit, skip])
 
     rows = conn.execute(query, params).fetchall()
+
+    # Build a car_idx → driver_name lookup from the drivers table
+    driver_rows = conn.execute(
+        "SELECT car_idx, user_name, car_number FROM drivers WHERE is_spectator = 0"
+    ).fetchall()
+    driver_map = {r["car_idx"]: r["user_name"] for r in driver_rows}
+    car_number_map = {r["car_idx"]: r["car_number"] for r in driver_rows}
+
     result = []
     for r in rows:
         d = dict(r)
@@ -258,6 +278,11 @@ def get_events(
             d["metadata"] = json.loads(d.get("metadata", "{}"))
         except (json.JSONDecodeError, TypeError):
             d["metadata"] = {}
+        # Resolve car indices to driver names
+        d["driver_names"] = [
+            driver_map.get(idx, f"Car #{car_number_map.get(idx, idx)}")
+            for idx in d["involved_drivers"]
+        ]
         result.append(d)
     return result
 
@@ -312,6 +337,7 @@ def get_highlight_config(conn: sqlite3.Connection) -> dict:
             "target_duration": None,
             "min_severity": 0,
             "overrides": {},
+            "params": {},
         }
     d = dict(row)
     try:
@@ -322,6 +348,10 @@ def get_highlight_config(conn: sqlite3.Connection) -> dict:
         d["overrides"] = json.loads(d.get("overrides", "{}"))
     except (json.JSONDecodeError, TypeError):
         d["overrides"] = {}
+    try:
+        d["params"] = json.loads(d.get("params", "{}"))
+    except (json.JSONDecodeError, TypeError):
+        d["params"] = {}
     return d
 
 
@@ -331,6 +361,7 @@ def save_highlight_config(
     target_duration: float | None = None,
     min_severity: int = 0,
     overrides: dict | None = None,
+    params: dict | None = None,
 ) -> dict:
     """Save (upsert) the highlight configuration for this project.
 
@@ -338,13 +369,14 @@ def save_highlight_config(
     """
     conn.execute("DELETE FROM highlight_config")
     conn.execute(
-        """INSERT INTO highlight_config (weights, target_duration, min_severity, overrides)
-           VALUES (?, ?, ?, ?)""",
+        """INSERT INTO highlight_config (weights, target_duration, min_severity, overrides, params)
+           VALUES (?, ?, ?, ?, ?)""",
         (
             json.dumps(weights),
             target_duration,
             max(0, min(10, min_severity)),
             json.dumps(overrides or {}),
+            json.dumps(params or {}),
         ),
     )
     conn.commit()

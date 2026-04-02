@@ -39,7 +39,8 @@ function ProjectCard({ project, viewMode = 'grid', onOpen, onDuplicate, onDelete
     return (
       <div
         className="flex items-center gap-4 px-4 py-3 bg-surface hover:bg-surface-hover
-                   border border-border rounded-lg cursor-pointer transition-colors group"
+                   border border-border rounded-lg cursor-pointer transition-all duration-200 group
+                   shadow-card hover:shadow-card-hover hover:border-border-strong"
         onClick={() => onOpen(project.id)}
       >
         {/* Name + track */}
@@ -89,11 +90,14 @@ function ProjectCard({ project, viewMode = 'grid', onOpen, onDuplicate, onDelete
   return (
     <div
       className="flex flex-col bg-surface hover:bg-surface-hover border border-border
-                 rounded-xl cursor-pointer transition-colors group overflow-hidden"
+                 rounded-xl cursor-pointer transition-all duration-200 group overflow-hidden
+                 shadow-card hover:shadow-card-hover hover:border-border-strong"
       onClick={() => onOpen(project.id)}
     >
-      {/* Thumbnail area (placeholder) */}
-      <div className="h-28 bg-bg-tertiary flex items-center justify-center relative">
+      {/* Thumbnail area */}
+      <div className="h-28 bg-bg-tertiary flex items-center justify-center relative overflow-hidden">
+        {/* Subtle gradient band at top */}
+        <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-gradient-from via-gradient-via to-gradient-to opacity-60" />
         <Flag className="w-8 h-8 text-text-disabled" />
         {/* Context menu button */}
         <div className="absolute top-2 right-2" ref={menuRef}>

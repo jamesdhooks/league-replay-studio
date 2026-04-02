@@ -414,12 +414,13 @@ async def global_exception_handler(request, exc):
 
 def _get_icon_path() -> str:
     """Return the path to the application icon."""
-    for name in ("icon.ico", "icon.png"):
+    for name in ("icon.ico", "icon.png", "icon.svg"):
+        # Check next to the executable / bundle root
         icon = BUNDLE_DIR / name
         if icon.exists():
             return str(icon)
-        # Also check project root
-        icon = APP_DIR.parent / name
+        # Check inside the built static dir (Vite public assets)
+        icon = STATIC_DIR / name
         if icon.exists():
             return str(icon)
     return ""
@@ -439,16 +440,26 @@ def _apply_app_user_model_id() -> None:
 
 # ── Server runner ────────────────────────────────────────────────────────────
 
-def start_server(port: int = 6175) -> None:
+def start_server(port: int = 6175, reload_enabled: bool = False) -> None:
     """Start the FastAPI server with uvicorn."""
     import uvicorn
-    logger.info("[App] Starting FastAPI on http://127.0.0.1:%d", port)
-    uvicorn.run(
-        app,
-        host="127.0.0.1",
-        port=port,
-        log_level="warning",
-    )
+    logger.info("[App] Starting FastAPI on http://127.0.0.1:%d (reload=%s)", port, reload_enabled)
+    if reload_enabled:
+        # Uvicorn reload mode requires an import string and should run on main thread.
+        uvicorn.run(
+            "app:app",
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+            reload=True,
+        )
+    else:
+        uvicorn.run(
+            app,
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+        )
 
 
 # ── Main entry point ────────────────────────────────────────────────────────
@@ -456,13 +467,29 @@ def start_server(port: int = 6175) -> None:
 def main() -> None:
     """Launch the application — pywebview window or browser."""
     port = int(os.environ.get("LRS_PORT", "6175"))
-    web_only = os.environ.get("WEB_ONLY", "0") == "1"
+    argv = sys.argv[1:]
+    web_only = (os.environ.get("WEB_ONLY", "0") == "1") or ("--web" in argv)
+    reload_requested = (os.environ.get("LRS_RELOAD", "0") == "1") or ("--reload" in argv)
 
-    # Start FastAPI in background thread
-    server_thread = threading.Thread(target=start_server, args=(port,), daemon=True)
-    server_thread.start()
+    # Reload is intended for browser/web mode only.
+    reload_enabled = reload_requested and web_only
+    if reload_requested and not web_only:
+        logger.warning("[App] --reload ignored because app is not in --web mode")
 
     url = f"http://127.0.0.1:{port}"
+
+    if web_only and reload_enabled:
+        logger.info("[App] Launching in browser with hot reload")
+        import webbrowser
+
+        # Open browser shortly after server boot starts.
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+        start_server(port=port, reload_enabled=True)
+        return
+
+    # Start FastAPI in background thread
+    server_thread = threading.Thread(target=start_server, kwargs={"port": port, "reload_enabled": False}, daemon=True)
+    server_thread.start()
 
     if web_only:
         logger.info("[App] Launching in browser (web-only mode)")

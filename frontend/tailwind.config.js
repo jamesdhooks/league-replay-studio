@@ -75,6 +75,12 @@ export default {
           firstlap: '#06b6d4',
           lastlap: '#ec4899',
         },
+        // ── Gradient accent palette (fixed, not theme-variable) ──
+        gradient: {
+          from: '#6366f1',  // indigo-500
+          via: '#8b5cf6',   // violet-500
+          to: '#3b82f6',    // blue-500
+        },
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
@@ -89,6 +95,7 @@ export default {
         'xl':  ['1.25rem', { lineHeight: '1.875rem' }],    // 20px
         '2xl': ['1.5rem', { lineHeight: '2rem' }],         // 24px
         '3xl': ['1.875rem', { lineHeight: '2.375rem' }],   // 30px
+        '4xl': ['2.25rem', { lineHeight: '2.75rem' }],     // 36px
       },
       spacing: {
         'toolbar': '4rem',       // 64px — taller, more spacious
@@ -101,11 +108,13 @@ export default {
         '3xl': '1.25rem',
       },
       boxShadow: {
-        'glow': '0 0 20px rgba(91,138,245,0.12)',
-        'glow-sm': '0 0 10px rgba(91,138,245,0.08)',
-        'card': '0 2px 8px rgba(0,0,0,0.2), 0 0 1px rgba(0,0,0,0.3)',
-        'elevated': '0 8px 24px rgba(0,0,0,0.35)',
-        'float': '0 16px 48px rgba(0,0,0,0.45)',
+        'glow': '0 0 24px rgba(99,102,241,0.15), 0 0 8px rgba(139,92,246,0.10)',
+        'glow-sm': '0 0 12px rgba(99,102,241,0.10)',
+        'glow-lg': '0 0 40px rgba(99,102,241,0.20), 0 0 16px rgba(139,92,246,0.12)',
+        'card': '0 2px 8px rgba(0,0,0,0.25), 0 0 1px rgba(0,0,0,0.3)',
+        'card-hover': '0 4px 16px rgba(0,0,0,0.3), 0 0 1px rgba(99,102,241,0.15)',
+        'elevated': '0 8px 24px rgba(0,0,0,0.4)',
+        'float': '0 16px 48px rgba(0,0,0,0.5)',
       },
       animation: {
         'fade-in': 'fadeIn 0.25s ease-out',
@@ -114,6 +123,7 @@ export default {
         'slide-right': 'slideRight 0.25s ease-out',
         'pulse-soft': 'pulseSoft 2s ease-in-out infinite',
         'scale-in': 'scaleIn 0.2s ease-out',
+        'shimmer': 'shimmer 2s linear infinite',
       },
       keyframes: {
         fadeIn: {
@@ -139,6 +149,10 @@ export default {
         scaleIn: {
           '0%': { opacity: '0', transform: 'scale(0.95)' },
           '100%': { opacity: '1', transform: 'scale(1)' },
+        },
+        shimmer: {
+          '0%': { backgroundPosition: '-200% 0' },
+          '100%': { backgroundPosition: '200% 0' },
         },
       },
     },

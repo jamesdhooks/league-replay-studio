@@ -1,11 +1,12 @@
 import { useHighlight, EVENT_TYPE_LABELS } from '../../context/HighlightContext'
 import { EVENT_COLORS } from '../../context/TimelineContext'
-import { Wand2 } from 'lucide-react'
+import { Wand2, SlidersHorizontal } from 'lucide-react'
 
 /**
  * HighlightWeightSliders — Priority sliders for each event type.
  *
- * Includes: per-type weight (0–100), minimum severity threshold, target duration.
+ * Includes: per-type weight (0–100), minimum severity threshold, target duration,
+ * and detection/camera tuning parameters.
  * Changes trigger instant reprocessing via HighlightContext.
  */
 export default function HighlightWeightSliders() {
@@ -13,6 +14,7 @@ export default function HighlightWeightSliders() {
     weights, setWeight, autoBalance,
     minSeverity, setMinSeverity,
     targetDuration, setTargetDuration,
+    params, setParams,
   } = useHighlight()
 
   const eventTypes = Object.keys(EVENT_TYPE_LABELS)
@@ -108,6 +110,114 @@ export default function HighlightWeightSliders() {
           <span className="text-xxs text-text-tertiary">sec</span>
         </div>
       </div>
+
+      {/* Detection & Camera Tuning */}
+      <div className="pt-2 border-t border-border-subtle space-y-2">
+        <div className="flex items-center gap-1.5">
+          <SlidersHorizontal className="w-3 h-3 text-text-tertiary" />
+          <h4 className="text-xxs font-semibold text-text-tertiary uppercase tracking-wider">
+            Detection Tuning
+          </h4>
+        </div>
+
+        {/* Battle gap threshold */}
+        <ParamSlider
+          label="Battle Gap"
+          tooltip="Max time gap (sec) between cars to be 'in battle'"
+          value={params.battleGap}
+          min={0.3} max={3.0} step={0.1}
+          format={v => `${v.toFixed(1)}s`}
+          onChange={v => setParams(p => ({ ...p, battleGap: v }))}
+        />
+
+        {/* Battle sticky period */}
+        <ParamSlider
+          label="Battle Hold"
+          tooltip="Seconds to follow one battle before switching"
+          value={params.battleStickyPeriod}
+          min={30} max={300} step={10}
+          format={v => `${v}s`}
+          onChange={v => setParams(p => ({ ...p, battleStickyPeriod: v }))}
+        />
+
+        {/* Camera sticky period */}
+        <ParamSlider
+          label="Camera Hold"
+          tooltip="Seconds to hold one camera angle before rotating"
+          value={params.cameraStickyPeriod}
+          min={5} max={60} step={5}
+          format={v => `${v}s`}
+          onChange={v => setParams(p => ({ ...p, cameraStickyPeriod: v }))}
+        />
+
+        {/* Overtake boost */}
+        <ParamSlider
+          label="Overtake Boost"
+          tooltip="Score multiplier for events involving position changes"
+          value={params.overtakeBoost}
+          min={1.0} max={3.0} step={0.1}
+          format={v => `${v.toFixed(1)}×`}
+          onChange={v => setParams(p => ({ ...p, overtakeBoost: v }))}
+        />
+
+        {/* Incident position cutoff */}
+        <ParamSlider
+          label="Incident Pos Cut"
+          tooltip="Ignore incidents from cars below this position (0 = include all)"
+          value={params.incidentPositionCutoff}
+          min={0} max={40} step={1}
+          format={v => v === 0 ? 'Off' : `P${v}+`}
+          onChange={v => setParams(p => ({ ...p, incidentPositionCutoff: v }))}
+        />
+
+        {/* Preferred driver boost */}
+        <ParamSlider
+          label="Driver Boost"
+          tooltip="Score multiplier for preferred drivers"
+          value={params.preferredDriverBoost}
+          min={1.0} max={3.0} step={0.1}
+          format={v => `${v.toFixed(1)}×`}
+          onChange={v => setParams(p => ({ ...p, preferredDriverBoost: v }))}
+        />
+
+        {/* Preferred drivers input */}
+        <div>
+          <span className="text-xxs text-text-secondary block mb-0.5">Preferred Drivers</span>
+          <input
+            type="text"
+            value={params.preferredDrivers}
+            onChange={(e) => setParams(p => ({ ...p, preferredDrivers: e.target.value }))}
+            placeholder="Name1, Name2, ..."
+            className="w-full px-2 py-1 text-xxs bg-bg-primary border border-border rounded
+                       text-text-primary placeholder:text-text-disabled
+                       focus:outline-none focus:border-accent"
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+/**
+ * Reusable slider row for detection tuning parameters.
+ */
+function ParamSlider({ label, tooltip, value, min, max, step, format, onChange }) {
+  return (
+    <div className="flex items-center gap-2" title={tooltip}>
+      <span className="text-xxs text-text-secondary w-20 truncate">{label}</span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        className="flex-1 h-1 accent-accent cursor-pointer"
+      />
+      <span className="text-xxs text-text-tertiary font-mono w-10 text-right">
+        {format(value)}
+      </span>
     </div>
   )
 }

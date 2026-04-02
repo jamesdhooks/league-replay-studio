@@ -1,0 +1,12 @@
+{
+  "autorun": false,
+  "terminals": [
+    {
+      "name": "LRS - Dev Mode",
+      "description": "Start League Replay Studio in web browser mode",
+      "focus": true,
+      "cwd": "[workspaceFolder]",
+      "command": "./start.bat --web --reload"
+    }
+  ]
+}

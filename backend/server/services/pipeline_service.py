@@ -4,7 +4,7 @@ pipeline_service.py
 One-click automated pipeline service.
 
 Manages the full pipeline lifecycle:
-  Capture → Analysis → Editing → Export → Upload
+  Analysis → Editing → Capture → Export → Upload
 
 Supports:
 - Sequential step execution with real-time progress
@@ -35,6 +35,15 @@ from server.events import EventType, make_event
 logger = logging.getLogger(__name__)
 
 
+def _format_race_time(seconds: float) -> str:
+    """Format race session time as M:SS or H:MM:SS."""
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
 # ── Pipeline States ─────────────────────────────────────────────────────────
 
 class PipelineState(str, Enum):
@@ -60,9 +69,9 @@ class StepState(str, Enum):
 
 class StepName(str, Enum):
     """Pipeline step identifiers."""
-    CAPTURE = "capture"
     ANALYSIS = "analysis"
     EDITING = "editing"
+    CAPTURE = "capture"
     EXPORT = "export"
     UPLOAD = "upload"
 
@@ -132,9 +141,9 @@ class PipelineRun:
         """Initialise default steps if empty."""
         if not self.steps:
             self.steps = {
-                StepName.CAPTURE: PipelineStep(name=StepName.CAPTURE),
                 StepName.ANALYSIS: PipelineStep(name=StepName.ANALYSIS),
                 StepName.EDITING: PipelineStep(name=StepName.EDITING),
+                StepName.CAPTURE: PipelineStep(name=StepName.CAPTURE),
                 StepName.EXPORT: PipelineStep(name=StepName.EXPORT),
                 StepName.UPLOAD: PipelineStep(name=StepName.UPLOAD),
             }
@@ -848,9 +857,9 @@ class PipelineService:
         logger.info("[Pipeline] Executor thread started")
 
         step_order = [
-            StepName.CAPTURE,
             StepName.ANALYSIS,
             StepName.EDITING,
+            StepName.CAPTURE,
             StepName.EXPORT,
             StepName.UPLOAD,
         ]
@@ -1013,13 +1022,25 @@ class PipelineService:
         })
 
     def _execute_capture(self) -> None:
-        """Execute the capture step."""
-        # Import here to avoid circular imports
+        """Execute the capture step.
+
+        Orchestrates a full-race capture:
+          1. Read analysis results (race start frame, events) from DB
+          2. Rewind replay to race start frame
+          3. Start recording via capture_service
+          4. Play replay at 1× speed
+          5. Monitor for race end (checkered + cooldown)
+          6. Stop recording
+
+        Matches the reference CaptureRace.cs pattern of using analysis
+        data to drive the replay during capture.
+        """
         from server.services.capture_service import capture_service
+        from server.services.iracing_bridge import bridge as iracing_bridge
+        from server.services.analysis_db import get_project_db
 
         logger.info("[Pipeline] Starting capture step")
 
-        # Check if capture already exists for this project
         with self._lock:
             config = self._current_run.config if self._current_run else {}
             project_id = self._current_run.project_id if self._current_run else 0
@@ -1039,14 +1060,122 @@ class PipelineService:
             })
             return
 
-        # TODO: Integrate with capture_service for actual capture
-        # For now, simulate progress
-        for i in range(10):
-            if self._stop_event.is_set() or self._pause_event.is_set():
-                raise InterruptedError("Capture interrupted")
-            self._update_step_progress(StepName.CAPTURE, (i + 1) * 10)
-            time.sleep(0.5)
+        if not iracing_bridge.is_connected:
+            raise RuntimeError("iRacing is not connected — cannot capture")
 
+        # ── Read analysis results ───────────────────────────────────────────
+        project_dir = project.get("project_dir", "") if project else ""
+        race_start_frame = 0
+
+        if project_dir:
+            try:
+                conn = get_project_db(project_dir)
+                row = conn.execute(
+                    "SELECT value FROM analysis_meta WHERE key = ?",
+                    ("race_start_frame",),
+                ).fetchone()
+                if row:
+                    race_start_frame = int(row["value"])
+                conn.close()
+            except Exception as exc:
+                logger.warning("[Pipeline] Could not read analysis meta: %s", exc)
+
+        self._update_step_progress(StepName.CAPTURE, 5.0, {
+            "message": "Rewinding replay to race start...",
+        })
+
+        # ── Rewind replay to race start ─────────────────────────────────────
+        iracing_bridge.set_replay_speed(0)
+        time.sleep(0.3)
+        iracing_bridge.seek_to_frame(race_start_frame)
+        time.sleep(1.0)
+
+        self._update_step_progress(StepName.CAPTURE, 10.0, {
+            "message": "Starting recording...",
+        })
+
+        # ── Start recording ─────────────────────────────────────────────────
+        if self._loop:
+            future = asyncio.run_coroutine_threadsafe(
+                capture_service.start_capture(), self._loop
+            )
+            result = future.result(timeout=10)
+            if not result.get("success"):
+                raise RuntimeError(
+                    f"Failed to start capture: {result.get('error', 'unknown')}"
+                )
+        else:
+            raise RuntimeError("No event loop available for capture")
+
+        time.sleep(0.5)
+
+        # ── Play replay at 1× and monitor for race end ─────────────────────
+        iracing_bridge.set_replay_speed(1)
+
+        SESSION_STATE_CHECKERED = 5
+        SESSION_STATE_COOLDOWN = 6
+        poll_interval = 1.0  # check once per second
+        last_session_time = 0.0
+        capture_started = time.monotonic()
+        MAX_CAPTURE_DURATION = 7200  # 2 hours safety limit
+
+        try:
+            while not self._stop_event.is_set():
+                if self._pause_event.is_set():
+                    iracing_bridge.set_replay_speed(0)
+                    raise InterruptedError("Capture paused")
+
+                elapsed = time.monotonic() - capture_started
+                if elapsed > MAX_CAPTURE_DURATION:
+                    logger.warning("[Pipeline] Capture hit safety time limit")
+                    break
+
+                snapshot = iracing_bridge.capture_snapshot()
+                if snapshot:
+                    session_state = snapshot.get("session_state", 0)
+                    session_time = snapshot.get("session_time", 0.0)
+
+                    if session_time > last_session_time:
+                        last_session_time = session_time
+
+                    # Estimate progress from session time
+                    # (rough — we don't know total race time ahead of time)
+                    progress = min(90.0, 10.0 + (elapsed / 60.0) * 5.0)
+                    self._update_step_progress(StepName.CAPTURE, progress, {
+                        "message": f"Recording... {_format_race_time(session_time)}",
+                        "session_time": session_time,
+                    })
+
+                    # Race finished: wait for cooldown then stop
+                    if session_state >= SESSION_STATE_COOLDOWN:
+                        logger.info("[Pipeline] Race cooldown reached, finishing capture")
+                        time.sleep(3.0)  # capture a few extra seconds
+                        break
+                    elif session_state >= SESSION_STATE_CHECKERED:
+                        logger.info("[Pipeline] Checkered flag — waiting for cooldown")
+                        # Continue loop, waiting for cooldown state
+
+                time.sleep(poll_interval)
+
+        finally:
+            # ── Stop recording ──────────────────────────────────────────────
+            iracing_bridge.set_replay_speed(0)
+
+            if self._loop:
+                future = asyncio.run_coroutine_threadsafe(
+                    capture_service.stop_capture(), self._loop
+                )
+                try:
+                    stop_result = future.result(timeout=10)
+                    capture_file = stop_result.get("file")
+                    if capture_file:
+                        logger.info("[Pipeline] Capture file: %s", capture_file)
+                except Exception as exc:
+                    logger.warning("[Pipeline] Error stopping capture: %s", exc)
+
+        self._update_step_progress(StepName.CAPTURE, 100.0, {
+            "message": "Capture complete",
+        })
         logger.info("[Pipeline] Capture step completed")
 
     def _execute_analysis(self) -> None:

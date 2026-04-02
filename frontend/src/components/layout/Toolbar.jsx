@@ -1,21 +1,23 @@
 import {
-  PanelLeftClose,
-  PanelLeftOpen,
   Settings,
   HelpCircle,
   Undo2,
   Redo2,
   Save,
   PlayCircle,
+  ArrowLeft,
+  Wifi,
+  WifiOff,
 } from 'lucide-react'
+import StepIndicator from '../projects/StepIndicator'
+import { useIRacing } from '../../context/IRacingContext'
+import { useSettings } from '../../context/SettingsContext'
 
 /**
  * Top toolbar with app title, navigation, and action buttons.
  * Larger (64px), friendlier spacing, professional Clipchamp-inspired styling.
  *
  * @param {Object} props
- * @param {boolean} props.sidebarCollapsed
- * @param {() => void} props.onToggleSidebar
  * @param {string} [props.projectName] - Active project name (if any)
  * @param {() => void} [props.onOpenSettings] - Callback to open settings panel
  * @param {boolean} [props.canUndo] - Whether undo is available
@@ -26,54 +28,104 @@ import {
  * @param {string} [props.redoDescription] - Description of next redo operation
  */
 function Toolbar({
-  sidebarCollapsed, onToggleSidebar, projectName, onOpenSettings,
+  activeProject, onBack, onStepClick, stepReadiness,
+  onOpenSettings, onOpenHelp,
   canUndo = false, canRedo = false, onUndo, onRedo,
   undoDescription, redoDescription,
 }) {
+  const { isConnected, sessionData } = useIRacing()
+  const { settings } = useSettings()
+
+  const captureSoftware = settings?.capture_software
+  const captureLabel = {
+    obs: 'OBS',
+    shadowplay: 'ShadowPlay',
+    relive: 'ReLive',
+    manual: 'Manual',
+  }[captureSoftware] ?? 'No Software'
   return (
-    <header className="h-toolbar flex items-center px-4 bg-bg-secondary border-b border-border
-                        select-none shrink-0">
-      {/* Left section: sidebar toggle + app name */}
-      <div className="flex items-center gap-3">
-        <button
-          onClick={onToggleSidebar}
-          className="p-2 rounded-xl hover:bg-surface-hover transition-all duration-150
-                     text-text-secondary hover:text-text-primary cursor-pointer
-                     active:scale-95"
-          title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-        >
-          {sidebarCollapsed ? (
-            <PanelLeftOpen className="w-5 h-5" />
-          ) : (
-            <PanelLeftClose className="w-5 h-5" />
-          )}
-        </button>
+    <header className="relative h-toolbar flex items-center px-4 bg-bg-secondary border-b border-border
+                        select-none shrink-0 bg-noise">
+      {/* Left section */}
+      <div className="flex items-center gap-3 shrink-0">
+        {activeProject ? (
+          <>
+            <button
+              onClick={onBack}
+              className="p-2 rounded-xl hover:bg-surface-hover transition-all duration-150
+                         text-text-secondary hover:text-text-primary active:scale-95"
+              title="Back to projects"
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+            <div className="flex flex-col justify-center min-w-0">
+              <span className="text-sm font-bold text-text-primary leading-tight truncate max-w-48">
+                {activeProject.name}
+              </span>
+              {activeProject.track_name && (
+                <span className="text-xxs text-text-tertiary leading-tight truncate max-w-48">
+                  {activeProject.track_name}{activeProject.session_type ? ` · ${activeProject.session_type}` : ''}
+                </span>
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-gradient-from via-gradient-via to-gradient-to
+                            flex items-center justify-center shadow-glow-sm">
+              <PlayCircle className="w-5 h-5 text-white" />
+            </div>
+            <div className="flex items-baseline gap-2">
+              <span className="text-lg font-extrabold text-gradient tracking-tight">
+                League Replay Studio
+              </span>
+              <span className="text-xxs text-text-disabled font-mono bg-surface/80 px-1.5 py-0.5 rounded">
+                v0.1.0
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
 
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-accent/15
-                          flex items-center justify-center border border-accent/10">
-            <PlayCircle className="w-4.5 h-4.5 text-accent" />
-          </div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-base font-bold text-text-primary tracking-tight">
-              League Replay Studio
-            </span>
-            <span className="text-xxs text-text-disabled font-mono bg-surface px-1.5 py-0.5 rounded">
-              v0.1.0
-            </span>
-          </div>
+      {/* Center — absolutely positioned so step pills are always at the exact midpoint */}
+      {activeProject && (
+        <div className="absolute left-1/2 -translate-x-1/2 flex items-center">
+          <StepIndicator
+            currentStep={activeProject.current_step}
+            onStepClick={onStepClick}
+            stepReadiness={stepReadiness}
+          />
         </div>
-      </div>
+      )}
 
-      {/* Center section: project name (if any) */}
-      <div className="flex-1 flex items-center justify-center">
-        <span className="text-sm text-text-tertiary italic">
-          {projectName || 'No project open'}
-        </span>
-      </div>
+      {/* Right section */}
+      <div className="ml-auto flex items-center gap-2 shrink-0">
+        {/* iRacing connection status card */}
+        <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs select-none
+          ${ isConnected
+            ? 'bg-success/10 border-success/20 text-success'
+            : 'bg-surface border-border text-text-disabled'
+          }`}>
+          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+            isConnected ? 'bg-success animate-pulse-soft' : 'bg-text-disabled'
+          }`} />
+          { isConnected
+            ? (sessionData?.track_name ? `iRacing · ${sessionData.track_name}` : 'iRacing · Connected')
+            : 'iRacing'
+          }
+          {isConnected && sessionData?.drivers?.length > 0 && (
+            <span className="ml-0.5 text-success/70">{sessionData.drivers.length}d</span>
+          )}
+        </div>
 
-      {/* Right section: action buttons */}
-      <div className="flex items-center gap-1">
+        {/* Capture software — always grey, shows configured software name */}
+        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs select-none
+                        bg-surface border-border text-text-secondary">
+          <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-text-disabled" />
+          {captureLabel}
+        </div>
+
+        <ToolbarDivider />
         <ToolbarButton icon={Save} title="Save (Ctrl+S)" disabled />
         <ToolbarDivider />
         <ToolbarButton
@@ -90,7 +142,7 @@ function Toolbar({
         />
         <ToolbarDivider />
         <ToolbarButton icon={Settings} title="Settings" onClick={onOpenSettings} />
-        <ToolbarButton icon={HelpCircle} title="Help" />
+        <ToolbarButton icon={HelpCircle} title="Help" onClick={onOpenHelp} />
       </div>
     </header>
   )

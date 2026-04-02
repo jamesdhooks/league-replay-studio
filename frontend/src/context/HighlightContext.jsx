@@ -18,6 +18,19 @@ const DEFAULT_WEIGHTS = {
   last_lap: 100,
 }
 
+/** Default detection/camera tuning parameters (inspired by iRacingReplayDirector) */
+const DEFAULT_PARAMS = {
+  battleGap: 1.0,               // Max gap (seconds) between cars to be "in battle"
+  battleStickyPeriod: 120,      // Seconds to track one battle before switching
+  cameraStickyPeriod: 20,       // Seconds to hold one camera angle
+  overtakeBoost: 1.5,           // Score multiplier for events with overtakes
+  incidentPositionCutoff: 0,    // Ignore incidents from cars below this position (0 = disabled)
+  firstLapWeight: 1.0,          // Multiplier for first-lap events (1.0 = normal)
+  lastLapWeight: 1.0,           // Multiplier for last-lap events (1.0 = normal)
+  preferredDrivers: '',         // Comma-separated preferred driver names (boost their events)
+  preferredDriverBoost: 1.3,    // Score multiplier for preferred driver events
+}
+
 /** Event type labels for UI display */
 export const EVENT_TYPE_LABELS = {
   incident: 'Incidents',
@@ -33,24 +46,61 @@ export const EVENT_TYPE_LABELS = {
 /**
  * Compute highlight score for a single event.
  *
- * Score = (severity / 10) × (type_weight / 100) × 100
- * Range: 0–100
+ * Base: (severity / 10) × (type_weight / 100) × 100
+ * Then apply boosts: overtake, preferred driver, first/last lap multipliers.
  */
-function computeEventScore(event, weights) {
+function computeEventScore(event, weights, params = {}) {
   const typeWeight = weights[event.event_type] ?? 50
-  return Math.round((event.severity / 10) * (typeWeight / 100) * 100)
+  let score = (event.severity / 10) * (typeWeight / 100) * 100
+
+  // Overtake boost — events with position changes get a multiplier
+  if (event.metadata?.with_overtake && params.overtakeBoost) {
+    score *= params.overtakeBoost
+  }
+
+  // Race phase multiplier
+  if (event.event_type === 'first_lap' && params.firstLapWeight != null) {
+    score *= params.firstLapWeight
+  }
+  if (event.event_type === 'last_lap' && params.lastLapWeight != null) {
+    score *= params.lastLapWeight
+  }
+
+  // Preferred driver boost
+  if (params.preferredDrivers && params.preferredDriverBoost) {
+    const preferred = params.preferredDrivers.split(',').map(n => n.trim().toLowerCase()).filter(Boolean)
+    if (preferred.length > 0 && event.driver_names) {
+      const hasPreferred = event.driver_names.some(name =>
+        preferred.some(p => name.toLowerCase().includes(p))
+      )
+      if (hasPreferred) {
+        score *= params.preferredDriverBoost
+      }
+    }
+  }
+
+  return Math.round(score)
 }
 
 /**
  * Build selection reason string for an event.
  */
-function buildReason(event, score, overrides, minSeverity) {
+function buildReason(event, score, overrides, minSeverity, inclusion) {
   const eid = String(event.id)
-  if (overrides[eid] === 'include') return 'Manual include'
-  if (overrides[eid] === 'exclude') return 'Manual exclude'
+  const override = normalizeOverride(overrides[eid])
+  if (override === 'highlight') return 'Manual highlight'
+  if (override === 'full-video') return 'Manual full-video'
+  if (override === 'exclude') return 'Manual exclude'
   if (event.severity < minSeverity) return `Below min severity (${minSeverity})`
   if (score <= 0) return 'Zero weight'
+  if (inclusion === 'full-video') return `Score ${score} — over highlight budget`
   return `Score ${score} (sev ${event.severity} × weight)`
+}
+
+/** Normalize legacy override values: 'include' → 'highlight' */
+function normalizeOverride(value) {
+  if (value === 'include') return 'highlight'
+  return value || null
 }
 
 /** Allow 10% overshoot on target duration before excluding events */
@@ -61,42 +111,51 @@ const TARGET_DURATION_TOLERANCE = 1.1
  *
  * Returns { scoredEvents, selectedIds, metrics }
  */
-function computeHighlightSelection(events, weights, targetDuration, minSeverity, overrides, raceDuration, drivers) {
+function computeHighlightSelection(events, weights, targetDuration, minSeverity, overrides, raceDuration, drivers, params = {}) {
   // 1. Score all events
   const scored = events.map(evt => ({
     ...evt,
-    score: computeEventScore(evt, weights),
-    override: overrides[String(evt.id)] || null,
+    score: computeEventScore(evt, weights, params),
+    override: normalizeOverride(overrides[String(evt.id)]),
     duration: Math.max(0, evt.end_time_seconds - evt.start_time_seconds),
   }))
 
-  // 2. Determine inclusion
-  // Sort by score descending for target-duration selection
+  // 2. Determine inclusion into 3 tiers: highlight / full-video / excluded
   const sortedByScore = [...scored].sort((a, b) => b.score - a.score)
 
-  let totalDuration = 0
-  const selectedIds = new Set()
+  let highlightDuration = 0
+  const highlightIds = new Set()
+  const fullVideoIds = new Set()
   const excludedIds = new Set()
 
-  // First pass: force-includes and force-excludes
+  // First pass: manual overrides
   for (const evt of sortedByScore) {
-    const eid = String(evt.id)
-    if (overrides[eid] === 'include') {
-      selectedIds.add(evt.id)
-      totalDuration += evt.duration
-    } else if (overrides[eid] === 'exclude') {
+    if (evt.override === 'highlight') {
+      highlightIds.add(evt.id)
+      highlightDuration += evt.duration
+    } else if (evt.override === 'full-video') {
+      fullVideoIds.add(evt.id)
+    } else if (evt.override === 'exclude') {
       excludedIds.add(evt.id)
     }
   }
 
   // Second pass: algorithm selection
   for (const evt of sortedByScore) {
-    if (selectedIds.has(evt.id) || excludedIds.has(evt.id)) continue
+    if (highlightIds.has(evt.id) || fullVideoIds.has(evt.id) || excludedIds.has(evt.id)) continue
 
     // Apply min severity filter
     if (evt.severity < minSeverity) {
       excludedIds.add(evt.id)
       continue
+    }
+
+    // Apply incident position cutoff
+    if (params.incidentPositionCutoff > 0 && evt.event_type === 'incident') {
+      if (evt.position && evt.position > params.incidentPositionCutoff) {
+        excludedIds.add(evt.id)
+        continue
+      }
     }
 
     // Apply zero-weight filter
@@ -105,31 +164,39 @@ function computeHighlightSelection(events, weights, targetDuration, minSeverity,
       continue
     }
 
-    // Apply target duration constraint
+    // Fits in highlight budget → highlight; otherwise → full-video (still a valid event)
     if (targetDuration && targetDuration > 0) {
-      if (totalDuration + evt.duration > targetDuration * TARGET_DURATION_TOLERANCE) {
-        excludedIds.add(evt.id)
+      if (highlightDuration + evt.duration > targetDuration * TARGET_DURATION_TOLERANCE) {
+        fullVideoIds.add(evt.id)
         continue
       }
     }
 
-    selectedIds.add(evt.id)
-    totalDuration += evt.duration
+    highlightIds.add(evt.id)
+    highlightDuration += evt.duration
   }
 
-  // 3. Build scored events with reasons and selection status
-  const scoredEvents = scored.map(evt => ({
-    ...evt,
-    included: selectedIds.has(evt.id),
-    reason: buildReason(evt, evt.score, overrides, minSeverity),
-  }))
+  // 3. Build scored events with inclusion tier and reasons
+  const scoredEvents = scored.map(evt => {
+    const inclusion = highlightIds.has(evt.id) ? 'highlight'
+      : fullVideoIds.has(evt.id) ? 'full-video'
+      : 'excluded'
+    return {
+      ...evt,
+      included: inclusion === 'highlight', // backward compat
+      inclusion,
+      reason: buildReason(evt, evt.score, overrides, minSeverity, inclusion),
+    }
+  })
 
   // 4. Compute metrics
-  const includedEvents = scoredEvents.filter(e => e.included)
-  const highlightDuration = includedEvents.reduce((sum, e) => sum + e.duration, 0)
+  const includedEvents = scoredEvents.filter(e => e.inclusion === 'highlight')
+  const fullVideoEvents = scoredEvents.filter(e => e.inclusion === 'full-video')
+  const totalHighlightDuration = includedEvents.reduce((sum, e) => sum + e.duration, 0)
+  const totalFullVideoDuration = fullVideoEvents.reduce((sum, e) => sum + e.duration, 0)
 
   // Coverage %
-  const coveragePct = raceDuration > 0 ? (highlightDuration / raceDuration) * 100 : 0
+  const coveragePct = raceDuration > 0 ? (totalHighlightDuration / raceDuration) * 100 : 0
 
   // Balance — distribution of event types in selected events
   const typeCounts = {}
@@ -173,8 +240,10 @@ function computeHighlightSelection(events, weights, targetDuration, minSeverity,
   const driverCoveragePct = Math.round((allDriverIds.size / totalDrivers) * 100)
 
   const metrics = {
-    duration: Math.round(highlightDuration * 10) / 10,
+    duration: Math.round(totalHighlightDuration * 10) / 10,
+    fullVideoDuration: Math.round(totalFullVideoDuration * 10) / 10,
     eventCount: includedEvents.length,
+    fullVideoCount: fullVideoEvents.length,
     totalEvents: events.length,
     coveragePct: Math.round(coveragePct * 10) / 10,
     balance: balanceScore,
@@ -185,7 +254,13 @@ function computeHighlightSelection(events, weights, targetDuration, minSeverity,
     typeCounts,
   }
 
-  return { scoredEvents, selectedIds: [...selectedIds], excludedIds: [...excludedIds], metrics }
+  return {
+    scoredEvents,
+    selectedIds: [...highlightIds],
+    fullVideoIds: [...fullVideoIds],
+    excludedIds: [...excludedIds],
+    metrics,
+  }
 }
 
 /**
@@ -223,6 +298,7 @@ export function HighlightProvider({ children }) {
   const [targetDuration, setTargetDuration] = useState(null)
   const [minSeverity, setMinSeverity] = useState(0)
   const [overrides, setOverrides] = useState({})    // { eventId: 'include'|'exclude' }
+  const [params, setParams] = useState({ ...DEFAULT_PARAMS })
 
   // ── A/B compare mode ────────────────────────────────────────────────────
   const [abMode, setAbMode] = useState(false)
@@ -250,8 +326,8 @@ export function HighlightProvider({ children }) {
 
   // ── Computed selection (memoised, <100ms) ───────────────────────────────
   const selection = useMemo(
-    () => computeHighlightSelection(events, weights, targetDuration, minSeverity, overrides, raceDuration, drivers),
-    [events, weights, targetDuration, minSeverity, overrides, raceDuration, drivers],
+    () => computeHighlightSelection(events, weights, targetDuration, minSeverity, overrides, raceDuration, drivers, params),
+    [events, weights, targetDuration, minSeverity, overrides, raceDuration, drivers, params],
   )
 
   // ── Sorted & filtered event list ───────────────────────────────────────
@@ -263,11 +339,13 @@ export function HighlightProvider({ children }) {
       list = list.filter(e => e.event_type === filterType)
     }
 
-    // Filter by inclusion
-    if (filterInclusion === 'included') {
-      list = list.filter(e => e.included)
+    // Filter by inclusion tier
+    if (filterInclusion === 'highlight') {
+      list = list.filter(e => e.inclusion === 'highlight')
+    } else if (filterInclusion === 'full-video') {
+      list = list.filter(e => e.inclusion === 'full-video')
     } else if (filterInclusion === 'excluded') {
-      list = list.filter(e => !e.included)
+      list = list.filter(e => e.inclusion === 'excluded')
     }
 
     // Filter by severity range
@@ -304,6 +382,7 @@ export function HighlightProvider({ children }) {
       if (config.target_duration !== undefined) setTargetDuration(config.target_duration)
       if (config.min_severity !== undefined) setMinSeverity(config.min_severity)
       if (config.overrides && typeof config.overrides === 'object') setOverrides(config.overrides)
+      if (config.params && typeof config.params === 'object') setParams({ ...DEFAULT_PARAMS, ...config.params })
     } catch (err) {
       console.error('[Highlights] Config load error:', err)
     }
@@ -317,17 +396,19 @@ export function HighlightProvider({ children }) {
         target_duration: targetDuration,
         min_severity: minSeverity,
         overrides,
+        params,
       })
     } catch (err) {
       console.error('[Highlights] Config save error:', err)
     }
-  }, [weights, targetDuration, minSeverity, overrides])
+  }, [weights, targetDuration, minSeverity, overrides, params])
 
   // ── Apply selections to DB ─────────────────────────────────────────────
   const applyHighlights = useCallback(async (projectId) => {
     try {
       await apiPost(`/projects/${projectId}/highlights/apply`, {
         included_ids: selection.selectedIds,
+        full_video_ids: selection.fullVideoIds,
         excluded_ids: selection.excludedIds,
       })
       // Also save the config
@@ -375,18 +456,22 @@ export function HighlightProvider({ children }) {
   const toggleOverride = useCallback((eventId) => {
     setOverrides(prev => {
       const eid = String(eventId)
-      const current = prev[eid]
+      const current = normalizeOverride(prev[eid])
       const next = { ...prev }
       let newValue
-      if (current === 'include') {
+      // Cycle: auto → highlight → full-video → exclude → auto
+      if (current === 'highlight') {
+        next[eid] = 'full-video'
+        newValue = 'full-video'
+      } else if (current === 'full-video') {
         next[eid] = 'exclude'
         newValue = 'exclude'
       } else if (current === 'exclude') {
         delete next[eid]
         newValue = null
       } else {
-        next[eid] = 'include'
-        newValue = 'include'
+        next[eid] = 'highlight'
+        newValue = 'highlight'
       }
 
       pushAction({
@@ -564,6 +649,10 @@ export function HighlightProvider({ children }) {
     minSeverity,
     setMinSeverity,
 
+    // Detection/camera params
+    params,
+    setParams,
+
     // Overrides
     overrides,
     toggleOverride,
@@ -611,6 +700,7 @@ export function HighlightProvider({ children }) {
     drivers,
   }), [
     weights, setWeight, targetDuration, minSeverity,
+    params,
     overrides, toggleOverride, setOverrideValue,
     selection, filteredEvents,
     loadConfig, saveConfig, applyHighlights, loadDrivers, autoBalance, jumpToEvent,

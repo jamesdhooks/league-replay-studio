@@ -128,7 +128,7 @@ Examples:
         "--full-pipeline",
         action="store_true",
         dest="full_pipeline",
-        help="Run the complete automated pipeline (capture→analysis→edit→export→upload)",
+        help="Run the complete automated pipeline (analysis→edit→capture→export→upload)",
     )
 
     # ── Options ─────────────────────────────────────────────────────────────

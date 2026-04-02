@@ -1,32 +1,22 @@
-import { useState, useEffect, useCallback } from 'react'
-import { ArrowLeft, ChevronRight } from 'lucide-react'
+import { useCallback } from 'react'
+import { ChevronRight } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext'
-import StepIndicator from './StepIndicator'
+import { useAnalysis } from '../../context/AnalysisContext'
 import ProjectFileBrowser from './ProjectFileBrowser'
 import AnalysisPanel from '../analysis/AnalysisPanel'
 import HighlightPanel from '../highlights/HighlightPanel'
 import CapturePanel from '../capture/CapturePanel'
 import EncodingPanel from '../encoding/EncodingPanel'
+import StepGate from '../common/StepGate'
 
 /**
  * Project view — shown when a project is open.
  * Displays step indicator, current step content area, and file browser sidebar.
- *
- * @param {Object} props
- * @param {Object} props.project - The active project object
- * @param {() => void} props.onBack - Return to project library
+ * Steps are always navigable; StepGate CTA is shown when prerequisites aren't met.
  */
-function ProjectView({ project, onBack }) {
-  const { advanceStep, setStep } = useProject()
-  const [showFileBrowser, setShowFileBrowser] = useState(true)
-
-  const handleStepClick = useCallback(async (stepId) => {
-    try {
-      await setStep(project.id, stepId)
-    } catch {
-      // Step navigation failed
-    }
-  }, [project.id, setStep])
+function ProjectView({ project }) {
+  const { advanceStep } = useProject()
+  const { events, eventSummary } = useAnalysis()
 
   const handleAdvance = useCallback(async () => {
     try {
@@ -36,39 +26,36 @@ function ProjectView({ project, onBack }) {
     }
   }, [project.id, advanceStep])
 
-  // Labels for each step
-  const stepDescriptions = {
-    setup: 'Configure project settings and select your replay file.',
-    capture: 'Record the replay using OBS, ShadowPlay, or ReLive.',
-    analysis: 'Scan the replay to detect race events and key moments.',
-    editing: 'Edit the timeline, tune highlights, and configure overlays.',
-    export: 'Encode the final video with GPU-accelerated rendering.',
-    upload: 'Upload to YouTube or other platforms.',
-  }
-
-  const nextStepLabels = {
-    setup: 'Begin Capture',
-    capture: 'Start Analysis',
-    analysis: 'Open Editor',
-    editing: 'Export Video',
-    export: 'Upload',
-    upload: 'Complete',
-  }
+  const hasAnalysis = (events?.length > 0) || (eventSummary?.total_events > 0)
 
   // Determine what to show in the main content area based on current step
   const renderStepContent = () => {
     switch (project.current_step) {
-      case 'capture':
-        return <CapturePanel projectId={project.id} />
-
       case 'analysis':
         return <AnalysisPanel />
 
       case 'editing':
+        if (!hasAnalysis) return <StepGate currentStep="editing" requiredStep="analysis" />
         return <HighlightPanel projectId={project.id} />
+
+      case 'capture':
+        if (!hasAnalysis) return <StepGate currentStep="capture" requiredStep="analysis" />
+        return <CapturePanel projectId={project.id} />
 
       case 'export':
         return <EncodingPanel projectId={project.id} />
+
+      case 'upload':
+        return (
+          <div className="flex-1 flex flex-col items-center justify-center p-8">
+            <div className="text-center space-y-4 max-w-md">
+              <h3 className="text-lg font-semibold text-text-primary">Upload</h3>
+              <p className="text-sm text-text-secondary">
+                Upload to YouTube or other platforms.
+              </p>
+            </div>
+          </div>
+        )
 
       default:
         return (
@@ -78,19 +65,8 @@ function ProjectView({ project, onBack }) {
                 {project.current_step}
               </h3>
               <p className="text-sm text-text-secondary">
-                {stepDescriptions[project.current_step] || ''}
+                This step is under construction.
               </p>
-
-              {project.current_step !== 'upload' && (
-                <button
-                  onClick={handleAdvance}
-                  className="flex items-center gap-1.5 mx-auto px-4 py-2 bg-accent hover:bg-accent-hover
-                             text-white rounded-lg text-sm font-medium transition-colors"
-                >
-                  {nextStepLabels[project.current_step] || 'Continue'}
-                  <ChevronRight className="w-4 h-4" />
-                </button>
-              )}
             </div>
           </div>
         )
@@ -98,48 +74,14 @@ function ProjectView({ project, onBack }) {
   }
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Project header */}
-      <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border shrink-0">
-        <button
-          onClick={onBack}
-          className="p-1 rounded-md hover:bg-surface-hover transition-colors text-text-secondary
-                     hover:text-text-primary"
-          title="Back to projects"
-        >
-          <ArrowLeft className="w-4 h-4" />
-        </button>
-
-        <div className="flex-1 min-w-0">
-          <h2 className="text-sm font-semibold text-text-primary truncate">
-            {project.name}
-          </h2>
-          {project.track_name && (
-            <p className="text-xxs text-text-tertiary truncate">
-              {project.track_name}
-              {project.session_type && ` · ${project.session_type}`}
-            </p>
-          )}
-        </div>
-
-        <StepIndicator
-          currentStep={project.current_step}
-          onStepClick={handleStepClick}
-        />
-      </div>
-
-      {/* Main content area */}
-      <div className="flex flex-1 overflow-hidden">
+    <div className="flex flex-1 overflow-hidden">
         {/* Step content */}
         {renderStepContent()}
 
-        {/* File browser sidebar */}
-        {showFileBrowser && (
-          <div className="w-64 border-l border-border bg-bg-secondary shrink-0 overflow-hidden">
-            <ProjectFileBrowser projectId={project.id} />
-          </div>
-        )}
-      </div>
+        {/* File browser sidebar — always rightmost */}
+        <div className="w-64 border-l border-border bg-bg-secondary shrink-0 overflow-hidden">
+          <ProjectFileBrowser projectId={project.id} />
+        </div>
     </div>
   )
 }

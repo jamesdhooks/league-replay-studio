@@ -3,7 +3,7 @@ import { EVENT_COLORS } from '../../context/TimelineContext'
 import { formatTime } from '../../utils/time'
 import {
   ArrowUpDown, ArrowUp, ArrowDown,
-  Check, X, Minus, ChevronDown,
+  Check, X, Minus, Film, ChevronDown,
 } from 'lucide-react'
 
 /**
@@ -15,7 +15,7 @@ import {
  */
 export default function HighlightEventTable() {
   const {
-    filteredEvents, overrides, toggleOverride, jumpToEvent,
+    filteredEvents, toggleOverride, jumpToEvent,
     sortColumn, sortDirection, handleSort,
     filterType, setFilterType,
     filterInclusion, setFilterInclusion,
@@ -48,7 +48,8 @@ export default function HighlightEventTable() {
                      text-text-primary focus:outline-none focus:border-accent"
         >
           <option value="">All events</option>
-          <option value="included">Included</option>
+          <option value="highlight">Highlight</option>
+          <option value="full-video">Full-video</option>
           <option value="excluded">Excluded</option>
         </select>
 
@@ -74,7 +75,7 @@ export default function HighlightEventTable() {
           </thead>
           <tbody>
             {filteredEvents.map(evt => {
-              const override = overrides[String(evt.id)] || null
+              const override = evt.override || null
               const color = EVENT_COLORS[evt.event_type] || '#666'
               const isOverridden = override !== null
 
@@ -83,13 +84,17 @@ export default function HighlightEventTable() {
                   key={evt.id}
                   onClick={() => jumpToEvent(evt)}
                   className={`border-b border-border-subtle cursor-pointer transition-colors
-                    ${evt.included
+                    ${evt.inclusion === 'highlight'
                       ? isOverridden
                         ? 'bg-accent/5 hover:bg-accent/10'
                         : 'hover:bg-bg-hover'
-                      : isOverridden
-                        ? 'bg-danger/5 hover:bg-danger/10 opacity-60'
-                        : 'opacity-40 hover:opacity-60'
+                      : evt.inclusion === 'full-video'
+                        ? isOverridden
+                          ? 'bg-info/5 hover:bg-info/10 opacity-70'
+                          : 'opacity-60 hover:opacity-80'
+                        : isOverridden
+                          ? 'bg-danger/5 hover:bg-danger/10 opacity-50'
+                          : 'opacity-30 hover:opacity-50'
                     }`}
                 >
                   {/* Override checkbox */}
@@ -97,23 +102,30 @@ export default function HighlightEventTable() {
                     <button
                       onClick={(e) => { e.stopPropagation(); toggleOverride(evt.id) }}
                       className={`w-4 h-4 rounded border flex items-center justify-center transition-colors
-                        ${override === 'include'
+                        ${override === 'highlight'
                           ? 'bg-success border-success text-white'
-                          : override === 'exclude'
-                            ? 'bg-danger border-danger text-white'
-                            : evt.included
-                              ? 'border-border-subtle text-success'
-                              : 'border-border-subtle text-text-disabled'
+                          : override === 'full-video'
+                            ? 'bg-info border-info text-white'
+                            : override === 'exclude'
+                              ? 'bg-danger border-danger text-white'
+                              : evt.inclusion === 'highlight'
+                                ? 'border-border-subtle text-success'
+                                : evt.inclusion === 'full-video'
+                                  ? 'border-border-subtle text-info'
+                                  : 'border-border-subtle text-text-disabled'
                         }`}
                       title={
-                        override === 'include' ? 'Force included (click to force exclude)'
-                        : override === 'exclude' ? 'Force excluded (click to auto)'
-                        : 'Auto (click to force include)'
+                        override === 'highlight' ? 'Force highlight (click for full-video)'
+                        : override === 'full-video' ? 'Force full-video (click to exclude)'
+                        : override === 'exclude' ? 'Force excluded (click for auto)'
+                        : 'Auto (click to force highlight)'
                       }
                     >
-                      {override === 'include' && <Check className="w-2.5 h-2.5" />}
+                      {override === 'highlight' && <Check className="w-2.5 h-2.5" />}
+                      {override === 'full-video' && <Film className="w-2.5 h-2.5" />}
                       {override === 'exclude' && <X className="w-2.5 h-2.5" />}
-                      {!override && evt.included && <Minus className="w-2.5 h-2.5" />}
+                      {!override && evt.inclusion === 'highlight' && <Minus className="w-2.5 h-2.5" />}
+                      {!override && evt.inclusion === 'full-video' && <Film className="w-2 h-2 opacity-50" />}
                     </button>
                   </td>
 

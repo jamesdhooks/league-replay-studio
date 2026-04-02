@@ -143,8 +143,10 @@ function ProjectLibrary({ onOpenProject }) {
         {/* New project button */}
         <button
           onClick={() => setWizardOpen(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-accent hover:bg-accent-hover
-                     text-white rounded-lg text-sm font-medium transition-colors"
+          className="flex items-center gap-1.5 px-3.5 py-1.5 bg-gradient-to-r from-gradient-from to-gradient-to
+                     hover:from-gradient-via hover:to-gradient-from
+                     text-white rounded-lg text-sm font-semibold transition-all duration-200
+                     shadow-glow-sm hover:shadow-glow"
         >
           <Plus className="w-4 h-4" />
           New Project
@@ -253,10 +255,11 @@ function ProjectLibrary({ onOpenProject }) {
  */
 function EmptyState({ onNewProject }) {
   return (
-    <div className="flex flex-col items-center justify-center py-16 space-y-4">
-      <div className="w-16 h-16 rounded-2xl bg-accent/10 flex items-center justify-center">
+    <div className="flex flex-col items-center justify-center py-20 space-y-5">
+      <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-gradient-from via-gradient-via to-gradient-to
+                      flex items-center justify-center shadow-glow">
         <svg
-          className="w-8 h-8 text-accent"
+          className="w-10 h-10 text-white"
           fill="none"
           viewBox="0 0 24 24"
           stroke="currentColor"
@@ -269,16 +272,18 @@ function EmptyState({ onNewProject }) {
           />
         </svg>
       </div>
-      <h2 className="text-xl font-semibold text-text-primary">
+      <h2 className="text-2xl font-extrabold text-gradient">
         League Replay Studio
       </h2>
-      <p className="text-sm text-text-secondary max-w-md text-center">
+      <p className="text-sm text-text-secondary max-w-md text-center leading-relaxed">
         Professional iRacing replay editor. Create a new project or open an existing one to get started.
       </p>
       <button
         onClick={onNewProject}
-        className="flex items-center gap-1.5 px-4 py-2 bg-accent hover:bg-accent-hover
-                   text-white rounded-lg text-sm font-medium transition-colors mt-2"
+        className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-gradient-from to-gradient-to
+                   hover:from-gradient-via hover:to-gradient-from
+                   text-white rounded-xl text-sm font-semibold transition-all duration-200
+                   shadow-glow-sm hover:shadow-glow mt-2"
       >
         <Plus className="w-4 h-4" />
         Create Your First Project

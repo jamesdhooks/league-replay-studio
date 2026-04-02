@@ -16,6 +16,7 @@ POST /api/iracing/replay/seek         — seek to specific frame
 POST /api/iracing/replay/speed        — set replay speed (1/2/4/8/16)
 POST /api/iracing/replay/camera       — switch camera to car / position
 GET  /api/iracing/stream               — MJPEG live preview stream
+GET  /api/iracing/stream/capabilities  — preview + capture engine availability
 GET  /api/iracing/stream/metrics       — capture engine metrics
 POST /api/iracing/stream/start         — start/restart capture engine
 POST /api/iracing/stream/stop          — stop capture engine
@@ -389,6 +390,157 @@ async def iracing_stream(
         media_type="multipart/x-mixed-replace; boundary=frame",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/stream/capabilities")
+async def stream_capabilities():
+    """Return availability status for all preview and capture backends.
+
+    Used by the frontend to show which engines are installed and
+    usable so the user can make an informed choice in Settings.
+
+    Response shape::
+
+        {
+          "preview": {
+            "native": {"available": bool, "exe_path": str|null, "description": str},
+            "dxcam":  {"available": bool, "description": str},
+            "printwindow": {"available": bool, "description": str}
+          },
+          "capture": {
+            "native":     {"available": bool, "description": str},
+            "obs":        {"available": bool, "process": str|null, "description": str},
+            "shadowplay": {"available": bool, "process": str|null, "description": str},
+            "relive":     {"available": bool, "process": str|null, "description": str},
+            "manual":     {"available": true,  "description": str}
+          }
+        }
+    """
+    import platform as _platform
+
+    # ── Preview engine availability ───────────────────────────────────────
+    preview: dict = {}
+
+    # Native C++ DXGI service
+    try:
+        from server.utils.native_capture_bridge import _find_native_exe
+        native_exe = _find_native_exe()
+        preview["native"] = {
+            "available": native_exe is not None,
+            "exe_path": str(native_exe) if native_exe else None,
+            "description": (
+                "C++ DXGI Desktop Duplication service — best performance, "
+                "works regardless of window focus. Requires build-native.bat."
+            ),
+        }
+    except Exception as exc:
+        preview["native"] = {
+            "available": False, "exe_path": None,
+            "description": f"Native capture bridge error: {exc}",
+        }
+
+    # dxcam
+    try:
+        from server.utils.capture_engine import _dxcam_available
+        preview["dxcam"] = {
+            "available": _dxcam_available,
+            "description": (
+                "Python DXGI Desktop Duplication (dxcam library). "
+                "Good performance. Requires dxcam + opencv-python-headless."
+            ),
+        }
+    except Exception:
+        preview["dxcam"] = {"available": False, "description": "dxcam not available"}
+
+    # PrintWindow (always available on Windows, but unreliable for DX games)
+    preview["printwindow"] = {
+        "available": _platform.system() == "Windows",
+        "description": (
+            "Win32 GDI PrintWindow. Always available but returns black pixels "
+            "for DirectX 11/12 games — use only as a last resort."
+        ),
+    }
+
+    # ── Capture software availability ────────────────────────────────────
+    capture: dict = {}
+
+    # Native internal recording (piggybacks on the preview pipeline)
+    try:
+        from server.utils.native_capture_bridge import _find_native_exe as _native_exe_fn
+        exe = _native_exe_fn()
+        capture["native"] = {
+            "available": exe is not None,
+            "description": (
+                "Internal capture via C++ DXGI service — zero-dependency "
+                "recording with no external software required. "
+                "Requires lrs_capture.exe (build-native.bat)."
+            ),
+        }
+    except Exception:
+        capture["native"] = {"available": False, "description": "Native not available"}
+
+    # External capture software — detect by running process name
+    if _platform.system() == "Windows":
+        import subprocess
+        def _proc_running(names: list[str]) -> str | None:
+            try:
+                result = subprocess.run(
+                    ["tasklist", "/fo", "csv", "/nh"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                for name in names:
+                    if name.lower() in result.stdout.lower():
+                        return name
+            except Exception:
+                pass
+            return None
+
+        obs_proc = _proc_running(["obs64.exe", "obs.exe", "obs32.exe"])
+        capture["obs"] = {
+            "available": True,  # always configurable even if not running
+            "process_running": obs_proc is not None,
+            "detected_process": obs_proc,
+            "description": (
+                "OBS Studio — full-featured capture software. "
+                "Configure hotkeys in Settings → Camera Defaults."
+            ),
+        }
+
+        sp_proc = _proc_running(["nvcontainer.exe", "shadowplay.exe", "nvsphelper64.exe"])
+        capture["shadowplay"] = {
+            "available": True,
+            "process_running": sp_proc is not None,
+            "detected_process": sp_proc,
+            "description": (
+                "NVIDIA ShadowPlay — low-overhead, hardware-accelerated capture. "
+                "Requires GeForce Experience."
+            ),
+        }
+
+        rl_proc = _proc_running(["relive.exe", "radeonsoftware.exe"])
+        capture["relive"] = {
+            "available": True,
+            "process_running": rl_proc is not None,
+            "detected_process": rl_proc,
+            "description": "AMD ReLive — hardware capture for AMD GPUs.",
+        }
+    else:
+        for key in ("obs", "shadowplay", "relive"):
+            capture[key] = {
+                "available": False, "process_running": False,
+                "detected_process": None,
+                "description": "Windows only",
+            }
+
+    capture["manual"] = {
+        "available": True,
+        "description": (
+            "Manual capture — start/stop recording yourself. "
+            "LRS will wait for you to provide the captured file."
+        ),
+    }
+
+    return {"preview": preview, "capture": capture}
 
 
 @router.get("/stream/metrics")

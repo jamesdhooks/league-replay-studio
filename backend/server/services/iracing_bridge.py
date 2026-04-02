@@ -147,15 +147,89 @@ class IRacingBridge:
             return False
 
     def cam_switch_car(self, car_idx: int, group_num: int) -> bool:
-        """Point camera at a specific car by CarIdx."""
+        """Point camera at a specific car by CarIdx.
+
+        Resolves car_idx to the car's racing number before calling
+        cam_switch_num (which expects the painted car number, not the
+        internal CarIdx).
+        """
         if not self._connected or self._ir is None:
             return False
+        # Resolve car_idx → car_number (racing number)
+        car_num = car_idx  # fallback
+        for d in self._session_data.get("drivers", []):
+            if d.get("car_idx") == car_idx:
+                try:
+                    car_num = int(d["car_number"])
+                except (ValueError, TypeError):
+                    car_num = car_idx
+                break
         try:
-            self._ir.cam_switch_num(car_idx, group_num, 0)
+            self._ir.cam_switch_num(car_num, group_num, 0)
+            logger.debug("[IRacingBridge] cam_switch_num car_num=%d group=%d (from car_idx=%d)", car_num, group_num, car_idx)
             return True
         except Exception as exc:
             logger.error("[IRacingBridge] cam_switch_car error: %s", exc)
             return False
+
+    def replay_search(self, mode: int) -> bool:
+        """Execute a replay search command (next_session, prev_session, etc.).
+
+        Uses ``irsdk.RpySrchMode`` constants:
+          to_start=0, to_end=1, prev_session=2, next_session=3,
+          prev_lap=4, next_lap=5, prev_incident=8, next_incident=9
+        """
+        if not self._connected or self._ir is None:
+            return False
+        try:
+            self._ir.replay_search(mode)
+            return True
+        except Exception as exc:
+            logger.error("[IRacingBridge] replay_search error: %s", exc)
+            return False
+
+    def replay_search_session_time(self, session_num: int, session_time_ms: int) -> bool:
+        """Jump the replay to a specific session number and time.
+
+        session_num:     0-based session index from SessionInfo.Sessions
+        session_time_ms: Milliseconds from session start
+        """
+        if not self._connected or self._ir is None:
+            return False
+        try:
+            self._ir.replay_search_session_time(session_num, session_time_ms)
+            return True
+        except Exception as exc:
+            logger.error("[IRacingBridge] replay_search_session_time error: %s", exc)
+            return False
+
+    def get_replay_session_num(self) -> int:
+        """Read the current ReplaySessionNum telemetry variable."""
+        if not self._connected or self._ir is None:
+            return -1
+        try:
+            self._ir.freeze_var_buffer_latest()
+            val = self._ir["ReplaySessionNum"]
+            return val if val is not None else -1
+        except Exception:
+            return -1
+
+    def get_sessions_info(self) -> list[dict]:
+        """Return the list of sessions from SessionInfo with type and index."""
+        try:
+            session_info = self._ir["SessionInfo"] or {}
+            sessions = session_info.get("Sessions", [])
+            return [
+                {
+                    "index": i,
+                    "type": s.get("SessionType", ""),
+                    "name": s.get("SessionName", ""),
+                    "laps": s.get("SessionLaps", ""),
+                }
+                for i, s in enumerate(sessions)
+            ]
+        except Exception:
+            return []
 
     def capture_snapshot(self) -> dict | None:
         """
@@ -300,8 +374,15 @@ class IRacingBridge:
             )
             session_type = ""
             sessions = session_info.get("Sessions", [])
+            race_session_num = None
             if sessions:
                 session_type = sessions[0].get("SessionType", "")
+                # Find the race session index
+                for i, s in enumerate(sessions):
+                    stype = (s.get("SessionType", "") or "").lower()
+                    if stype in ("race", "race1", "race2"):
+                        race_session_num = i
+                        break
             avg_lap_time = 0.0
             if sessions:
                 try:
@@ -315,6 +396,11 @@ class IRacingBridge:
                 "avg_lap_time": avg_lap_time,
                 "drivers": drivers,
                 "cameras": cameras,
+                "race_session_num": race_session_num,
+                "sessions": [
+                    {"index": i, "type": s.get("SessionType", ""), "name": s.get("SessionName", "")}
+                    for i, s in enumerate(sessions)
+                ],
             }
 
             self._push_update(

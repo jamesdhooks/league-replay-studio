@@ -80,7 +80,7 @@ In League Replay Studio, this becomes a **step-based workflow** (Setup → Analy
 | No undo/redo | Destructive workflow |
 | Cannot save/resume projects | Must redo everything from scratch each session |
 
-> **Note:** Recording the replay at 1× speed is an accepted constraint — iRacing does not expose raw frames and we need the in-game audio. Capture can be done internally via our CaptureEngine (dxcam DXGI capture → FFmpeg NVENC encoding) or externally through OBS/Nvidia ShadowPlay via hotkeys. The internal capture engine supports automatic backend selection: dxcam for GPU-accelerated capture (60+ FPS) when the iRacing window is unoccluded, with automatic fallback to PrintWindow (GDI) for reliable behind-window capture. The real wins are in the **encoding pipeline**, **preview system**, and **highlight editing workflow**.
+> **Note:** Recording the replay at 1× speed is an accepted constraint — iRacing does not expose raw frames and we need the in-game audio. Capture can be done internally via our CaptureEngine (3-tier: native C++ DXGI → dxcam → PrintWindow GDI → FFmpeg NVENC encoding) or externally through OBS/Nvidia ShadowPlay via hotkeys. The internal engine automatically selects the fastest available backend: a compiled native C++ service for zero-overhead DXGI capture, dxcam as a Python DXGI fallback, and PrintWindow as a GDI safety net. The real wins are in the **encoding pipeline**, **preview system**, and **highlight editing workflow**.
 
 ---
 
@@ -162,7 +162,7 @@ In League Replay Studio, this becomes a **step-based workflow** (Setup → Analy
 | **Web Framework** | FastAPI | Async REST API + WebSocket for real-time updates |
 | **iRacing Interface** | irsdk (`pip install irsdk`) | Python iRacing SDK — shared memory telemetry + Broadcasting API for replay/camera control |
 | **Video Encoding** | FFmpeg (via ffmpeg-python) | GPU-accelerated encoding (NVENC, AMF, QSV) |
-| **Frame Capture** | dxcam (DXGI Desktop Duplication) + PrintWindow fallback; OBS / Nvidia ShadowPlay optional | Internal high-performance capture with automatic backend selection; external capture via user's recording software |
+| **Frame Capture** | Native C++ DXGI service + dxcam (Python DXGI) + PrintWindow fallback; OBS / Nvidia ShadowPlay optional | Internal 3-tier capture engine with automatic backend selection; external capture via user's recording software |
 | **Capture Control** | CaptureEngine (multi-threaded) + pyautogui / pynput | Internal capture engine or configurable hotkey automation with validation |
 | **Image Processing** | Pillow / OpenCV | Frame manipulation, overlay compositing (alpha_composite) |
 | **Overlay Rendering** | Playwright (headless Chromium) + Jinja2 | HTML/Tailwind templates → transparent PNG frames (see Section 7.6) |
@@ -1400,49 +1400,57 @@ class EncodingEngine:
 
 ### 4.6.1 Internal Capture Engine Architecture
 
-The CaptureEngine (v4) provides high-performance internal screen capture with a decoupled pipeline. Writer threads isolate capture from pipe I/O so a blocked encoder never stalls frame grabbing. Frames are dropped rather than queued to prefer latency over completeness. Dual recording modes: GPU-native (FFmpeg gdigrab, zero Python in hot path) or CPU pipe (capture → queue → writer → FFmpeg stdin).
+The CaptureEngine (v5) provides high-performance internal screen capture with a 3-tier backend and a decoupled pipeline. Writer threads isolate capture from pipe I/O so a blocked encoder never stalls frame grabbing. Frames are dropped rather than queued to prefer latency over completeness. Dual recording modes: GPU-native (FFmpeg gdigrab, zero Python in hot path) or CPU pipe (capture → queue → writer → FFmpeg stdin).
 
 ```
  +-----------------------------------------------------------------+
- |                CAPTURE ENGINE ARCHITECTURE (v4)                  |
+ |                CAPTURE ENGINE ARCHITECTURE (v5)                  |
  +-----------------------------------------------------------------+
  |                                                                  |
- |  Backend Selection (auto / manual)                               |
- |  +-- Tier 1: dxcam (DXGI Desktop Duplication API)               |
+ |  Backend Selection (auto / manual via preview_backend setting)   |
+ |  +-- Tier 1: Native C++ (lrs_capture.exe)                       |
+ |  |   +-- DXGI Desktop Duplication, D3D11 staging texture        |
+ |  |   +-- Named pipe IPC (commands) + shared memory (frames)     |
+ |  |   +-- BGRA→BGR24 in C++, zero Python in hot path            |
+ |  |   +-- Configurable output_index (0–7) and fps_cap           |
+ |  |   +-- 5-second no-frame timeout triggers fallback            |
+ |  |                                                               |
+ |  +-- Tier 2: dxcam (DXGI Desktop Duplication API)               |
  |  |   +-- GPU-backed capture, 60-240 FPS capable                 |
  |  |   +-- Uses camera.start(target_fps=N) for jitter-free pacing |
- |  |   +-- output_color="BGR" -- numpy arrays, no conversion      |
- |  |   +-- Auto-fallback on 30+ consecutive failures              |
+ |  |   +-- output_color="BGR" — numpy arrays, no conversion       |
+ |  |   +-- 3-second no-frame timeout triggers fallback            |
  |  |                                                               |
- |  +-- Tier 2: PrintWindow (Win32 GDI)                             |
+ |  +-- Tier 3: PrintWindow (Win32 GDI)                             |
  |      +-- Captures window content regardless of Z-order          |
  |      +-- GetDIBits writes into pre-allocated numpy buffer       |
- |      +-- BGRA[:,:,:3] slice to BGR -- zero extra allocation     |
+ |      +-- BGRA[:,:,:3] slice to BGR — zero extra allocation      |
  |      +-- ~10-20 FPS (GDI overhead, acceptable for preview)      |
  |                                                                  |
  |  Decoupled Pipeline (writer threads + frame dropping)            |
  |                                                                  |
  |   Capture Thread      deque(2)     Preview Writer   Reader Thrd |
  |   +--------------+  +--------+   +--------------+ +----------+  |
- |   | dxcam / PW   |->| frames |==>| FFmpeg stdin |>| SOI/EOI  |  |
- |   | -> numpy BGR |  | (drop) |   | -c:v mjpeg   | | scanner  |  |
+ |   | native/dxcam |->| frames |==>| FFmpeg stdin |>| SOI/EOI  |  |
+ |   | /PW -> BGR   |  | (drop) |   | -c:v mjpeg   | | scanner  |  |
  |   +--------------+  +--------+   +--------------+ +----------+  |
  |          |                                              |        |
  |          |                                       latest_jpeg     |
  |          |                                       (atomic swap)   |
  |          |                                                       |
  |          |  CPU recording mode:                                  |
- |          |  +-- deque(2) --> Record Writer --> FFmpeg stdin       |
+ |          |  +-- deque(2) → Record Writer → FFmpeg stdin          |
  |          |      (frame drop)    thread       -c:v h264_nvenc     |
- |          |                                    --> output.mp4     |
+ |          |                                    → output.mp4       |
  |          |                                                       |
  |          |  GPU recording mode (alternative):                    |
  |          |  +-- FFmpeg subprocess (standalone)                   |
- |          |      -f gdigrab -> h264_nvenc --> output.mp4          |
+ |          |      -f gdigrab → h264_nvenc → output.mp4            |
  |          |      Zero Python in recording hot path                |
  |          |      Python = control plane only (spawn/stop)         |
  |                                                                  |
  |  Key design decisions:                                           |
+ |  - Native C++ exe communicates via shared memory (zero copy)    |
  |  - NO PIL/Pillow in capture or encoding loop                    |
  |  - memoryview(frame) for stdin writes (no .tobytes() copy)      |
  |  - Writer threads decouple capture from pipe I/O                |
@@ -1458,6 +1466,7 @@ The CaptureEngine (v4) provides high-performance internal screen capture with a 
  |  REST API                                                        |
  |  +-- GET  /api/iracing/stream              -- MJPEG preview     |
  |  +-- GET  /api/iracing/stream/metrics      -- FPS, drops, etc   |
+ |  +-- GET  /api/iracing/stream/capabilities -- backend avail.    |
  |  +-- POST /api/iracing/stream/start        -- start engine      |
  |  +-- POST /api/iracing/stream/stop         -- stop engine       |
  |  +-- POST /api/iracing/stream/record/start -- recording (mode)  |
