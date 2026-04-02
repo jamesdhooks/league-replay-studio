@@ -159,13 +159,13 @@ function HlsStreamPlayer({ src, className, onLoad, onError }) {
     // Safari has native HLS — no hls.js needed
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = src
-      const onMeta = () => { video.play().catch(() => {}); onLoad?.() }
-      const onErr  = () => onError?.(new Error('HLS stream error'))
-      video.addEventListener('loadedmetadata', onMeta, { once: true })
-      video.addEventListener('error', onErr, { once: true })
+      const handleLoadedMetadata = () => { video.play().catch(() => {}); onLoad?.() }
+      const handleError = () => onError?.(new Error('HLS stream error'))
+      video.addEventListener('loadedmetadata', handleLoadedMetadata, { once: true })
+      video.addEventListener('error', handleError, { once: true })
       return () => {
-        video.removeEventListener('loadedmetadata', onMeta)
-        video.removeEventListener('error', onErr)
+        video.removeEventListener('loadedmetadata', handleLoadedMetadata)
+        video.removeEventListener('error', handleError)
         video.removeAttribute('src')
         video.load()
       }
@@ -176,6 +176,8 @@ function HlsStreamPlayer({ src, className, onLoad, onError }) {
       return
     }
 
+    // lowLatencyMode reduces the default buffer target from ~30 s to ~3 s,
+    // which is appropriate for this near-live streaming use case.
     const hls = new Hls({ lowLatencyMode: true })
     hls.loadSource(src)
     hls.attachMedia(video)

@@ -49,6 +49,10 @@ from server.services.iracing_bridge import bridge
 
 router = APIRouter(prefix="/api/iracing", tags=["iracing"])
 
+# Validates HLS filenames: only 'playlist.m3u8' or 'seg#####.ts' are accepted,
+# ruling out any path-separator or traversal characters.
+_SAFE_HLS_FILENAME = re.compile(r'^(?:playlist\.m3u8|seg\d{5}\.ts)$')
+
 
 # ── HLS session state ─────────────────────────────────────────────────────────
 # A single shared FFmpeg HLS segmenter process feeds all HLS clients.
@@ -738,7 +742,6 @@ async def hls_file(
     """
     # Strictly validate filename: only allow 'playlist.m3u8' or 'seg#####.ts'
     # This rejects any path separators, dots, or other traversal characters.
-    _SAFE_HLS_FILENAME = re.compile(r'^(?:playlist\.m3u8|seg\d{5}\.ts)$')
     if not _SAFE_HLS_FILENAME.match(filename):
         raise HTTPException(status_code=404, detail="Not found")
 
@@ -796,6 +799,9 @@ async def hls_file(
 
     # Build path from the validated filename (no separators possible after regex check)
     segment_path = pathlib.Path(tmpdir_str) / filename
+    # Defense-in-depth: ensure the resolved path stays inside the HLS temp dir
+    if not segment_path.resolve().is_relative_to(pathlib.Path(tmpdir_str).resolve()):
+        raise HTTPException(status_code=400, detail="Invalid segment path")
 
     if not segment_path.exists():
         raise HTTPException(status_code=404, detail="Segment not found")
