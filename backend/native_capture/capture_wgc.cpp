@@ -28,6 +28,8 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <dwmapi.h>
+#pragma comment(lib, "dwmapi.lib")
 #include <d3d11.h>
 #include <dxgi.h>
 #pragma comment(lib, "d3d11.lib")
@@ -89,6 +91,9 @@ struct WGCCapture::Impl {
     bool                                has_new   = false;
     int                                 frame_w   = 0;
     int                                 frame_h   = 0;
+
+    // Client-area crop (set in startCapture, used in grabFrame)
+    int crop_x = 0, crop_y = 0, crop_w = 0, crop_h = 0;
 
     // Monotonic counter used to detect new frames
     uint64_t grab_seq = 0;
@@ -247,6 +252,36 @@ bool WGCCapture::startCapture(HWND hwnd) {
         hwnd_                = hwnd;
 
         session.StartCapture();
+
+        // Compute client-area crop relative to the WGC frame (which includes
+        // DWM shadow/border padding).  DwmGetWindowAttribute gives us the
+        // extended frame bounds (physical pixels), and GetClientRect+
+        // ClientToScreen gives us the client origin in physical pixels.
+        {
+            RECT ext{};
+            if (SUCCEEDED(DwmGetWindowAttribute(
+                    hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &ext, sizeof(ext))))
+            {
+                RECT client{};
+                GetClientRect(hwnd, &client);
+                POINT clientOrigin{ 0, 0 };
+                ClientToScreen(hwnd, &clientOrigin);
+                // Offset of client area inside the WGC frame
+                impl_->crop_x = clientOrigin.x - ext.left;
+                impl_->crop_y = clientOrigin.y - ext.top;
+                impl_->crop_w = client.right  - client.left;
+                impl_->crop_h = client.bottom - client.top;
+                fprintf(stderr, "[WGC] Client crop +%d+%d %dx%d\n",
+                        impl_->crop_x, impl_->crop_y,
+                        impl_->crop_w, impl_->crop_h);
+            } else {
+                // Fallback: no crop
+                impl_->crop_x = impl_->crop_y = 0;
+                impl_->crop_w = size.Width;
+                impl_->crop_h = size.Height;
+            }
+        }
+
         fprintf(stderr, "[WGC] Capture started for HWND %p\n", (void*)hwnd);
         return true;
 
@@ -337,9 +372,23 @@ bool WGCCapture::grabFrame(FrameHeader* header, uint8_t* pixel_data) {
         return false;
     }
 
-    // Convert BGRA32 -> BGR24 row by row
-    const uint32_t dst_stride = static_cast<uint32_t>(w) * 3;
-    const uint32_t data_size  = dst_stride * static_cast<uint32_t>(h);
+    // Convert BGRA32 -> BGR24 row by row, cropping to client area
+    const int ox = (std::max)(0, impl_->crop_x);
+    const int oy = (std::max)(0, impl_->crop_y);
+    const int ow = (impl_->crop_w > 0)
+                   ? (std::min)(impl_->crop_w, w - ox)
+                   : w - ox;
+    const int oh = (impl_->crop_h > 0)
+                   ? (std::min)(impl_->crop_h, h - oy)
+                   : h - oy;
+
+    if (ow <= 0 || oh <= 0) {
+        impl_->context->Unmap(impl_->staging.get(), 0);
+        return false;
+    }
+
+    const uint32_t dst_stride = static_cast<uint32_t>(ow) * 3;
+    const uint32_t data_size  = dst_stride * static_cast<uint32_t>(oh);
 
     if (data_size > MAX_FRAME_BYTES) {
         impl_->context->Unmap(impl_->staging.get(), 0);
@@ -349,10 +398,12 @@ bool WGCCapture::grabFrame(FrameHeader* header, uint8_t* pixel_data) {
 
     const uint8_t* src = static_cast<const uint8_t*>(mapped.pData);
     uint8_t*       dst = pixel_data;
-    for (int row = 0; row < h; ++row) {
-        const uint8_t* sr = src + static_cast<ptrdiff_t>(row) * mapped.RowPitch;
-        uint8_t*       dr = dst + static_cast<ptrdiff_t>(row) * dst_stride;
-        for (int col = 0; col < w; ++col) {
+    for (int row = 0; row < oh; ++row) {
+        const uint8_t* sr = src
+            + static_cast<ptrdiff_t>(oy + row) * mapped.RowPitch
+            + static_cast<ptrdiff_t>(ox) * 4;
+        uint8_t* dr = dst + static_cast<ptrdiff_t>(row) * dst_stride;
+        for (int col = 0; col < ow; ++col) {
             dr[col * 3 + 0] = sr[col * 4 + 0]; // B
             dr[col * 3 + 1] = sr[col * 4 + 1]; // G
             dr[col * 3 + 2] = sr[col * 4 + 2]; // R
@@ -361,8 +412,8 @@ bool WGCCapture::grabFrame(FrameHeader* header, uint8_t* pixel_data) {
 
     impl_->context->Unmap(impl_->staging.get(), 0);
 
-    header->width        = static_cast<uint32_t>(w);
-    header->height       = static_cast<uint32_t>(h);
+    header->width        = static_cast<uint32_t>(ow);
+    header->height       = static_cast<uint32_t>(oh);
     header->stride       = dst_stride;
     header->pixel_format = 0;   // BGR24
     header->data_size    = data_size;

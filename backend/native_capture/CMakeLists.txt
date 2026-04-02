@@ -22,6 +22,7 @@ target_link_libraries(lrs_capture PRIVATE
     user32
     gdi32
     windowsapp
+    dwmapi
 )
 
 # Static CRT so the exe is self-contained (no vcruntime DLL needed)

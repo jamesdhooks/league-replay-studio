@@ -295,8 +295,8 @@ class CaptureEngine:
             pass  # keep default
 
         self._fps = max(1, min(fps, 60))
-        self._quality = max(10, min(quality, 95))
-        self._max_width = max(320, min(max_width, 1920))
+        self._quality = max(10, min(quality, 100))
+        self._max_width = max(320, min(max_width, 3840))
         self._stop_event.clear()
         self._frame_count = 0
         self._start_time = time.monotonic()
@@ -314,6 +314,24 @@ class CaptureEngine:
             target=self._capture_loop, daemon=True, name="cap-grab",
         )
         self._capture_thread.start()
+
+    def update_params(
+        self,
+        quality: Optional[int] = None,
+        max_width: Optional[int] = None,
+        fps: Optional[int] = None,
+    ) -> None:
+        """Live-update quality/resolution/fps without restarting the engine."""
+        if quality is not None:
+            self._quality = max(10, min(quality, 100))
+        if max_width is not None:
+            self._max_width = max(320, min(max_width, 3840))
+        if fps is not None:
+            self._fps = max(1, min(fps, 60))
+        logger.info(
+            "[CaptureEngine] update_params q=%d max_w=%d fps=%d",
+            self._quality, self._max_width, self._fps,
+        )
 
     def stop(self) -> None:
         if not self._running:
@@ -678,6 +696,7 @@ class CaptureEngine:
 
         native_started_at: float = time.monotonic() if use_native else 0.0
         native_first_frame = False
+        native_last_frame_at: float = 0.0
 
         while not self._stop_event.is_set():
             t0 = time.monotonic()
@@ -694,16 +713,32 @@ class CaptureEngine:
                         if not native_first_frame:
                             logger.info("[CaptureEngine] native: first frame received")
                             native_first_frame = True
+                        native_last_frame_at = time.monotonic()
                         native_started_at = time.monotonic()
                     else:
                         if native_started_at == 0.0:
                             native_started_at = time.monotonic()
-                        if (
-                            not native_first_frame
-                            and (time.monotonic() - native_started_at) > 5.0
-                        ):
+                        elapsed = time.monotonic() - native_started_at
+                        if not native_first_frame and elapsed > 5.0:
                             logger.warning(
                                 "[CaptureEngine] native: no frame in 5 s, "
+                                "falling back to dxcam"
+                            )
+                            self._cleanup_native()
+                            native_dead = True
+                            use_native = False
+                            if _dxcam_available:
+                                use_dxcam = True
+                                self._active_backend = "dxcam"
+                            else:
+                                self._active_backend = "printwindow"
+                        elif (
+                            native_first_frame
+                            and native_last_frame_at > 0
+                            and (time.monotonic() - native_last_frame_at) > 5.0
+                        ):
+                            logger.warning(
+                                "[CaptureEngine] native: frame stall >5 s, "
                                 "falling back to dxcam"
                             )
                             self._cleanup_native()
@@ -821,10 +856,12 @@ class CaptureEngine:
         falls back to Pillow.  No subprocess, no pipe, no SOI/EOI parsing.
         """
         if _cv2 is not None:
-            ok, buf = _cv2.imencode(
-                ".jpg", frame,
-                [_cv2.IMWRITE_JPEG_QUALITY, self._quality],
-            )
+            params = [_cv2.IMWRITE_JPEG_QUALITY, self._quality]
+            if self._quality >= 85:
+                # 4:4:4 chroma subsampling — avoids colour blurring at high quality
+                # cv2 enum IMWRITE_JPEG_SAMPLING_FACTOR = 18, value 0x111111 = 4:4:4
+                params.extend([18, 0x111111])
+            ok, buf = _cv2.imencode(".jpg", frame, params)
             return buf.tobytes() if ok else None
 
         # Pillow fallback (slower, but works)

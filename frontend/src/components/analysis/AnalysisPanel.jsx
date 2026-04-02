@@ -68,7 +68,7 @@ export default function AnalysisPanel() {
 
   // Stream quality settings
   const [streamFps, setStreamFps] = useLocalStorage('lrs:analysis:streamFps', 15)
-  const [streamQuality, setStreamQuality] = useLocalStorage('lrs:analysis:streamQuality', 70)
+  const [streamQuality, setStreamQuality] = useLocalStorage('lrs:analysis:streamQuality', 85)
   const [streamMaxWidth, setStreamMaxWidth] = useLocalStorage('lrs:analysis:streamMaxWidth', 1280)
   const [showQualitySettings, setShowQualitySettings] = useState(false)
   // Stream key — changes to force <img> reload when quality settings change
@@ -656,7 +656,7 @@ export default function AnalysisPanel() {
               )}
 
               {/* Top-right controls: window picker + quality settings */}
-              <div className="absolute top-3 right-3 flex items-center gap-1.5 z-10">
+              <div className="absolute top-3 right-3 flex items-center gap-1.5 z-10" onClick={e => e.stopPropagation()}>
                 <button
                   onClick={() => { setShowQualitySettings(prev => !prev) }}
                   title="Stream quality settings"
@@ -683,7 +683,7 @@ export default function AnalysisPanel() {
               {/* Quality settings dropdown */}
               {showQualitySettings && (
                 <div className="absolute top-10 right-3 w-56 bg-bg-secondary border border-border
-                                rounded-lg shadow-xl z-20 animate-fade-in p-3">
+                                rounded-lg shadow-xl z-20 animate-fade-in p-3" onClick={e => e.stopPropagation()}>
                   <span className="text-xxs font-medium text-text-primary block mb-2">Stream Quality</span>
                   <div className="space-y-2">
                     <label className="flex items-center justify-between text-xxs text-text-secondary">
@@ -706,6 +706,7 @@ export default function AnalysisPanel() {
                         <option value={70}>High (70)</option>
                         <option value={85}>Ultra (85)</option>
                         <option value={95}>Max (95)</option>
+                        <option value={100}>Lossless (100)</option>
                       </select>
                     </label>
                     <label className="flex items-center justify-between text-xxs text-text-secondary">
@@ -716,6 +717,8 @@ export default function AnalysisPanel() {
                         <option value={960}>960p</option>
                         <option value={1280}>1280p</option>
                         <option value={1920}>1920p</option>
+                        <option value={2560}>1440p</option>
+                        <option value={3840}>Native (4K)</option>
                       </select>
                     </label>
                   </div>
@@ -726,7 +729,7 @@ export default function AnalysisPanel() {
               {showWindowPicker && (
                 <div className="absolute top-10 right-3 w-72 max-h-52 overflow-y-auto
                                 bg-bg-secondary border border-border rounded-lg shadow-xl z-20
-                                animate-fade-in">
+                                animate-fade-in" onClick={e => e.stopPropagation()}>
                   <div className="flex items-center justify-between px-3 py-2 border-b border-border">
                     <span className="text-xxs font-medium text-text-primary">Capture Target</span>
                     <button
@@ -780,6 +783,7 @@ export default function AnalysisPanel() {
                     return (
                       <div
                         key={ev.id}
+                        onClick={e => e.stopPropagation()}
                         className="flex items-center gap-2 px-3 py-2 rounded-lg
                                    bg-black/80 backdrop-blur-md border border-white/15
                                    text-xs animate-slide-up pointer-events-auto shadow-elevated"

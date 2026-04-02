@@ -356,13 +356,15 @@ async def iracing_stream(
     from server.utils.capture_engine import capture_engine
 
     fps = max(1, min(fps, 30))
-    quality = max(10, min(quality, 95))
-    max_width = max(320, min(max_width, 1920))
+    quality = max(10, min(quality, 100))
+    max_width = max(320, min(max_width, 3840))
     interval = 1.0 / fps
 
-    # Start the engine if not already running (or restart with new params)
+    # Start the engine if not already running, or live-update params if it is
     if not capture_engine.is_running:
         capture_engine.start(fps=fps, quality=quality, max_width=max_width)
+    else:
+        capture_engine.update_params(quality=quality, max_width=max_width, fps=fps)
 
     async def generate():
         boundary = b"--frame\r\n"

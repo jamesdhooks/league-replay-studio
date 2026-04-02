@@ -246,6 +246,8 @@ static BOOL WINAPI ctrlHandler(DWORD type) {
 
 int main(int argc, char* argv[]) {
     fprintf(stderr, "=== LRS Native Capture Service ===\n");
+    // Report physical pixel coordinates (required for correct WGC client-area crop)
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     SetConsoleCtrlHandler(ctrlHandler, TRUE);
 
     // Parse optional --output flag (monitor index, default 0)
