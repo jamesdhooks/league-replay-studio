@@ -9,7 +9,7 @@ import {
   Fuel, Zap, Crown, Flag, FlagTriangleRight, Loader2, CheckCircle2,
   XCircle, Terminal, ChevronRight, ChevronDown, Camera, Video, Monitor,
   SkipBack, SkipForward, Rewind, FastForward, List, Trash2, Settings,
-  Eye, Users, Flame, RotateCcw, CircleDot, ShieldAlert,
+  Eye, Users, Flame, RotateCcw, CircleDot, ShieldAlert, WifiOff, AlertCircle,
 } from 'lucide-react'
 
 /**
@@ -186,9 +186,10 @@ export default function AnalysisPanel() {
   // Stream key — changes to force <img> reload when quality settings change
   const [streamKey, setStreamKey] = useState(0)
   const [streamLoaded, setStreamLoaded] = useState(false)
+  const [streamError, setStreamError] = useState(null)
 
   // Reset loaded state whenever the stream is recycled
-  useEffect(() => { setStreamLoaded(false) }, [streamKey])
+  useEffect(() => { setStreamLoaded(false); setStreamError(null) }, [streamKey])
 
   // Drivers list for camera switching
   const [drivers, setDrivers] = useState([])
@@ -726,7 +727,7 @@ export default function AnalysisPanel() {
                       src={activeStreamUrl}
                       className="w-full h-full object-cover"
                       onLoad={() => setStreamLoaded(true)}
-                      onError={() => {}}
+                      onError={(err) => setStreamError(err?.message || 'H.264 stream error')}
                     />
                   ) : (
                     <img
@@ -734,16 +735,32 @@ export default function AnalysisPanel() {
                       src={streamUrl}
                       alt="iRacing replay"
                       className="w-full h-full object-cover"
-                      onError={(e) => { e.target.style.opacity = '0.15' }}
+                      onError={() => setStreamError('MJPEG stream failed to load')}
                       onLoad={(e) => { e.target.style.opacity = '1'; setStreamLoaded(true) }}
                     />
                   )}
-                  {/* Loading spinner — shown until the first MJPEG frame arrives */}
-                  {!streamLoaded && (
+                  {/* Error overlay */}
+                  {streamError && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center
+                                    bg-black/60 backdrop-blur-sm gap-3">
+                      <AlertCircle size={32} className="text-danger" />
+                      <span className="text-xs text-white/80 font-medium">Stream Disconnected</span>
+                      <span className="text-xxs text-white/50 max-w-[200px] text-center">{streamError}</span>
+                      <button
+                        onClick={() => setStreamKey(k => k + 1)}
+                        className="mt-1 px-3 py-1 rounded-md text-xxs bg-accent/20 text-accent
+                                   hover:bg-accent/30 border border-accent/30 transition-colors"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  )}
+                  {/* Loading spinner — shown until the first frame arrives */}
+                  {!streamLoaded && !streamError && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center
                                     bg-black/60 backdrop-blur-sm gap-3">
                       <Loader2 size={32} className="text-accent animate-spin" />
-                      <span className="text-xs text-white/60">Connecting to preview stream…</span>
+                      <span className="text-xs text-white/60">Connecting to stream…</span>
                     </div>
                   )}
                   {/* Live badge */}
@@ -773,9 +790,11 @@ export default function AnalysisPanel() {
                 </>
               ) : (
                 <div className="flex flex-col items-center justify-center h-full gap-2">
-                  <Video size={32} className="text-text-disabled" />
-                  <span className="text-xs text-text-disabled">iRacing not connected</span>
-                  <span className="text-xxs text-text-disabled">Connect iRacing to see preview</span>
+                  <WifiOff size={32} className="text-text-disabled" />
+                  <span className="text-xs text-text-disabled font-medium">iRacing Not Running</span>
+                  <span className="text-xxs text-text-disabled text-center max-w-[220px]">
+                    Launch iRacing and load a replay to see the preview stream
+                  </span>
                 </div>
               )}
 
@@ -784,7 +803,7 @@ export default function AnalysisPanel() {
                 <button
                   onClick={() => { setShowQualitySettings(prev => !prev) }}
                   title="Stream quality settings"
-                  className="flex items-center gap-1 px-2 py-1 rounded-md text-xxs
+                  className="flex items-center justify-center h-7 px-2 rounded-md text-xxs
                              bg-black/70 backdrop-blur-sm text-white/70 hover:text-white border border-white/10
                              transition-colors"
                 >
@@ -793,7 +812,7 @@ export default function AnalysisPanel() {
                 <button
                   onClick={() => { setShowWindowPicker(prev => !prev); if (!showWindowPicker) fetchWindows() }}
                   title={captureTarget.mode === 'manual' ? 'Manual capture target' : 'Auto-detecting iRacing'}
-                  className={`flex items-center gap-1 px-2 py-1 rounded-md text-xxs transition-colors
+                  className={`flex items-center gap-1 h-7 px-2 rounded-md text-xxs transition-colors
                     ${captureTarget.mode === 'manual'
                       ? 'bg-accent/20 text-accent border border-accent/30'
                       : 'bg-black/70 backdrop-blur-sm text-white/70 hover:text-white border border-white/10'
@@ -907,20 +926,27 @@ export default function AnalysisPanel() {
                       No visible windows found
                     </div>
                   ) : (
-                    windowList.map(win => (
-                      <button
-                        key={win.hwnd}
-                        onClick={() => selectWindow(win.hwnd)}
-                        className={`w-full flex items-center gap-2 px-3 py-2 text-left text-xxs
-                                    hover:bg-bg-hover transition-colors border-b border-border-subtle/30 last:border-0
-                                    ${captureTarget.hwnd === win.hwnd ? 'bg-accent/10 text-accent' : 'text-text-secondary'}`}
-                      >
-                        <Monitor size={11} className={win.is_iracing ? 'text-accent' : 'text-text-disabled'} />
-                        <span className="truncate flex-1">{win.title}</span>
-                        {win.is_iracing && (
-                          <span className="shrink-0 text-accent text-xxs font-medium">iRacing</span>
+                    [...windowList].sort((a, b) => (b.is_iracing ? 1 : 0) - (a.is_iracing ? 1 : 0)).map((win, idx, sorted) => (
+                      <div key={win.hwnd}>
+                        {/* Separator between iRacing and other windows */}
+                        {idx > 0 && !win.is_iracing && sorted[idx - 1]?.is_iracing && (
+                          <div className="px-3 py-1 text-xxs text-text-disabled border-b border-border bg-bg-secondary/50">
+                            Other Windows
+                          </div>
                         )}
-                      </button>
+                        <button
+                          onClick={() => selectWindow(win.hwnd)}
+                          className={`w-full flex items-center gap-2 px-3 py-2 text-left text-xxs
+                                      hover:bg-bg-hover transition-colors border-b border-border-subtle/30 last:border-0
+                                      ${captureTarget.hwnd === win.hwnd ? 'bg-accent/10 text-accent' : 'text-text-secondary'}`}
+                        >
+                          <Monitor size={11} className={win.is_iracing ? 'text-accent' : 'text-text-disabled'} />
+                          <span className="truncate flex-1">{win.title}</span>
+                          {win.is_iracing && (
+                            <span className="shrink-0 text-accent text-xxs font-medium">iRacing</span>
+                          )}
+                        </button>
+                      </div>
                     ))
                   )}
                 </div>
