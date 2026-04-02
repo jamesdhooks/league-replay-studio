@@ -18,6 +18,16 @@ python-multipart>=0.0.9
 # https://github.com/kutu/pyirsdk
 pyirsdk>=1.3.0
 
+# Screenshot capture (iRacing window embed)
+mss>=9.0.0
+Pillow>=10.0.0
+
+# High-performance screen capture (DXGI Desktop Duplication API)
+# Optional: falls back to PrintWindow if not installed
+dxcam>=0.0.5
+numpy>=1.24.0
+opencv-python-headless>=4.8.0  # required by dxcam for color conversion
+
 # YouTube Data API integration
 httpx>=0.27.0
 
