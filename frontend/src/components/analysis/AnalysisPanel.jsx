@@ -318,7 +318,7 @@ export default function AnalysisPanel() {
         })
         .catch(() => {})
     }
-  }, [activeProject?.id, fetchAnalysisStatus, fetchEvents, fetchEventSummary])
+  }, [activeProject?.id, fetchAnalysisStatus, fetchEvents, fetchEventSummary, loadAnalysisLog])
 
   // Fetch race duration for timeline scrubber
   useEffect(() => {
@@ -828,20 +828,25 @@ export default function AnalysisPanel() {
                         const Icon = cfg.icon || BarChart3
                         const isActive = activeFilter === event_type
                         return (
-                          <button
+                          <Tooltip
                             key={event_type}
-                            onClick={() => handleFilterChange(event_type)}
-                            title={`${cfg.label || event_type}: ${count} event${count !== 1 ? 's' : ''} — click to ${isActive ? 'show all' : 'filter'}`}
-                            className={`flex items-center gap-1 px-1.5 py-0.5 text-xxs rounded
-                                       transition-colors border
-                                       ${isActive
-                                         ? 'border-accent bg-accent/10 text-accent'
-                                         : 'border-border text-text-tertiary hover:text-text-secondary'
-                                       }`}
+                            content={`${cfg.label || event_type}: ${count} event${count !== 1 ? 's' : ''} — click to ${isActive ? 'show all' : 'filter'}`}
+                            position="bottom"
+                            delay={200}
                           >
-                            <Icon size={9} className={cfg.color} />
-                            <span>{count}</span>
-                          </button>
+                            <button
+                              onClick={() => handleFilterChange(event_type)}
+                              className={`flex items-center gap-1 px-1.5 py-0.5 text-xxs rounded
+                                         transition-colors border
+                                         ${isActive
+                                           ? 'border-accent bg-accent/10 text-accent'
+                                           : 'border-border text-text-tertiary hover:text-text-secondary'
+                                         }`}
+                            >
+                              <Icon size={9} className={cfg.color} />
+                              <span>{count}</span>
+                            </button>
+                          </Tooltip>
                         )
                       })}
                     </div>
