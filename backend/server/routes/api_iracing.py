@@ -408,10 +408,16 @@ async def iracing_stream_h264(
     Frames flow: capture_engine (BGR numpy) → FFmpeg stdin (rawvideo) → libx264
     → fragmented MP4 → HTTP response → MSE player.
 
+    The capture engine always runs at its current MJPEG resolution (max_width
+    is never mutated here).  If max_width is smaller than the engine's current
+    output, FFmpeg downscales via -vf scale.  This keeps both streams independent
+    and prevents mid-stream dimension changes from causing bitstream corruption.
+
     Query params:
       fps       — target frames per second (1-30, default 20)
       crf       — H.264 CRF quality (0-51, lower=better, default 23)
-      max_width — max output width in px (default 1280)
+      max_width — max H.264 output width (default 1280); never upscales beyond
+                  the capture engine's current output resolution
     """
     from server.utils.capture_engine import capture_engine
 
@@ -427,13 +433,18 @@ async def iracing_stream_h264(
     if not ffmpeg:
         raise HTTPException(status_code=503, detail="FFmpeg not found in PATH")
 
-    # Ensure the capture engine is running
+    # Start the engine if it isn't running.
+    # IMPORTANT: do NOT pass max_width here — H.264 must never mutate the
+    # engine's output resolution, because that also changes the MJPEG stream
+    # and invalidates the dimensions of any in-flight frames in the queue.
+    # Instead we capture at whatever the engine is currently outputting and
+    # let FFmpeg's -vf scale filter handle the desired output size.
     if not capture_engine.is_running:
-        capture_engine.start(fps=fps, quality=85, max_width=max_width)
+        capture_engine.start(fps=fps, quality=85, max_width=1280)
     else:
-        capture_engine.update_params(fps=fps, max_width=max_width)
+        capture_engine.update_params(fps=fps)
 
-    # Wait up to 5 s for the first frame so we know output dimensions
+    # Wait up to 5 s for the first frame so we know the engine output size
     loop = asyncio.get_running_loop()
     for _ in range(100):
         if capture_engine._out_w > 0 and capture_engine._out_h > 0:
@@ -442,16 +453,29 @@ async def iracing_stream_h264(
     if capture_engine._out_w == 0:
         raise HTTPException(status_code=503, detail="Capture engine has no frames yet")
 
-    out_w = capture_engine._out_w & ~1
-    out_h = capture_engine._out_h & ~1
+    # Lock the input dimensions for this stream.  These must stay constant for
+    # the lifetime of the FFmpeg process — if they ever deviate (race window
+    # from a concurrent update_params call) the feeder discards mismatched frames.
+    input_w = capture_engine._out_w & ~1
+    input_h = capture_engine._out_h & ~1
+
+    # Compute desired output dimensions.  Never upscale; cap to input size.
+    # FFmpeg handles scaling internally so the Python pipeline stays dimension-stable.
+    desired_w = min(max_width, input_w) & ~1
+    desired_h = int(input_h * desired_w / input_w) & ~1
+
+    scale_filter: list[str] = []
+    if desired_w != input_w:
+        scale_filter = ["-vf", f"scale={desired_w}:{desired_h}:flags=fast_bilinear"]
 
     cmd = [
         ffmpeg, "-hide_banner", "-loglevel", "error",
         "-f", "rawvideo",
         "-pixel_format", "bgr24",
-        "-video_size", f"{out_w}x{out_h}",
+        "-video_size", f"{input_w}x{input_h}",   # raw input size — never changes
         "-framerate", str(fps),
         "-i", "pipe:0",
+        *scale_filter,                             # optional FFmpeg-side downscale
         "-c:v", "libx264",
         "-preset", "ultrafast",
         "-tune", "zerolatency",
@@ -492,10 +516,19 @@ async def iracing_stream_h264(
     def _feed_stdin():
         try:
             while state["active"]:
+                # Self-exit if a newer stream has started — avoids the generation
+                # token check only running in the finally path.
+                if capture_engine._h264_gen != h264_gen:
+                    break
                 try:
                     frame = capture_engine._h264_queue.popleft()
                 except IndexError:
                     _time.sleep(0.004)
+                    continue
+                # Dimension guard: drop any frame that doesn't match the size
+                # FFmpeg was launched with.  This handles the brief race window
+                # when the engine's max_width changes between two requests.
+                if frame.shape[0] != input_h or frame.shape[1] != input_w:
                     continue
                 if proc.stdin is None or proc.stdin.closed:
                     break

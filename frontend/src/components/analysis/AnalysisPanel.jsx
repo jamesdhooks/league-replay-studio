@@ -180,12 +180,16 @@ export default function AnalysisPanel() {
   const [isPlaying, setIsPlaying] = useState(true)
   const [replayState, setReplayState] = useState(null)
 
-  // Stream quality settings
+  // Stream quality settings — each format has its own independent settings.
+  // FPS is shared (it's a display preference, not format-specific).
   const [streamFps, setStreamFps] = useLocalStorage('lrs:analysis:streamFps', 15)
-  const [streamQuality, setStreamQuality] = useLocalStorage('lrs:analysis:streamQuality', 85)
-  const [streamMaxWidth, setStreamMaxWidth] = useLocalStorage('lrs:analysis:streamMaxWidth', 1280)
   const [streamFormat, setStreamFormat] = useLocalStorage('lrs:analysis:streamFormat', 'mjpeg')
-  const [streamCrf, setStreamCrf] = useLocalStorage('lrs:analysis:streamCrf', 23)
+  // MJPEG-specific
+  const [mjpegQuality, setMjpegQuality] = useLocalStorage('lrs:analysis:mjpegQuality', 85)
+  const [mjpegMaxWidth, setMjpegMaxWidth] = useLocalStorage('lrs:analysis:mjpegMaxWidth', 1280)
+  // H.264-specific
+  const [h264Crf, setH264Crf] = useLocalStorage('lrs:analysis:h264Crf', 23)
+  const [h264MaxWidth, setH264MaxWidth] = useLocalStorage('lrs:analysis:h264MaxWidth', 1280)
   const [showQualitySettings, setShowQualitySettings] = useState(false)
 
   // Detection tuning parameters
@@ -423,8 +427,8 @@ export default function AnalysisPanel() {
     } catch {}
   }
 
-  const streamUrl = `/api/iracing/stream?fps=${streamFps}&quality=${streamQuality}&max_width=${streamMaxWidth}&_k=${streamKey}`
-  const h264Url   = `/api/iracing/stream/h264?fps=${streamFps}&crf=${streamCrf}&max_width=${streamMaxWidth}&_k=${streamKey}`
+  const streamUrl = `/api/iracing/stream?fps=${streamFps}&quality=${mjpegQuality}&max_width=${mjpegMaxWidth}&_k=${streamKey}`
+  const h264Url   = `/api/iracing/stream/h264?fps=${streamFps}&crf=${h264Crf}&max_width=${h264MaxWidth}&_k=${streamKey}`
   const activeStreamUrl = streamFormat === 'h264' ? h264Url : streamUrl
 
   // ── Idle state: no analysis running, no events ────────────────────────
@@ -975,29 +979,35 @@ export default function AnalysisPanel() {
                 <div className="absolute top-10 right-3 w-56 bg-bg-secondary border border-border
                                 rounded-lg shadow-xl z-20 animate-fade-in p-3" onClick={e => e.stopPropagation()}>
                   <span className="text-xxs font-medium text-text-primary block mb-2">Stream Quality</span>
+                  {/* Format toggle */}
+                  <div className="flex items-center justify-between text-xxs text-text-secondary mb-2">
+                    <span className="font-medium">Format</span>
+                    <div className="flex rounded overflow-hidden border border-border">
+                      {['mjpeg', 'h264'].map(fmt => (
+                        <button
+                          key={fmt}
+                          onClick={() => {
+                            setStreamFormat(fmt)
+                            setStreamKey(k => k + 1)
+                            setShowQualitySettings(false)
+                          }}
+                          className={`px-2 py-0.5 text-xxs transition-colors ${
+                            streamFormat === fmt
+                              ? 'bg-accent text-white'
+                              : 'bg-surface text-text-secondary hover:bg-bg-hover'
+                          }`}
+                        >
+                          {fmt === 'mjpeg' ? 'MJPEG' : 'H.264'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Divider */}
+                  <div className="border-t border-border mb-2" />
+
+                  {/* FPS — shared across formats */}
                   <div className="space-y-2">
-                    <label className="flex items-center justify-between text-xxs text-text-secondary">
-                      <span>Format</span>
-                      <div className="flex rounded overflow-hidden border border-border">
-                        {['mjpeg', 'h264'].map(fmt => (
-                          <button
-                            key={fmt}
-                            onClick={() => {
-                              setStreamFormat(fmt)
-                              setStreamKey(k => k + 1)
-                              setShowQualitySettings(false)
-                            }}
-                            className={`px-2 py-0.5 text-xxs transition-colors ${
-                              streamFormat === fmt
-                                ? 'bg-accent text-white'
-                                : 'bg-surface text-text-secondary hover:bg-bg-hover'
-                            }`}
-                          >
-                            {fmt === 'mjpeg' ? 'MJPEG' : 'H.264'}
-                          </button>
-                        ))}
-                      </div>
-                    </label>
                     <label className="flex items-center justify-between text-xxs text-text-secondary">
                       <span>FPS</span>
                       <select value={streamFps} onChange={e => { setStreamFps(+e.target.value); setStreamKey(k => k + 1) }}
@@ -1009,43 +1019,60 @@ export default function AnalysisPanel() {
                         <option value={30}>30</option>
                       </select>
                     </label>
+
+                    {/* Format-specific settings — no overlap */}
                     {streamFormat === 'h264' ? (
-                      <label className="flex items-center justify-between text-xxs text-text-secondary">
-                        <span>Quality (CRF)</span>
-                        <select value={streamCrf} onChange={e => { setStreamCrf(+e.target.value); setStreamKey(k => k + 1) }}
-                          className="bg-surface border border-border rounded px-1.5 py-0.5 text-xxs text-text-primary">
-                          <option value={18}>Visually lossless (18)</option>
-                          <option value={23}>High (23)</option>
-                          <option value={28}>Medium (28)</option>
-                          <option value={33}>Low (33)</option>
-                        </select>
-                      </label>
+                      <>
+                        <label className="flex items-center justify-between text-xxs text-text-secondary">
+                          <span>Quality (CRF)</span>
+                          <select value={h264Crf} onChange={e => { setH264Crf(+e.target.value); setStreamKey(k => k + 1) }}
+                            className="bg-surface border border-border rounded px-1.5 py-0.5 text-xxs text-text-primary">
+                            <option value={18}>Visually lossless (18)</option>
+                            <option value={23}>High (23)</option>
+                            <option value={28}>Medium (28)</option>
+                            <option value={33}>Low (33)</option>
+                          </select>
+                        </label>
+                        <label className="flex items-center justify-between text-xxs text-text-secondary">
+                          <span title="Downscale cap — never upscales beyond source">Max width</span>
+                          <select value={h264MaxWidth} onChange={e => { setH264MaxWidth(+e.target.value); setStreamKey(k => k + 1) }}
+                            className="bg-surface border border-border rounded px-1.5 py-0.5 text-xxs text-text-primary">
+                            <option value={640}>640px</option>
+                            <option value={960}>960px</option>
+                            <option value={1280}>1280px</option>
+                            <option value={1920}>1920px</option>
+                            <option value={9999}>Source (no limit)</option>
+                          </select>
+                        </label>
+                      </>
                     ) : (
-                      <label className="flex items-center justify-between text-xxs text-text-secondary">
-                        <span>Quality</span>
-                        <select value={streamQuality} onChange={e => { setStreamQuality(+e.target.value); setStreamKey(k => k + 1) }}
-                          className="bg-surface border border-border rounded px-1.5 py-0.5 text-xxs text-text-primary">
-                          <option value={40}>Low (40)</option>
-                          <option value={55}>Medium (55)</option>
-                          <option value={70}>High (70)</option>
-                          <option value={85}>Ultra (85)</option>
-                          <option value={95}>Max (95)</option>
-                          <option value={100}>Lossless (100)</option>
-                        </select>
-                      </label>
+                      <>
+                        <label className="flex items-center justify-between text-xxs text-text-secondary">
+                          <span>JPEG quality</span>
+                          <select value={mjpegQuality} onChange={e => { setMjpegQuality(+e.target.value); setStreamKey(k => k + 1) }}
+                            className="bg-surface border border-border rounded px-1.5 py-0.5 text-xxs text-text-primary">
+                            <option value={40}>Low (40)</option>
+                            <option value={55}>Medium (55)</option>
+                            <option value={70}>High (70)</option>
+                            <option value={85}>Ultra (85)</option>
+                            <option value={95}>Max (95)</option>
+                            <option value={100}>Lossless (100)</option>
+                          </select>
+                        </label>
+                        <label className="flex items-center justify-between text-xxs text-text-secondary">
+                          <span>Max width</span>
+                          <select value={mjpegMaxWidth} onChange={e => { setMjpegMaxWidth(+e.target.value); setStreamKey(k => k + 1) }}
+                            className="bg-surface border border-border rounded px-1.5 py-0.5 text-xxs text-text-primary">
+                            <option value={640}>640px</option>
+                            <option value={960}>960px</option>
+                            <option value={1280}>1280px</option>
+                            <option value={1920}>1920px</option>
+                            <option value={2560}>2560px</option>
+                            <option value={3840}>3840px (4K)</option>
+                          </select>
+                        </label>
+                      </>
                     )}
-                    <label className="flex items-center justify-between text-xxs text-text-secondary">
-                      <span>Resolution</span>
-                      <select value={streamMaxWidth} onChange={e => { setStreamMaxWidth(+e.target.value); setStreamKey(k => k + 1) }}
-                        className="bg-surface border border-border rounded px-1.5 py-0.5 text-xxs text-text-primary">
-                        <option value={640}>640p</option>
-                        <option value={960}>960p</option>
-                        <option value={1280}>1280p</option>
-                        <option value={1920}>1920p</option>
-                        <option value={2560}>1440p</option>
-                        <option value={3840}>Native (4K)</option>
-                      </select>
-                    </label>
                   </div>
                 </div>
               )}
