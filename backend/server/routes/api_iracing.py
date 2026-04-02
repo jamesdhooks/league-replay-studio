@@ -30,6 +30,8 @@ from typing import Optional
 
 import asyncio
 import io
+import shutil
+import subprocess
 import time
 
 from fastapi import APIRouter, HTTPException
@@ -390,6 +392,125 @@ async def iracing_stream(
     return StreamingResponse(
         generate(),
         media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/stream/h264")
+async def iracing_stream_h264(
+    fps: int = 20,
+    crf: int = 23,
+    max_width: int = 1280,
+) -> StreamingResponse:
+    """H.264 fragmented-MP4 preview stream via FFmpeg gdigrab.
+
+    Streams low-latency H.264 fMP4 suitable for MediaSource Extensions.
+    gdigrab captures the iRacing window region directly — no Python frame
+    copies in the hot path.
+
+    Query params:
+      fps       — target frames per second (1-30, default 20)
+      crf       — H.264 CRF quality (0-51, lower=better, default 23)
+      max_width — max output width in px (default 1280)
+    """
+    from server.utils.window_capture import _find_iracing_hwnd, _get_window_rect
+
+    fps       = max(1, min(fps, 30))
+    crf       = max(0, min(crf, 51))
+    max_width = max(320, min(max_width, 3840))
+
+    try:
+        from server.utils.gpu_detection import find_ffmpeg
+        ffmpeg = find_ffmpeg()
+    except Exception:
+        ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise HTTPException(status_code=503, detail="FFmpeg not found in PATH")
+
+    hwnd = _find_iracing_hwnd()
+    if hwnd is None:
+        raise HTTPException(status_code=404, detail="iRacing window not found")
+    rect = _get_window_rect(hwnd)
+    if not rect:
+        raise HTTPException(status_code=404, detail="Cannot get window rect")
+
+    x = rect["left"]
+    y = rect["top"]
+    w = rect["width"]  & ~1
+    h = rect["height"] & ~1
+    if w < 100 or h < 100:
+        raise HTTPException(status_code=400, detail="Window too small")
+
+    scale_w = min(max_width, w) & ~1
+
+    cmd = [
+        ffmpeg, "-hide_banner", "-loglevel", "error",
+        "-f", "gdigrab",
+        "-framerate", str(fps),
+        "-offset_x", str(x),
+        "-offset_y", str(y),
+        "-video_size", f"{w}x{h}",
+        "-i", "desktop",
+        "-vf", f"scale={scale_w}:-2",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-tune", "zerolatency",
+        "-crf", str(crf),
+        "-pix_fmt", "yuv420p",
+        "-profile:v", "baseline",
+        "-level:v", "4.0",
+        "-f", "mp4",
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        "pipe:1",
+    ]
+
+    loop = asyncio.get_running_loop()
+    try:
+        proc = await loop.run_in_executor(
+            None,
+            lambda: subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            ),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to start FFmpeg: {exc}")
+
+    # Brief sanity check — if FFmpeg dies immediately it means gdigrab failed
+    await asyncio.sleep(0.4)
+    if proc.poll() is not None:
+        err = b""
+        if proc.stderr:
+            try:
+                err = proc.stderr.read(512)
+            except Exception:
+                pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"FFmpeg/gdigrab failed: {err.decode(errors='replace')}",
+        )
+
+    async def generate():
+        try:
+            while True:
+                chunk = await loop.run_in_executor(None, proc.stdout.read, 65536)
+                if not chunk:
+                    break
+                yield chunk
+        except asyncio.CancelledError:
+            pass
+        finally:
+            try:
+                proc.kill()
+                proc.wait()
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        generate(),
+        media_type="video/mp4",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
 

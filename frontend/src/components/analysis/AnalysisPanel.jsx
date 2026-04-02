@@ -27,6 +27,93 @@ const EVENT_CONFIG = {
 }
 
 /**
+ * H264StreamPlayer — MSE-based H.264 fMP4 live stream player.
+ * Uses MediaSource Extensions to consume a chunked fragmented-MP4 stream
+ * from /api/iracing/stream/h264 without buffer stalls or file-seek issues.
+ */
+function H264StreamPlayer({ src, className, onLoad, onError }) {
+  const videoRef = useRef(null)
+
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video || !src) return
+    if (!window.MediaSource) {
+      onError?.(new Error('MediaSource not supported in this browser'))
+      return
+    }
+
+    const active = { value: true }
+    const queue = []
+    let sb = null
+
+    // Pick best supported H.264 codec string (high > main > baseline)
+    const CODEC = [
+      'video/mp4; codecs="avc1.640028"',
+      'video/mp4; codecs="avc1.4D4028"',
+      'video/mp4; codecs="avc1.42E028"',
+    ].find(c => MediaSource.isTypeSupported(c)) ?? 'video/mp4; codecs="avc1.42E028"'
+
+    const ms = new MediaSource()
+    const blobUrl = URL.createObjectURL(ms)
+    video.src = blobUrl
+
+    const flush = () => {
+      if (!sb || sb.updating || !queue.length) return
+      try { sb.appendBuffer(queue.shift()) } catch {}
+    }
+
+    ms.addEventListener('sourceopen', async () => {
+      try {
+        sb = ms.addSourceBuffer(CODEC)
+        sb.mode = 'sequence'
+        sb.addEventListener('updateend', () => {
+          // Trim stale buffered data to prevent memory growth
+          if (sb.buffered.length > 0 && !sb.updating) {
+            const t = video.currentTime
+            const s = sb.buffered.start(0)
+            if (t - s > 8) {
+              try { sb.remove(s, Math.max(s + 0.1, t - 4)) } catch {}
+              return
+            }
+          }
+          flush()
+        })
+
+        const resp = await fetch(src)
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+        const reader = resp.body.getReader()
+        while (active.value) {
+          const { done, value } = await reader.read()
+          if (done || !active.value) break
+          queue.push(value)
+          flush()
+        }
+        reader.cancel()
+      } catch (e) {
+        if (active.value) onError?.(e)
+      }
+    })
+
+    return () => {
+      active.value = false
+      video.src = ''
+      try { URL.revokeObjectURL(blobUrl) } catch {}
+    }
+  }, [src])
+
+  return (
+    <video
+      ref={videoRef}
+      className={className}
+      autoPlay
+      muted
+      playsInline
+      onCanPlay={onLoad}
+    />
+  )
+}
+
+/**
  * AnalysisPanel — Full layout with:
  *  - Fixed top bar: controls + progress + clear analysis
  *  - Full-height middle: wide tabbed sidebar (Log/Events) + 16:9 MJPEG TV + playback controls
@@ -70,6 +157,8 @@ export default function AnalysisPanel() {
   const [streamFps, setStreamFps] = useLocalStorage('lrs:analysis:streamFps', 15)
   const [streamQuality, setStreamQuality] = useLocalStorage('lrs:analysis:streamQuality', 85)
   const [streamMaxWidth, setStreamMaxWidth] = useLocalStorage('lrs:analysis:streamMaxWidth', 1280)
+  const [streamFormat, setStreamFormat] = useLocalStorage('lrs:analysis:streamFormat', 'mjpeg')
+  const [streamCrf, setStreamCrf] = useLocalStorage('lrs:analysis:streamCrf', 23)
   const [showQualitySettings, setShowQualitySettings] = useState(false)
   // Stream key — changes to force <img> reload when quality settings change
   const [streamKey, setStreamKey] = useState(0)
@@ -266,6 +355,8 @@ export default function AnalysisPanel() {
   }
 
   const streamUrl = `/api/iracing/stream?fps=${streamFps}&quality=${streamQuality}&max_width=${streamMaxWidth}&_k=${streamKey}`
+  const h264Url   = `/api/iracing/stream/h264?fps=${streamFps}&crf=${streamCrf}&max_width=${streamMaxWidth}&_k=${streamKey}`
+  const activeStreamUrl = streamFormat === 'h264' ? h264Url : streamUrl
 
   // ── Idle state: no analysis running, no events ────────────────────────
   if (!isAnalyzing && !hasEvents && discoveredEvents.length === 0) {
@@ -605,15 +696,25 @@ export default function AnalysisPanel() {
                  title={isPlaying ? 'Click to pause' : 'Click to play'}>
               {isConnected ? (
                 <>
-                  {/* MJPEG stream instead of polling screenshots */}
-                  <img
-                    key={streamKey}
-                    src={streamUrl}
-                    alt="iRacing replay"
-                    className="w-full h-full object-cover"
-                    onError={(e) => { e.target.style.opacity = '0.15' }}
-                    onLoad={(e) => { e.target.style.opacity = '1'; setStreamLoaded(true) }}
-                  />
+                  {/* Stream: H.264 (MSE) or MJPEG depending on format setting */}
+                  {streamFormat === 'h264' ? (
+                    <H264StreamPlayer
+                      key={streamKey}
+                      src={activeStreamUrl}
+                      className="w-full h-full object-cover"
+                      onLoad={() => setStreamLoaded(true)}
+                      onError={() => {}}
+                    />
+                  ) : (
+                    <img
+                      key={streamKey}
+                      src={streamUrl}
+                      alt="iRacing replay"
+                      className="w-full h-full object-cover"
+                      onError={(e) => { e.target.style.opacity = '0.15' }}
+                      onLoad={(e) => { e.target.style.opacity = '1'; setStreamLoaded(true) }}
+                    />
+                  )}
                   {/* Loading spinner — shown until the first MJPEG frame arrives */}
                   {!streamLoaded && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center
@@ -687,6 +788,24 @@ export default function AnalysisPanel() {
                   <span className="text-xxs font-medium text-text-primary block mb-2">Stream Quality</span>
                   <div className="space-y-2">
                     <label className="flex items-center justify-between text-xxs text-text-secondary">
+                      <span>Format</span>
+                      <div className="flex rounded overflow-hidden border border-border">
+                        {['mjpeg', 'h264'].map(fmt => (
+                          <button
+                            key={fmt}
+                            onClick={() => { setStreamFormat(fmt); setStreamKey(k => k + 1) }}
+                            className={`px-2 py-0.5 text-xxs transition-colors ${
+                              streamFormat === fmt
+                                ? 'bg-accent text-white'
+                                : 'bg-surface text-text-secondary hover:bg-bg-hover'
+                            }`}
+                          >
+                            {fmt === 'mjpeg' ? 'MJPEG' : 'H.264'}
+                          </button>
+                        ))}
+                      </div>
+                    </label>
+                    <label className="flex items-center justify-between text-xxs text-text-secondary">
                       <span>FPS</span>
                       <select value={streamFps} onChange={e => { setStreamFps(+e.target.value); setStreamKey(k => k + 1) }}
                         className="bg-surface border border-border rounded px-1.5 py-0.5 text-xxs text-text-primary">
@@ -697,18 +816,31 @@ export default function AnalysisPanel() {
                         <option value={30}>30</option>
                       </select>
                     </label>
-                    <label className="flex items-center justify-between text-xxs text-text-secondary">
-                      <span>Quality</span>
-                      <select value={streamQuality} onChange={e => { setStreamQuality(+e.target.value); setStreamKey(k => k + 1) }}
-                        className="bg-surface border border-border rounded px-1.5 py-0.5 text-xxs text-text-primary">
-                        <option value={40}>Low (40)</option>
-                        <option value={55}>Medium (55)</option>
-                        <option value={70}>High (70)</option>
-                        <option value={85}>Ultra (85)</option>
-                        <option value={95}>Max (95)</option>
-                        <option value={100}>Lossless (100)</option>
-                      </select>
-                    </label>
+                    {streamFormat === 'h264' ? (
+                      <label className="flex items-center justify-between text-xxs text-text-secondary">
+                        <span>Quality (CRF)</span>
+                        <select value={streamCrf} onChange={e => { setStreamCrf(+e.target.value); setStreamKey(k => k + 1) }}
+                          className="bg-surface border border-border rounded px-1.5 py-0.5 text-xxs text-text-primary">
+                          <option value={18}>Visually lossless (18)</option>
+                          <option value={23}>High (23)</option>
+                          <option value={28}>Medium (28)</option>
+                          <option value={33}>Low (33)</option>
+                        </select>
+                      </label>
+                    ) : (
+                      <label className="flex items-center justify-between text-xxs text-text-secondary">
+                        <span>Quality</span>
+                        <select value={streamQuality} onChange={e => { setStreamQuality(+e.target.value); setStreamKey(k => k + 1) }}
+                          className="bg-surface border border-border rounded px-1.5 py-0.5 text-xxs text-text-primary">
+                          <option value={40}>Low (40)</option>
+                          <option value={55}>Medium (55)</option>
+                          <option value={70}>High (70)</option>
+                          <option value={85}>Ultra (85)</option>
+                          <option value={95}>Max (95)</option>
+                          <option value={100}>Lossless (100)</option>
+                        </select>
+                      </label>
+                    )}
                     <label className="flex items-center justify-between text-xxs text-text-secondary">
                       <span>Resolution</span>
                       <select value={streamMaxWidth} onChange={e => { setStreamMaxWidth(+e.target.value); setStreamKey(k => k + 1) }}
