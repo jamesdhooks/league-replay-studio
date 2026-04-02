@@ -374,7 +374,16 @@ async def serve_index():
 
 @app.get("/{path:path}")
 async def serve_spa(path: str):
-    """Serve static files or fall back to index.html for SPA routing."""
+    """Serve static files or fall back to index.html for SPA routing.
+
+    Excludes /api and /ws paths — those are handled by registered routers.
+    """
+    # Never intercept API or WebSocket paths
+    if path.startswith("api/") or path.startswith("ws"):
+        return JSONResponse(
+            {"error": "not_found", "message": f"No route: /{path}"},
+            status_code=404,
+        )
     # Try to serve the exact file
     full_path = STATIC_DIR / path
     if full_path.exists() and full_path.is_file():

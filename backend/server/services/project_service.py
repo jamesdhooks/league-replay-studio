@@ -371,12 +371,12 @@ class ProjectService:
 
         # Define category mapping
         category_defs = [
-            ("replay", "🏁 Replay", "Replay Files"),
-            ("captures", "🎬 Captures", "Captured Video"),
-            ("preview", "🔍 Preview Assets", "Preview Assets"),
-            ("exports", "📤 Exports", "Exported Video"),
-            ("overlays", "🎨 Overlays", "Overlay Templates"),
-            ("logs", "📋 Logs", "Log Files"),
+            ("replay", "Replay Files", "Replay Files"),
+            ("captures", "Captures", "Captured Video"),
+            ("preview", "Preview Assets", "Preview Assets"),
+            ("exports", "Exports", "Exported Video"),
+            ("overlays", "Overlays", "Overlay Templates"),
+            ("logs", "Logs", "Log Files"),
         ]
 
         for dir_name, icon_label, description in category_defs:
@@ -437,7 +437,7 @@ class ProjectService:
         if root_files:
             categories.insert(0, {
                 "name": "root",
-                "label": "📄 Project",
+                "label": "Project",
                 "description": "Project Files",
                 "files": root_files,
                 "file_count": len(root_files),

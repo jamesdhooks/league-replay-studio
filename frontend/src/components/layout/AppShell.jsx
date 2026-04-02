@@ -52,8 +52,10 @@ function AppShell() {
 
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Left sidebar */}
-        <Sidebar collapsed={sidebarCollapsed} onOpenSettings={openSettings} />
+        {/* Left sidebar — only show when not viewing a project */}
+        {!activeProject && !showSettings && (
+          <Sidebar collapsed={sidebarCollapsed} onOpenSettings={openSettings} />
+        )}
 
         {/* Main area */}
         <main className="flex-1 flex flex-col overflow-hidden bg-bg-primary">

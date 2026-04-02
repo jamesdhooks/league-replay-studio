@@ -87,7 +87,103 @@ export default function CapturePanel({ projectId }) {
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
 
-        {/* ── Software Detection ─────────────────────────────────────── */}
+        {/* ── PRIMARY CAPTURE ACTION (most visible) ──────────────── */}
+        <div className="bg-bg-secondary border border-border rounded-lg p-4">
+          {captureState === 'capturing' ? (
+            <div className="space-y-3">
+              <div className="flex items-center justify-center gap-2">
+                <div className="w-3 h-3 rounded-full bg-danger animate-pulse" />
+                <span className="text-base font-semibold text-danger">Recording in Progress</span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <MetricBox icon={Clock} label="Elapsed" value={formatTime(elapsedSeconds)} />
+                <MetricBox icon={HardDrive} label="File Size" value={formatFileSize(fileSize)} />
+              </div>
+
+              {filePath && (
+                <div className="text-xxs text-text-tertiary font-mono truncate text-center" title={filePath}>
+                  <FileVideo className="w-3 h-3 inline mr-1" />
+                  {filePath.split(/[/\\]/).pop()}
+                </div>
+              )}
+
+              <button
+                onClick={handleStop}
+                disabled={loading}
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm
+                  font-semibold bg-danger hover:bg-danger/90 text-white transition-colors"
+              >
+                <Square className="w-4 h-4" />
+                Stop Capture
+              </button>
+            </div>
+          ) : captureState === 'completed' ? (
+            <div className="space-y-3">
+              <div className="flex items-center justify-center gap-2">
+                <CheckCircle2 className="w-5 h-5 text-success" />
+                <span className="text-base font-semibold text-success">Capture Complete</span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <MetricBox icon={Clock} label="Duration" value={formatTime(elapsedSeconds)} />
+                <MetricBox icon={HardDrive} label="File Size" value={formatFileSize(fileSize)} />
+              </div>
+
+              {filePath && (
+                <div className="text-xxs text-text-tertiary font-mono truncate text-center" title={filePath}>
+                  <FileVideo className="w-3 h-3 inline mr-1" />
+                  {filePath.split(/[/\\]/).pop()}
+                </div>
+              )}
+
+              <button
+                onClick={handleReset}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm
+                  font-medium bg-bg-primary text-text-primary hover:bg-bg-hover border border-border transition-colors"
+              >
+                <RotateCcw className="w-4 h-4" />
+                Reset & Capture Again
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <button
+                onClick={handleStart}
+                disabled={loading || captureState === 'testing'}
+                className={`w-full flex items-center justify-center gap-2 px-4 py-4 rounded-lg text-base
+                  font-semibold transition-colors
+                  ${loading
+                    ? 'bg-accent/50 text-white cursor-wait'
+                    : 'bg-accent hover:bg-accent-hover text-white shadow-lg shadow-accent/20'
+                  }`}
+              >
+                <Play className="w-5 h-5" />
+                Start Capture
+              </button>
+
+              {activeSoftwareInfo && !activeSoftwareInfo.running && (
+                <div className="flex items-start gap-2 px-3 py-2 bg-warning/5 border border-warning/30 rounded-md">
+                  <AlertTriangle className="w-3.5 h-3.5 text-warning shrink-0 mt-0.5" />
+                  <p className="text-xxs text-warning">
+                    {activeSoftwareInfo.label} is not running. Start it before capturing.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* ── Error Display ─────────────────────────────────────────── */}
+        {error && captureState === 'error' && (
+          <div className="flex items-start gap-2 px-3 py-2.5 bg-danger/5 border border-danger/30 rounded-md">
+            <XCircle className="w-4 h-4 text-danger shrink-0 mt-0.5" />
+            <div>
+              <p className="text-xs text-danger font-medium">Error</p>
+              <p className="text-xxs text-danger/80 mt-0.5">{error}</p>
+            </div>
+          </div>
+        )}
         <Section icon={Monitor} title="Capture Software">
           <div className="space-y-2">
             {software.length > 0 ? (
@@ -175,128 +271,6 @@ export default function CapturePanel({ projectId }) {
               )}
             </div>
           </Section>
-        )}
-
-        {/* ── Capture Controls ──────────────────────────────────────── */}
-        <Section icon={Video} title="Capture Controls">
-          <div className="space-y-3">
-            {captureState === 'capturing' ? (
-              <>
-                {/* Progress display */}
-                <div className="bg-bg-primary border border-border rounded-md p-3 space-y-2">
-                  <div className="flex items-center gap-2">
-                    <div className="w-2.5 h-2.5 rounded-full bg-danger animate-pulse" />
-                    <span className="text-xs font-medium text-danger">Recording</span>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <MetricBox
-                      icon={Clock}
-                      label="Elapsed"
-                      value={formatTime(elapsedSeconds)}
-                    />
-                    <MetricBox
-                      icon={HardDrive}
-                      label="File Size"
-                      value={formatFileSize(fileSize)}
-                    />
-                  </div>
-
-                  {filePath && (
-                    <div className="text-xxs text-text-tertiary font-mono truncate" title={filePath}>
-                      <FileVideo className="w-3 h-3 inline mr-1" />
-                      {filePath.split(/[/\\]/).pop()}
-                    </div>
-                  )}
-                </div>
-
-                <button
-                  onClick={handleStop}
-                  disabled={loading}
-                  className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-md text-xs
-                    font-medium bg-danger hover:bg-danger/90 text-white transition-colors"
-                >
-                  <Square className="w-3.5 h-3.5" />
-                  Stop Capture
-                </button>
-              </>
-            ) : captureState === 'completed' ? (
-              <>
-                {/* Completed display */}
-                <div className="bg-success/5 border border-success/30 rounded-md p-3 space-y-2">
-                  <div className="flex items-center gap-2">
-                    <CheckCircle2 className="w-4 h-4 text-success" />
-                    <span className="text-xs font-medium text-success">Capture Complete</span>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <MetricBox
-                      icon={Clock}
-                      label="Duration"
-                      value={formatTime(elapsedSeconds)}
-                    />
-                    <MetricBox
-                      icon={HardDrive}
-                      label="File Size"
-                      value={formatFileSize(fileSize)}
-                    />
-                  </div>
-
-                  {filePath && (
-                    <div className="text-xxs text-text-tertiary font-mono truncate" title={filePath}>
-                      <FileVideo className="w-3 h-3 inline mr-1" />
-                      {filePath.split(/[/\\]/).pop()}
-                    </div>
-                  )}
-                </div>
-
-                <button
-                  onClick={handleReset}
-                  className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md text-xs
-                    font-medium bg-bg-primary text-text-primary hover:bg-bg-hover border border-border transition-colors"
-                >
-                  <RotateCcw className="w-3.5 h-3.5" />
-                  Reset
-                </button>
-              </>
-            ) : (
-              <>
-                <button
-                  onClick={handleStart}
-                  disabled={loading || captureState === 'testing'}
-                  className={`w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-md text-xs
-                    font-medium transition-colors
-                    ${loading
-                      ? 'bg-accent/50 text-white cursor-wait'
-                      : 'bg-accent hover:bg-accent-hover text-white'
-                    }`}
-                >
-                  <Play className="w-3.5 h-3.5" />
-                  Start Capture
-                </button>
-
-                {activeSoftwareInfo && !activeSoftwareInfo.running && (
-                  <div className="flex items-start gap-2 px-3 py-2 bg-warning/5 border border-warning/30 rounded-md">
-                    <AlertTriangle className="w-3.5 h-3.5 text-warning shrink-0 mt-0.5" />
-                    <p className="text-xxs text-warning">
-                      {activeSoftwareInfo.label} is not running. Start it before capturing.
-                    </p>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        </Section>
-
-        {/* ── Error Display ──────────────────────────────────────────── */}
-        {error && captureState === 'error' && (
-          <div className="flex items-start gap-2 px-3 py-2.5 bg-danger/5 border border-danger/30 rounded-md">
-            <XCircle className="w-4 h-4 text-danger shrink-0 mt-0.5" />
-            <div>
-              <p className="text-xs text-danger font-medium">Error</p>
-              <p className="text-xxs text-danger/80 mt-0.5">{error}</p>
-            </div>
-          </div>
         )}
 
       </div>

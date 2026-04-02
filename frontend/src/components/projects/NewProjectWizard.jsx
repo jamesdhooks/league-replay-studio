@@ -24,24 +24,25 @@ function NewProjectWizard({ onClose, onCreated }) {
   const [name, setName] = useState('')
   const [replayFile, setReplayFile] = useState('')
   const [trackName, setTrackName] = useState('')
-  const [sessionType, setSessionType] = useState('race')
   const [creating, setCreating] = useState(false)
 
   // Replay discovery
   const [discoveredFiles, setDiscoveredFiles] = useState([])
   const [discovering, setDiscovering] = useState(false)
   const [replaySearch, setReplaySearch] = useState('')
+  const hasDiscovered = useState(false)
 
   // Discover replays on step 2
   useEffect(() => {
-    if (step === 2 && discoveredFiles.length === 0 && !discovering) {
+    if (step === 2 && !hasDiscovered[0] && !discovering) {
       setDiscovering(true)
+      hasDiscovered[0] = true
       discoverReplays()
         .then(files => setDiscoveredFiles(files))
         .catch(() => setDiscoveredFiles([]))
         .finally(() => setDiscovering(false))
     }
-  }, [step, discoveredFiles.length, discovering, discoverReplays])
+  }, [step, discovering, discoverReplays, hasDiscovered])
 
   const filteredFiles = replaySearch
     ? discoveredFiles.filter(f =>
@@ -57,7 +58,7 @@ function NewProjectWizard({ onClose, onCreated }) {
         name: name.trim(),
         replay_file: replayFile,
         track_name: trackName,
-        session_type: sessionType,
+        session_type: 'race',
       })
       showSuccess(`Project "${project.name}" created`)
       onCreated?.(project)
@@ -101,8 +102,6 @@ function NewProjectWizard({ onClose, onCreated }) {
               setName={setName}
               trackName={trackName}
               setTrackName={setTrackName}
-              sessionType={sessionType}
-              setSessionType={setSessionType}
             />
           )}
           {step === 2 && (
@@ -120,7 +119,6 @@ function NewProjectWizard({ onClose, onCreated }) {
               name={name}
               replayFile={replayFile}
               trackName={trackName}
-              sessionType={sessionType}
             />
           )}
         </div>
@@ -165,7 +163,7 @@ function NewProjectWizard({ onClose, onCreated }) {
 
 // ── Step Components ──────────────────────────────────────────────────────────
 
-function Step1_Name({ name, setName, trackName, setTrackName, sessionType, setSessionType }) {
+function Step1_Name({ name, setName, trackName, setTrackName }) {
   return (
     <div className="space-y-4">
       <div>
@@ -197,22 +195,6 @@ function Step1_Name({ name, setName, trackName, setTrackName, sessionType, setSe
                      text-text-primary placeholder:text-text-disabled
                      focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent/30"
         />
-      </div>
-
-      <div>
-        <label className="block text-sm font-medium text-text-primary mb-1.5">
-          Session Type
-        </label>
-        <select
-          value={sessionType}
-          onChange={(e) => setSessionType(e.target.value)}
-          className="w-full px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm
-                     text-text-primary focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent/30"
-        >
-          <option value="race">Race</option>
-          <option value="qualifying">Qualifying</option>
-          <option value="practice">Practice</option>
-        </select>
       </div>
     </div>
   )
@@ -293,7 +275,7 @@ function Step2_Replay({ replayFile, setReplayFile, discoveredFiles, discovering,
   )
 }
 
-function Step3_Review({ name, replayFile, trackName, sessionType }) {
+function Step3_Review({ name, replayFile, trackName }) {
   return (
     <div className="space-y-4">
       <p className="text-sm text-text-secondary">
@@ -303,7 +285,6 @@ function Step3_Review({ name, replayFile, trackName, sessionType }) {
       <div className="bg-bg-primary rounded-lg border border-border divide-y divide-border">
         <ReviewRow label="Project Name" value={name} />
         <ReviewRow label="Track" value={trackName || '—'} />
-        <ReviewRow label="Session Type" value={sessionType} />
         <ReviewRow
           label="Replay File"
           value={replayFile ? replayFile.split(/[/\\]/).pop() : 'None selected'}

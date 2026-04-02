@@ -1,7 +1,17 @@
 import { useState, useEffect, useCallback } from 'react'
-import { ChevronRight, ChevronDown, File, Folder, RefreshCw } from 'lucide-react'
+import { ChevronRight, ChevronDown, File, Folder, RefreshCw, Flag, Film, Eye, Upload, Layers, FileText, FileCode } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext'
 import { formatFileSize } from '../../utils/format'
+
+const CATEGORY_ICONS = {
+  root: FileCode,
+  replay: Flag,
+  captures: Film,
+  preview: Eye,
+  exports: Upload,
+  overlays: Layers,
+  logs: FileText,
+}
 
 /**
  * Project file browser — shows the project directory tree organized by category.
@@ -91,6 +101,10 @@ function ProjectFileBrowser({ projectId }) {
               ) : (
                 <ChevronRight className="w-3 h-3 text-text-tertiary shrink-0" />
               )}
+              {(() => {
+                const CatIcon = CATEGORY_ICONS[category.name] || Folder
+                return <CatIcon className="w-3.5 h-3.5 text-text-tertiary shrink-0" />
+              })()}
               <span className="text-xs text-text-primary flex-1">
                 {category.label}
               </span>

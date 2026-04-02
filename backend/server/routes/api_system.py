@@ -3,15 +3,20 @@ api_system.py
 --------------
 System information and health check endpoints.
 
-GET /api/system/info     — system info (version, platform, etc.)
-GET /api/system/health   — health check
+GET  /api/system/info     — system info (version, platform, etc.)
+GET  /api/system/health   — health check
+POST /api/system/browse   — open native folder/file picker dialog
 """
 
 import platform
 import sys
+import threading
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 
 from version import __version__, APP_NAME
 
@@ -36,3 +41,55 @@ async def system_info() -> dict:
         "architecture": platform.machine(),
         "frozen": getattr(sys, "frozen", False),
     }
+
+
+class BrowseRequest(BaseModel):
+    mode: str = "folder"  # "folder" or "file"
+    title: str = "Select"
+    initial_dir: str = ""
+    file_types: Optional[list[list[str]]] = None  # e.g. [["Replay Files", "*.rpy"]]
+
+
+@router.post("/browse")
+async def browse_dialog(req: BrowseRequest) -> dict:
+    """Open a native folder or file picker dialog.
+
+    Returns the selected path or empty string if cancelled.
+    """
+    import asyncio
+
+    result = {"path": ""}
+
+    def _run_dialog():
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+
+            initial = req.initial_dir if req.initial_dir and Path(req.initial_dir).exists() else str(Path.home())
+
+            if req.mode == "folder":
+                path = filedialog.askdirectory(
+                    title=req.title,
+                    initialdir=initial,
+                )
+            else:
+                filetypes = [tuple(ft) for ft in req.file_types] if req.file_types else [("All Files", "*.*")]
+                path = filedialog.askopenfilename(
+                    title=req.title,
+                    initialdir=initial,
+                    filetypes=filetypes,
+                )
+
+            root.destroy()
+            result["path"] = path or ""
+        except Exception:
+            result["path"] = ""
+
+    # tkinter must run on a non-asyncio thread
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _run_dialog)
+
+    return result

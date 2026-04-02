@@ -12,9 +12,11 @@ import {
   Laptop,
   Youtube,
   Wand2,
+  FolderOpen,
 } from 'lucide-react'
 import { useSettings } from '../../context/SettingsContext'
 import { useToast } from '../../context/ToastContext'
+import { apiPost } from '../../services/api'
 import YouTubeSettings from '../youtube/YouTubeSettings'
 import SetupWizard from '../wizard/SetupWizard'
 
@@ -196,19 +198,21 @@ function GeneralSettings({ value, onChange }) {
 
       {/* iRacing Replay Directory */}
       <SettingGroup label="iRacing Replay Directory" description="Path to your iRacing replay files (.rpy).">
-        <TextInput
+        <BrowseInput
           value={value('iracing_replay_dir')}
           onChange={(v) => onChange('iracing_replay_dir', v)}
           placeholder="e.g., C:\Users\You\Documents\iRacing\replays"
+          browseTitle="Select iRacing Replay Directory"
         />
       </SettingGroup>
 
       {/* Default Project Directory */}
       <SettingGroup label="Default Project Directory" description="Where new projects are created by default.">
-        <TextInput
+        <BrowseInput
           value={value('default_project_dir')}
           onChange={(v) => onChange('default_project_dir', v)}
           placeholder="Leave empty to use default data directory"
+          browseTitle="Select Default Project Directory"
         />
       </SettingGroup>
 
@@ -293,22 +297,20 @@ function HotkeySettings({ value, onChange }) {
     <div className="space-y-6 max-w-xl">
       <SectionHeader
         title="Hotkeys"
-        description="Keyboard shortcuts for capture control."
+        description="Keyboard shortcuts for capture control. Click the input and press the desired key."
       />
 
       <SettingGroup label="Start Capture Hotkey" description="Key to trigger recording start in capture software.">
-        <TextInput
+        <HotkeyCaptureSettings
           value={value('capture_hotkey_start')}
           onChange={(v) => onChange('capture_hotkey_start', v)}
-          placeholder="e.g., F9"
         />
       </SettingGroup>
 
       <SettingGroup label="Stop Capture Hotkey" description="Key to trigger recording stop in capture software.">
-        <TextInput
+        <HotkeyCaptureSettings
           value={value('capture_hotkey_stop')}
           onChange={(v) => onChange('capture_hotkey_stop', v)}
-          placeholder="e.g., F9"
         />
       </SettingGroup>
     </div>
@@ -385,6 +387,43 @@ function TextInput({ value, onChange, placeholder }) {
   )
 }
 
+function BrowseInput({ value, onChange, placeholder, browseTitle }) {
+  const handleBrowse = async () => {
+    try {
+      const result = await apiPost('/system/browse', {
+        mode: 'folder',
+        title: browseTitle || 'Select Folder',
+        initial_dir: value || '',
+      })
+      if (result.path) onChange(result.path)
+    } catch { /* dialog cancelled or failed */ }
+  }
+
+  return (
+    <div className="flex gap-2">
+      <input
+        type="text"
+        value={value || ''}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="flex-1 px-3 py-2 text-sm bg-bg-primary border border-border rounded-lg
+                   text-text-primary placeholder:text-text-disabled
+                   focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent
+                   transition-colors"
+      />
+      <button
+        type="button"
+        onClick={handleBrowse}
+        className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-bg-primary
+                   text-text-secondary hover:text-text-primary hover:bg-surface-hover text-sm transition-colors"
+      >
+        <FolderOpen className="w-4 h-4" />
+        Browse
+      </button>
+    </div>
+  )
+}
+
 function Select({ value, onChange, options }) {
   return (
     <select
@@ -419,6 +458,46 @@ function Toggle({ checked, onChange }) {
         className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow-sm
                     transition-transform ${checked ? 'translate-x-5' : 'translate-x-0'}`}
       />
+    </button>
+  )
+}
+
+function HotkeyCaptureSettings({ value, onChange }) {
+  const [capturing, setCapturing] = useState(false)
+
+  const handleKeyDown = (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+
+    const parts = []
+    if (e.ctrlKey) parts.push('Ctrl')
+    if (e.altKey) parts.push('Alt')
+    if (e.shiftKey) parts.push('Shift')
+    if (e.metaKey) parts.push('Meta')
+
+    const key = e.key
+    if (['Control', 'Alt', 'Shift', 'Meta'].includes(key)) return
+
+    const keyName = key.length === 1 ? key.toUpperCase() : key
+    parts.push(keyName)
+
+    onChange(parts.join('+'))
+    setCapturing(false)
+  }
+
+  return (
+    <button
+      type="button"
+      onKeyDown={capturing ? handleKeyDown : undefined}
+      onClick={() => setCapturing(true)}
+      onBlur={() => setCapturing(false)}
+      className={`w-full px-3 py-2 rounded-lg border text-sm text-left transition-colors focus:outline-none ${
+        capturing
+          ? 'bg-accent/10 border-accent text-accent ring-2 ring-accent/30'
+          : 'bg-bg-primary border-border text-text-primary hover:border-accent/50'
+      }`}
+    >
+      {capturing ? 'Press a key...' : value || 'Click to set hotkey'}
     </button>
   )
 }

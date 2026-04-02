@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react'
-import { Wand2, ChevronLeft, ChevronRight, Check, X } from 'lucide-react'
+import { useState, useEffect, useCallback } from 'react'
+import { Wand2, ChevronLeft, ChevronRight, Check, X, FolderOpen } from 'lucide-react'
+import { apiPost } from '../../services/api'
 
 const STEPS = [
   { id: 1, label: 'Welcome' },
@@ -177,6 +178,18 @@ function SetupWizard({ onComplete, onSkip }) {
 
 function Step1Welcome({ detected, iracingDir, setIracingDir }) {
   const dirs = detected?.iracing_dirs ?? []
+
+  const handleBrowse = async () => {
+    try {
+      const result = await apiPost('/system/browse', {
+        mode: 'folder',
+        title: 'Select iRacing Replay Directory',
+        initial_dir: iracingDir,
+      })
+      if (result.path) setIracingDir(result.path)
+    } catch { /* dialog cancelled or failed */ }
+  }
+
   return (
     <div className="space-y-4">
       <div>
@@ -203,13 +216,23 @@ function Step1Welcome({ detected, iracingDir, setIracingDir }) {
           </select>
         )}
         {(dirs.length === 0 || !dirs.includes(iracingDir)) && (
-          <input
-            type="text"
-            value={iracingDir}
-            onChange={(e) => setIracingDir(e.target.value)}
-            placeholder="e.g. C:\Users\You\Documents\iRacing\replays"
-            className="w-full px-3 py-2 rounded-lg bg-surface-hover border border-border text-text-primary text-sm focus:outline-none focus:border-accent"
-          />
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={iracingDir}
+              onChange={(e) => setIracingDir(e.target.value)}
+              placeholder="e.g. C:\\Users\\You\\Documents\\iRacing\\replays"
+              className="flex-1 px-3 py-2 rounded-lg bg-surface-hover border border-border text-text-primary text-sm focus:outline-none focus:border-accent"
+            />
+            <button
+              type="button"
+              onClick={handleBrowse}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-surface-hover text-text-secondary hover:text-text-primary hover:bg-surface-active text-sm transition-colors"
+            >
+              <FolderOpen className="w-4 h-4" />
+              Browse
+            </button>
+          </div>
         )}
         {dirs.length > 0 && (
           <p className="text-xs text-accent">✓ iRacing directory auto-detected</p>
@@ -262,21 +285,11 @@ function Step2Capture({ detected, captureSoftware, setCaptureSoftware, hotkeySta
       <div className="grid grid-cols-2 gap-4">
         <div className="space-y-1">
           <label className="block text-sm font-medium text-text-primary">Start Hotkey</label>
-          <input
-            type="text"
-            value={hotkeyStart}
-            onChange={(e) => setHotkeyStart(e.target.value)}
-            className="w-full px-3 py-2 rounded-lg bg-surface-hover border border-border text-text-primary text-sm focus:outline-none focus:border-accent"
-          />
+          <HotkeyCapture value={hotkeyStart} onChange={setHotkeyStart} />
         </div>
         <div className="space-y-1">
           <label className="block text-sm font-medium text-text-primary">Stop Hotkey</label>
-          <input
-            type="text"
-            value={hotkeyStop}
-            onChange={(e) => setHotkeyStop(e.target.value)}
-            className="w-full px-3 py-2 rounded-lg bg-surface-hover border border-border text-text-primary text-sm focus:outline-none focus:border-accent"
-          />
+          <HotkeyCapture value={hotkeyStop} onChange={setHotkeyStop} />
         </div>
       </div>
     </div>
@@ -293,6 +306,14 @@ function Step3Gpu({ detected, preferredGpu, setPreferredGpu }) {
     { id: 'cpu', label: 'CPU (software)' },
   ]
 
+  const gpuSummary = () => {
+    if (!gpu) return null
+    if (!gpu.ffmpeg_available) return 'FFmpeg not found — install FFmpeg for hardware encoding'
+    if (gpu.has_gpu_encoder && gpu.best_h264) return `${gpu.best_h264.label} (hardware accelerated)`
+    if (gpu.gpu_vendors?.length > 0) return `GPU: ${gpu.gpu_vendors.join(', ')}`
+    return 'No GPU encoder detected — CPU encoding will be used'
+  }
+
   return (
     <div className="space-y-4">
       <div>
@@ -303,9 +324,13 @@ function Step3Gpu({ detected, preferredGpu, setPreferredGpu }) {
       </div>
 
       {gpu && (
-        <div className="px-3 py-2 rounded-lg bg-surface-hover border border-border text-sm text-text-secondary">
+        <div className={`px-3 py-2 rounded-lg border text-sm ${
+          gpu.has_gpu_encoder
+            ? 'bg-accent/5 border-accent/30 text-accent'
+            : 'bg-surface-hover border-border text-text-secondary'
+        }`}>
           <span className="font-medium text-text-primary">Detected: </span>
-          {gpu.vendor ? `${gpu.vendor} — ${gpu.encoder ?? gpu.name ?? 'GPU'}` : 'No GPU detected'}
+          {gpuSummary()}
         </div>
       )}
 
@@ -332,6 +357,17 @@ function Step3Gpu({ detected, preferredGpu, setPreferredGpu }) {
 }
 
 function Step4ProjectDir({ projectDir, setProjectDir }) {
+  const handleBrowse = async () => {
+    try {
+      const result = await apiPost('/system/browse', {
+        mode: 'folder',
+        title: 'Select Default Project Directory',
+        initial_dir: projectDir,
+      })
+      if (result.path) setProjectDir(result.path)
+    } catch { /* dialog cancelled or failed */ }
+  }
+
   return (
     <div className="space-y-4">
       <div>
@@ -345,13 +381,23 @@ function Step4ProjectDir({ projectDir, setProjectDir }) {
         <label className="block text-sm font-medium text-text-primary">
           Default Project Directory
         </label>
-        <input
-          type="text"
-          value={projectDir}
-          onChange={(e) => setProjectDir(e.target.value)}
-          placeholder="e.g. C:\Users\You\Videos\LRS Projects"
-          className="w-full px-3 py-2 rounded-lg bg-surface-hover border border-border text-text-primary text-sm focus:outline-none focus:border-accent"
-        />
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={projectDir}
+            onChange={(e) => setProjectDir(e.target.value)}
+            placeholder="e.g. C:\Users\You\Videos\LRS Projects"
+            className="flex-1 px-3 py-2 rounded-lg bg-surface-hover border border-border text-text-primary text-sm focus:outline-none focus:border-accent"
+          />
+          <button
+            type="button"
+            onClick={handleBrowse}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-surface-hover text-text-secondary hover:text-text-primary hover:bg-surface-active text-sm transition-colors"
+          >
+            <FolderOpen className="w-4 h-4" />
+            Browse
+          </button>
+        </div>
         <p className="text-xs text-text-tertiary">
           Leave blank to be prompted each time you create a project.
         </p>
@@ -385,6 +431,52 @@ function Step5YouTube() {
         You can connect YouTube at any time from the Settings panel.
       </p>
     </div>
+  )
+}
+
+/**
+ * HotkeyCapture — captures actual keyboard input for hotkey assignment.
+ * Click to focus, then press the desired key combination.
+ */
+function HotkeyCapture({ value, onChange }) {
+  const [capturing, setCapturing] = useState(false)
+
+  const handleKeyDown = useCallback((e) => {
+    e.preventDefault()
+    e.stopPropagation()
+
+    const parts = []
+    if (e.ctrlKey) parts.push('Ctrl')
+    if (e.altKey) parts.push('Alt')
+    if (e.shiftKey) parts.push('Shift')
+    if (e.metaKey) parts.push('Meta')
+
+    const key = e.key
+    // Ignore standalone modifier keys
+    if (['Control', 'Alt', 'Shift', 'Meta'].includes(key)) return
+
+    // Normalize key name
+    const keyName = key.length === 1 ? key.toUpperCase() : key
+    parts.push(keyName)
+
+    onChange(parts.join('+'))
+    setCapturing(false)
+  }, [onChange])
+
+  return (
+    <button
+      type="button"
+      onKeyDown={capturing ? handleKeyDown : undefined}
+      onClick={() => setCapturing(true)}
+      onBlur={() => setCapturing(false)}
+      className={`w-full px-3 py-2 rounded-lg border text-sm text-left transition-colors focus:outline-none ${
+        capturing
+          ? 'bg-accent/10 border-accent text-accent ring-2 ring-accent/30'
+          : 'bg-surface-hover border-border text-text-primary hover:border-accent/50'
+      }`}
+    >
+      {capturing ? 'Press a key...' : value || 'Click to set hotkey'}
+    </button>
   )
 }
 
