@@ -192,7 +192,7 @@ function HlsStreamPlayer({ src, className, onLoad, onError }) {
       video.removeAttribute('src')
       video.load()
     }
-  }, [src])
+  }, [src, onLoad, onError])
 
   return (
     <video

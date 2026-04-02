@@ -34,6 +34,7 @@ from typing import Optional
 import asyncio
 import io
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -700,12 +701,12 @@ async def hls_stop():
 
     Safe to call even when no HLS session is active.
     """
+    def _stop() -> None:
+        with _hls_lock:
+            _stop_hls_session_locked()
+
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, lambda: (
-        _hls_lock.acquire(),
-        _stop_hls_session_locked(),
-        _hls_lock.release(),
-    ))
+    await loop.run_in_executor(None, _stop)
     return {"status": "stopped"}
 
 
@@ -735,14 +736,10 @@ async def hls_file(
         // or via hls.js:
         hls.loadSource("/api/iracing/stream/hls/playlist.m3u8?fps=15&crf=23")
     """
-    # Reject path traversal attempts
-    if "/" in filename or "\\" in filename or ".." in filename:
-        raise HTTPException(status_code=400, detail="Invalid filename")
-
-    is_playlist = filename == "playlist.m3u8"
-    is_segment  = filename.startswith("seg") and filename.endswith(".ts")
-
-    if not is_playlist and not is_segment:
+    # Strictly validate filename: only allow 'playlist.m3u8' or 'seg#####.ts'
+    # This rejects any path separators, dots, or other traversal characters.
+    _SAFE_HLS_FILENAME = re.compile(r'^(?:playlist\.m3u8|seg\d{5}\.ts)$')
+    if not _SAFE_HLS_FILENAME.match(filename):
         raise HTTPException(status_code=404, detail="Not found")
 
     try:
@@ -757,7 +754,7 @@ async def hls_file(
     crf       = max(0, min(crf, 51))
     max_width = max(320, min(max_width, 3840))
 
-    if is_playlist:
+    if filename == "playlist.m3u8":
         # Start (or restart on param change) the HLS segmenter
         def _ensure_session() -> pathlib.Path:
             with _hls_lock:
@@ -790,17 +787,15 @@ async def hls_file(
             headers={"Cache-Control": "no-cache"},
         )
 
-    # Segment request — look up the current tmpdir
+    # Segment request — filename already validated as 'seg#####.ts' by the regex above
     with _hls_lock:
         tmpdir_str = _hls_session.get("tmpdir")
 
     if not tmpdir_str:
         raise HTTPException(status_code=404, detail="No active HLS session")
 
+    # Build path from the validated filename (no separators possible after regex check)
     segment_path = pathlib.Path(tmpdir_str) / filename
-    # Guard against path traversal via symlinks or odd filenames
-    if not segment_path.resolve().is_relative_to(pathlib.Path(tmpdir_str).resolve()):
-        raise HTTPException(status_code=400, detail="Invalid segment path")
 
     if not segment_path.exists():
         raise HTTPException(status_code=404, detail="Segment not found")
