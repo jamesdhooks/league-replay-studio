@@ -17,6 +17,10 @@ Detector list:
   - LeaderChangeDetector : P1 car_idx changes
   - FirstLapDetector     : race lap 1
   - LastLapDetector      : final lap of the race
+  - CrashDetector        : off-track with significant time loss
+  - SpinoutDetector      : brief off-track with moderate time loss
+  - ContactDetector      : multiple cars off-track at same location
+  - CloseCallDetector    : near-miss with proximity and brief off-track
 """
 
 from __future__ import annotations
@@ -39,6 +43,10 @@ EVENT_FASTEST_LAP = "fastest_lap"
 EVENT_LEADER_CHANGE = "leader_change"
 EVENT_FIRST_LAP   = "first_lap"
 EVENT_LAST_LAP    = "last_lap"
+EVENT_CRASH       = "crash"
+EVENT_SPINOUT     = "spinout"
+EVENT_CONTACT     = "contact"
+EVENT_CLOSE_CALL  = "close_call"
 
 # iRacing surface constants
 SURFACE_OFF_TRACK = 0
@@ -658,6 +666,413 @@ class LastLapDetector(BaseDetector):
         return events
 
 
+# ── Crash Detector ───────────────────────────────────────────────────────────
+
+class CrashDetector(BaseDetector):
+    """Detect crashes by finding cars that go off-track with a significant
+    lap time increase, indicating a big stop or impact.
+
+    Severity scales with the number of cars involved and the duration of
+    the off-track excursion.  Distinguished from spinouts by requiring a
+    larger time loss and longer off-track duration.
+    """
+
+    event_type = EVENT_CRASH
+    DEDUP_SECONDS = 20.0
+    LEAD_IN = 3.0
+    FOLLOW_OUT = 10.0
+
+    def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
+        min_time_loss = session_info.get("crash_min_time_loss", 10.0)
+        min_off_track_duration = session_info.get("crash_min_off_track_duration", 3.0)
+
+        # Find off-track episodes per car with their duration and estimated
+        # time degradation.  We compare est_time before and after the off-track
+        # window; a large positive delta indicates the car lost significant time.
+        rows = db.execute("""
+            WITH off_track AS (
+                SELECT cs.car_idx, cs.position, cs.lap, cs.lap_pct,
+                       cs.est_time, cs.best_lap_time,
+                       t.session_time, t.replay_frame,
+                       LAG(cs.surface) OVER (
+                           PARTITION BY cs.car_idx ORDER BY t.session_time
+                       ) AS prev_surface,
+                       LEAD(cs.est_time) OVER (
+                           PARTITION BY cs.car_idx ORDER BY t.session_time
+                       ) AS next_est_time
+                FROM car_states cs
+                JOIN race_ticks t ON cs.tick_id = t.id
+                WHERE t.session_state IN (?, ?)
+                  AND cs.position > 0
+            )
+            SELECT session_time, replay_frame, car_idx, position, lap,
+                   lap_pct, est_time, next_est_time, best_lap_time
+            FROM off_track
+            WHERE prev_surface = ?
+              AND next_est_time IS NOT NULL
+              AND next_est_time - est_time > ?
+        """, (SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
+              SURFACE_OFF_TRACK, min_time_loss)).fetchall()
+
+        events: list[dict] = []
+        seen: dict[int, float] = {}
+
+        for row in rows:
+            time_s = row["session_time"]
+            frame = row["replay_frame"]
+            car_idx = row["car_idx"]
+
+            if time_s - seen.get(car_idx, -999) < self.DEDUP_SECONDS:
+                # Extend existing event if nearby cars are also crashing
+                for e in reversed(events):
+                    if car_idx in e["involved_drivers"]:
+                        e["end_time"] = time_s + self.FOLLOW_OUT
+                        e["end_frame"] = frame
+                        seen[car_idx] = time_s + self.FOLLOW_OUT
+                        break
+                continue
+
+            time_loss = row["next_est_time"] - row["est_time"]
+            # Severity: base 6, scale up with time lost (capped at 10)
+            severity = min(10, 6 + int(time_loss / 10))
+
+            events.append({
+                "event_type": self.event_type,
+                "start_time": max(0, time_s - self.LEAD_IN),
+                "end_time": time_s + self.FOLLOW_OUT,
+                "start_frame": max(0, frame),
+                "end_frame": frame,
+                "lap_number": row["lap"],
+                "severity": severity,
+                "involved_drivers": [car_idx],
+                "position": row["position"],
+                "metadata": {
+                    "time_loss": round(time_loss, 2),
+                    "lap_pct": row["lap_pct"],
+                    "detected_by": "off_track_time_loss",
+                },
+            })
+            seen[car_idx] = time_s + self.FOLLOW_OUT
+
+        # Merge crashes that overlap in time (multi-car pileups)
+        merged: list[dict] = []
+        for ev in sorted(events, key=lambda e: e["start_time"]):
+            if merged and ev["start_time"] <= merged[-1]["end_time"]:
+                last = merged[-1]
+                for d in ev["involved_drivers"]:
+                    if d not in last["involved_drivers"]:
+                        last["involved_drivers"].append(d)
+                last["end_time"] = max(last["end_time"], ev["end_time"])
+                last["end_frame"] = max(last["end_frame"], ev["end_frame"])
+                # Bump severity for multi-car crashes
+                last["severity"] = min(10, last["severity"] + 1)
+            else:
+                merged.append(ev)
+
+        logger.info("[Detector:Crash] Found %d crashes", len(merged))
+        return merged
+
+
+# ── Spinout Detector ─────────────────────────────────────────────────────────
+
+class SpinoutDetector(BaseDetector):
+    """Detect spinouts / loss of control events.
+
+    A spinout is a brief off-track excursion with moderate time loss — less
+    severe than a crash but more impactful than a simple track-limit
+    violation.  The key differentiator is the time loss range: significant
+    enough to notice but not enough to indicate a full crash.
+    """
+
+    event_type = EVENT_SPINOUT
+    DEDUP_SECONDS = 15.0
+    LEAD_IN = 2.0
+    FOLLOW_OUT = 5.0
+
+    def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
+        min_time_loss = session_info.get("spinout_min_time_loss", 2.0)
+        max_time_loss = session_info.get("spinout_max_time_loss", 10.0)
+
+        rows = db.execute("""
+            WITH surface_changes AS (
+                SELECT cs.car_idx, cs.position, cs.lap, cs.lap_pct,
+                       cs.surface, cs.est_time,
+                       t.session_time, t.replay_frame,
+                       LAG(cs.surface) OVER (
+                           PARTITION BY cs.car_idx ORDER BY t.session_time
+                       ) AS prev_surface,
+                       LAG(cs.est_time) OVER (
+                           PARTITION BY cs.car_idx ORDER BY t.session_time
+                       ) AS prev_est_time
+                FROM car_states cs
+                JOIN race_ticks t ON cs.tick_id = t.id
+                WHERE t.session_state IN (?, ?)
+                  AND cs.position > 0
+            )
+            SELECT session_time, replay_frame, car_idx, position, lap,
+                   lap_pct, est_time, prev_est_time
+            FROM surface_changes
+            WHERE surface = ?
+              AND prev_surface = ?
+              AND prev_est_time IS NOT NULL
+              AND est_time - prev_est_time > ?
+              AND est_time - prev_est_time <= ?
+        """, (SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
+              SURFACE_ON_TRACK, SURFACE_OFF_TRACK,
+              min_time_loss, max_time_loss)).fetchall()
+
+        events: list[dict] = []
+        seen: dict[int, float] = {}
+
+        for row in rows:
+            time_s = row["session_time"]
+            frame = row["replay_frame"]
+            car_idx = row["car_idx"]
+
+            if time_s - seen.get(car_idx, -999) < self.DEDUP_SECONDS:
+                continue
+
+            time_loss = row["est_time"] - row["prev_est_time"]
+            # Severity: 3-6 range based on time loss within the spinout band
+            severity = min(6, 3 + int(time_loss / 3))
+
+            events.append({
+                "event_type": self.event_type,
+                "start_time": max(0, time_s - self.LEAD_IN),
+                "end_time": time_s + self.FOLLOW_OUT,
+                "start_frame": max(0, frame),
+                "end_frame": frame,
+                "lap_number": row["lap"],
+                "severity": severity,
+                "involved_drivers": [car_idx],
+                "position": row["position"],
+                "metadata": {
+                    "time_loss": round(time_loss, 2),
+                    "lap_pct": row["lap_pct"],
+                    "detected_by": "off_track_recovery",
+                },
+            })
+            seen[car_idx] = time_s
+
+        logger.info("[Detector:Spinout] Found %d spinouts", len(events))
+        return events
+
+
+# ── Contact Detector ─────────────────────────────────────────────────────────
+
+class ContactDetector(BaseDetector):
+    """Detect car-to-car contact by finding multiple cars going off-track
+    at nearly the same time and track position.
+
+    Contact is inferred when two or more cars go off-track within a short
+    time window and are close together on the track (similar lap_pct),
+    but recover quickly without major position changes.
+    """
+
+    event_type = EVENT_CONTACT
+    LEAD_IN = 2.0
+    FOLLOW_OUT = 5.0
+
+    def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
+        time_window = session_info.get("contact_time_window", 2.0)
+        lap_pct_threshold = session_info.get("contact_lap_pct_threshold", 0.03)
+
+        # Find all off-track transition moments (on-track → off-track)
+        rows = db.execute("""
+            WITH surface_transitions AS (
+                SELECT cs.car_idx, cs.position, cs.lap, cs.lap_pct,
+                       cs.surface,
+                       t.session_time, t.replay_frame,
+                       LAG(cs.surface) OVER (
+                           PARTITION BY cs.car_idx ORDER BY t.session_time
+                       ) AS prev_surface
+                FROM car_states cs
+                JOIN race_ticks t ON cs.tick_id = t.id
+                WHERE t.session_state IN (?, ?)
+                  AND cs.position > 0
+            )
+            SELECT session_time, replay_frame, car_idx, position, lap, lap_pct
+            FROM surface_transitions
+            WHERE surface = ?
+              AND prev_surface = ?
+            ORDER BY session_time
+        """, (SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
+              SURFACE_OFF_TRACK, SURFACE_ON_TRACK)).fetchall()
+
+        # Group off-track transitions that are close in time and track position
+        events: list[dict] = []
+        used: set[int] = set()
+
+        for i, row_a in enumerate(rows):
+            if i in used:
+                continue
+            group = [row_a]
+            used.add(i)
+
+            for j in range(i + 1, len(rows)):
+                if j in used:
+                    continue
+                row_b = rows[j]
+                dt = row_b["session_time"] - row_a["session_time"]
+                if dt > time_window:
+                    break
+                if row_b["car_idx"] == row_a["car_idx"]:
+                    continue
+                lap_diff = min(
+                    abs(row_a["lap_pct"] - row_b["lap_pct"]),
+                    1.0 - abs(row_a["lap_pct"] - row_b["lap_pct"]),
+                )
+                if lap_diff <= lap_pct_threshold:
+                    group.append(row_b)
+                    used.add(j)
+
+            if len(group) < 2:
+                continue
+
+            drivers = list({r["car_idx"] for r in group})
+            t_start = min(r["session_time"] for r in group)
+            t_end = max(r["session_time"] for r in group)
+            frame_start = min(r["replay_frame"] for r in group)
+            frame_end = max(r["replay_frame"] for r in group)
+            # Severity: 4-7, higher with more cars involved
+            severity = min(7, 4 + len(drivers) - 2)
+
+            events.append({
+                "event_type": self.event_type,
+                "start_time": max(0, t_start - self.LEAD_IN),
+                "end_time": t_end + self.FOLLOW_OUT,
+                "start_frame": max(0, frame_start),
+                "end_frame": frame_end,
+                "lap_number": group[0]["lap"],
+                "severity": severity,
+                "involved_drivers": drivers,
+                "position": min(r["position"] for r in group),
+                "metadata": {
+                    "car_count": len(drivers),
+                    "lap_pct": round(group[0]["lap_pct"], 4),
+                    "detected_by": "multi_car_off_track",
+                },
+            })
+
+        logger.info("[Detector:Contact] Found %d contacts", len(events))
+        return events
+
+
+# ── Close Call Detector ──────────────────────────────────────────────────────
+
+class CloseCallDetector(BaseDetector):
+    """Detect near-misses where cars are very close together and one
+    briefly goes off-track but recovers quickly.
+
+    A close call occurs when a car goes off-track while another car is
+    nearby (small lap_pct gap), but the off-track car returns to racing
+    without significant time loss.  Lower severity entertainment events.
+    """
+
+    event_type = EVENT_CLOSE_CALL
+    DEDUP_SECONDS = 10.0
+    LEAD_IN = 2.0
+    FOLLOW_OUT = 4.0
+
+    def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
+        proximity_pct = session_info.get("close_call_proximity_pct", 0.02)
+        avg_lap_time = session_info.get("avg_lap_time", 90.0) or 90.0
+        max_time_loss = session_info.get("close_call_max_time_loss", 2.0)
+
+        # Find cars that go off-track while a nearby car stays on-track,
+        # and recover quickly (re-appear on track in the next sample with
+        # small est_time degradation).
+        rows = db.execute("""
+            WITH off_track_moments AS (
+                SELECT cs.car_idx, cs.position, cs.lap, cs.lap_pct,
+                       cs.est_time,
+                       t.session_time, t.replay_frame, t.id AS tick_id,
+                       LAG(cs.surface) OVER (
+                           PARTITION BY cs.car_idx ORDER BY t.session_time
+                       ) AS prev_surface,
+                       LEAD(cs.surface) OVER (
+                           PARTITION BY cs.car_idx ORDER BY t.session_time
+                       ) AS next_surface,
+                       LEAD(cs.est_time) OVER (
+                           PARTITION BY cs.car_idx ORDER BY t.session_time
+                       ) AS next_est_time
+                FROM car_states cs
+                JOIN race_ticks t ON cs.tick_id = t.id
+                WHERE t.session_state IN (?, ?)
+                  AND cs.position > 0
+            )
+            SELECT otm.session_time, otm.replay_frame, otm.car_idx,
+                   otm.position, otm.lap, otm.lap_pct,
+                   otm.tick_id,
+                   otm.est_time, otm.next_est_time
+            FROM off_track_moments otm
+            WHERE otm.prev_surface = ?
+              AND otm.next_surface = ?
+              AND otm.next_est_time IS NOT NULL
+              AND otm.next_est_time - otm.est_time < ?
+              AND otm.next_est_time - otm.est_time >= 0
+        """, (SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
+              SURFACE_OFF_TRACK, SURFACE_ON_TRACK,
+              max_time_loss)).fetchall()
+
+        events: list[dict] = []
+        seen: dict[int, float] = {}
+
+        for row in rows:
+            time_s = row["session_time"]
+            frame = row["replay_frame"]
+            car_idx = row["car_idx"]
+            tick_id = row["tick_id"]
+
+            if time_s - seen.get(car_idx, -999) < self.DEDUP_SECONDS:
+                continue
+
+            # Check for a nearby on-track car at the same tick
+            nearby = db.execute("""
+                SELECT car_idx
+                FROM car_states
+                WHERE tick_id = ?
+                  AND car_idx != ?
+                  AND surface = ?
+                  AND position > 0
+                  AND MIN(
+                      ABS(lap_pct - ?),
+                      1.0 - ABS(lap_pct - ?)
+                  ) < ?
+                LIMIT 1
+            """, (tick_id, car_idx, SURFACE_ON_TRACK,
+                  row["lap_pct"], row["lap_pct"],
+                  proximity_pct)).fetchone()
+
+            if not nearby:
+                continue
+
+            nearby_car = nearby["car_idx"]
+            severity = min(5, 2 + int(row.get("position", 10) <= 5) + 1)
+
+            events.append({
+                "event_type": self.event_type,
+                "start_time": max(0, time_s - self.LEAD_IN),
+                "end_time": time_s + self.FOLLOW_OUT,
+                "start_frame": max(0, frame),
+                "end_frame": frame,
+                "lap_number": row["lap"],
+                "severity": severity,
+                "involved_drivers": [car_idx, nearby_car],
+                "position": row["position"],
+                "metadata": {
+                    "off_track_car": car_idx,
+                    "nearby_car": nearby_car,
+                    "lap_pct": round(row["lap_pct"], 4),
+                    "detected_by": "brief_off_track_with_proximity",
+                },
+            })
+            seen[car_idx] = time_s
+
+        logger.info("[Detector:CloseCall] Found %d close calls", len(events))
+        return events
+
+
 # ── Detector registry ────────────────────────────────────────────────────────
 
 ALL_DETECTORS: list[BaseDetector] = [
@@ -669,4 +1084,8 @@ ALL_DETECTORS: list[BaseDetector] = [
     LeaderChangeDetector(),
     FirstLapDetector(),
     LastLapDetector(),
+    CrashDetector(),
+    SpinoutDetector(),
+    ContactDetector(),
+    CloseCallDetector(),
 ]

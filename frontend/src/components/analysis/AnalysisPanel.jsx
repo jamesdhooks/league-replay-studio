@@ -9,7 +9,7 @@ import {
   Fuel, Zap, Crown, Flag, FlagTriangleRight, Loader2, CheckCircle2,
   XCircle, Terminal, ChevronRight, ChevronDown, Camera, Video, Monitor,
   SkipBack, SkipForward, Rewind, FastForward, List, Trash2, Settings,
-  Eye, Users,
+  Eye, Users, Flame, RotateCcw, CircleDot, ShieldAlert,
 } from 'lucide-react'
 
 /**
@@ -24,6 +24,10 @@ const EVENT_CONFIG = {
   leader_change: { icon: Crown,            label: 'Leader Change',  color: 'text-event-leader',    bg: 'bg-event-leader/10' },
   first_lap:     { icon: FlagTriangleRight, label: 'First Lap',     color: 'text-event-firstlap',  bg: 'bg-event-firstlap/10' },
   last_lap:      { icon: Flag,             label: 'Last Lap',       color: 'text-event-lastlap',   bg: 'bg-event-lastlap/10' },
+  crash:         { icon: Flame,            label: 'Crash',          color: 'text-event-incident',  bg: 'bg-event-incident/10' },
+  spinout:       { icon: RotateCcw,        label: 'Spinout',        color: 'text-event-battle',    bg: 'bg-event-battle/10' },
+  contact:       { icon: CircleDot,        label: 'Contact',        color: 'text-event-overtake',  bg: 'bg-event-overtake/10' },
+  close_call:    { icon: ShieldAlert,      label: 'Close Call',     color: 'text-event-fastest',   bg: 'bg-event-fastest/10' },
 }
 
 /**

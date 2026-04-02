@@ -41,6 +41,10 @@ export const EVENT_TYPE_LABELS = {
   leader_change: 'Leader Changes',
   first_lap: 'First Lap',
   last_lap: 'Last Lap',
+  crash: 'Crashes',
+  spinout: 'Spinouts',
+  contact: 'Contacts',
+  close_call: 'Close Calls',
 }
 
 /**
