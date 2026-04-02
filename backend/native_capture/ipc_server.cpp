@@ -25,7 +25,7 @@ void IPCServer::run(CommandHandler handler) {
             PIPE_NAME,
             PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-            1,          // max instances
+            PIPE_UNLIMITED_INSTANCES,  // allow rapid reconnects
             65536,      // out buffer
             65536,      // in buffer
             100,        // default timeout ms

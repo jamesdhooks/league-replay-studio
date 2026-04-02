@@ -29,6 +29,7 @@
 
 #include "frame_buffer.h"
 #include "capture_dxgi.h"
+#include "capture_wgc.h"
 #include "ipc_server.h"
 
 // ── Globals ──────────────────────────────────────────────────────────────
@@ -37,6 +38,8 @@ static std::atomic<bool> g_running{true};
 static std::atomic<uint64_t> g_frame_count{0};
 static std::atomic<double>   g_fps{0.0};
 static DXGICapture g_capture;
+static WGCCapture  g_wgc;
+static std::atomic<bool>     g_use_wgc{false};
 static HANDLE g_shm_handle = nullptr;
 static void*  g_shm_ptr    = nullptr;
 
@@ -87,7 +90,9 @@ static void captureThread() {
         auto* header = static_cast<FrameHeader*>(g_shm_ptr);
         uint8_t* pixel_data = static_cast<uint8_t*>(g_shm_ptr) + sizeof(FrameHeader);
 
-        bool got_frame = g_capture.grabFrame(header, pixel_data);
+        bool got_frame = g_use_wgc.load()
+            ? g_wgc.grabFrame(header, pixel_data)
+            : g_capture.grabFrame(header, pixel_data);
 
         if (got_frame) {
             // Atomically publish the new frame
@@ -143,16 +148,52 @@ static int jsonGetInt(const std::string& json, const std::string& key) {
     catch (...) { return 0; }
 }
 
+// Extract a 64-bit integer (needed for HWND values on 64-bit Windows)
+static int64_t jsonGetInt64(const std::string& json, const std::string& key) {
+    std::string search = "\"" + key + "\"";
+    auto pos = json.find(search);
+    if (pos == std::string::npos) return 0;
+    pos = json.find(':', pos);
+    if (pos == std::string::npos) return 0;
+    pos++;
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
+    try { return std::stoll(json.substr(pos)); }
+    catch (...) { return 0; }
+}
+
 // ── Command handler ──────────────────────────────────────────────────────
 
 static std::string handleCommand(const std::string& json_cmd) {
     std::string cmd = jsonGetString(json_cmd, "cmd");
+
+    if (cmd == "set_hwnd") {
+        HWND hwnd = reinterpret_cast<HWND>(
+            static_cast<uintptr_t>(jsonGetInt64(json_cmd, "hwnd")));
+        if (!hwnd) {
+            return "{\"status\":\"error\",\"message\":\"null hwnd\"}";
+        }
+        if (WGCCapture::isAvailable()) {
+            bool ok = g_wgc.setHwnd(hwnd);
+            if (ok) {
+                g_use_wgc = true;
+                fprintf(stderr, "[CMD] set_hwnd: WGC capturing HWND=%p\n", (void*)hwnd);
+                return "{\"status\":\"ok\",\"mode\":\"wgc\"}";
+            } else {
+                fprintf(stderr, "[CMD] WGC setHwnd failed: %s\n",
+                        g_wgc.lastError().c_str());
+                // Fall through to DXGI rect fallback below
+            }
+        }
+        // WGC not available or failed -- not supported without a rect; report error
+        return "{\"status\":\"error\",\"message\":\"wgc_unavailable\"}";
+    }
 
     if (cmd == "set_region") {
         int x = jsonGetInt(json_cmd, "x");
         int y = jsonGetInt(json_cmd, "y");
         int w = jsonGetInt(json_cmd, "w");
         int h = jsonGetInt(json_cmd, "h");
+        g_use_wgc = false;
         g_capture.setRegion(x, y, w, h);
         fprintf(stderr, "[CMD] set_region: %d,%d %dx%d\n", x, y, w, h);
         return "{\"status\":\"ok\"}";
@@ -241,6 +282,7 @@ int main(int argc, char* argv[]) {
     ipc.stop();
     if (ipc_thread.joinable()) ipc_thread.join();
     if (cap_thread.joinable())  cap_thread.join();
+    g_wgc.shutdown();
     g_capture.shutdown();
     destroySharedMemory();
 

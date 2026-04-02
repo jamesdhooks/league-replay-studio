@@ -365,7 +365,7 @@ class NativeCaptureBridge:
             return None
 
     def set_region(self, x: int, y: int, w: int, h: int) -> bool:
-        """Tell the C++ service to crop to a specific screen region."""
+        """Tell the C++ service to crop to a specific screen region (DXGI mode)."""
         logger.debug("[NativeCapture] set_region(%d, %d, %d, %d)", x, y, w, h)
         resp = self._send_command({"cmd": "set_region", "x": x, "y": y, "w": w, "h": h})
         ok = resp is not None and resp.get("status") == "ok"
@@ -373,6 +373,18 @@ class NativeCaptureBridge:
             logger.info("[NativeCapture] region set to (%d,%d) %dx%d", x, y, w, h)
         else:
             logger.warning("[NativeCapture] set_region failed (resp=%s)", resp)
+        return ok
+
+    def set_hwnd(self, hwnd: int) -> bool:
+        """Tell the C++ service to capture a specific window via WGC (preferred)."""
+        logger.debug("[NativeCapture] set_hwnd(%d)", hwnd)
+        resp = self._send_command({"cmd": "set_hwnd", "hwnd": hwnd})
+        ok = resp is not None and resp.get("status") == "ok"
+        if ok:
+            mode = resp.get("mode", "?")
+            logger.info("[NativeCapture] HWND %d captured (mode=%s)", hwnd, mode)
+        else:
+            logger.warning("[NativeCapture] set_hwnd failed (resp=%s)", resp)
         return ok
 
     def status(self) -> Optional[dict]:

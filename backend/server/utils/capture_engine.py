@@ -204,9 +204,9 @@ class CaptureEngine:
         self._pw_bmi = _BITMAPINFOHEADER()
         self._pw_last_hwnd_check: float = 0.0
 
-        # Native capture bridge (C++ DXGI service)
+        # Native capture bridge (C++ DXGI/WGC service)
         self._native_bridge: Optional[object] = None
-        self._native_region_set: bool = False
+        self._native_hwnd: Optional[int] = None   # last HWND sent to C++ service
 
         # Metrics
         self._frame_count: int = 0
@@ -1010,7 +1010,7 @@ class CaptureEngine:
             if not bridge.start():
                 return False
             self._native_bridge = bridge
-            self._native_region_set = False
+            self._native_hwnd = None
             return True
         except Exception:
             logger.warning("[CaptureEngine] native bridge start failed", exc_info=True)
@@ -1022,19 +1022,26 @@ class CaptureEngine:
         if bridge is None:
             return None
 
-        # Set region to iRacing window (refreshed periodically)
-        if not self._native_region_set or (time.monotonic() - self._pw_last_hwnd_check > 2.0):
-            from server.utils.window_capture import _find_iracing_hwnd, _get_window_rect
+        # Refresh iRacing HWND periodically; call set_hwnd when it changes
+        now = time.monotonic()
+        if self._native_hwnd is None or (now - self._pw_last_hwnd_check > 2.0):
+            logger.debug("[CaptureEngine] native: refreshing iRacing HWND")
+            from server.utils.window_capture import _find_iracing_hwnd
             hwnd = _find_iracing_hwnd()
             if hwnd is not None:
-                rect = _get_window_rect(hwnd)
-                if rect:
-                    bridge.set_region(
-                        rect["left"], rect["top"],
-                        rect["width"], rect["height"],
-                    )
-                    self._native_region_set = True
-                    self._pw_last_hwnd_check = time.monotonic()
+                hwnd_int = hwnd if isinstance(hwnd, int) else ctypes.cast(
+                    hwnd, ctypes.c_void_p).value or 0
+                if hwnd_int != self._native_hwnd:
+                    logger.debug("[CaptureEngine] native: calling set_hwnd(%d)", hwnd_int)
+                    ok = bridge.set_hwnd(hwnd_int)
+                    if ok:
+                        self._native_hwnd = hwnd_int
+                    else:
+                        logger.warning("[CaptureEngine] native: set_hwnd failed, "
+                                       "WGC may be unavailable")
+            else:
+                logger.debug("[CaptureEngine] native: iRacing window not found")
+            self._pw_last_hwnd_check = now
 
         return bridge.grab_frame()
 
@@ -1047,7 +1054,7 @@ class CaptureEngine:
             except Exception:
                 pass
         self._native_bridge = None
-        self._native_region_set = False
+        self._native_hwnd = None
 
     # ======================================================================
     # dxcam backend -- returns numpy BGR24 array, NO PIL
