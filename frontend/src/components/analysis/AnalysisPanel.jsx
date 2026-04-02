@@ -42,9 +42,10 @@ function H264StreamPlayer({ src, className, onLoad, onError }) {
       return
     }
 
-    const active = { value: true }
+    const controller = new AbortController()
     const queue = []
     let sb = null
+    let ms = null
 
     // Pick best supported H.264 codec string (high > main > baseline)
     const CODEC = [
@@ -53,7 +54,7 @@ function H264StreamPlayer({ src, className, onLoad, onError }) {
       'video/mp4; codecs="avc1.42E028"',
     ].find(c => MediaSource.isTypeSupported(c)) ?? 'video/mp4; codecs="avc1.42E028"'
 
-    const ms = new MediaSource()
+    ms = new MediaSource()
     const blobUrl = URL.createObjectURL(ms)
     video.src = blobUrl
 
@@ -68,7 +69,7 @@ function H264StreamPlayer({ src, className, onLoad, onError }) {
         sb.mode = 'sequence'
         sb.addEventListener('updateend', () => {
           // Trim stale buffered data to prevent memory growth
-          if (sb.buffered.length > 0 && !sb.updating) {
+          if (sb && sb.buffered.length > 0 && !sb.updating) {
             const t = video.currentTime
             const s = sb.buffered.start(0)
             if (t - s > 8) {
@@ -79,25 +80,37 @@ function H264StreamPlayer({ src, className, onLoad, onError }) {
           flush()
         })
 
-        const resp = await fetch(src)
+        const resp = await fetch(src, { signal: controller.signal })
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
         const reader = resp.body.getReader()
-        while (active.value) {
-          const { done, value } = await reader.read()
-          if (done || !active.value) break
-          queue.push(value)
-          flush()
+        try {
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            queue.push(value)
+            flush()
+          }
+        } catch (e) {
+          // AbortError is expected on cleanup — not a real error
+          if (e?.name !== 'AbortError') throw e
+        } finally {
+          reader.cancel()
         }
-        reader.cancel()
       } catch (e) {
-        if (active.value) onError?.(e)
+        if (e?.name !== 'AbortError' && !controller.signal.aborted) onError?.(e)
       }
     })
 
     return () => {
-      active.value = false
-      video.src = ''
+      controller.abort()
+      // Detach video source first, then clean up MSE objects
+      try { video.pause() } catch {}
+      video.removeAttribute('src')
+      video.load()
       try { URL.revokeObjectURL(blobUrl) } catch {}
+      // Dereference so flush() no-ops if updateend fires after cleanup
+      sb = null
+      ms = null
     }
   }, [src])
 

@@ -859,8 +859,10 @@ class CaptureEngine:
             params = [_cv2.IMWRITE_JPEG_QUALITY, self._quality]
             if self._quality >= 85:
                 # 4:4:4 chroma subsampling — avoids colour blurring at high quality
-                # cv2 enum IMWRITE_JPEG_SAMPLING_FACTOR = 18, value 0x111111 = 4:4:4
-                params.extend([18, 0x111111])
+                # Guard with getattr: IMWRITE_JPEG_SAMPLING_FACTOR requires OpenCV >= 4.1.1
+                sampling_key = getattr(_cv2, 'IMWRITE_JPEG_SAMPLING_FACTOR', None)
+                if sampling_key is not None:
+                    params.extend([sampling_key, 0x111111])
             ok, buf = _cv2.imencode(".jpg", frame, params)
             return buf.tobytes() if ok else None
 
