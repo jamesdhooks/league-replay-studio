@@ -306,7 +306,7 @@ class ReplayAnalyzer:
                 "project_id": self.project_id,
                 "stage": "analysis_detect",
                 "description": "Running event detectors on telemetry data...",
-                "detail": f"Analysing {total_ticks:,} telemetry samples with 8 event detectors",
+                "detail": f"Analysing {total_ticks:,} telemetry samples with {num_detectors} event detectors",
                 "progress_percent": 85,
             })
             total_events = self._detect_events(conn)
@@ -423,19 +423,25 @@ class ReplayAnalyzer:
             await asyncio.sleep(0.5)
 
         # Now scan forward at 16× to find the exact moment SessionState==Racing
-        iracing_bridge.set_replay_speed(SCAN_SPEED)
+        # Use a higher speed when scanning from frame 0 (must skip practice/qual)
+        skip_speed = SCAN_SPEED if jumped_to_race else 32
+        iracing_bridge.set_replay_speed(skip_speed)
 
         self.on_progress("step_completed", {
             "project_id": self.project_id,
             "stage": "analysis_scan",
             "description": "Scanning for race start (green flag)...",
-            "detail": "Fast-forwarding at 16× speed, waiting for SessionState to change to Racing (green flag drop)",
+            "detail": (
+                "Fast-forwarding at 16× speed, waiting for SessionState to change to Racing (green flag drop)"
+                if jumped_to_race else
+                f"Fast-forwarding at {skip_speed}× speed — skipping practice/qualifying sessions to find race green flag"
+            ),
             "progress_percent": 5,
         })
 
         race_start_frame = 0
         race_start_session_time = 0.0
-        scan_limit = 1500 if jumped_to_race else 6000  # Much shorter limit when we jumped to race
+        scan_limit = 1500 if jumped_to_race else 12000  # Longer limit when scanning from start (must traverse practice/qual)
         for tick in range(scan_limit):
             if self._cancelled:
                 iracing_bridge.set_replay_speed(0)
@@ -443,6 +449,24 @@ class ReplayAnalyzer:
 
             snapshot = self._capture_snapshot()
             if snapshot and snapshot.get("session_state") == SESSION_STATE_RACING:
+                # If we know the race session number, verify we're actually in
+                # the race session — not practice or qualifying (which also have
+                # session_state == RACING).
+                current_session_num = snapshot.get("session_num")
+                if race_session_num is not None and current_session_num is not None:
+                    if current_session_num != race_session_num:
+                        # Still in practice/qualifying — keep scanning
+                        if tick > 0 and tick % 500 == 0:
+                            self.on_progress("step_completed", {
+                                "project_id": self.project_id,
+                                "stage": "analysis_scan",
+                                "description": f"Skipping session #{current_session_num} (not race)...",
+                                "detail": f"Currently in session #{current_session_num}, race is session #{race_session_num} — fast-forwarding",
+                                "progress_percent": 5,
+                            })
+                        await asyncio.sleep(TICK_INTERVAL)
+                        continue
+
                 race_start_frame = snapshot.get("replay_frame", 0)
                 race_start_session_time = snapshot.get("session_time", 0.0)
                 break
@@ -450,11 +474,17 @@ class ReplayAnalyzer:
             # Periodic progress during race-start search
             if tick > 0 and tick % 250 == 0:
                 elapsed_race_s = (snapshot or {}).get("session_time", 0.0)
+                current_sn = (snapshot or {}).get("session_num")
+                detail_parts = [f"Scanned {_format_time(elapsed_race_s)} of replay so far"]
+                if current_sn is not None and race_session_num is not None:
+                    detail_parts.append(f"in session #{current_sn}, looking for race session #{race_session_num}")
+                else:
+                    detail_parts.append("waiting for racing to begin")
                 self.on_progress("step_completed", {
                     "project_id": self.project_id,
                     "stage": "analysis_scan",
                     "description": "Still searching for green flag...",
-                    "detail": f"Scanned {_format_time(elapsed_race_s)} of replay so far — waiting for racing to begin",
+                    "detail": " — ".join(detail_parts),
                     "progress_percent": 5,
                 })
 
@@ -690,8 +720,13 @@ class ReplayAnalyzer:
             "PitStopDetector": ("Pit Stops", "Identifying cars on pit surface for 5+ seconds"),
             "FastestLapDetector": ("Fastest Laps", "Finding new personal and session best lap times"),
             "LeaderChangeDetector": ("Leader Changes", "Tracking P1 position changes on track"),
+            "PaceLapDetector": ("Pace Lap", "Detecting formation/pace lap before green flag"),
             "FirstLapDetector": ("First Lap", "Marking the opening lap of the race"),
             "LastLapDetector": ("Last Lap", "Marking the final lap before checkered"),
+            "CrashDetector": ("Crashes", "Finding off-track excursions with significant time loss"),
+            "SpinoutDetector": ("Spinouts", "Detecting brief off-track moments with moderate time loss"),
+            "ContactDetector": ("Contacts", "Identifying multi-car off-track incidents at same location"),
+            "CloseCallDetector": ("Close Calls", "Finding near-misses with proximity and brief off-track"),
         }
 
         # Get avg_lap_time from session data or estimate from telemetry
@@ -729,8 +764,8 @@ class ReplayAnalyzer:
                             "project_id": self.project_id,
                             "event_type": ev.get("event_type", "unknown"),
                             "severity": ev.get("severity", 0),
-                            "start_time": ev.get("start_time_seconds", 0),
-                            "end_time": ev.get("end_time_seconds", 0),
+                            "start_time": ev.get("start_time", 0),
+                            "end_time": ev.get("end_time", 0),
                             "lap": ev.get("lap_number", 0),
                             "drivers": car_indices,
                             "driver_names": [
@@ -741,10 +776,27 @@ class ReplayAnalyzer:
                         })
                 else:
                     logger.info("[Analysis] %s: 0 events", detector_name)
+                    # Log zero-event detectors in the analysis feed for diagnostics
+                    self.on_progress("step_completed", {
+                        "project_id": self.project_id,
+                        "stage": "analysis_detect",
+                        "description": f"{label}: 0 events found",
+                        "detail": f"{detector_name} completed but found no matching patterns in the telemetry data",
+                        "detector": detector_name,
+                        "progress_percent": progress_pct,
+                    })
             except Exception as exc:
                 logger.error(
                     "[Analysis] %s failed: %s", detector_name, exc,
                 )
+                self.on_progress("step_completed", {
+                    "project_id": self.project_id,
+                    "stage": "analysis_detect",
+                    "description": f"{label}: detection failed",
+                    "detail": f"{detector_name} encountered an error: {exc}",
+                    "detector": detector_name,
+                    "progress_percent": progress_pct,
+                })
 
         return total_events
 
