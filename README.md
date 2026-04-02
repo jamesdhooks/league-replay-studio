@@ -59,7 +59,7 @@ The app runs as a native desktop window (FastAPI + pywebview). Open a replay, le
 
 > **Note on capture:** iRacing does not expose raw frames, and in-game audio requires real-time recording. Screen capture via OBS or ShadowPlay is unavoidable — League Replay Studio makes this integration reliable with configurable hotkeys, process detection, and capture validation.
 
-> **Built-in live preview:** The analysis and editing workflow uses a built-in capture engine for the live preview feed. It automatically selects the best available backend: a native C++ DXGI service (`lrs_capture.exe`), the Python `dxcam` library, or the GDI `PrintWindow` fallback — no external capture software required for preview.
+> **Built-in live preview:** The analysis and editing workflow uses a built-in capture engine for the live preview feed. It automatically selects the best available backend: a native C++ DXGI/WGC service (`lrs_capture.exe`), the Python `dxcam` library, or the GDI `PrintWindow` fallback — no external capture software required for preview. The native backend crops to the DPI-accurate client area (no titlebar) and supports two stream formats selectable in the quality settings dropdown: **MJPEG** (low-latency, universal) and **H.264** (MediaSource Extensions player, higher quality at lower bandwidth).
 
 ---
 

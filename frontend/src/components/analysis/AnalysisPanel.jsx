@@ -67,7 +67,14 @@ function H264StreamPlayer({ src, className, onLoad, onError }) {
       try {
         sb = ms.addSourceBuffer(CODEC)
         sb.mode = 'sequence'
+        let played = false
         sb.addEventListener('updateend', () => {
+          // Start playback and notify parent on first successful append
+          if (!played && sb && sb.buffered.length > 0) {
+            played = true
+            video.play().catch(() => {})
+            onLoad?.()
+          }
           // Trim stale buffered data to prevent memory growth
           if (sb && sb.buffered.length > 0 && !sb.updating) {
             const t = video.currentTime
@@ -121,7 +128,6 @@ function H264StreamPlayer({ src, className, onLoad, onError }) {
       autoPlay
       muted
       playsInline
-      onCanPlay={onLoad}
     />
   )
 }

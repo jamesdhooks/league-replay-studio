@@ -237,6 +237,10 @@ class CaptureEngine:
         self._record_writer: Optional[threading.Thread] = None
         self._frames_dropped: int = 0
 
+        # H.264 live stream feed queue (filled by capture loop, drained by endpoint thread)
+        self._h264_queue: collections.deque = collections.deque(maxlen=4)
+        self._h264_streaming: bool = False
+
     # -- Properties ---------------------------------------------------------
 
     @property
@@ -333,6 +337,16 @@ class CaptureEngine:
             self._quality, self._max_width, self._fps,
         )
 
+    def start_h264_feed(self) -> None:
+        """Enable the raw-frame queue so the H.264 endpoint can drain it."""
+        self._h264_queue.clear()
+        self._h264_streaming = True
+
+    def stop_h264_feed(self) -> None:
+        """Disable the raw-frame queue and discard any buffered frames."""
+        self._h264_streaming = False
+        self._h264_queue.clear()
+
     def stop(self) -> None:
         if not self._running:
             return
@@ -350,6 +364,8 @@ class CaptureEngine:
         self._cleanup_dxcam()
         self._release_pw_gdi()
         self._record_queue.clear()
+        self._h264_streaming = False
+        self._h264_queue.clear()
         logger.info("[CaptureEngine] stopped")
 
     # -- Backend selection --------------------------------------------------
@@ -835,6 +851,10 @@ class CaptureEngine:
                     if len(self._record_queue) >= self._record_queue.maxlen:
                         self._frames_dropped += 1
                     self._record_queue.append(frame)
+
+                # Enqueue scaled frame for H.264 live stream feed (if active)
+                if self._h264_streaming:
+                    self._h264_queue.append(out_frame)
 
             # Pacing: native/dxcam have their own timing; PrintWindow needs manual
             if backend_used == "printwindow":

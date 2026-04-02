@@ -390,6 +390,14 @@ Auto-detect OBS Studio, NVIDIA ShadowPlay, AMD ReLive. Configurable hotkey mappi
 - [x] Graceful recorder shutdown (CTRL_BREAK on Windows for GPU mode, stdin close for CPU)
 - [x] frames_dropped + recording_mode exposed in stream metrics
 - [x] OBS/ShadowPlay hotkey-based capture still fully supported alongside internal capture
+- [x] WGC DWM client-area crop — native C++ capture clips to DPI-accurate client rect (no titlebar bleed)
+- [x] `SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)` at process start for accurate WGC geometry
+- [x] `update_params()` — live quality / FPS / max-width hot-update without restarting the engine
+- [x] JPEG 4:4:4 chroma subsampling (`IMWRITE_JPEG_SAMPLING_FACTOR`) for highest-quality MJPEG preview (with graceful fallback for older OpenCV versions)
+- [x] H.264 live preview stream (`GET /api/iracing/stream/h264`) as an alternative to MJPEG — zero second capture path; reuses the same capture engine
+- [x] Raw-frame feed queue (`_h264_queue`, deque maxlen=4, `_h264_streaming` flag) filled by capture loop and drained by a daemon feeder thread → FFmpeg stdin (rawvideo bgr24) → libx264 ultrafast/zerolatency → fragmented MP4 (frag_keyframe+empty_moov) → HTTP StreamingResponse
+- [x] `H264StreamPlayer` React component — MSE-based playback with `AbortController` fetch abort, explicit `video.play()` after first `appendBuffer`, clean teardown on unmount/format-switch
+- [x] Format toggle (MJPEG / H.264) in the preview quality settings dropdown with CRF/bitrate controls for H.264 mode
 
 ---
 

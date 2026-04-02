@@ -1400,7 +1400,7 @@ class EncodingEngine:
 
 ### 4.6.1 Internal Capture Engine Architecture
 
-The CaptureEngine (v5) provides high-performance internal screen capture with a 3-tier backend and a decoupled pipeline. Writer threads isolate capture from pipe I/O so a blocked encoder never stalls frame grabbing. Frames are dropped rather than queued to prefer latency over completeness. Dual recording modes: GPU-native (FFmpeg gdigrab, zero Python in hot path) or CPU pipe (capture → queue → writer → FFmpeg stdin).
+The CaptureEngine (v6) provides high-performance internal screen capture with a 3-tier backend and a decoupled pipeline. Writer threads isolate capture from pipe I/O so a blocked encoder never stalls frame grabbing. Frames are dropped rather than queued to prefer latency over completeness. Dual recording modes: GPU-native (FFmpeg gdigrab, zero Python in hot path) or CPU pipe (capture → queue → writer → FFmpeg stdin). A separate H.264 live-stream path feeds raw BGR frames from the same capture loop to FFmpeg via stdin pipe, encoding to fragmented MP4 served over HTTP and consumed by the frontend MediaSource Extensions (MSE) player — no second capture path required.
 
 ```
  +-----------------------------------------------------------------+
@@ -1438,6 +1438,14 @@ The CaptureEngine (v5) provides high-performance internal screen capture with a 
  |          |                                       latest_jpeg     |
  |          |                                       (atomic swap)   |
  |          |                                                       |
+ |          |  H.264 live stream mode:                              |
+ |          |  +-- deque(4) → Feeder Thread → FFmpeg stdin         |
+ |          |      (frame drop)    (daemon)    rawvideo bgr24       |
+ |          |                                  -c:v libx264         |
+ |          |                                  ultrafast/zerolatency |
+ |          |                                  fMP4 pipe:1 → HTTP  |
+ |          |                                  → MSE player (React) |
+ |          |                                                       |
  |          |  CPU recording mode:                                  |
  |          |  +-- deque(2) → Record Writer → FFmpeg stdin          |
  |          |      (frame drop)    thread       -c:v h264_nvenc     |
@@ -1451,10 +1459,18 @@ The CaptureEngine (v5) provides high-performance internal screen capture with a 
  |                                                                  |
  |  Key design decisions:                                           |
  |  - Native C++ exe communicates via shared memory (zero copy)    |
+ |  - WGC: DWM DPI-aware client-area crop (no titlebar bleed)      |
+ |  - SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2) at init  |
  |  - NO PIL/Pillow in capture or encoding loop                    |
  |  - memoryview(frame) for stdin writes (no .tobytes() copy)      |
+ |  - JPEG 4:4:4 chroma (IMWRITE_JPEG_SAMPLING_FACTOR) for quality |
  |  - Writer threads decouple capture from pipe I/O                |
  |  - Frame dropping > latency (deque maxlen=2, oldest dropped)    |
+ |  - H.264 stream uses separate deque(4) — larger buffer OK       |
+ |    because latency tolerance is higher than MJPEG preview       |
+ |  - H.264 feeder is a daemon thread; FFmpeg dims known before    |
+ |    proc spawn (waits up to 5 s for first frame resolution)      |
+ |  - update_params(): live quality/fps/maxwidth without restart   |
  |  - GPU recording via gdigrab = zero Python in hot path          |
  |  - CPU recording via queue + writer thread as fallback          |
  |  - dxcam drives FPS natively (no Python sleep jitter)           |
@@ -1465,6 +1481,7 @@ The CaptureEngine (v5) provides high-performance internal screen capture with a 
  |                                                                  |
  |  REST API                                                        |
  |  +-- GET  /api/iracing/stream              -- MJPEG preview     |
+ |  +-- GET  /api/iracing/stream/h264         -- H.264 fMP4 stream |
  |  +-- GET  /api/iracing/stream/metrics      -- FPS, drops, etc   |
  |  +-- GET  /api/iracing/stream/capabilities -- backend avail.    |
  |  +-- POST /api/iracing/stream/start        -- start engine      |
@@ -1477,15 +1494,17 @@ The CaptureEngine (v5) provides high-performance internal screen capture with a 
 
 **Performance evolution:**
 
-| Metric | v1 (PIL pipeline) | v2 (FFmpeg MJPEG) | v3 (dual output) | v4 (current) |
+| Metric | v1 (PIL pipeline) | v2 (FFmpeg MJPEG) | v3 (dual output) | v6 (current) |
 |--------|-------------------|-------------------|-------------------|--------------|
 | Frame path | numpy→PIL→JPEG | numpy.tobytes()→FFmpeg | memoryview→FFmpeg | capture→deque→writer→FFmpeg |
-| Encoder | Pillow (1 thread) | libjpeg-turbo SIMD | libjpeg-turbo SIMD | libjpeg-turbo SIMD |
+| Encoder | Pillow (1 thread) | libjpeg-turbo SIMD | libjpeg-turbo SIMD | libjpeg-turbo SIMD (MJPEG) / libx264 (H.264) |
 | Copy cost | 3 copies | 1 copy | 0 Python copies | 0 Python copies |
 | Recording | N/A | N/A | CPU pipe (same thread) | GPU gdigrab OR CPU pipe (separate thread) |
-| Backpressure | blocks capture | blocks capture | blocks capture | frame drop (deque maxlen=2) |
+| H.264 preview | N/A | N/A | N/A | deque(4) → daemon feeder → libx264 → fMP4 → MSE |
+| Backpressure | blocks capture | blocks capture | blocks capture | frame drop (deque maxlen=2/4) |
 | Pipe writes | N/A | capture thread | capture thread (2 pipes) | dedicated writer threads |
 | FPS (dxcam) | 15-25 | 40-60 | 60+ | 60+ (isolated from encoding) |
+| WGC crop | N/A | N/A | N/A | DWM client-area crop, DPI-aware — no titlebar |
 
 **Capture Mode Comparison:**
 
@@ -1500,8 +1519,10 @@ The CaptureEngine (v5) provides high-performance internal screen capture with a 
 - dxcam captures the composited desktop, not a specific window -- if iRacing is behind another window, the capture will include the overlapping app. Ideal for fullscreen iRacing.
 - dxcam requires GPU access and will not work over Remote Desktop (no DXGI).
 - PrintWindow is the only option that captures specific window content behind other windows, but limited to ~10-20 FPS due to GDI overhead.
-- FFmpeg must be installed and in PATH. Required for both MJPEG preview encoding and GPU H.264 recording.
-- The engine uses a singleton pattern -- multiple MJPEG stream consumers share the same capture, avoiding duplicate captures.
+- FFmpeg must be installed and in PATH. Required for MJPEG preview, H.264 live stream, and GPU H.264 recording.
+- The engine uses a singleton pattern -- MJPEG and H.264 stream consumers share the same capture loop, avoiding duplicate captures.
+- H.264 live stream uses the same capture backend; the **feeder queue** (`_h264_streaming` flag + `deque(maxlen=4)`) is enabled/disabled per HTTP request. No second capture path.
+- MSE H.264 player (`H264StreamPlayer`) uses `AbortController` for clean fetch cancellation. `video.play()` must be called explicitly after the first `appendBuffer` / `updateend` — the `autoPlay` attribute is ignored when `video.src` is assigned programmatically.
 - GPU recording mode uses gdigrab desktop-region capture; if iRacing window is moved during recording, the capture region will be stale. CPU recording mode is unaffected.
 - Writer threads use `deque(maxlen=2)` -- frames are dropped (oldest first) when encoders can't keep up. The `frames_dropped` metric tracks this.
 - OBS/ShadowPlay remain fully supported via the existing hotkey-based capture orchestration system.
