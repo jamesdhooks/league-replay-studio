@@ -3,16 +3,18 @@ api_projects.py
 ----------------
 REST endpoints for project management.
 
-GET    /api/projects                — list all projects (with optional search/filter)
-POST   /api/projects                — create a new project
-GET    /api/projects/{id}           — get project details
-PUT    /api/projects/{id}           — update project
-DELETE /api/projects/{id}           — delete project
-POST   /api/projects/{id}/duplicate — duplicate project
-GET    /api/projects/{id}/step      — get step status
-PUT    /api/projects/{id}/step      — set/advance project step
-GET    /api/projects/{id}/files     — project file browser
-GET    /api/replays/discover        — auto-discover .rpy files
+GET    /api/projects                          — list all projects (with optional search/filter)
+POST   /api/projects                          — create a new project
+GET    /api/projects/{id}                     — get project details
+PUT    /api/projects/{id}                     — update project
+DELETE /api/projects/{id}                     — delete project
+POST   /api/projects/{id}/duplicate           — duplicate project
+GET    /api/projects/{id}/step                — get step status
+PUT    /api/projects/{id}/step                — set/advance project step
+GET    /api/projects/{id}/files               — project file browser
+GET    /api/projects/{id}/files/content       — read file content as text
+GET    /api/projects/{id}/files/serve         — serve file directly (images/video)
+GET    /api/replays/discover                  — auto-discover .rpy files
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from server.services.project_service import project_service
@@ -179,6 +182,36 @@ async def get_project_files(project_id: int) -> dict:
     if not result:
         raise HTTPException(status_code=404, detail="Project not found")
     return result
+
+
+# ── File Content & Serving ────────────────────────────────────────────────────
+
+@router.get("/projects/{project_id}/files/content")
+async def get_file_content(
+    project_id: int,
+    path: str = Query(..., description="Relative path within the project directory"),
+) -> PlainTextResponse:
+    """Read a project file and return its content as plain text."""
+    result = project_service.get_file_content(project_id, path)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return PlainTextResponse(result["content"])
+
+
+@router.get("/projects/{project_id}/files/serve")
+async def serve_file(
+    project_id: int,
+    path: str = Query(..., description="Relative path within the project directory"),
+):
+    """Serve a project file directly (for images, video, etc.)."""
+    result = project_service.resolve_file_path(project_id, path)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return FileResponse(result["absolute_path"], filename=result["filename"])
 
 
 # ── Replay Discovery ─────────────────────────────────────────────────────────

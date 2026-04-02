@@ -451,6 +451,53 @@ class ProjectService:
             "total_size": total_size,
         }
 
+    # ── File Content & Serving ───────────────────────────────────────────────
+
+    def get_file_content(self, project_id: int, rel_path: str) -> Optional[dict]:
+        """Read a project file and return its text content."""
+        project = self.get_project(project_id)
+        if not project:
+            return None
+
+        proj_dir = Path(project["project_dir"]).resolve()
+        file_path = (proj_dir / rel_path).resolve()
+
+        # Prevent path traversal
+        if not str(file_path).startswith(str(proj_dir)):
+            return {"error": "Path escapes project directory"}
+
+        if not file_path.exists() or not file_path.is_file():
+            return {"error": "File not found"}
+
+        # Limit to reasonable text file sizes (10 MB)
+        max_size = 10 * 1024 * 1024
+        if file_path.stat().st_size > max_size:
+            return {"error": "File too large to display as text"}
+
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+            return {"content": content}
+        except OSError as exc:
+            return {"error": f"Cannot read file: {exc}"}
+
+    def resolve_file_path(self, project_id: int, rel_path: str) -> Optional[dict]:
+        """Resolve a relative file path within a project directory for serving."""
+        project = self.get_project(project_id)
+        if not project:
+            return None
+
+        proj_dir = Path(project["project_dir"]).resolve()
+        file_path = (proj_dir / rel_path).resolve()
+
+        # Prevent path traversal
+        if not str(file_path).startswith(str(proj_dir)):
+            return {"error": "Path escapes project directory"}
+
+        if not file_path.exists() or not file_path.is_file():
+            return {"error": "File not found"}
+
+        return {"absolute_path": str(file_path), "filename": file_path.name}
+
     # ── Private helpers ───────────────────────────────────────────────────────
 
     @staticmethod

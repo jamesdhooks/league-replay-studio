@@ -41,12 +41,15 @@ from server.services.analysis_db import (
     clear_analysis_data,
     get_events,
     count_events,
+    insert_events_batch,
     get_analysis_status as db_get_analysis_status,
     get_highlight_config,
     save_highlight_config,
     batch_update_highlight_flags,
     get_drivers,
 )
+from server.services.detectors import ALL_DETECTORS
+from server.services.replay_analysis import ReplayAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +80,28 @@ def _on_progress(event_type: str, data: dict) -> None:
 class AnalyzeRequest(BaseModel):
     """Optional parameters for starting analysis."""
     battle_gap_threshold: Optional[float] = None
+    crash_min_time_loss: Optional[float] = None
+    crash_min_off_track_duration: Optional[float] = None
+    spinout_min_time_loss: Optional[float] = None
+    spinout_max_time_loss: Optional[float] = None
+    contact_time_window: Optional[float] = None
+    contact_proximity: Optional[float] = None
+    close_call_proximity: Optional[float] = None
+    close_call_max_off_track: Optional[float] = None
     force_rescan: bool = False
+
+
+class RedetectRequest(BaseModel):
+    """Parameters for re-running detection with tuned thresholds."""
+    battle_gap_threshold: Optional[float] = 0.5
+    crash_min_time_loss: Optional[float] = 10.0
+    crash_min_off_track_duration: Optional[float] = 3.0
+    spinout_min_time_loss: Optional[float] = 2.0
+    spinout_max_time_loss: Optional[float] = 10.0
+    contact_time_window: Optional[float] = 2.0
+    contact_proximity: Optional[float] = 0.05
+    close_call_proximity: Optional[float] = 0.02
+    close_call_max_off_track: Optional[float] = 3.0
 
 
 class EventsResponse(BaseModel):
@@ -86,6 +110,116 @@ class EventsResponse(BaseModel):
     total: int
     skip: int
     limit: int
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _build_session_info_from_body(body) -> dict:
+    """Extract tuning parameters from a request body into a session_info dict."""
+    info: dict[str, Any] = {}
+    param_keys = [
+        "battle_gap_threshold", "crash_min_time_loss", "crash_min_off_track_duration",
+        "spinout_min_time_loss", "spinout_max_time_loss", "contact_time_window",
+        "contact_proximity", "close_call_proximity", "close_call_max_off_track",
+    ]
+    if body:
+        for key in param_keys:
+            val = getattr(body, key, None)
+            if val is not None:
+                info[key] = val
+    return info
+
+
+async def _run_redetect(project_id: int, project_dir: str, session_info: dict) -> int:
+    """Re-run ONLY the event detection pass with new tuning parameters."""
+    conn = get_project_db(project_dir)
+    try:
+        # Check for existing telemetry data
+        tick_count = conn.execute("SELECT COUNT(*) FROM race_ticks").fetchone()[0]
+        if tick_count == 0:
+            raise ValueError("No telemetry data found. Run a full analysis first.")
+
+        # Clear existing events
+        conn.execute("DELETE FROM race_events")
+        conn.commit()
+
+        # Build driver map from stored drivers
+        drivers = get_drivers(conn)
+        driver_map: dict[int, str] = {}
+        driver_list = []
+        for d in drivers:
+            idx = d.get("car_idx")
+            if idx is not None:
+                driver_map[idx] = d.get("user_name", f"#{d.get('car_number', idx)}")
+                driver_list.append(d)
+        session_info["drivers"] = driver_list
+
+        # Estimate average lap time
+        if not session_info.get("avg_lap_time"):
+            session_info["avg_lap_time"] = ReplayAnalyzer._estimate_avg_lap_time(conn)
+
+        # Broadcast start
+        _on_progress("step_completed", {
+            "project_id": project_id,
+            "stage": "redetect_start",
+            "description": "Re-detecting events with tuned parameters...",
+            "progress_percent": 0,
+        })
+
+        total = 0
+        num_detectors = len(ALL_DETECTORS)
+
+        for i, detector in enumerate(ALL_DETECTORS):
+            detector_name = detector.__class__.__name__
+            progress_pct = int((i / num_detectors) * 100)
+
+            _on_progress("step_completed", {
+                "project_id": project_id,
+                "stage": "redetect",
+                "description": f"Detecting {detector_name}...",
+                "detector": detector_name,
+                "progress_percent": progress_pct,
+            })
+
+            try:
+                events = detector.detect(conn, session_info)
+                if events:
+                    count = insert_events_batch(conn, events)
+                    total += count
+                    conn.commit()
+
+                    for ev in events:
+                        car_indices = ev.get("involved_drivers", [])
+                        _on_progress("event_discovered", {
+                            "project_id": project_id,
+                            "event_type": ev.get("event_type", "unknown"),
+                            "severity": ev.get("severity", 0),
+                            "start_time": ev.get("start_time", 0),
+                            "end_time": ev.get("end_time", 0),
+                            "lap": ev.get("lap_number", 0),
+                            "drivers": car_indices,
+                            "driver_names": [
+                                driver_map.get(idx, f"Car {idx}")
+                                for idx in car_indices
+                            ],
+                            "detector": detector_name,
+                        })
+            except Exception as exc:
+                logger.error("[Redetect] %s failed: %s", detector_name, exc)
+
+            # Yield to event loop so broadcasts can flush
+            await asyncio.sleep(0)
+
+        _on_progress("step_completed", {
+            "project_id": project_id,
+            "stage": "redetect_complete",
+            "description": f"Re-detection complete — {total} events found",
+            "progress_percent": 100,
+        })
+
+        return total
+    finally:
+        conn.close()
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -112,8 +246,7 @@ async def start_analysis(project_id: int, body: AnalyzeRequest | None = None):
     # Build session info from project + bridge
     from server.services.iracing_bridge import bridge as iracing_bridge
     session_info = dict(iracing_bridge.session_data) if iracing_bridge.is_connected else {}
-    if body and body.battle_gap_threshold is not None:
-        session_info["battle_gap_threshold"] = body.battle_gap_threshold
+    session_info.update(_build_session_info_from_body(body))
 
     # Start background analysis
     started = analysis_manager.start(
@@ -145,6 +278,38 @@ async def cancel_analysis(project_id: int):
     analysis_manager.cancel(project_id)
     logger.info("[Analysis API] Cancelled analysis for project #%d", project_id)
     return {"status": "cancelled", "project_id": project_id}
+
+
+@router.post("/projects/{project_id}/analyze/redetect")
+async def redetect_events(project_id: int, body: RedetectRequest):
+    """Re-run ONLY the event detection pass with new tuning parameters.
+
+    Requires existing telemetry data (from a previous analysis scan).
+    """
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if analysis_manager.is_running(project_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Analysis is already running for this project",
+        )
+
+    project_dir = project["project_dir"]
+    session_info = _build_session_info_from_body(body)
+
+    try:
+        total = await _run_redetect(project_id, project_dir, session_info)
+        logger.info(
+            "[Analysis API] Redetect for project #%d: %d events", project_id, total,
+        )
+        return {"status": "completed", "project_id": project_id, "total_events": total}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error("[Analysis API] Redetect failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.delete("/projects/{project_id}/analysis")

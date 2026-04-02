@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
 import { ChevronRight, ChevronDown, File, Folder, RefreshCw, Flag, Film, Eye, Upload, Layers, FileText, FileCode } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext'
+import { useModal } from '../../context/ModalContext'
 import { formatFileSize } from '../../utils/format'
+import FileViewerModal from '../ui/FileViewer'
 
 const CATEGORY_ICONS = {
   root: FileCode,
@@ -21,6 +23,7 @@ const CATEGORY_ICONS = {
  */
 function ProjectFileBrowser({ projectId }) {
   const { getProjectFiles } = useProject()
+  const { openContentModal } = useModal()
   const [fileData, setFileData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [expandedCategories, setExpandedCategories] = useState({})
@@ -124,19 +127,24 @@ function ProjectFileBrowser({ projectId }) {
                   </div>
                 ) : (
                   category.files.map((file, idx) => (
-                    <div
+                    <button
                       key={idx}
-                      className="flex items-center gap-2 px-3 py-1 hover:bg-surface-hover
-                                 rounded-md transition-colors group"
+                      onClick={() => openContentModal({
+                        title: file.name,
+                        wide: true,
+                        content: <FileViewerModal file={file} projectId={projectId} />,
+                      })}
+                      className="w-full flex items-center gap-2 px-3 py-1 hover:bg-surface-hover
+                                 rounded-md transition-colors group text-left cursor-pointer"
                     >
                       <File className="w-3 h-3 text-text-tertiary shrink-0" />
-                      <span className="text-xxs text-text-secondary truncate flex-1">
+                      <span className="text-xxs text-text-secondary truncate flex-1 group-hover:text-text-primary transition-colors">
                         {file.name}
                       </span>
                       <span className="text-xxs text-text-disabled shrink-0">
                         {formatFileSize(file.size_bytes)}
                       </span>
-                    </div>
+                    </button>
                   ))
                 )}
               </div>

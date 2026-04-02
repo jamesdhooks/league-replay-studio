@@ -1,8 +1,6 @@
 import { useCallback } from 'react'
-import { ChevronRight } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext'
 import { useAnalysis } from '../../context/AnalysisContext'
-import ProjectFileBrowser from './ProjectFileBrowser'
 import AnalysisPanel from '../analysis/AnalysisPanel'
 import HighlightPanel from '../highlights/HighlightPanel'
 import CapturePanel from '../capture/CapturePanel'
@@ -11,7 +9,7 @@ import StepGate from '../common/StepGate'
 
 /**
  * Project view — shown when a project is open.
- * Displays step indicator, current step content area, and file browser sidebar.
+ * Displays step indicator and current step content area.
  * Steps are always navigable; StepGate CTA is shown when prerequisites aren't met.
  */
 function ProjectView({ project }) {
@@ -77,11 +75,6 @@ function ProjectView({ project }) {
     <div className="flex flex-1 overflow-hidden">
         {/* Step content */}
         {renderStepContent()}
-
-        {/* File browser sidebar — always rightmost */}
-        <div className="w-64 border-l border-border bg-bg-secondary shrink-0 overflow-hidden">
-          <ProjectFileBrowser projectId={project.id} />
-        </div>
     </div>
   )
 }
