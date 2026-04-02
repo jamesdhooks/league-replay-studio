@@ -10,7 +10,7 @@ import {
   XCircle, Terminal, ChevronRight, ChevronDown, Camera, Video, Monitor,
   SkipBack, SkipForward, Rewind, FastForward, List, Trash2, Settings,
   Eye, Users, Flame, RotateCcw, CircleDot, ShieldAlert, WifiOff, AlertCircle, Minus, Plus,
-  Folder,
+  Folder, SlidersHorizontal,
 } from 'lucide-react'
 import ProjectFileBrowser from '../projects/ProjectFileBrowser'
 import ResizableSidebar from '../layout/ResizableSidebar'
@@ -186,6 +186,21 @@ export default function AnalysisPanel() {
   const [streamFormat, setStreamFormat] = useLocalStorage('lrs:analysis:streamFormat', 'mjpeg')
   const [streamCrf, setStreamCrf] = useLocalStorage('lrs:analysis:streamCrf', 23)
   const [showQualitySettings, setShowQualitySettings] = useState(false)
+
+  // Detection tuning parameters
+  const [tuningParams, setTuningParams] = useLocalStorage('lrs:analysis:tuningParams', {
+    battle_gap_threshold: 0.5,
+    crash_min_time_loss: 10.0,
+    crash_min_off_track_duration: 3.0,
+    spinout_min_time_loss: 2.0,
+    spinout_max_time_loss: 10.0,
+    contact_time_window: 2.0,
+    contact_proximity: 0.05,
+    close_call_proximity: 0.02,
+    close_call_max_off_track: 3.0,
+  })
+  const [showTuning, setShowTuning] = useState(false)
+  const [isRedetecting, setIsRedetecting] = useState(false)
   // Stream key — changes to force <img> reload when quality settings change
   const [streamKey, setStreamKey] = useState(0)
   const [streamLoaded, setStreamLoaded] = useState(false)
@@ -315,7 +330,7 @@ export default function AnalysisPanel() {
 
   const handleStart = async () => {
     setSidebarTab('log')
-    try { await startAnalysis(activeProject.id) } catch {}
+    try { await startAnalysis(activeProject.id, tuningParams) } catch {}
   }
 
   const handleCancel = async () => {
@@ -330,6 +345,22 @@ export default function AnalysisPanel() {
     const newFilter = activeFilter === type ? '' : type
     setActiveFilter(newFilter)
     await fetchEvents(activeProject.id, { eventType: newFilter })
+  }
+
+  const handleRedetect = async () => {
+    if (!activeProject?.id || isRedetecting) return
+    setIsRedetecting(true)
+    try {
+      await apiPost(`/projects/${activeProject.id}/analyze/redetect`, tuningParams)
+      await fetchEvents(activeProject.id)
+      await fetchEventSummary(activeProject.id)
+    } catch {} finally {
+      setIsRedetecting(false)
+    }
+  }
+
+  const updateTuning = (key, value) => {
+    setTuningParams(prev => ({ ...prev, [key]: value }))
   }
 
   // Seek iRacing replay to an event's start time + focus the involved driver
@@ -513,6 +544,20 @@ export default function AnalysisPanel() {
 
           {/* Right controls */}
           <div className="ml-auto flex items-center gap-3 shrink-0">
+            {!isAnalyzing && (
+              <button
+                onClick={() => setShowTuning(prev => !prev)}
+                title="Detection tuning parameters"
+                className={`flex items-center gap-1 px-2 py-1 rounded-md text-xxs transition-colors border
+                  ${showTuning
+                    ? 'bg-accent/15 border-accent/30 text-accent'
+                    : 'bg-transparent border-border text-text-disabled hover:text-text-secondary'
+                  }`}
+              >
+                <SlidersHorizontal size={11} />
+                <span>Tune</span>
+              </button>
+            )}
             {isConnected && (
               <button
                 onClick={() => setCameraFollow(prev => !prev)}
@@ -533,6 +578,108 @@ export default function AnalysisPanel() {
               </span>
             )}
           </div>
+        </div>
+
+        {/* ── Detection Tuning Panel ────────────────────────────────── */}
+        {showTuning && (
+          <div className="border-t border-border bg-bg-secondary px-4 py-3">
+            <div className="grid grid-cols-3 gap-x-6 gap-y-2 text-xxs">
+              {/* Battle */}
+              <label className="flex flex-col gap-0.5">
+                <span className="text-text-secondary font-medium">Battle gap (s)</span>
+                <input type="number" step="0.1" min="0.1" max="5"
+                  value={tuningParams.battle_gap_threshold}
+                  onChange={e => updateTuning('battle_gap_threshold', parseFloat(e.target.value) || 0.5)}
+                  className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
+                />
+              </label>
+              {/* Crash */}
+              <label className="flex flex-col gap-0.5">
+                <span className="text-text-secondary font-medium">Crash min time loss (s)</span>
+                <input type="number" step="1" min="1" max="60"
+                  value={tuningParams.crash_min_time_loss}
+                  onChange={e => updateTuning('crash_min_time_loss', parseFloat(e.target.value) || 10)}
+                  className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
+                />
+              </label>
+              <label className="flex flex-col gap-0.5">
+                <span className="text-text-secondary font-medium">Crash min off-track (s)</span>
+                <input type="number" step="0.5" min="0.5" max="30"
+                  value={tuningParams.crash_min_off_track_duration}
+                  onChange={e => updateTuning('crash_min_off_track_duration', parseFloat(e.target.value) || 3)}
+                  className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
+                />
+              </label>
+              {/* Spinout */}
+              <label className="flex flex-col gap-0.5">
+                <span className="text-text-secondary font-medium">Spinout min time loss (s)</span>
+                <input type="number" step="0.5" min="0.5" max="30"
+                  value={tuningParams.spinout_min_time_loss}
+                  onChange={e => updateTuning('spinout_min_time_loss', parseFloat(e.target.value) || 2)}
+                  className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
+                />
+              </label>
+              <label className="flex flex-col gap-0.5">
+                <span className="text-text-secondary font-medium">Spinout max time loss (s)</span>
+                <input type="number" step="1" min="1" max="60"
+                  value={tuningParams.spinout_max_time_loss}
+                  onChange={e => updateTuning('spinout_max_time_loss', parseFloat(e.target.value) || 10)}
+                  className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
+                />
+              </label>
+              {/* Contact */}
+              <label className="flex flex-col gap-0.5">
+                <span className="text-text-secondary font-medium">Contact time window (s)</span>
+                <input type="number" step="0.5" min="0.5" max="10"
+                  value={tuningParams.contact_time_window}
+                  onChange={e => updateTuning('contact_time_window', parseFloat(e.target.value) || 2)}
+                  className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
+                />
+              </label>
+              <label className="flex flex-col gap-0.5">
+                <span className="text-text-secondary font-medium">Contact proximity</span>
+                <input type="number" step="0.01" min="0.01" max="1"
+                  value={tuningParams.contact_proximity}
+                  onChange={e => updateTuning('contact_proximity', parseFloat(e.target.value) || 0.05)}
+                  className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
+                />
+              </label>
+              {/* Close call */}
+              <label className="flex flex-col gap-0.5">
+                <span className="text-text-secondary font-medium">Close call proximity</span>
+                <input type="number" step="0.005" min="0.005" max="0.5"
+                  value={tuningParams.close_call_proximity}
+                  onChange={e => updateTuning('close_call_proximity', parseFloat(e.target.value) || 0.02)}
+                  className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
+                />
+              </label>
+              <label className="flex flex-col gap-0.5">
+                <span className="text-text-secondary font-medium">Close call max off-track (s)</span>
+                <input type="number" step="0.5" min="0.5" max="15"
+                  value={tuningParams.close_call_max_off_track}
+                  onChange={e => updateTuning('close_call_max_off_track', parseFloat(e.target.value) || 3)}
+                  className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
+                />
+              </label>
+            </div>
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                onClick={handleRedetect}
+                disabled={isRedetecting}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold
+                           text-white bg-gradient-to-r from-gradient-from to-gradient-to
+                           rounded-lg hover:from-gradient-via hover:to-gradient-from
+                           transition-all duration-200 shadow-glow-sm disabled:opacity-50"
+              >
+                {isRedetecting ? <Loader2 size={13} className="animate-spin" /> : <SlidersHorizontal size={13} />}
+                {isRedetecting ? 'Re-detecting...' : 'Re-detect Events'}
+              </button>
+              <span className="text-xxs text-text-disabled">
+                Re-runs detection on existing telemetry with these parameters
+              </span>
+            </div>
+          </div>
+        )}
         </div>
 
         {error && (
