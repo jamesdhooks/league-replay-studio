@@ -479,23 +479,32 @@ async def stream_capabilities():
     except Exception:
         capture["native"] = {"available": False, "description": "Native not available"}
 
-    # External capture software — detect by running process name
+    # External capture software — detect by running process name.
+    # subprocess.run blocks; offload to a thread so the event loop stays free.
+    # Run tasklist once and check all three against the same output.
     if _platform.system() == "Windows":
         import subprocess
-        def _proc_running(names: list[str]) -> str | None:
+
+        def _tasklist_lower() -> str:
             try:
                 result = subprocess.run(
                     ["tasklist", "/fo", "csv", "/nh"],
                     capture_output=True, text=True, timeout=3,
                 )
-                for name in names:
-                    if name.lower() in result.stdout.lower():
-                        return name
+                return result.stdout.lower()
             except Exception:
-                pass
+                return ""
+
+        loop = asyncio.get_running_loop()
+        tl_out = await loop.run_in_executor(None, _tasklist_lower)
+
+        def _proc_running(names: list[str]) -> str | None:
+            for name in names:
+                if name.lower() in tl_out:
+                    return name
             return None
 
-        obs_proc = _proc_running(["obs64.exe", "obs.exe", "obs32.exe"])
+        obs_proc      = _proc_running(["obs64.exe", "obs.exe", "obs32.exe"])
         capture["obs"] = {
             "available": True,  # always configurable even if not running
             "process_running": obs_proc is not None,
@@ -554,7 +563,8 @@ async def stream_metrics():
 async def stream_stop():
     """Stop the capture engine (frees resources)."""
     from server.utils.capture_engine import capture_engine
-    capture_engine.stop()
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, capture_engine.stop)
     return {"status": "stopped"}
 
 
@@ -568,10 +578,15 @@ async def stream_start(
     """Start / restart the capture engine with given parameters."""
     from server.utils.capture_engine import capture_engine
 
+    loop = asyncio.get_running_loop()
     if capture_engine.is_running:
-        capture_engine.stop()
+        await loop.run_in_executor(None, capture_engine.stop)
     capture_engine._backend_pref = backend
-    capture_engine.start(fps=fps, quality=quality, max_width=max_width)
+    # start() spawns daemon threads and returns quickly; still offloaded to avoid
+    # any incidental blocking (settings read, thread create) on the event loop.
+    await loop.run_in_executor(
+        None, lambda: capture_engine.start(fps=fps, quality=quality, max_width=max_width)
+    )
     return capture_engine.metrics
 
 

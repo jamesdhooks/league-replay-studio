@@ -45,8 +45,11 @@ _IS_WINDOWS = platform.system() == "Windows"
 # Must match frame_buffer.h constants
 SHM_NAME = "Local\\LRS_CaptureFrame"
 MAX_FRAME_BYTES = 3840 * 2160 * 4   # ~33 MB
-HEADER_SIZE = 48                      # sizeof(FrameHeader) = 8+4+4+4+4+4+12 = 40 → padded to match C struct
+
 PIPE_NAME = r"\\.\pipe\LRS_CaptureControl"
+
+# Timeout for a single pipe command round-trip (seconds)
+PIPE_CMD_TIMEOUT = 2.0
 
 # ── FrameHeader layout (must match C++ struct) ─────────────────────────────
 # struct FrameHeader {
@@ -59,6 +62,10 @@ PIPE_NAME = r"\\.\pipe\LRS_CaptureControl"
 #     uint32_t _reserved[3];  // 12
 # };
 HEADER_STRUCT = struct.Struct("<Q5I3I")  # 8 + 5*4 + 3*4 = 40 bytes
+
+# Byte offset where pixel data starts in the SHM region.
+# Must match sizeof(FrameHeader) from frame_buffer.h (with #pragma pack(1)).
+HEADER_SIZE = HEADER_STRUCT.size  # 40 bytes; was wrongly 48 — caused 8-byte data misalignment
 
 
 def _find_native_exe() -> Optional[Path]:
@@ -95,6 +102,16 @@ class NativeCaptureBridge:
         self._lock = threading.Lock()
         self._running = False
 
+        # Throttled logging counters
+        self._grab_calls: int = 0
+        self._grab_frames: int = 0
+        self._last_grab_log: float = 0.0
+        self._last_pipe_warn: float = 0.0
+
+        # Background output drainer threads
+        self._stdout_drainer: Optional[threading.Thread] = None
+        self._stderr_drainer: Optional[threading.Thread] = None
+
     @property
     def is_running(self) -> bool:
         return self._running and self._proc is not None and self._proc.poll() is None
@@ -108,14 +125,16 @@ class NativeCaptureBridge:
         fails to start.
         """
         if self._running:
+            logger.debug("[NativeCapture] start() called but already running")
             return True
 
         exe = _find_native_exe()
         if not exe:
-            logger.warning("[NativeCapture] lrs_capture.exe not found")
+            logger.warning("[NativeCapture] lrs_capture.exe not found in any candidate path")
             return False
 
-        logger.info("[NativeCapture] Starting %s", exe)
+        logger.info("[NativeCapture] Starting %s (output_index=%d, timeout=%.1fs)",
+                    exe, output_index, timeout)
 
         try:
             self._proc = subprocess.Popen(
@@ -124,34 +143,82 @@ class NativeCaptureBridge:
                 stderr=subprocess.PIPE,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
+            logger.info("[NativeCapture] Process spawned (PID %d), waiting for READY...",
+                        self._proc.pid)
         except OSError as exc:
-            logger.error("[NativeCapture] Failed to launch: %s", exc)
+            logger.error("[NativeCapture] Failed to launch exe: %s", exc)
             return False
 
         # Wait for the READY marker on stdout
         deadline = time.monotonic() + timeout
         ready = False
+        lines_seen: list[str] = []
         while time.monotonic() < deadline:
             if self._proc.poll() is not None:
-                stderr_out = self._proc.stderr.read().decode(errors="replace")
-                logger.error("[NativeCapture] Process exited early: %s", stderr_out)
+                # Process exited before sending READY
+                try:
+                    stderr_out = self._proc.stderr.read().decode(errors="replace").strip()
+                except Exception:
+                    stderr_out = "(could not read stderr)"
+                logger.error(
+                    "[NativeCapture] Process exited early (code=%s) before READY. "
+                    "stdout lines=%s stderr=%r",
+                    self._proc.returncode, lines_seen, stderr_out[:500],
+                )
                 self._proc = None
                 return False
-            line = self._proc.stdout.readline().decode(errors="replace").strip()
+
+            try:
+                line = self._proc.stdout.readline().decode(errors="replace").strip()
+            except Exception as exc:
+                logger.error("[NativeCapture] stdout readline error: %s", exc)
+                break
+
+            if line:
+                lines_seen.append(line)
+                logger.debug("[NativeCapture] exe stdout: %r", line)
+
             if line == "READY":
                 ready = True
+                elapsed = timeout - (deadline - time.monotonic())
+                logger.info("[NativeCapture] READY received in %.2fs", elapsed)
                 break
 
         if not ready:
-            logger.error("[NativeCapture] Timed out waiting for READY")
+            try:
+                stderr_out = self._proc.stderr.read().decode(errors="replace").strip()
+            except Exception:
+                stderr_out = "(could not read stderr)"
+            logger.error(
+                "[NativeCapture] Timed out (%.1fs) waiting for READY. "
+                "stdout lines=%s stderr=%r",
+                timeout, lines_seen, stderr_out[:500],
+            )
             self.stop()
             return False
 
-        # Connect to shared memory
+        # Connect to shared memory before starting drainer threads
+        logger.info("[NativeCapture] Connecting to shared memory region %r ...", SHM_NAME)
         if not self._open_shm():
-            logger.error("[NativeCapture] Failed to open shared memory")
+            logger.error("[NativeCapture] Failed to open shared memory — stopping service")
             self.stop()
             return False
+
+        # Start background threads to drain stdout/stderr so the pipe
+        # buffer never fills up and stalls the C++ process.
+        self._stdout_drainer = threading.Thread(
+            target=self._drain_stdout,
+            daemon=True,
+            name="native-stdout",
+        )
+        self._stderr_drainer = threading.Thread(
+            target=self._drain_stderr,
+            daemon=True,
+            name="native-stderr",
+        )
+        self._stdout_drainer.start()
+        self._stderr_drainer.start()
+        logger.debug("[NativeCapture] stdout/stderr drainer threads started")
 
         self._running = True
         logger.info("[NativeCapture] Service started (PID %d)", self._proc.pid)
@@ -159,9 +226,10 @@ class NativeCaptureBridge:
 
     def stop(self) -> None:
         """Stop the C++ capture service."""
+        logger.info("[NativeCapture] Stopping service...")
         self._running = False
 
-        # Send stop command (best-effort)
+        # Send stop command (best-effort, non-blocking)
         try:
             self._send_command({"cmd": "stop"})
         except Exception:
@@ -171,17 +239,58 @@ class NativeCaptureBridge:
         self._close_shm()
 
         if self._proc:
+            pid = self._proc.pid
             try:
                 self._proc.terminate()
                 self._proc.wait(timeout=3)
+                logger.info("[NativeCapture] Process %d terminated cleanly", pid)
             except Exception:
                 try:
                     self._proc.kill()
+                    logger.warning("[NativeCapture] Process %d force-killed", pid)
                 except Exception:
                     pass
             self._proc = None
 
         logger.info("[NativeCapture] Service stopped")
+
+    # ── Background output drainers ─────────────────────────────────────────
+
+    def _drain_stdout(self) -> None:
+        """Read and log any stdout lines from the C++ process.
+
+        Must run in a background thread — if stdout fills up, the C++ process
+        will block on write() which stalls the entire service including IPC.
+        """
+        proc = self._proc
+        if proc is None or proc.stdout is None:
+            return
+        try:
+            for raw in proc.stdout:
+                line = raw.decode(errors="replace").rstrip()
+                if line:
+                    logger.debug("[NativeCapture/stdout] %s", line)
+        except Exception:
+            pass
+        logger.debug("[NativeCapture] stdout drainer exited")
+
+    def _drain_stderr(self) -> None:
+        """Read and log any stderr lines from the C++ process.
+
+        stderr is where assertion failures, DXGI errors, and other C++
+        diagnostics appear.
+        """
+        proc = self._proc
+        if proc is None or proc.stderr is None:
+            return
+        try:
+            for raw in proc.stderr:
+                line = raw.decode(errors="replace").rstrip()
+                if line:
+                    logger.warning("[NativeCapture/stderr] %s", line)
+        except Exception:
+            pass
+        logger.debug("[NativeCapture] stderr drainer exited")
 
     # ── Frame reading ──────────────────────────────────────────────────────
 
@@ -189,37 +298,62 @@ class NativeCaptureBridge:
         """Read the latest frame from shared memory.
 
         Returns a BGR24 numpy array, or None if no new frame is available.
+        Logs a throttled status line (~every 5 seconds).
         """
         if not self._running or self._shm_mmap is None:
             return None
+
+        self._grab_calls += 1
 
         try:
             # Read header from shared memory
             self._shm_mmap.seek(0)
             header_bytes = self._shm_mmap.read(HEADER_STRUCT.size)
             if len(header_bytes) < HEADER_STRUCT.size:
+                logger.debug("[NativeCapture] grab_frame: header too short (%d bytes)",
+                             len(header_bytes))
                 return None
 
             (frame_id, width, height, stride, pixel_format,
              data_size, _r1, _r2, _r3) = HEADER_STRUCT.unpack(header_bytes)
+
+            # Throttled status log every 5 seconds
+            now = time.monotonic()
+            if now - self._last_grab_log >= 5.0:
+                proc_alive = self._proc is not None and self._proc.poll() is None
+                logger.info(
+                    "[NativeCapture] status: running=%s proc_alive=%s "
+                    "calls=%d frames=%d frame_id=%d shm=(%dx%d sz=%d)",
+                    self._running, proc_alive,
+                    self._grab_calls, self._grab_frames,
+                    frame_id, width, height, data_size,
+                )
+                self._last_grab_log = now
 
             # Check if this is a new frame
             if frame_id == 0 or frame_id == self._last_frame_id:
                 return None
 
             if data_size == 0 or width == 0 or height == 0:
+                logger.debug("[NativeCapture] grab_frame: empty frame header "
+                             "(id=%d w=%d h=%d sz=%d)", frame_id, width, height, data_size)
                 return None
 
             if data_size > MAX_FRAME_BYTES:
+                logger.warning("[NativeCapture] grab_frame: data_size %d exceeds max %d",
+                               data_size, MAX_FRAME_BYTES)
                 return None
 
             # Read pixel data
             self._shm_mmap.seek(HEADER_SIZE)
             pixel_bytes = self._shm_mmap.read(data_size)
             if len(pixel_bytes) < data_size:
+                logger.debug("[NativeCapture] grab_frame: short pixel read "
+                             "(%d < %d)", len(pixel_bytes), data_size)
                 return None
 
             self._last_frame_id = frame_id
+            self._grab_frames += 1
 
             # Create numpy array (BGR24)
             frame = np.frombuffer(pixel_bytes, dtype=np.uint8).reshape(height, width, 3)
@@ -232,11 +366,18 @@ class NativeCaptureBridge:
 
     def set_region(self, x: int, y: int, w: int, h: int) -> bool:
         """Tell the C++ service to crop to a specific screen region."""
+        logger.debug("[NativeCapture] set_region(%d, %d, %d, %d)", x, y, w, h)
         resp = self._send_command({"cmd": "set_region", "x": x, "y": y, "w": w, "h": h})
-        return resp is not None and resp.get("status") == "ok"
+        ok = resp is not None and resp.get("status") == "ok"
+        if ok:
+            logger.info("[NativeCapture] region set to (%d,%d) %dx%d", x, y, w, h)
+        else:
+            logger.warning("[NativeCapture] set_region failed (resp=%s)", resp)
+        return ok
 
     def status(self) -> Optional[dict]:
         """Query the C++ service status."""
+        logger.debug("[NativeCapture] sending status command")
         return self._send_command({"cmd": "status"})
 
     # ── Shared memory ──────────────────────────────────────────────────────
@@ -244,48 +385,69 @@ class NativeCaptureBridge:
     def _open_shm(self) -> bool:
         """Open the shared memory region created by the C++ service."""
         if not _IS_WINDOWS:
+            logger.warning("[NativeCapture] _open_shm: not Windows, skipping")
             return False
 
         try:
             kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
 
+            # Fix 64-bit pointer handling: MapViewOfFile returns LPVOID (8 bytes on
+            # 64-bit Windows).  Without an explicit restype ctypes defaults to c_int
+            # (32-bit) and silently truncates the upper 32 bits → wrong address →
+            # crash when the SHM is mapped above the 4 GB boundary.
+            kernel32.OpenFileMappingA.restype = ctypes.c_void_p
+            kernel32.MapViewOfFile.restype = ctypes.c_void_p
+            kernel32.MapViewOfFile.argtypes = [
+                ctypes.wintypes.HANDLE,   # hFileMappingObject
+                ctypes.wintypes.DWORD,    # dwDesiredAccess
+                ctypes.wintypes.DWORD,    # dwFileOffsetHigh
+                ctypes.wintypes.DWORD,    # dwFileOffsetLow
+                ctypes.c_size_t,          # dwNumberOfBytesToMap
+            ]
+            # UnmapViewOfFile must receive the full 64-bit address
+            kernel32.UnmapViewOfFile.argtypes = [ctypes.c_void_p]
+            kernel32.UnmapViewOfFile.restype  = ctypes.wintypes.BOOL
+
             # OpenFileMapping
             FILE_MAP_READ = 0x0004
+            logger.debug("[NativeCapture] OpenFileMappingA(%r, FILE_MAP_READ)", SHM_NAME)
             handle = kernel32.OpenFileMappingA(
                 FILE_MAP_READ,
                 False,
                 SHM_NAME.encode("ascii"),
             )
             if not handle:
-                logger.error("[NativeCapture] OpenFileMapping failed: %d",
-                             kernel32.GetLastError())
+                err = ctypes.windll.kernel32.GetLastError()
+                logger.error("[NativeCapture] OpenFileMappingA failed (error=%d). "
+                             "Is the C++ service running and has it created the SHM?", err)
                 return False
 
-            self._shm_handle = handle
+            self._shm_handle = int(handle)  # store as plain int (c_void_p)
+            logger.debug("[NativeCapture] SHM handle opened: 0x%x", self._shm_handle)
 
-            # MapViewOfFile
-            ptr = kernel32.MapViewOfFile(handle, FILE_MAP_READ, 0, 0, 0)
+            # MapViewOfFile — with c_void_p restype this is the full 64-bit address;
+            # NULL (failure) is returned as Python None.
+            ptr = kernel32.MapViewOfFile(self._shm_handle, FILE_MAP_READ, 0, 0, 0)
             if not ptr:
-                logger.error("[NativeCapture] MapViewOfFile failed")
-                kernel32.CloseHandle(handle)
+                err = ctypes.windll.kernel32.GetLastError()
+                logger.error("[NativeCapture] MapViewOfFile failed (error=%d)", err)
+                kernel32.CloseHandle(self._shm_handle)
                 self._shm_handle = None
                 return False
 
-            # Wrap in mmap-like interface via ctypes buffer
-            # We create a writable buffer from the mapped memory
-            buf = (ctypes.c_char * (HEADER_STRUCT.size + MAX_FRAME_BYTES)).from_address(ptr)
-            self._shm_mmap = memoryview(buf)
-            # Actually, let's use a simpler approach: read from the mapped pointer
-            # Store the raw pointer and size for direct reads
+            ptr = int(ptr)  # ensure plain Python int for arithmetic
+            shm_total = HEADER_STRUCT.size + MAX_FRAME_BYTES
+            logger.info("[NativeCapture] SHM mapped at ptr=0x%x, size=%d bytes (%.1f MB)",
+                        ptr, shm_total, shm_total / 1024 / 1024)
+
+            # Wrap the raw pointer in our file-like reader
             self._shm_ptr = ptr
-            self._shm_buf = buf
-            # Create a fake mmap-like object
-            self._shm_mmap = _ShmReader(ptr, HEADER_STRUCT.size + MAX_FRAME_BYTES)
+            self._shm_mmap = _ShmReader(ptr, shm_total)
 
             return True
 
         except Exception:
-            logger.error("[NativeCapture] SHM open failed", exc_info=True)
+            logger.error("[NativeCapture] SHM open raised exception", exc_info=True)
             return False
 
     def _close_shm(self) -> None:
@@ -294,14 +456,19 @@ class NativeCaptureBridge:
             return
         try:
             kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            # Re-apply argtypes so UnmapViewOfFile receives the full 64-bit address
+            kernel32.UnmapViewOfFile.argtypes = [ctypes.c_void_p]
+            kernel32.UnmapViewOfFile.restype  = ctypes.wintypes.BOOL
             if hasattr(self, '_shm_ptr') and self._shm_ptr:
                 kernel32.UnmapViewOfFile(self._shm_ptr)
                 self._shm_ptr = None
+                logger.debug("[NativeCapture] SHM unmapped")
             if self._shm_handle:
                 kernel32.CloseHandle(self._shm_handle)
                 self._shm_handle = None
+                logger.debug("[NativeCapture] SHM handle closed")
         except Exception:
-            pass
+            logger.debug("[NativeCapture] _close_shm error", exc_info=True)
         self._shm_mmap = None
 
     # ── Named pipe IPC ─────────────────────────────────────────────────────
@@ -315,6 +482,7 @@ class NativeCaptureBridge:
             return False
 
         try:
+            logger.debug("[NativeCapture] connecting to pipe %r", PIPE_NAME)
             handle = ctypes.windll.kernel32.CreateFileA(  # type: ignore[attr-defined]
                 PIPE_NAME.encode("ascii"),
                 0xC0000000,  # GENERIC_READ | GENERIC_WRITE
@@ -325,14 +493,53 @@ class NativeCaptureBridge:
                 None,
             )
             if handle == -1 or handle == 0xFFFFFFFF:
+                err = ctypes.windll.kernel32.GetLastError()
+                now = time.monotonic()
+                if now - self._last_pipe_warn >= 10.0:
+                    logger.warning("[NativeCapture] pipe connect failed (error=%d). "
+                                   "IPC commands will be skipped.", err)
+                    self._last_pipe_warn = now
                 return False
             self._pipe_handle = handle
+            logger.info("[NativeCapture] pipe connected (handle=%d)", handle)
             return True
         except Exception:
+            logger.debug("[NativeCapture] _ensure_pipe exception", exc_info=True)
             return False
 
     def _send_command(self, cmd: dict) -> Optional[dict]:
-        """Send a JSON command and read the JSON response."""
+        """Send a JSON command and read the JSON response.
+
+        Runs the actual I/O in a daemon thread so it cannot block the caller
+        indefinitely.  If no response arrives within PIPE_CMD_TIMEOUT seconds,
+        the command is abandoned and None is returned.
+        """
+        result: list[Optional[dict]] = [None]
+
+        def _do() -> None:
+            result[0] = self._send_command_blocking(cmd)
+
+        worker = threading.Thread(target=_do, daemon=True, name="native-pipe-cmd")
+        worker.start()
+        worker.join(timeout=PIPE_CMD_TIMEOUT)
+
+        if worker.is_alive():
+            now = time.monotonic()
+            if now - self._last_pipe_warn >= 10.0:
+                logger.warning(
+                    "[NativeCapture] pipe command %r timed out after %.1fs — "
+                    "service may be unresponsive; IPC will be skipped",
+                    cmd.get("cmd"), PIPE_CMD_TIMEOUT,
+                )
+                self._last_pipe_warn = now
+            # Don't close the pipe here — the worker thread holds it; let it finish
+            # in its own time since it's a daemon thread.
+            return None
+
+        return result[0]
+
+    def _send_command_blocking(self, cmd: dict) -> Optional[dict]:
+        """Blocking version of _send_command (runs inside a timeout thread)."""
         with self._lock:
             if not self._ensure_pipe():
                 return None
@@ -344,40 +551,66 @@ class NativeCaptureBridge:
                 kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
                 written = ctypes.wintypes.DWORD(0)
 
+                logger.debug("[NativeCapture] pipe write: cmd=%r (%d bytes)",
+                             cmd.get("cmd"), len(payload))
+
                 # Write length + payload
-                kernel32.WriteFile(
+                ok1 = kernel32.WriteFile(
                     self._pipe_handle, length_prefix, 4,
-                    ctypes.byref(written), None
+                    ctypes.byref(written), None,
                 )
-                kernel32.WriteFile(
+                ok2 = kernel32.WriteFile(
                     self._pipe_handle, payload, len(payload),
-                    ctypes.byref(written), None
+                    ctypes.byref(written), None,
                 )
                 kernel32.FlushFileBuffers(self._pipe_handle)
+
+                if not ok1 or not ok2:
+                    err = kernel32.GetLastError()
+                    logger.warning("[NativeCapture] pipe write failed (error=%d)", err)
+                    self._close_pipe()
+                    return None
 
                 # Read response length
                 resp_len_buf = (ctypes.c_char * 4)()
                 bytes_read = ctypes.wintypes.DWORD(0)
-                kernel32.ReadFile(
+                ok3 = kernel32.ReadFile(
                     self._pipe_handle, resp_len_buf, 4,
-                    ctypes.byref(bytes_read), None
+                    ctypes.byref(bytes_read), None,
                 )
-                resp_len = struct.unpack("<I", bytes(resp_len_buf))[0]
+                if not ok3 or bytes_read.value < 4:
+                    err = kernel32.GetLastError()
+                    logger.warning("[NativeCapture] pipe read (length) failed "
+                                   "(error=%d, read=%d)", err, bytes_read.value)
+                    self._close_pipe()
+                    return None
 
+                resp_len = struct.unpack("<I", bytes(resp_len_buf))[0]
                 if resp_len == 0 or resp_len > 1024 * 1024:
+                    logger.warning("[NativeCapture] pipe: invalid response length %d",
+                                   resp_len)
                     return None
 
                 # Read response payload
                 resp_buf = (ctypes.c_char * resp_len)()
-                kernel32.ReadFile(
+                ok4 = kernel32.ReadFile(
                     self._pipe_handle, resp_buf, resp_len,
-                    ctypes.byref(bytes_read), None
+                    ctypes.byref(bytes_read), None,
                 )
+                if not ok4:
+                    err = kernel32.GetLastError()
+                    logger.warning("[NativeCapture] pipe read (payload) failed "
+                                   "(error=%d)", err)
+                    self._close_pipe()
+                    return None
+
                 resp_json = bytes(resp_buf).decode("utf-8")
-                return json.loads(resp_json)
+                parsed = json.loads(resp_json)
+                logger.debug("[NativeCapture] pipe response: %s", parsed)
+                return parsed
 
             except Exception:
-                logger.debug("[NativeCapture] pipe error", exc_info=True)
+                logger.warning("[NativeCapture] pipe command exception", exc_info=True)
                 self._close_pipe()
                 return None
 
@@ -386,6 +619,7 @@ class NativeCaptureBridge:
         if self._pipe_handle is not None:
             try:
                 ctypes.windll.kernel32.CloseHandle(self._pipe_handle)  # type: ignore[attr-defined]
+                logger.debug("[NativeCapture] pipe handle closed")
             except Exception:
                 pass
             self._pipe_handle = None

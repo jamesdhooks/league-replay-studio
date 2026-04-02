@@ -123,24 +123,41 @@ bool DXGICapture::initDuplication() {
 }
 
 void DXGICapture::setRegion(int x, int y, int w, int h) {
-    region_x_ = x;
-    region_y_ = y;
-    region_w_ = w;
-    region_h_ = h;
-    has_region_ = (w > 0 && h > 0);
-
-    // Recreate staging texture if duplication is already active
-    if (staging_) {
-        staging_->Release();
-        staging_ = nullptr;
-    }
-    if (device_) {
-        initDuplication();
-    }
+    // Store the new region atomically so this can be called from any thread
+    // (incl. the IPC thread) without racing with grabFrame() on the capture
+    // thread.  The staging texture is recreated inside grabFrame() on the
+    // next call, which runs exclusively on the capture thread.
+    pending_x_.store(x, std::memory_order_relaxed);
+    pending_y_.store(y, std::memory_order_relaxed);
+    pending_w_.store(w, std::memory_order_relaxed);
+    pending_h_.store(h, std::memory_order_relaxed);
+    region_dirty_.store(true, std::memory_order_release);
+    fprintf(stderr, "[Capture] setRegion queued: %d,%d %dx%d\n", x, y, w, h);
 }
 
 bool DXGICapture::grabFrame(FrameHeader* header, uint8_t* pixel_data) {
     if (!duplication_ || !staging_) return false;
+
+    // Apply any pending region change before acquiring the next frame.
+    // This runs exclusively on the capture thread, so no synchronisation
+    // with staging_ / duplication_ is needed here.
+    if (region_dirty_.load(std::memory_order_acquire)) {
+        region_dirty_.store(false, std::memory_order_relaxed);
+        region_x_   = pending_x_.load(std::memory_order_relaxed);
+        region_y_   = pending_y_.load(std::memory_order_relaxed);
+        region_w_   = pending_w_.load(std::memory_order_relaxed);
+        region_h_   = pending_h_.load(std::memory_order_relaxed);
+        has_region_ = (region_w_ > 0 && region_h_ > 0);
+        fprintf(stderr, "[Capture] applying region: %d,%d %dx%d\n",
+                region_x_, region_y_, region_w_, region_h_);
+        // Recreate staging texture for the new dimensions
+        if (staging_) { staging_->Release(); staging_ = nullptr; }
+        if (!initDuplication()) {
+            fprintf(stderr, "[Capture] initDuplication failed after setRegion: %s\n",
+                    last_error_.c_str());
+            return false;
+        }
+    }
 
     IDXGIResource* resource = nullptr;
     DXGI_OUTDUPL_FRAME_INFO frame_info;
