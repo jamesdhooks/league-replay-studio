@@ -73,6 +73,10 @@ export default function AnalysisPanel() {
   const [showQualitySettings, setShowQualitySettings] = useState(false)
   // Stream key — changes to force <img> reload when quality settings change
   const [streamKey, setStreamKey] = useState(0)
+  const [streamLoaded, setStreamLoaded] = useState(false)
+
+  // Reset loaded state whenever the stream is recycled
+  useEffect(() => { setStreamLoaded(false) }, [streamKey])
 
   // Drivers list for camera switching
   const [drivers, setDrivers] = useState([])
@@ -608,8 +612,16 @@ export default function AnalysisPanel() {
                     alt="iRacing replay"
                     className="w-full h-full object-cover"
                     onError={(e) => { e.target.style.opacity = '0.15' }}
-                    onLoad={(e) => { e.target.style.opacity = '1' }}
+                    onLoad={(e) => { e.target.style.opacity = '1'; setStreamLoaded(true) }}
                   />
+                  {/* Loading spinner — shown until the first MJPEG frame arrives */}
+                  {!streamLoaded && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center
+                                    bg-black/60 backdrop-blur-sm gap-3">
+                      <Loader2 size={32} className="text-accent animate-spin" />
+                      <span className="text-xs text-white/60">Connecting to preview stream…</span>
+                    </div>
+                  )}
                   {/* Live badge */}
                   {isAnalyzing && (
                     <div className="absolute top-3 left-3 flex items-center gap-1.5 px-2 py-1

@@ -110,20 +110,21 @@ WGCCapture::~WGCCapture() {
 
 // static
 bool WGCCapture::isAvailable() {
-    // Windows Graphics Capture requires Win 10 1803 (build 17134).
-    OSVERSIONINFOEXW info{};
-    info.dwOSVersionInfoSize = sizeof(info);
-    info.dwMajorVersion      = 10;
-    info.dwBuildNumber       = 17134;
-    DWORDLONG mask = VerSetConditionMask(
-        VerSetConditionMask(
-            VerSetConditionMask(0,
-                VER_MAJORVERSION, VER_GREATER_EQUAL),
-            VER_MINORVERSION,  VER_GREATER_EQUAL),
-        VER_BUILDNUMBER, VER_GREATER_EQUAL);
-    return VerifyVersionInfoW(&info,
-        VER_MAJORVERSION | VER_MINORVERSION | VER_BUILDNUMBER,
-        mask) != FALSE;
+    // VerifyVersionInfoW lies about the OS version unless the application has
+    // a Windows 10 compatibility manifest entry.  RtlGetVersion (ntdll) always
+    // returns the true build number, so use it instead.
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) return false;
+    using PFN_RtlGetVersion = NTSTATUS(WINAPI*)(PRTL_OSVERSIONINFOW);
+    auto fn = reinterpret_cast<PFN_RtlGetVersion>(
+        GetProcAddress(ntdll, "RtlGetVersion"));
+    if (!fn) return false;
+    RTL_OSVERSIONINFOW vi{};
+    vi.dwOSVersionInfoSize = sizeof(vi);
+    if (fn(&vi) != 0 /* STATUS_SUCCESS */) return false;
+    // WGC requires Windows 10 build 17134+ (1803)
+    return vi.dwMajorVersion > 10 ||
+           (vi.dwMajorVersion == 10 && vi.dwBuildNumber >= 17134);
 }
 
 bool WGCCapture::init(HWND hwnd) {

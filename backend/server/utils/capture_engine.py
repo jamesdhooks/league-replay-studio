@@ -207,6 +207,7 @@ class CaptureEngine:
         # Native capture bridge (C++ DXGI/WGC service)
         self._native_bridge: Optional[object] = None
         self._native_hwnd: Optional[int] = None   # last HWND sent to C++ service
+        self._native_wgc_ok: Optional[bool] = None  # None=untested True=WGC False=use DXGI rect
 
         # Metrics
         self._frame_count: int = 0
@@ -1022,23 +1023,40 @@ class CaptureEngine:
         if bridge is None:
             return None
 
-        # Refresh iRacing HWND periodically; call set_hwnd when it changes
+        # Refresh iRacing HWND periodically; prefer WGC, fall back to DXGI rect
         now = time.monotonic()
         if self._native_hwnd is None or (now - self._pw_last_hwnd_check > 2.0):
-            logger.debug("[CaptureEngine] native: refreshing iRacing HWND")
-            from server.utils.window_capture import _find_iracing_hwnd
+            from server.utils.window_capture import _find_iracing_hwnd, _get_window_rect
             hwnd = _find_iracing_hwnd()
             if hwnd is not None:
-                hwnd_int = hwnd if isinstance(hwnd, int) else ctypes.cast(
-                    hwnd, ctypes.c_void_p).value or 0
-                if hwnd_int != self._native_hwnd:
-                    logger.debug("[CaptureEngine] native: calling set_hwnd(%d)", hwnd_int)
-                    ok = bridge.set_hwnd(hwnd_int)
-                    if ok:
-                        self._native_hwnd = hwnd_int
-                    else:
-                        logger.warning("[CaptureEngine] native: set_hwnd failed, "
-                                       "WGC may be unavailable")
+                hwnd_int = hwnd if isinstance(hwnd, int) else (ctypes.cast(
+                    hwnd, ctypes.c_void_p).value or 0)
+                if hwnd_int != self._native_hwnd or self._native_wgc_ok is None:
+                    # Try WGC first (unless we already know it's unavailable)
+                    if self._native_wgc_ok is not False:
+                        logger.debug("[CaptureEngine] native: trying set_hwnd(%d)", hwnd_int)
+                        ok = bridge.set_hwnd(hwnd_int)
+                        if ok:
+                            self._native_hwnd = hwnd_int
+                            self._native_wgc_ok = True
+                        else:
+                            logger.info("[CaptureEngine] native: WGC unavailable, "
+                                        "falling back to DXGI set_region")
+                            self._native_wgc_ok = False
+                    # DXGI rect fallback when WGC is unavailable
+                    if self._native_wgc_ok is False:
+                        rect = _get_window_rect(hwnd)
+                        if rect:
+                            logger.debug("[CaptureEngine] native: set_region "
+                                         "(%d,%d) %dx%d",
+                                         rect["left"], rect["top"],
+                                         rect["width"], rect["height"])
+                            ok2 = bridge.set_region(
+                                rect["left"], rect["top"],
+                                rect["width"], rect["height"],
+                            )
+                            if ok2:
+                                self._native_hwnd = hwnd_int
             else:
                 logger.debug("[CaptureEngine] native: iRacing window not found")
             self._pw_last_hwnd_check = now
@@ -1055,6 +1073,7 @@ class CaptureEngine:
                 pass
         self._native_bridge = None
         self._native_hwnd = None
+        self._native_wgc_ok = None
 
     # ======================================================================
     # dxcam backend -- returns numpy BGR24 array, NO PIL
