@@ -158,14 +158,18 @@ function HlsStreamPlayer({ src, className, onLoad, onError }) {
     const video = videoRef.current
     if (!video || !src) return
 
+    // Guard against post-unmount callbacks (stale closure safe-guard)
+    let alive = true
+
     // Safari has native HLS — no hls.js needed
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = src
-      const handleLoadedMetadata = () => { video.play().catch(() => {}); onLoad?.() }
-      const handleError = () => onError?.(new Error('HLS stream error'))
+      const handleLoadedMetadata = () => { if (alive) { video.play().catch(() => {}); onLoad?.() } }
+      const handleError = () => { if (alive) onError?.(new Error('HLS stream error')) }
       video.addEventListener('loadedmetadata', handleLoadedMetadata, { once: true })
       video.addEventListener('error', handleError, { once: true })
       return () => {
+        alive = false
         video.removeEventListener('loadedmetadata', handleLoadedMetadata)
         video.removeEventListener('error', handleError)
         video.removeAttribute('src')
@@ -178,23 +182,34 @@ function HlsStreamPlayer({ src, className, onLoad, onError }) {
       return
     }
 
-    // lowLatencyMode reduces the default buffer target from ~30 s to ~3 s,
-    // which is appropriate for this near-live streaming use case.
-    const hls = new Hls({ lowLatencyMode: true })
+    // Do NOT use lowLatencyMode — we serve standard HLS (complete 1-second
+    // segments), not LL-HLS. lowLatencyMode makes hls.js attempt partial-
+    // segment range requests our server doesn't support, generating
+    // AbortErrors on every segment load.
+    const hls = new Hls({
+      lowLatencyMode: false,
+      maxBufferLength: 4,       // keep ~4 s of buffer for this near-live use case
+      maxMaxBufferLength: 8,
+    })
     hls.loadSource(src)
     hls.attachMedia(video)
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      if (!alive) return
       video.play().catch(() => {})
       onLoad?.()
     })
     hls.on(Hls.Events.ERROR, (_, data) => {
-      if (data.fatal) onError?.(new Error(data.details || 'HLS playback error'))
+      if (data.fatal && alive) onError?.(new Error(data.details || 'HLS playback error'))
     })
 
     return () => {
+      alive = false
       hls.destroy()
       video.removeAttribute('src')
       video.load()
+      // Tell the backend to tear down the HLS segmenter immediately so the
+      // feeder thread stops draining _h264_queue.
+      fetch('/api/iracing/stream/hls/stop', { method: 'POST' }).catch(() => {})
     }
   // Only re-create hls.js when the source URL changes — not on every parent
   // render that creates new onLoad/onError function instances.
@@ -1150,6 +1165,12 @@ export default function AnalysisPanel() {
                         <button
                           key={fmt}
                           onClick={() => {
+                            if (fmt === streamFormat) return  // no-op if same format
+                            // Always stop HLS segmenter when switching formats.
+                            // The backend coordinator handles the rest, but this
+                            // ensures prompt cleanup even if the new endpoint
+                            // request is delayed.
+                            fetch('/api/iracing/stream/hls/stop', { method: 'POST' }).catch(() => {})
                             setStreamFormat(fmt)
                             setStreamKey(k => k + 1)
                             setShowQualitySettings(false)

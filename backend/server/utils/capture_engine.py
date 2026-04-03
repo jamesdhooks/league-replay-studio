@@ -746,6 +746,16 @@ class CaptureEngine:
                     backend_used = "native"
                     frame = self._grab_native()
 
+                    # Reject frames from transitional WGC states (e.g. the
+                    # window chrome grab at 174×32 before the game renders).
+                    # A real iRacing frame is always at least 320×200.
+                    if frame is not None and (frame.shape[1] < 320 or frame.shape[0] < 200):
+                        logger.debug(
+                            "[CaptureEngine] native: ignoring undersized frame (%dx%d)",
+                            frame.shape[1], frame.shape[0],
+                        )
+                        frame = None
+
                     if frame is not None:
                         if not native_first_frame:
                             logger.info("[CaptureEngine] native: first frame received")

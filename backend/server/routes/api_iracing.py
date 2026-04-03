@@ -57,9 +57,11 @@ router = APIRouter(prefix="/api/iracing", tags=["iracing"])
 _SAFE_HLS_FILENAME_RE = re.compile(r'^(?:playlist\.m3u8|seg\d{5}\.ts)$')
 
 
-# ── HLS session state ─────────────────────────────────────────────────────────
-# A single shared FFmpeg HLS segmenter process feeds all HLS clients.
-# Restarted automatically if fps/crf/max_width change.
+# ── Stream coordination ────────────────────────────────────────────────────────
+# Only ONE H.264-feed consumer (H.264 fMP4 or HLS segmenter) may be active at
+# a time.  MJPEG is independent (reads latest_jpeg, not the queue).  The
+# functions below enforce mutual exclusion so switching formats never leaves
+# zombie feeders that steal frames from the new consumer.
 
 _hls_lock = threading.Lock()
 _hls_session: dict = {
@@ -73,6 +75,27 @@ _hls_session: dict = {
     "crf": 0,
     "max_width": 0,
 }
+
+
+def _stop_h264_consumers() -> None:
+    """Stop ALL active H.264/HLS feed consumers.
+
+    Call this before starting a new H.264 or HLS stream to guarantee that no
+    zombie feeder thread is left draining ``_h264_queue``.
+    Safe to call when nothing is running.
+    """
+    from server.utils.capture_engine import capture_engine
+
+    # 1. Stop the HLS segmenter (kills FFmpeg + feeder thread)
+    with _hls_lock:
+        _stop_hls_session_locked()
+
+    # 2. Disable the h264 feed entirely (kills any H.264 fMP4 feeder thread
+    #    that checks the gen token).  We increment the gen so the old feeder's
+    #    gen-check fails, then clear the streaming flag.
+    capture_engine._h264_gen += 1
+    capture_engine._h264_streaming = False
+    capture_engine._h264_queue.clear()
 
 
 def _stop_hls_session_locked() -> None:
@@ -120,6 +143,12 @@ def _start_hls_session_locked(ffmpeg: str, fps: int, crf: int, max_width: int) -
 
     _stop_hls_session_locked()
 
+    # Also kill any lingering H.264 fMP4 feeder — we're about to take over
+    # the h264_queue exclusively.
+    capture_engine._h264_gen += 1
+    capture_engine._h264_streaming = False
+    capture_engine._h264_queue.clear()
+
     tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="lrs_hls_"))
     playlist_path = tmpdir / "playlist.m3u8"
 
@@ -161,6 +190,7 @@ def _start_hls_session_locked(ffmpeg: str, fps: int, crf: int, max_width: int) -
         "-c:v", "libx264",
         "-preset", "ultrafast",
         "-tune", "zerolatency",
+        "-g", str(fps),           # keyframe every second — required for HLS segments
         "-crf", str(crf),
         "-pix_fmt", "yuv420p",
         "-profile:v", "baseline",
@@ -177,36 +207,67 @@ def _start_hls_session_locked(ffmpeg: str, fps: int, crf: int, max_width: int) -
         cmd,
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,   # drained below; DEVNULL would hide startup errors
         bufsize=0,
     )
+
+    def _drain_ffmpeg_stderr() -> None:
+        """Continuously drain FFmpeg stderr so the pipe never deadlocks."""
+        try:
+            for raw in proc.stderr:
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                if line:
+                    logger.error("[HLS FFmpeg] %s", line)
+        except Exception:
+            pass
+
+    threading.Thread(target=_drain_ffmpeg_stderr, daemon=True).start()
 
     gen_token = capture_engine.start_h264_feed()
     feed_state = {"active": True}
 
     def _feed_stdin() -> None:
+        last_frame: Optional[bytes] = None
+        last_frame_at: float = time.monotonic()
+        # Max age before repeating last frame to keep FFmpeg's pipeline flowing.
+        REPEAT_AFTER_S = 1.0 / fps  # one frame-period at the target fps
         try:
             while feed_state["active"]:
+                # ── Gen-token check: exit immediately if superseded ──
+                if capture_engine._h264_gen != gen_token:
+                    logger.info("[HLS] feeder exiting — superseded by gen %d",
+                                capture_engine._h264_gen)
+                    break
+
+                frame_bytes: Optional[bytes] = None
                 try:
                     frame = capture_engine._h264_queue.popleft()
+                    # Dimension guard
+                    if frame.shape[1] != input_w or frame.shape[0] != input_h:
+                        try:
+                            import cv2 as _cv2_hls
+                            frame = _cv2_hls.resize(
+                                frame, (input_w, input_h),
+                                interpolation=_cv2_hls.INTER_LINEAR,
+                            )
+                        except Exception:
+                            continue  # cv2 unavailable → skip corrupted frame
+                    frame_bytes = frame.tobytes()
+                    last_frame = frame_bytes
+                    last_frame_at = time.monotonic()
                 except IndexError:
-                    time.sleep(0.004)
-                    continue
-                # Dimension guard: resize to locked input dims so that minor
-                # source resolution fluctuations don't corrupt the HLS bitstream.
-                if frame.shape[1] != input_w or frame.shape[0] != input_h:
-                    try:
-                        import cv2 as _cv2_hls
-                        frame = _cv2_hls.resize(
-                            frame, (input_w, input_h),
-                            interpolation=_cv2_hls.INTER_LINEAR,
-                        )
-                    except Exception:
-                        continue  # cv2 unavailable → skip corrupted frame
+                    # No new frame — repeat last frame if stale to prevent FFmpeg stalling
+                    if last_frame is not None and (time.monotonic() - last_frame_at) >= REPEAT_AFTER_S:
+                        frame_bytes = last_frame
+                        last_frame_at = time.monotonic()
+                    else:
+                        time.sleep(0.004)
+                        continue
+
                 if proc.stdin is None or proc.stdin.closed:
                     break
                 try:
-                    proc.stdin.write(frame.tobytes())
+                    proc.stdin.write(frame_bytes)
                 except (BrokenPipeError, OSError):
                     break
         finally:
@@ -556,6 +617,10 @@ async def iracing_stream(
     logger.info("[Stream] MJPEG client connected (fps=%d quality=%d max_width=%d)",
                 fps, quality, max_width)
 
+    # Stop any running H.264/HLS consumers — they share _h264_queue and would
+    # conflict with parameter changes.  MJPEG is independent (reads latest_jpeg).
+    _stop_h264_consumers()
+
     # Start the engine if not already running, or live-update params if it is
     if not capture_engine.is_running:
         capture_engine.start(fps=fps, quality=quality, max_width=max_width)
@@ -629,6 +694,9 @@ async def iracing_stream_h264(
 
     logger.info("[Stream] H.264 client connected (fps=%d crf=%d max_width=%d)",
                 fps, crf, max_width)
+
+    # ── Mutual exclusion: stop any running HLS/H.264 consumer first ──
+    _stop_h264_consumers()
 
     # Start the engine if it isn't running.
     # IMPORTANT: do NOT pass max_width here — H.264 must never mutate the
@@ -853,10 +921,20 @@ async def hls_file(
         tmpdir = await loop.run_in_executor(None, _ensure_session)
         playlist_path = tmpdir / "playlist.m3u8"
 
-        # Wait up to 5 s for FFmpeg to write the first segment
-        for _ in range(50):
+        # Wait up to 10 s for FFmpeg to write the first segment
+        for _ in range(100):
             if playlist_path.exists() and playlist_path.stat().st_size > 0:
                 break
+            # Bail early if FFmpeg process already died — no point waiting longer
+            with _hls_lock:
+                hls_proc = _hls_session.get("proc")
+            if hls_proc is not None and hls_proc.poll() is not None:
+                logger.error("[HLS] FFmpeg exited early (code %d) — check [HLS FFmpeg] log lines above",
+                             hls_proc.returncode)
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"FFmpeg exited unexpectedly (code {hls_proc.returncode}) — see backend logs",
+                )
             await asyncio.sleep(0.1)
 
         if not playlist_path.exists():
