@@ -96,11 +96,20 @@ ENCODERS = {
 
 # ── FFmpeg detection ────────────────────────────────────────────────────────
 
+_ffmpeg_cache: Optional[str] = None
+_ffmpeg_searched: bool = False
+
+
 def find_ffmpeg() -> Optional[str]:
-    """Find the ffmpeg binary path."""
+    """Find the ffmpeg binary path (result is cached after first call)."""
+    global _ffmpeg_cache, _ffmpeg_searched
+    if _ffmpeg_searched:
+        return _ffmpeg_cache
     path = shutil.which("ffmpeg")
+    _ffmpeg_searched = True
     if path:
         logger.info("[GPU] Found ffmpeg: %s", path)
+        _ffmpeg_cache = path
         return path
     logger.warning("[GPU] ffmpeg not found in PATH")
     return None

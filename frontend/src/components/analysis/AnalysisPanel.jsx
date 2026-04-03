@@ -10,7 +10,7 @@ import {
   Fuel, Zap, Crown, Flag, FlagTriangleRight, Loader2, CheckCircle2,
   XCircle, Terminal, ChevronRight, ChevronDown, Camera, Video, Monitor,
   SkipBack, SkipForward, Rewind, FastForward, List, Trash2, Settings,
-  Eye, Users, RefreshCw, Flame, RotateCcw, CircleDot, ShieldAlert, WifiOff, AlertCircle, Minus, Plus,
+  Eye, EyeOff, Users, RefreshCw, Flame, RotateCcw, CircleDot, ShieldAlert, WifiOff, AlertCircle, Minus, Plus,
   Folder, SlidersHorizontal, Info, CarFront,
 } from 'lucide-react'
 import ProjectFileBrowser from '../projects/ProjectFileBrowser'
@@ -196,7 +196,10 @@ function HlsStreamPlayer({ src, className, onLoad, onError }) {
       video.removeAttribute('src')
       video.load()
     }
-  }, [src, onLoad, onError])
+  // Only re-create hls.js when the source URL changes — not on every parent
+  // render that creates new onLoad/onError function instances.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [src])
 
   return (
     <video
@@ -289,7 +292,6 @@ export default function AnalysisPanel() {
   // H.264-specific
   const [h264Crf, setH264Crf] = useLocalStorage('lrs:analysis:h264Crf', 23)
   const [h264MaxWidth, setH264MaxWidth] = useLocalStorage('lrs:analysis:h264MaxWidth', 1280)
-  const [streamCrf, setStreamCrf] = useLocalStorage('lrs:analysis:streamCrf', 23)
   const [streamHlsCrf, setStreamHlsCrf] = useLocalStorage('lrs:analysis:streamHlsCrf', 23)
   const [showQualitySettings, setShowQualitySettings] = useState(false)
 
@@ -311,6 +313,8 @@ export default function AnalysisPanel() {
   const [streamKey, setStreamKey] = useState(0)
   const [streamLoaded, setStreamLoaded] = useState(false)
   const [streamError, setStreamError] = useState(null)
+  const [streamVisible, setStreamVisible] = useState(true)
+  const [isDataLoading, setIsDataLoading] = useState(true)
 
   // Timeline scrubber state
   const [raceDuration, setRaceDuration] = useState(0)
@@ -375,37 +379,28 @@ export default function AnalysisPanel() {
 
   // Load analysis data when project changes
   useEffect(() => {
-    if (activeProject?.id) {
-      fetchAnalysisStatus(activeProject.id)
-      fetchEvents(activeProject.id)
-      fetchEventSummary(activeProject.id)
-      // Auto-reload analysis log from project files if available
-      apiGet(`/projects/${activeProject.id}/analysis/log`)
-        .then(data => {
-          if (data?.entries?.length > 0) {
-            loadAnalysisLog(data.entries)
-          }
-        })
-        .catch(() => {})
-    }
+    if (!activeProject?.id) return
+    setIsDataLoading(true)
+    const logFetch = apiGet(`/projects/${activeProject.id}/analysis/log`)
+      .then(data => { if (data?.entries?.length > 0) loadAnalysisLog(data.entries) })
+      .catch(() => {})
+    Promise.all([
+      fetchAnalysisStatus(activeProject.id),
+      fetchEvents(activeProject.id),
+      fetchEventSummary(activeProject.id),
+      logFetch,
+    ]).finally(() => setIsDataLoading(false))
   }, [activeProject?.id, fetchAnalysisStatus, fetchEvents, fetchEventSummary, loadAnalysisLog])
 
   // Fetch race duration for timeline scrubber
   useEffect(() => {
     if (!activeProject?.id) return
     apiGet(`/projects/${activeProject.id}/analysis/race-duration`)
-      .then(data => setRaceDuration(data?.duration || 0))
+      .then(data => setRaceDuration(data?.duration_seconds || 0))
       .catch(() => {})
   }, [activeProject?.id, events])
 
-  // Auto-scroll log to bottom
-  useEffect(() => {
-    if (sidebarTab === 'log' && logEndRef.current) {
-      logEndRef.current.scrollIntoView({ behavior: 'smooth' })
-    }
-  }, [analysisLog, sidebarTab])
-
-  // Auto-scroll events sidebar
+  // Auto-scroll events sidebar (scroll newest to view during live analysis)
   useEffect(() => {
     if (sidebarTab === 'events' && eventsEndRef.current) {
       eventsEndRef.current.scrollIntoView({ behavior: 'smooth' })
@@ -524,7 +519,9 @@ export default function AnalysisPanel() {
   }
 
   const handleSwitchDriver = async (carIdx) => {
-    const camGroup = cameraGroups.length > 0 ? cameraGroups[0].group_num : 0
+    // Use the currently active camera group so switching drivers doesn't
+    // force a camera change.  0 = "no change" in iRacing's API.
+    const camGroup = replayState?.cam_group_num ?? 0
     try {
       await apiPost('/iracing/replay/camera', { car_idx: carIdx, group_num: camGroup })
     } catch {}
@@ -539,8 +536,18 @@ export default function AnalysisPanel() {
 
   const streamUrl = `/api/iracing/stream?fps=${streamFps}&quality=${mjpegQuality}&max_width=${mjpegMaxWidth}&_k=${streamKey}`
   const h264Url   = `/api/iracing/stream/h264?fps=${streamFps}&crf=${h264Crf}&max_width=${h264MaxWidth}&_k=${streamKey}`
-  const hlsUrl    = `/api/iracing/stream/hls/playlist.m3u8?fps=${streamFps}&crf=${streamHlsCrf}&max_width=${streamMaxWidth}&_k=${streamKey}`
+  const hlsUrl    = `/api/iracing/stream/hls/playlist.m3u8?fps=${streamFps}&crf=${streamHlsCrf}&max_width=${h264MaxWidth}&_k=${streamKey}`
   const activeStreamUrl = streamFormat === 'h264' ? h264Url : streamFormat === 'hls' ? hlsUrl : streamUrl
+
+  // ── Loading state: initial data fetch in progress ────────────────────
+  if (isDataLoading) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center gap-3">
+        <Loader2 size={22} className="animate-spin text-text-disabled" />
+        <p className="text-xs text-text-tertiary">Loading analysis data…</p>
+      </div>
+    )
+  }
 
   // ── Idle state: no analysis running, no events ────────────────────────
   if (!isAnalyzing && !hasEvents && discoveredEvents.length === 0) {
@@ -662,20 +669,6 @@ export default function AnalysisPanel() {
 
           {/* Right controls */}
           <div className="ml-auto flex items-center gap-3 shrink-0">
-            {!isAnalyzing && (
-              <button
-                onClick={() => setShowTuning(prev => !prev)}
-                title="Detection tuning parameters"
-                className={`flex items-center gap-1 px-2 py-1 rounded-md text-xxs transition-colors border
-                  ${showTuning
-                    ? 'bg-accent/15 border-accent/30 text-accent'
-                    : 'bg-transparent border-border text-text-disabled hover:text-text-secondary'
-                  }`}
-              >
-                <SlidersHorizontal size={11} />
-                <span>Tune</span>
-              </button>
-            )}
             {isConnected && (
               <button
                 onClick={() => setCameraFollow(prev => !prev)}
@@ -697,136 +690,6 @@ export default function AnalysisPanel() {
             )}
           </div>
         </div>
-
-        {/* ── Detection Tuning Panel ────────────────────────────────── */}
-        {showTuning && (
-          <div className="border-t border-border bg-bg-secondary px-4 py-3">
-            {/* ── Battle Detection ── */}
-            <div className="mb-3">
-              <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
-                <Swords size={11} className="text-event-battle" /> Battle Detection
-              </span>
-              <div className="grid grid-cols-3 gap-x-6 gap-y-2 text-xxs">
-                <TuneField
-                  label="Gap threshold (s)"
-                  tooltip="Maximum time gap (seconds) between two adjacent-position cars for a battle to be detected. Lower values require tighter racing. At 0.5s only very close battles are captured; increase to 1.0–1.5s to catch more side-by-side action. Battles must be sustained for 10+ seconds."
-                  value={tuningParams.battle_gap_threshold}
-                  onChange={v => updateTuning('battle_gap_threshold', v || 0.5)}
-                  step={0.1} min={0.1} max={5}
-                />
-              </div>
-            </div>
-
-            {/* ── Crash Detection ── */}
-            <div className="mb-3">
-              <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
-                <Flame size={11} className="text-event-incident" /> Crash Detection
-              </span>
-              <div className="grid grid-cols-3 gap-x-6 gap-y-2 text-xxs">
-                <TuneField
-                  label="Min time loss (s)"
-                  tooltip="Minimum estimated time lost (seconds) for an off-track excursion to qualify as a crash. Higher values only catch severe incidents; lower values detect smaller offs. This measures the difference in CarIdxEstTime before and after the off-track. Default 10s means only big stops/impacts."
-                  value={tuningParams.crash_min_time_loss}
-                  onChange={v => updateTuning('crash_min_time_loss', v || 10)}
-                  step={1} min={1} max={60}
-                />
-                <TuneField
-                  label="Min off-track duration (s)"
-                  tooltip="Minimum duration (seconds) a car must remain off-track to count as a crash. Prevents brief grass clips from being flagged. Higher values only capture extended off-track excursions. Combined with time loss threshold to distinguish crashes from spinouts."
-                  value={tuningParams.crash_min_off_track_duration}
-                  onChange={v => updateTuning('crash_min_off_track_duration', v || 3)}
-                  step={0.5} min={0.5} max={30}
-                />
-              </div>
-            </div>
-
-            {/* ── Spinout Detection ── */}
-            <div className="mb-3">
-              <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
-                <RotateCcw size={11} className="text-event-battle" /> Spinout Detection
-              </span>
-              <div className="grid grid-cols-3 gap-x-6 gap-y-2 text-xxs">
-                <TuneField
-                  label="Min time loss (s)"
-                  tooltip="Minimum time loss (seconds) for an off-track moment to classify as a spinout (not just a track-limit violation). Events below this are ignored; events above the max are classified as crashes instead. Default 2s catches moderate loss-of-control moments."
-                  value={tuningParams.spinout_min_time_loss}
-                  onChange={v => updateTuning('spinout_min_time_loss', v || 2)}
-                  step={0.5} min={0.5} max={30}
-                />
-                <TuneField
-                  label="Max time loss (s)"
-                  tooltip="Maximum time loss (seconds) for a spinout. Off-track events with time loss exceeding this threshold are classified as crashes instead. This creates a band: spinouts are between min and max time loss. Default 10s means any off with 2–10s lost is a spinout, 10s+ is a crash."
-                  value={tuningParams.spinout_max_time_loss}
-                  onChange={v => updateTuning('spinout_max_time_loss', v || 10)}
-                  step={1} min={1} max={60}
-                />
-              </div>
-            </div>
-
-            {/* ── Contact Detection ── */}
-            <div className="mb-3">
-              <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
-                <CircleDot size={11} className="text-event-overtake" /> Contact Detection
-              </span>
-              <div className="grid grid-cols-3 gap-x-6 gap-y-2 text-xxs">
-                <TuneField
-                  label="Time window (s)"
-                  tooltip="Maximum time window (seconds) for grouping multiple cars going off-track as a single contact event. If two or more cars go off-track within this window at similar track positions, it's classified as car-to-car contact. Wider windows catch chain-reaction incidents."
-                  value={tuningParams.contact_time_window}
-                  onChange={v => updateTuning('contact_time_window', v || 2)}
-                  step={0.5} min={0.5} max={10}
-                />
-                <TuneField
-                  label="Proximity"
-                  tooltip="Maximum track-position difference (as fraction of lap, 0–1) for two off-track cars to be considered in contact. 0.05 = 5% of track length. Lower values require cars to be very close together; higher values group more distant incidents. At 90s lap time, 0.05 ≈ 4.5 seconds of track distance."
-                  value={tuningParams.contact_proximity}
-                  onChange={v => updateTuning('contact_proximity', v || 0.05)}
-                  step={0.01} min={0.01} max={1}
-                />
-              </div>
-            </div>
-
-            {/* ── Close Call Detection ── */}
-            <div className="mb-3">
-              <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
-                <ShieldAlert size={11} className="text-event-fastest" /> Close Call Detection
-              </span>
-              <div className="grid grid-cols-3 gap-x-6 gap-y-2 text-xxs">
-                <TuneField
-                  label="Proximity"
-                  tooltip="Maximum track-position difference (fraction of lap) between an off-track car and a nearby on-track car for a close call. Very small values (0.02 = 2% of lap) only catch true near-misses where cars are nearly side-by-side. Increase to catch wider-gap close calls."
-                  value={tuningParams.close_call_proximity}
-                  onChange={v => updateTuning('close_call_proximity', v || 0.02)}
-                  step={0.005} min={0.005} max={0.5}
-                />
-                <TuneField
-                  label="Max off-track (s)"
-                  tooltip="Maximum time loss (seconds) for a close call. The off-track car must recover quickly — if it loses more time than this, it becomes a spinout or crash instead. Low values capture only brief, exciting near-misses. These are entertainment-value events."
-                  value={tuningParams.close_call_max_off_track}
-                  onChange={v => updateTuning('close_call_max_off_track', v || 3)}
-                  step={0.5} min={0.5} max={15}
-                />
-              </div>
-            </div>
-
-            <div className="mt-1 flex items-center gap-2">
-              <button
-                onClick={handleRedetect}
-                disabled={isRedetecting}
-                className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold
-                           text-white bg-gradient-to-r from-gradient-from to-gradient-to
-                           rounded-lg hover:from-gradient-via hover:to-gradient-from
-                           transition-all duration-200 shadow-glow-sm disabled:opacity-50"
-              >
-                {isRedetecting ? <Loader2 size={13} className="animate-spin" /> : <SlidersHorizontal size={13} />}
-                {isRedetecting ? 'Re-detecting...' : 'Re-detect Events'}
-              </button>
-              <span className="text-xxs text-text-disabled">
-                Re-runs detection on existing telemetry with these parameters
-              </span>
-            </div>
-          </div>
-        )}
 
         {error && (
           <div className="flex items-center gap-1.5 px-4 py-1.5 bg-danger/10 border-t border-danger/20">
@@ -856,7 +719,7 @@ export default function AnalysisPanel() {
                       No log entries yet
                     </div>
                   )}
-                  {analysisLog.map(entry => (
+                  {[...analysisLog].reverse().map(entry => (
                     <div
                       key={entry.id}
                       className="flex gap-2 px-3 py-1.5 text-xxs border-b border-border-subtle/30 animate-fade-in"
@@ -880,7 +743,6 @@ export default function AnalysisPanel() {
                       </div>
                     </div>
                   ))}
-                  <div ref={logEndRef} />
                 </div>
               ),
             },
@@ -890,102 +752,245 @@ export default function AnalysisPanel() {
               icon: List,
               count: discoveredEvents.length || eventSummary?.total_events || 0,
               content: (
-                <div>
-                  {/* Filter chips */}
-                  {eventSummary && eventSummary.total_events > 0 && (
-                    <div className="px-3 py-2 border-b border-border-subtle flex flex-wrap gap-1">
-                      {eventSummary.by_type.map(({ event_type, count }) => {
-                        const cfg = EVENT_CONFIG[event_type] || {}
+                <div className="flex flex-col h-full">
+                  {/* Sub-navigation: Events list ↔ Tuning params */}
+                  <div className="shrink-0 flex items-center gap-1 px-3 py-1.5 border-b border-border-subtle bg-bg-secondary/50">
+                    <button
+                      onClick={() => setShowTuning(false)}
+                      className={`px-2 py-0.5 text-xxs rounded transition-colors
+                        ${!showTuning ? 'bg-accent/15 text-accent' : 'text-text-disabled hover:text-text-secondary'}`}
+                    >
+                      Events
+                    </button>
+                    <button
+                      onClick={() => setShowTuning(true)}
+                      className={`flex items-center gap-1 px-2 py-0.5 text-xxs rounded transition-colors
+                        ${showTuning ? 'bg-accent/15 text-accent' : 'text-text-disabled hover:text-text-secondary'}`}
+                    >
+                      <SlidersHorizontal size={9} />
+                      Tune
+                    </button>
+                    {showTuning && (
+                      <button
+                        onClick={handleRedetect}
+                        disabled={isRedetecting}
+                        className="ml-auto flex items-center gap-1 px-2 py-0.5 text-xxs font-medium
+                                   text-white bg-gradient-to-r from-gradient-from to-gradient-to
+                                   rounded transition-all duration-150 shadow-glow-sm disabled:opacity-50"
+                      >
+                        {isRedetecting
+                          ? <Loader2 size={9} className="animate-spin" />
+                          : <SlidersHorizontal size={9} />}
+                        {isRedetecting ? 'Running…' : 'Re-detect'}
+                      </button>
+                    )}
+                  </div>
+
+                  {showTuning ? (
+                    /* ── Tuning form ── */
+                    <div className="flex-1 overflow-y-auto px-3 py-2 space-y-3">
+                      {/* Battle */}
+                      <div>
+                        <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
+                          <Swords size={11} className="text-event-battle" /> Battle Detection
+                        </span>
+                        <TuneField
+                          label="Gap threshold (s)"
+                          tooltip="Maximum time gap (seconds) between two adjacent-position cars for a battle to be detected. Lower values require tighter racing. Battles must be sustained for 10+ seconds."
+                          value={tuningParams.battle_gap_threshold}
+                          onChange={v => updateTuning('battle_gap_threshold', v || 0.5)}
+                          step={0.1} min={0.1} max={5}
+                        />
+                      </div>
+                      {/* Crash */}
+                      <div>
+                        <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
+                          <Flame size={11} className="text-event-incident" /> Crash Detection
+                        </span>
+                        <div className="space-y-1.5">
+                          <TuneField
+                            label="Min time loss (s)"
+                            tooltip="Minimum estimated time lost for an off-track excursion to qualify as a crash."
+                            value={tuningParams.crash_min_time_loss}
+                            onChange={v => updateTuning('crash_min_time_loss', v || 10)}
+                            step={1} min={1} max={60}
+                          />
+                          <TuneField
+                            label="Min off-track duration (s)"
+                            tooltip="Minimum duration a car must remain off-track to count as a crash."
+                            value={tuningParams.crash_min_off_track_duration}
+                            onChange={v => updateTuning('crash_min_off_track_duration', v || 3)}
+                            step={0.5} min={0.5} max={30}
+                          />
+                        </div>
+                      </div>
+                      {/* Spinout */}
+                      <div>
+                        <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
+                          <RotateCcw size={11} className="text-event-battle" /> Spinout Detection
+                        </span>
+                        <div className="space-y-1.5">
+                          <TuneField
+                            label="Min time loss (s)"
+                            tooltip="Minimum time loss for an off-track moment to classify as a spinout."
+                            value={tuningParams.spinout_min_time_loss}
+                            onChange={v => updateTuning('spinout_min_time_loss', v || 2)}
+                            step={0.5} min={0.5} max={30}
+                          />
+                          <TuneField
+                            label="Max time loss (s)"
+                            tooltip="Maximum time loss for a spinout. Events above this threshold are classified as crashes."
+                            value={tuningParams.spinout_max_time_loss}
+                            onChange={v => updateTuning('spinout_max_time_loss', v || 10)}
+                            step={1} min={1} max={60}
+                          />
+                        </div>
+                      </div>
+                      {/* Contact */}
+                      <div>
+                        <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
+                          <CircleDot size={11} className="text-event-overtake" /> Contact Detection
+                        </span>
+                        <div className="space-y-1.5">
+                          <TuneField
+                            label="Time window (s)"
+                            tooltip="Maximum time window for grouping multiple off-track cars as a single contact event."
+                            value={tuningParams.contact_time_window}
+                            onChange={v => updateTuning('contact_time_window', v || 2)}
+                            step={0.5} min={0.5} max={10}
+                          />
+                          <TuneField
+                            label="Proximity"
+                            tooltip="Maximum track-position difference (fraction of lap) for two cars to be considered in contact."
+                            value={tuningParams.contact_proximity}
+                            onChange={v => updateTuning('contact_proximity', v || 0.05)}
+                            step={0.01} min={0.01} max={1}
+                          />
+                        </div>
+                      </div>
+                      {/* Close Call */}
+                      <div>
+                        <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
+                          <ShieldAlert size={11} className="text-event-fastest" /> Close Call Detection
+                        </span>
+                        <div className="space-y-1.5">
+                          <TuneField
+                            label="Proximity"
+                            tooltip="Maximum track-position difference between an off-track car and a nearby on-track car."
+                            value={tuningParams.close_call_proximity}
+                            onChange={v => updateTuning('close_call_proximity', v || 0.02)}
+                            step={0.005} min={0.005} max={0.5}
+                          />
+                          <TuneField
+                            label="Max off-track (s)"
+                            tooltip="Maximum time loss for a close call — recovery must be quick or it becomes a spinout/crash."
+                            value={tuningParams.close_call_max_off_track}
+                            onChange={v => updateTuning('close_call_max_off_track', v || 3)}
+                            step={0.5} min={0.5} max={15}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    /* ── Events list ── */
+                    <div className="flex-1 overflow-y-auto">
+                      {/* Filter chips */}
+                      {eventSummary && eventSummary.total_events > 0 && (
+                        <div className="px-3 py-2 border-b border-border-subtle flex flex-wrap gap-1">
+                          {eventSummary.by_type.map(({ event_type, count }) => {
+                            const cfg = EVENT_CONFIG[event_type] || {}
+                            const Icon = cfg.icon || BarChart3
+                            const isActive = activeFilter === event_type
+                            return (
+                              <Tooltip
+                                key={event_type}
+                                content={`${cfg.label || event_type}: ${count} event${count !== 1 ? 's' : ''} — click to ${isActive ? 'show all' : 'filter'}`}
+                                position="bottom"
+                                delay={200}
+                              >
+                                <button
+                                  onClick={() => handleFilterChange(event_type)}
+                                  className={`flex items-center gap-1 px-1.5 py-0.5 text-xxs rounded
+                                             transition-colors border
+                                             ${isActive
+                                               ? 'border-accent bg-accent/10 text-accent'
+                                               : 'border-border text-text-tertiary hover:text-text-secondary'
+                                             }`}
+                                >
+                                  <Icon size={9} className={cfg.color} />
+                                  <span>{count}</span>
+                                </button>
+                              </Tooltip>
+                            )
+                          })}
+                        </div>
+                      )}
+
+                      {/* Event list — compact rows */}
+                      {(isAnalyzing ? discoveredEvents : events).map((ev) => {
+                        const isDiscovered = isAnalyzing
+                        const type = isDiscovered ? ev.type : ev.event_type
+                        const cfg = EVENT_CONFIG[type] || {}
                         const Icon = cfg.icon || BarChart3
-                        const isActive = activeFilter === event_type
+                        const startSec = isDiscovered ? ev.startTime : ev.start_time_seconds
+                        const sev = ev.severity
+                        const eventId = ev.id
+                        const isExpanded = expandedEvent === `sidebar-${eventId}`
+
                         return (
-                          <Tooltip
-                            key={event_type}
-                            content={`${cfg.label || event_type}: ${count} event${count !== 1 ? 's' : ''} — click to ${isActive ? 'show all' : 'filter'}`}
-                            position="bottom"
-                            delay={200}
-                          >
-                            <button
-                              onClick={() => handleFilterChange(event_type)}
-                              className={`flex items-center gap-1 px-1.5 py-0.5 text-xxs rounded
-                                         transition-colors border
-                                         ${isActive
-                                           ? 'border-accent bg-accent/10 text-accent'
-                                           : 'border-border text-text-tertiary hover:text-text-secondary'
-                                         }`}
-                            >
-                              <Icon size={9} className={cfg.color} />
-                              <span>{count}</span>
-                            </button>
-                          </Tooltip>
+                          <div key={`${isDiscovered ? 'd' : 'e'}-${eventId}`}
+                               className="border-b border-border-subtle/30 animate-slide-right">
+                            <div className="flex items-center hover:bg-bg-hover transition-colors">
+                              <button
+                                onClick={() => seekToEvent(ev)}
+                                title="Seek replay to this event"
+                                className="flex-1 flex items-center gap-1.5 px-3 py-1.5 text-left min-w-0"
+                              >
+                                <Icon size={12} className={cfg.color || 'text-text-tertiary'} />
+                                <span className="text-xs font-medium text-text-primary truncate">
+                                  {cfg.label || type}
+                                </span>
+                                <span className="text-xxs text-text-disabled font-mono ml-auto">
+                                  {formatTime(startSec)}
+                                </span>
+                                <span className={`shrink-0 w-4 h-4 rounded-full flex items-center justify-center
+                                                text-xxs font-bold ${severityColor(sev)}`}>
+                                  {sev}
+                                </span>
+                              </button>
+                              {!isDiscovered && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    setExpandedEvent(prev => prev === `sidebar-${eventId}` ? null : `sidebar-${eventId}`)
+                                  }}
+                                  title={isExpanded ? 'Collapse details' : 'Expand details'}
+                                  className="shrink-0 w-6 h-6 flex items-center justify-center mr-1
+                                             rounded-md hover:bg-surface-active text-text-disabled
+                                             hover:text-text-secondary transition-colors"
+                                >
+                                  <ChevronDown size={12}
+                                    className={`transition-transform duration-150 ${isExpanded ? 'rotate-180' : ''}`} />
+                                </button>
+                              )}
+                            </div>
+                            {isExpanded && !isDiscovered && (
+                              <div className="px-3 pt-2 pb-2 bg-bg-secondary/50 border-t border-border-subtle animate-fade-in">
+                                <EventDetail event={ev} />
+                              </div>
+                            )}
+                          </div>
                         )
                       })}
-                    </div>
-                  )}
 
-                  {/* Event list — compact rows */}
-                  {(isAnalyzing ? discoveredEvents : events).map((ev) => {
-                    const isDiscovered = isAnalyzing
-                    const type = isDiscovered ? ev.type : ev.event_type
-                    const cfg = EVENT_CONFIG[type] || {}
-                    const Icon = cfg.icon || BarChart3
-                    const startSec = isDiscovered ? ev.startTime : ev.start_time_seconds
-                    const sev = ev.severity
-                    const eventId = isDiscovered ? ev.id : ev.id
-                    const isExpanded = expandedEvent === `sidebar-${eventId}`
-
-                    return (
-                      <div key={`${isDiscovered ? 'd' : 'e'}-${eventId}`}
-                           className="border-b border-border-subtle/30 animate-slide-right">
-                        <div className="flex items-center hover:bg-bg-hover transition-colors">
-                          <button
-                            onClick={() => seekToEvent(ev)}
-                            title="Seek replay to this event"
-                            className="flex-1 flex items-center gap-1.5 px-3 py-1.5 text-left min-w-0"
-                          >
-                            <Icon size={12} className={cfg.color || 'text-text-tertiary'} />
-                            <span className="text-xs font-medium text-text-primary truncate">
-                              {cfg.label || type}
-                            </span>
-                            <span className="text-xxs text-text-disabled font-mono ml-auto">
-                              {formatTime(startSec)}
-                            </span>
-                            <span className={`shrink-0 w-4 h-4 rounded-full flex items-center justify-center
-                                            text-xxs font-bold ${severityColor(sev)}`}>
-                              {sev}
-                            </span>
-                          </button>
-                          {!isDiscovered && (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                setExpandedEvent(prev => prev === `sidebar-${eventId}` ? null : `sidebar-${eventId}`)
-                              }}
-                              title={isExpanded ? 'Collapse details' : 'Expand details'}
-                              className="shrink-0 w-6 h-6 flex items-center justify-center mr-1
-                                         rounded-md hover:bg-surface-active text-text-disabled
-                                         hover:text-text-secondary transition-colors"
-                            >
-                              <ChevronDown size={12}
-                                className={`transition-transform duration-150 ${isExpanded ? 'rotate-180' : ''}`} />
-                            </button>
-                          )}
+                      {(isAnalyzing ? discoveredEvents : events).length === 0 && (
+                        <div className="flex items-center justify-center py-8 text-text-disabled text-xs">
+                          {isAnalyzing ? 'Waiting for events...' : 'No events detected'}
                         </div>
-                        {isExpanded && !isDiscovered && (
-                          <div className="px-3 pt-2 pb-2 bg-bg-secondary/50 border-t border-border-subtle animate-fade-in">
-                            <EventDetail event={ev} />
-                          </div>
-                        )}
-                      </div>
-                    )
-                  })}
-
-                  {(isAnalyzing ? discoveredEvents : events).length === 0 && (
-                    <div className="flex items-center justify-center py-8 text-text-disabled text-xs">
-                      {isAnalyzing ? 'Waiting for events...' : 'No events detected'}
+                      )}
+                      <div ref={eventsEndRef} />
                     </div>
                   )}
-                  <div ref={eventsEndRef} />
                 </div>
               ),
             },
@@ -998,14 +1003,16 @@ export default function AnalysisPanel() {
           ]}
         />
 
-        {/* ── TV Preview area + playback controls ─────────────────────── */}
-        <div className="flex-1 flex flex-col min-w-0 bg-bg-primary">
-          {/* TV container — fills available space, centers the 16:9 stream */}
-          <div className="flex-1 flex items-center justify-center p-4 min-h-0 relative">
-            <div className="relative h-full rounded-xl overflow-hidden border-2 border-border bg-black shadow-lg"
-                 style={{ aspectRatio: '16/9', maxWidth: '100%', cursor: isConnected ? 'pointer' : 'default' }}
-                 onClick={isConnected ? handlePlayPause : undefined}
-                 title={isConnected ? (isPlaying ? 'Click to pause' : 'Click to play') : undefined}>
+        {/* ── Center + right column ────────────────────────────────────── */}
+        <div className="flex-1 flex flex-col min-w-0 bg-bg-primary overflow-hidden">
+          {/* Row: TV card + cameras/drivers cards (same height) */}
+          <div className="flex-1 min-h-0 flex gap-3 p-3">
+            {/* TV card */}
+            <div className="flex-1 flex items-center justify-center min-h-0 min-w-0">
+              <div className="relative rounded-xl overflow-hidden border-2 border-border bg-black shadow-lg"
+                   style={{ aspectRatio: '16/9', width: '100%', maxHeight: '100%', cursor: isConnected && !isAnalyzing ? 'pointer' : 'default' }}
+                 onClick={isConnected && !isAnalyzing ? handlePlayPause : undefined}
+                 title={isAnalyzing ? 'Playback disabled during analysis' : isConnected ? (isPlaying ? 'Click to pause' : 'Click to play') : undefined}>
               {isConnected ? (
                 <>
                   {/* Stream: HLS, H.264 (MSE), or MJPEG depending on format setting */}
@@ -1067,22 +1074,6 @@ export default function AnalysisPanel() {
                       LIVE
                     </div>
                   )}
-                  {/* Progress overlay */}
-                  {isAnalyzing && progress && (
-                    <div className="absolute bottom-3 left-3 right-3 flex items-center gap-2
-                                    bg-black/70 backdrop-blur-sm rounded-md px-2.5 py-1.5">
-                      <span className="text-xxs text-white/80 font-mono shrink-0">
-                        {Math.round(progress.percent || 0)}%
-                      </span>
-                      <div className="flex-1 h-1 bg-white/20 rounded-full overflow-hidden">
-                        <div className="h-full bg-accent rounded-full transition-all duration-300"
-                             style={{ width: `${progress.percent || 0}%` }} />
-                      </div>
-                      {progress.currentLap && (
-                        <span className="text-xxs text-white/60 shrink-0">L{progress.currentLap}</span>
-                      )}
-                    </div>
-                  )}
                 </>
               ) : (
                 <div className="flex flex-col items-center justify-center h-full gap-2">
@@ -1094,12 +1085,29 @@ export default function AnalysisPanel() {
                 </div>
               )}
 
-              {/* Top-right controls: restart + window picker + quality settings */}
-              <div className="absolute top-3 right-3 flex items-center gap-1.5 z-10" onClick={e => e.stopPropagation()}>
+              {/* Stream hidden overlay */}
+              {!streamVisible && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-bg-secondary z-30 gap-3 pointer-events-none">
+                  <EyeOff size={28} className="text-text-disabled" />
+                  <span className="text-xs text-text-disabled font-medium">Preview hidden</span>
+                </div>
+              )}
+
+              {/* Top-right controls: stream visibility + restart + window picker + quality settings */}
+              <div className="absolute top-3 right-3 flex items-center gap-1.5 z-40" onClick={e => e.stopPropagation()}>
+                <button
+                  onClick={() => setStreamVisible(v => !v)}
+                  title={streamVisible ? 'Hide preview' : 'Show preview'}
+                  className="flex items-center justify-center h-7 px-2 rounded-md text-xxs
+                             bg-black/70 backdrop-blur-sm text-white/70 hover:text-white border border-white/10
+                             transition-colors"
+                >
+                  {streamVisible ? <Eye size={11} /> : <EyeOff size={11} />}
+                </button>
                 <button
                   onClick={() => setStreamKey(k => k + 1)}
                   title="Restart preview stream"
-                  className="flex items-center gap-1 px-2 py-1 rounded-md text-xxs
+                  className="flex items-center justify-center h-7 px-2 rounded-md text-xxs
                              bg-black/70 backdrop-blur-sm text-white/70 hover:text-white border border-white/10
                              transition-colors"
                 >
@@ -1133,11 +1141,12 @@ export default function AnalysisPanel() {
                 <div className="absolute top-10 right-3 w-56 bg-bg-secondary border border-border
                                 rounded-lg shadow-xl z-20 animate-fade-in p-3" onClick={e => e.stopPropagation()}>
                   <span className="text-xxs font-medium text-text-primary block mb-2">Stream Quality</span>
-                  {/* Format toggle */}
+
+                  {/* Format selector */}
                   <div className="flex items-center justify-between text-xxs text-text-secondary mb-2">
                     <span className="font-medium">Format</span>
                     <div className="flex rounded overflow-hidden border border-border">
-                      {['mjpeg', 'h264'].map(fmt => (
+                      {['mjpeg', 'h264', 'hls'].map(fmt => (
                         <button
                           key={fmt}
                           onClick={() => {
@@ -1151,7 +1160,7 @@ export default function AnalysisPanel() {
                               : 'bg-surface text-text-secondary hover:bg-bg-hover'
                           }`}
                         >
-                          {fmt === 'mjpeg' ? 'MJPEG' : 'H.264'}
+                          {fmt === 'mjpeg' ? 'MJPEG' : fmt === 'h264' ? 'H.264' : 'HLS'}
                         </button>
                       ))}
                     </div>
@@ -1162,28 +1171,6 @@ export default function AnalysisPanel() {
 
                   {/* FPS — shared across formats */}
                   <div className="space-y-2">
-                    <label className="flex items-center justify-between text-xxs text-text-secondary">
-                      <span>Format</span>
-                      <div className="flex rounded overflow-hidden border border-border">
-                        {['mjpeg', 'h264', 'hls'].map(fmt => (
-                          <button
-                            key={fmt}
-                            onClick={() => {
-                              setStreamFormat(fmt)
-                              setStreamKey(k => k + 1)
-                              setShowQualitySettings(false)
-                            }}
-                            className={`px-2 py-0.5 text-xxs transition-colors ${
-                              streamFormat === fmt
-                                ? 'bg-accent text-white'
-                                : 'bg-surface text-text-secondary hover:bg-bg-hover'
-                            }`}
-                          >
-                            {fmt === 'mjpeg' ? 'MJPEG' : fmt === 'h264' ? 'H.264' : 'HLS'}
-                          </button>
-                        ))}
-                      </div>
-                    </label>
                     <label className="flex items-center justify-between text-xxs text-text-secondary">
                       <span>FPS</span>
                       <select value={streamFps} onChange={e => { setStreamFps(+e.target.value); setStreamKey(k => k + 1) }}
@@ -1200,7 +1187,7 @@ export default function AnalysisPanel() {
                     {streamFormat === 'h264' ? (
                       <label className="flex items-center justify-between text-xxs text-text-secondary">
                         <span>Quality (CRF)</span>
-                        <select value={streamCrf} onChange={e => { setStreamCrf(+e.target.value); setStreamKey(k => k + 1) }}
+                        <select value={h264Crf} onChange={e => { setH264Crf(+e.target.value); setStreamKey(k => k + 1) }}
                           className="bg-surface border border-border rounded px-1.5 py-0.5 text-xxs text-text-primary">
                           <option value={18}>Visually lossless (18)</option>
                           <option value={23}>High (23)</option>
@@ -1352,206 +1339,191 @@ export default function AnalysisPanel() {
             </div>
           </div>
 
-          {/* ── Timeline scrubber ─────────────────────────────────────── */}
-          {isConnected && raceDuration > 0 && replayState && (
-            <div className="shrink-0 px-4 pt-2 bg-bg-primary">
-              <div
-                ref={scrubberRef}
-                className="relative h-5 group cursor-pointer select-none"
-                onMouseDown={(e) => {
-                  const bar = e.currentTarget
-                  const rect = bar.getBoundingClientRect()
-                  const seekTo = (clientX) => {
-                    const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
-                    const timeMs = Math.round(pct * raceDuration * 1000)
-                    apiPost('/iracing/replay/seek-time', { session_num: 0, session_time_ms: timeMs })
-                  }
-                  seekTo(e.clientX)
-                  let lastSeek = Date.now()
-                  const onMove = (ev) => {
-                    if (Date.now() - lastSeek < 200) return
-                    lastSeek = Date.now()
-                    seekTo(ev.clientX)
-                  }
-                  const onUp = (ev) => {
-                    seekTo(ev.clientX)
-                    document.removeEventListener('mousemove', onMove)
-                    document.removeEventListener('mouseup', onUp)
-                  }
-                  document.addEventListener('mousemove', onMove)
-                  document.addEventListener('mouseup', onUp)
-                }}
-              >
-                {/* Track */}
-                <div className="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-1.5 bg-surface rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-gradient-to-r from-gradient-from via-gradient-via to-gradient-to rounded-full transition-all duration-200"
-                    style={{ width: `${raceDuration > 0 ? Math.min(100, (replayState.session_time / raceDuration) * 100) : 0}%` }}
-                  />
-                </div>
-                {/* Event markers */}
-                {(isAnalyzing ? discoveredEvents : events).map((ev, i) => {
-                  const time = ev.startTime ?? ev.start_time_seconds ?? 0
-                  if (time <= 0 || raceDuration <= 0) return null
-                  const pct = Math.min(100, (time / raceDuration) * 100)
-                  return (
-                    <div
-                      key={`marker-${i}`}
-                      className="absolute top-1/2 -translate-y-1/2 w-0.5 h-3 rounded-full bg-white/30 pointer-events-none"
-                      style={{ left: `${pct}%` }}
-                    />
-                  )
-                })}
-                {/* Thumb */}
-                <div
-                  className="absolute top-1/2 w-3 h-3 rounded-full bg-accent border-2 border-white shadow-md
-                             opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
-                  style={{
-                    left: `${raceDuration > 0 ? Math.min(100, (replayState.session_time / raceDuration) * 100) : 0}%`,
-                    transform: 'translate(-50%, -50%)',
-                  }}
-                />
-              </div>
-              <div className="flex justify-between -mt-0.5 pb-0.5">
-                <span className="text-xxs text-text-disabled font-mono">{formatTime(replayState.session_time)}</span>
-                <span className="text-xxs text-text-disabled font-mono">{formatTime(raceDuration)}</span>
-              </div>
-            </div>
-          )}
-
-          {/* ── Full playback controls beneath the TV ─────────────────── */}
-          {isConnected && (
-            <div className="shrink-0 border-t border-border bg-bg-secondary px-4 py-2">
-              {/* Replay time display */}
-              {replayState && (
-                <div className="flex items-center justify-center gap-2 mb-1.5">
-                  <span className="text-xxs text-text-disabled font-mono">
-                    {formatTime(replayState.session_time)}
-                  </span>
-                  {replayState.race_laps > 0 && (
-                    <span className="text-xxs text-text-disabled flex items-center gap-1">
-                      ·
-                      <button
-                        onClick={() => handleReplaySearch('prev_lap')}
-                        title="Previous lap"
-                        className="w-4 h-4 rounded flex items-center justify-center hover:bg-bg-hover
-                                   text-text-disabled hover:text-text-primary transition-colors"
-                      >
-                        <Minus size={10} />
-                      </button>
-                      <span>Lap {replayState.race_laps}</span>
-                      <button
-                        onClick={() => handleReplaySearch('next_lap')}
-                        title="Next lap"
-                        className="w-4 h-4 rounded flex items-center justify-center hover:bg-bg-hover
-                                   text-text-disabled hover:text-text-primary transition-colors"
-                      >
-                        <Plus size={10} />
-                      </button>
+            {/* ── Cameras + Drivers column (floating cards, same row height as TV) ── */}
+            {isConnected && !isAnalyzing && (
+              <div className="flex flex-col gap-2 w-44 shrink-0">
+                {/* Cameras card */}
+                <div className="rounded-xl border border-border bg-bg-secondary shadow-sm overflow-hidden flex flex-col"
+                     style={{ maxHeight: '45%' }}>
+                  <div className="shrink-0 px-3 py-2 border-b border-border">
+                    <span className="text-xxs font-medium text-text-primary flex items-center gap-1.5">
+                      <Eye size={11} />
+                      Cameras
                     </span>
-                  )}
+                  </div>
+                  <div className="flex-1 overflow-y-auto">
+                    {cameraGroups.map(cam => (
+                      <button key={cam.group_num}
+                        onClick={() => handleSwitchCamera(cam.group_num)}
+                        className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xxs
+                                   hover:bg-bg-hover transition-colors border-b border-border-subtle/30
+                                   ${replayState?.cam_group_num === cam.group_num
+                                     ? 'bg-accent/10 text-accent font-medium'
+                                     : 'text-text-secondary'}`}>
+                        <Eye size={10} className={replayState?.cam_group_num === cam.group_num ? 'text-accent' : 'text-text-disabled'} />
+                        <span className="truncate">{cam.group_name}</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              )}
+                {/* Drivers card */}
+                <div className="flex-1 rounded-xl border border-border bg-bg-secondary shadow-sm overflow-hidden flex flex-col min-h-0">
+                  <div className="shrink-0 px-3 py-2 border-b border-border">
+                    <span className="text-xxs font-medium text-text-primary flex items-center gap-1.5">
+                      <Users size={11} />
+                      Drivers
+                    </span>
+                  </div>
+                  <div className="flex-1 overflow-y-auto">
+                    {drivers.filter(d => !d.is_spectator).map(d => (
+                      <button key={d.car_idx}
+                        onClick={() => handleSwitchDriver(d.car_idx)}
+                        className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xxs
+                                   hover:bg-bg-hover transition-colors border-b border-border-subtle/30
+                                   ${replayState?.cam_car_idx === d.car_idx
+                                     ? 'bg-accent/10 text-accent font-medium'
+                                     : 'text-text-secondary'}`}>
+                        <span className="font-mono shrink-0 w-5 text-right">#{d.car_number}</span>
+                        <span className="truncate">{d.user_name}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
 
-              {/* Transport controls */}
-              <div className="flex items-center justify-center gap-1">
-                {/* Prev incident */}
-                <button onClick={() => handleReplaySearch('prev_incident')} title="Previous incident"
-                  className="p-1.5 rounded-md hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors">
-                  <SkipBack size={14} />
-                </button>
-                {/* Prev lap */}
-                <button onClick={() => handleReplaySearch('prev_lap')} title="Previous lap"
-                  className="p-1.5 rounded-md hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors">
-                  <Rewind size={14} />
-                </button>
-                {/* Rewind: -4x */}
-                <button onClick={() => handleSetSpeed(-4)} title="Rewind 4×"
-                  className={`px-2 py-1 rounded-md text-xxs font-mono transition-colors
-                    ${replaySpeed === -4 ? 'bg-accent/15 text-accent' : 'hover:bg-bg-hover text-text-secondary hover:text-text-primary'}`}>
-                  ◀◀
-                </button>
-                {/* Play/Pause toggle */}
-                <button onClick={handlePlayPause} title={isPlaying ? 'Pause' : 'Play'}
-                  className="p-2 rounded-lg bg-gradient-to-r from-gradient-from to-gradient-to
-                             text-white hover:from-gradient-via hover:to-gradient-from
-                             transition-all duration-200 shadow-glow-sm mx-1">
-                  {isPlaying ? <Pause size={16} /> : <Play size={16} />}
-                </button>
-                {/* Speed buttons */}
-                {[1, 2, 4, 8, 16].map(spd => (
-                  <button key={spd} onClick={() => handleSetSpeed(spd)} title={`${spd}× speed`}
-                    className={`px-2 py-1 rounded-md text-xxs font-mono transition-colors
-                      ${replaySpeed === spd ? 'bg-accent/15 text-accent font-bold' : 'hover:bg-bg-hover text-text-secondary hover:text-text-primary'}`}>
-                    {spd}×
+          {/* ── Playback controls card ────────────────────────────────── */}
+          {isConnected && !isAnalyzing && (
+            <div className="shrink-0 px-3 pb-3">
+              <div className="rounded-xl border border-border bg-bg-secondary shadow-sm px-4 py-3">
+                {/* Timeline scrubber — shown when race duration is known */}
+                {raceDuration > 0 && replayState && (
+                  <div className="mb-3">
+                    <div
+                      ref={scrubberRef}
+                      className="relative h-5 group cursor-pointer select-none"
+                      onMouseDown={(e) => {
+                        const bar = e.currentTarget
+                        const rect = bar.getBoundingClientRect()
+                        const seekTo = (clientX) => {
+                          const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+                          const timeMs = Math.round(pct * raceDuration * 1000)
+                          apiPost('/iracing/replay/seek-time', { session_num: 0, session_time_ms: timeMs })
+                        }
+                        seekTo(e.clientX)
+                        let lastSeek = Date.now()
+                        const onMove = (mv) => {
+                          if (Date.now() - lastSeek < 200) return
+                          lastSeek = Date.now()
+                          seekTo(mv.clientX)
+                        }
+                        const onUp = (up) => {
+                          seekTo(up.clientX)
+                          document.removeEventListener('mousemove', onMove)
+                          document.removeEventListener('mouseup', onUp)
+                        }
+                        document.addEventListener('mousemove', onMove)
+                        document.addEventListener('mouseup', onUp)
+                      }}
+                    >
+                      {/* Track */}
+                      <div className="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-1.5 bg-surface rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-gradient-to-r from-gradient-from via-gradient-via to-gradient-to rounded-full transition-all duration-200"
+                          style={{ width: `${Math.min(100, (replayState.session_time / raceDuration) * 100)}%` }}
+                        />
+                      </div>
+                      {/* Event markers */}
+                      {(isAnalyzing ? discoveredEvents : events).map((ev, i) => {
+                        const time = ev.startTime ?? ev.start_time_seconds ?? 0
+                        if (time <= 0) return null
+                        const pct = Math.min(100, (time / raceDuration) * 100)
+                        return (
+                          <div key={`marker-${i}`}
+                               className="absolute top-1/2 -translate-y-1/2 w-0.5 h-3 rounded-full bg-white/30 pointer-events-none"
+                               style={{ left: `${pct}%` }} />
+                        )
+                      })}
+                      {/* Thumb */}
+                      <div
+                        className="absolute top-1/2 w-3 h-3 rounded-full bg-accent border-2 border-white shadow-md
+                                   opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
+                        style={{ left: `${Math.min(100, (replayState.session_time / raceDuration) * 100)}%`,
+                                 transform: 'translate(-50%, -50%)' }}
+                      />
+                    </div>
+                    <div className="flex justify-between -mt-0.5">
+                      <span className="text-xxs text-text-disabled font-mono">{formatTime(replayState.session_time)}</span>
+                      <span className="text-xxs text-text-disabled font-mono">{formatTime(raceDuration)}</span>
+                    </div>
+                  </div>
+                )}
+                {/* Replay time + lap counter */}
+                {replayState && (
+                  <div className="flex items-center justify-center gap-2 mb-1.5">
+                    <span className="text-xxs text-text-disabled font-mono">
+                      {formatTime(replayState.session_time)}
+                    </span>
+                    {replayState.race_laps > 0 && (
+                      <span className="text-xxs text-text-disabled flex items-center gap-1">
+                        ·
+                        <button onClick={() => handleReplaySearch('prev_lap')} title="Previous lap"
+                          className="w-4 h-4 rounded flex items-center justify-center hover:bg-bg-hover
+                                     text-text-disabled hover:text-text-primary transition-colors">
+                          <Minus size={10} />
+                        </button>
+                        <span>Lap {replayState.race_laps}</span>
+                        <button onClick={() => handleReplaySearch('next_lap')} title="Next lap"
+                          className="w-4 h-4 rounded flex items-center justify-center hover:bg-bg-hover
+                                     text-text-disabled hover:text-text-primary transition-colors">
+                          <Plus size={10} />
+                        </button>
+                      </span>
+                    )}
+                  </div>
+                )}
+                {/* Transport controls */}
+                <div className="flex items-center justify-center gap-1">
+                  <button onClick={() => handleReplaySearch('prev_incident')} title="Previous incident"
+                    className="p-1.5 rounded-md hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors">
+                    <SkipBack size={14} />
                   </button>
-                ))}
-                {/* Next lap */}
-                <button onClick={() => handleReplaySearch('next_lap')} title="Next lap"
-                  className="p-1.5 rounded-md hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors">
-                  <FastForward size={14} />
-                </button>
-                {/* Next incident */}
-                <button onClick={() => handleReplaySearch('next_incident')} title="Next incident"
-                  className="p-1.5 rounded-md hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors">
-                  <SkipForward size={14} />
-                </button>
+                  <button onClick={() => handleReplaySearch('prev_lap')} title="Previous lap"
+                    className="p-1.5 rounded-md hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors">
+                    <Rewind size={14} />
+                  </button>
+                  <button onClick={() => handleSetSpeed(-4)} title="Rewind 4×"
+                    className={`px-2 py-1 rounded-md text-xxs font-mono transition-colors
+                      ${replaySpeed === -4 ? 'bg-accent/15 text-accent' : 'hover:bg-bg-hover text-text-secondary hover:text-text-primary'}`}>
+                    ◀◀
+                  </button>
+                  <button onClick={handlePlayPause} title={isPlaying ? 'Pause' : 'Play'}
+                    className="p-2 rounded-lg bg-gradient-to-r from-gradient-from to-gradient-to
+                               text-white hover:from-gradient-via hover:to-gradient-from
+                               transition-all duration-200 shadow-glow-sm mx-1">
+                    {isPlaying ? <Pause size={16} /> : <Play size={16} />}
+                  </button>
+                  {[1, 2, 4, 8, 16].map(spd => (
+                    <button key={spd} onClick={() => handleSetSpeed(spd)} title={`${spd}× speed`}
+                      className={`px-2 py-1 rounded-md text-xxs font-mono transition-colors
+                        ${replaySpeed === spd ? 'bg-accent/15 text-accent font-bold' : 'hover:bg-bg-hover text-text-secondary hover:text-text-primary'}`}>
+                      {spd}×
+                    </button>
+                  ))}
+                  <button onClick={() => handleReplaySearch('next_lap')} title="Next lap"
+                    className="p-1.5 rounded-md hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors">
+                    <FastForward size={14} />
+                  </button>
+                  <button onClick={() => handleReplaySearch('next_incident')} title="Next incident"
+                    className="p-1.5 rounded-md hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors">
+                    <SkipForward size={14} />
+                  </button>
+                </div>
               </div>
             </div>
           )}
         </div>
-
-        {/* ── Right sidebar (Cameras + Drivers) ───────────────────────── */}
-        {isConnected && (
-          <div className="w-48 flex flex-col overflow-hidden border-l border-border bg-bg-primary/50 shrink-0">
-            {/* Cameras section */}
-            <div className="flex flex-col overflow-hidden" style={{ maxHeight: '45%' }}>
-              <div className="shrink-0 px-3 py-2 border-b border-border bg-bg-secondary/50">
-                <span className="text-xxs font-medium text-text-primary flex items-center gap-1.5">
-                  <Eye size={11} />
-                  Cameras
-                </span>
-              </div>
-              <div className="flex-1 overflow-y-auto">
-                {cameraGroups.map(cam => (
-                  <button key={cam.group_num}
-                    onClick={() => handleSwitchCamera(cam.group_num)}
-                    className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xxs
-                               hover:bg-bg-hover transition-colors border-b border-border-subtle/30
-                               ${replayState?.cam_group_num === cam.group_num
-                                 ? 'bg-accent/10 text-accent font-medium'
-                                 : 'text-text-secondary'}`}>
-                    <Eye size={10} className={replayState?.cam_group_num === cam.group_num ? 'text-accent' : 'text-text-disabled'} />
-                    <span className="truncate">{cam.group_name}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-            {/* Drivers section */}
-            <div className="flex-1 flex flex-col overflow-hidden border-t border-border">
-              <div className="shrink-0 px-3 py-2 border-b border-border bg-bg-secondary/50">
-                <span className="text-xxs font-medium text-text-primary flex items-center gap-1.5">
-                  <Users size={11} />
-                  Drivers
-                </span>
-              </div>
-              <div className="flex-1 overflow-y-auto">
-                {drivers.filter(d => !d.is_spectator).map(d => (
-                  <button key={d.car_idx}
-                    onClick={() => handleSwitchDriver(d.car_idx)}
-                    className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xxs
-                               hover:bg-bg-hover transition-colors border-b border-border-subtle/30
-                               ${replayState?.cam_car_idx === d.car_idx
-                                 ? 'bg-accent/10 text-accent font-medium'
-                                 : 'text-text-secondary'}`}>
-                    <span className="font-mono shrink-0 w-5 text-right">#{d.car_number}</span>
-                    <span className="truncate">{d.user_name}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
 
       </div>
     </div>
@@ -1629,19 +1601,19 @@ function EventDetail({ event }) {
  */
 function TuneField({ label, tooltip, value, onChange, step, min, max }) {
   return (
-    <label className="flex flex-col gap-0.5">
-      <span className="text-text-secondary font-medium flex items-center gap-1">
+    <label className="flex items-center justify-between gap-2">
+      <span className="text-text-secondary font-medium flex items-center gap-1 shrink-0 text-xxs">
         {label}
         {tooltip && (
           <Tooltip content={tooltip} position="top">
-            <Info size={11} className="text-text-disabled hover:text-accent cursor-help transition-colors" />
+            <Info size={10} className="text-text-disabled hover:text-accent cursor-help transition-colors" />
           </Tooltip>
         )}
       </span>
       <input type="number" step={step} min={min} max={max}
         value={value}
         onChange={e => onChange(parseFloat(e.target.value))}
-        className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
+        className="w-20 px-2 py-0.5 rounded bg-surface border border-border text-text-primary text-xxs text-right"
       />
     </label>
   )

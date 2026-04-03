@@ -1,4 +1,5 @@
 import { useCallback } from 'react'
+import { Loader2 } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext'
 import { useAnalysis } from '../../context/AnalysisContext'
 import AnalysisPanel from '../analysis/AnalysisPanel'
@@ -9,10 +10,10 @@ import StepGate from '../common/StepGate'
 
 /**
  * Project view — shown when a project is open.
- * Displays step indicator and current step content area.
- * Steps are always navigable; StepGate CTA is shown when prerequisites aren't met.
+ * Shows a content-area spinner while the project record is loading,
+ * then renders step content.
  */
-function ProjectView({ project }) {
+function ProjectView({ project, isLoading }) {
   const { advanceStep } = useProject()
   const { events, eventSummary } = useAnalysis()
 
@@ -23,6 +24,17 @@ function ProjectView({ project }) {
       // Advance failed
     }
   }, [project.id, advanceStep])
+
+  // While the project record itself is still fetching, show a neutral spinner
+  // in the content area (not the analysis-specific one).
+  if (isLoading) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center gap-3 animate-fade-in">
+        <Loader2 size={22} className="animate-spin text-text-disabled" />
+        <p className="text-xs text-text-tertiary">Opening project…</p>
+      </div>
+    )
+  }
 
   const hasAnalysis = (events?.length > 0) || (eventSummary?.total_events > 0)
 

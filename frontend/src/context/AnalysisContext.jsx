@@ -242,16 +242,18 @@ export function AnalysisProvider({ children }) {
   // ── Load analysis log from persisted data ───────────────────────────────
   const loadAnalysisLog = useCallback((entries) => {
     if (!entries || entries.length === 0) return
-    const mapped = entries.map((entry, i) => ({
-      id: i + 1,
-      level: entry.event === 'completed' ? 'success'
-           : entry.event === 'error' ? 'error'
-           : entry.stage === 'analysis_detect' ? 'detect'
-           : 'info',
-      ts: (entry.ts || 0) * 1000,
-      message: entry.description || entry.message || entry.event || '',
-      detail: entry.detail || '',
-    }))
+    const mapped = entries
+      .filter(entry => entry.event !== 'event_discovered')
+      .map((entry, i) => ({
+        id: i + 1,
+        level: entry.event === 'completed' ? 'success'
+             : entry.event === 'error' ? 'error'
+             : entry.stage === 'analysis_detect' ? 'detect'
+             : 'info',
+        ts: (entry.ts || 0) * 1000,
+        message: entry.description || entry.message || entry.event || '',
+        detail: entry.detail || '',
+      }))
     logIdRef.current = mapped.length
     setAnalysisLog(mapped)
   }, [])

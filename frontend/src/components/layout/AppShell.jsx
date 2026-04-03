@@ -1,4 +1,5 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
+import { Loader2, BarChart3 } from 'lucide-react'
 import Toolbar from './Toolbar'
 import ProjectLibrary from '../projects/ProjectLibrary'
 import ProjectView from '../projects/ProjectView'
@@ -7,6 +8,7 @@ import HelpPanel from '../help/HelpPanel'
 import { useProject } from '../../context/ProjectContext'
 import { useAnalysis } from '../../context/AnalysisContext'
 import { useUndoRedo } from '../../context/UndoRedoContext'
+import { useSettings } from '../../context/SettingsContext'
 
 /**
  * Main application layout shell.
@@ -15,11 +17,32 @@ import { useUndoRedo } from '../../context/UndoRedoContext'
 function AppShell() {
   const { activeProject, openProject, closeProject, setStep } = useProject()
   const { events, eventSummary } = useAnalysis()
+  const { loading: settingsLoading } = useSettings()
   const [showSettings, setShowSettings] = useState(false)
   const { undo, redo, canUndo, canRedo, history, currentIndex } = useUndoRedo()
 
-  const handleOpenProject = useCallback((project) => {
-    openProject(project.id)
+  // True while a project is being fetched after the user clicks open
+  const [projectLoading, setProjectLoading] = useState(false)
+
+  // App-ready fade: once settings load, flip appReady so we can fade out the splash
+  const [appReady, setAppReady] = useState(false)
+  const [splashDone, setSplashDone] = useState(false)
+  useEffect(() => {
+    if (!settingsLoading) {
+      setAppReady(true)
+      // Keep splash mounted briefly so the fade-out animation plays
+      const t = setTimeout(() => setSplashDone(true), 600)
+      return () => clearTimeout(t)
+    }
+  }, [settingsLoading])
+
+  const handleOpenProject = useCallback(async (project) => {
+    setProjectLoading(true)
+    try {
+      await openProject(project.id)
+    } finally {
+      setProjectLoading(false)
+    }
   }, [openProject])
 
   const handleStepClick = useCallback(async (stepId) => {
@@ -50,6 +73,27 @@ function AppShell() {
 
   return (
     <>
+    {/* ── Full-screen app splash (settings / backend boot) ──────────────── */}
+    {!splashDone && (
+      <div
+        className={`fixed inset-0 z-50 flex flex-col items-center justify-center
+                    bg-bg-primary transition-opacity duration-500
+                    ${appReady ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
+      >
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-gradient-from via-gradient-via to-gradient-to
+                          flex items-center justify-center shadow-glow">
+            <BarChart3 size={30} className="text-white" />
+          </div>
+          <div className="text-center">
+            <p className="text-base font-bold text-text-primary tracking-tight">League Replay Studio</p>
+            <p className="text-xs text-text-tertiary mt-1">Starting up…</p>
+          </div>
+          <Loader2 size={18} className="animate-spin text-text-disabled mt-2" />
+        </div>
+      </div>
+    )}
+
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-bg-primary">
       {/* Top toolbar */}
       <Toolbar
@@ -76,6 +120,7 @@ function AppShell() {
           ) : activeProject ? (
             <ProjectView
               project={activeProject}
+              isLoading={projectLoading}
             />
           ) : (
             <ProjectLibrary onOpenProject={handleOpenProject} />

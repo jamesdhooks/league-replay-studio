@@ -41,6 +41,7 @@ static DXGICapture g_capture;
 static WGCCapture  g_wgc;
 static std::atomic<bool>     g_use_wgc{false};
 static std::atomic<bool>     g_has_target{false};  // don't capture until set_hwnd/set_region
+static bool                  g_dxgi_ready = false;  // true once DXGI DuplicateOutput succeeds
 static HANDLE g_shm_handle = nullptr;
 static void*  g_shm_ptr    = nullptr;
 
@@ -199,6 +200,10 @@ static std::string handleCommand(const std::string& json_cmd) {
     }
 
     if (cmd == "set_region") {
+        if (!g_dxgi_ready) {
+            fprintf(stderr, "[CMD] set_region rejected: DXGI not initialised\n");
+            return "{\"status\":\"error\",\"message\":\"dxgi_unavailable\"}";
+        }
         int x = jsonGetInt(json_cmd, "x");
         int y = jsonGetInt(json_cmd, "y");
         int w = jsonGetInt(json_cmd, "w");
@@ -264,13 +269,17 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // 2. Initialise DXGI capture
+    // 2. Initialise DXGI capture (non-fatal: WGC HWND mode does not require it;
+    //    DXGI_ERROR_NOT_CURRENTLY_AVAILABLE is common when a game holds the
+    //    Desktop Duplication handle exclusively)
     if (!g_capture.init(output_idx)) {
-        fprintf(stderr, "[Main] DXGI init failed: %s\n", g_capture.lastError().c_str());
-        destroySharedMemory();
-        return 1;
+        fprintf(stderr, "[Main] DXGI init failed (non-fatal): %s\n",
+                g_capture.lastError().c_str());
+        fprintf(stderr, "[Main] set_region will be unavailable; WGC HWND capture is still active\n");
+    } else {
+        g_dxgi_ready = true;
+        fprintf(stderr, "[Main] DXGI capture initialised on output %d\n", output_idx);
     }
-    fprintf(stderr, "[Main] DXGI capture initialised on output %d\n", output_idx);
 
     // 3. Start capture thread
     std::thread cap_thread(captureThread);

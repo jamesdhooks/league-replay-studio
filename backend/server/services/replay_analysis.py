@@ -302,6 +302,7 @@ class ReplayAnalyzer:
                 return {"status": "cancelled"}
 
             # Pass 2: Detect events
+            num_detectors = len(ALL_DETECTORS)
             self.on_progress("step_completed", {
                 "project_id": self.project_id,
                 "stage": "analysis_detect",

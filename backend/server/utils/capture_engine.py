@@ -200,6 +200,8 @@ class CaptureEngine:
         self._dxcam_camera = None
         self._dxcam_started = False
         self._dxcam_region: Optional[tuple[int, int, int, int]] = None
+        self._dxcam_create_fails: int = 0        # consecutive _dxcam.create() failures
+        self._dxcam_create_next_try: float = 0.0  # monotonic backoff deadline
 
         # PrintWindow cached GDI state
         self._pw_hwnd: Optional[int] = None
@@ -710,6 +712,11 @@ class CaptureEngine:
         dxcam_dead  = False
         dxcam_started_at: float = 0.0
         dxcam_first_frame = False
+        native_restart_count: int = 0
+        MAX_NATIVE_RESTARTS: int = 3
+        retry_native_at: float = 0.0  # monotonic time to retry native from PrintWindow
+        native_hwnd_set_at: float = 0.0  # when HWND was last successfully sent to bridge
+        native_last_status_log: float = 0.0  # throttle status() diagnostic polls
 
         # Start native bridge if that's our backend
         if use_native:
@@ -748,37 +755,144 @@ class CaptureEngine:
                     else:
                         if native_started_at == 0.0:
                             native_started_at = time.monotonic()
-                        elapsed = time.monotonic() - native_started_at
-                        if not native_first_frame and elapsed > 5.0:
-                            logger.warning(
-                                "[CaptureEngine] native: no frame in 5 s, "
-                                "falling back to dxcam"
+
+                        now_t = time.monotonic()
+                        # Use hwnd_set_at as anchor if available (more accurate
+                        # — only start the clock once we know the bridge has a target)
+                        hwnd_set = self._native_hwnd_set_at
+                        stall_since = hwnd_set if (hwnd_set > 0 and not native_first_frame) else native_started_at
+                        elapsed = now_t - stall_since
+
+                        # Throttled diagnostic: every 2 s while waiting, query
+                        # the C++ service for its own status so we can log WHY
+                        # frames aren't arriving.
+                        if now_t - native_last_status_log >= 2.0 and elapsed >= 1.0:
+                            native_last_status_log = now_t
+                            bridge_status = None
+                            try:
+                                bridge_status = self._native_bridge.status() if self._native_bridge else None
+                            except Exception:
+                                pass
+                            is_alive = (
+                                self._native_bridge is not None
+                                and getattr(self._native_bridge, '_proc', None) is not None
+                                and self._native_bridge._proc.poll() is None
                             )
+                            logger.info(
+                                "[CaptureEngine] native: waiting for frames "
+                                "(elapsed=%.1fs hwnd=%s proc_alive=%s bridge_status=%s)",
+                                elapsed, self._native_hwnd, is_alive, bridge_status,
+                            )
+
+                        if not native_first_frame and elapsed > 8.0:
+                            # Check if the process is still alive before deciding
+                            is_alive = (
+                                self._native_bridge is not None
+                                and getattr(self._native_bridge, '_proc', None) is not None
+                                and self._native_bridge._proc.poll() is None
+                            )
+                            if not is_alive:
+                                logger.warning(
+                                    "[CaptureEngine] native: process died before "
+                                    "first frame — restarting immediately"
+                                )
                             self._cleanup_native()
-                            native_dead = True
-                            use_native = False
-                            if _dxcam_available:
-                                use_dxcam = True
-                                self._active_backend = "dxcam"
+                            if native_restart_count < MAX_NATIVE_RESTARTS:
+                                native_restart_count += 1
+                                sleep_s = 1.5 * native_restart_count  # back off: 1.5, 3, 4.5 s
+                                logger.warning(
+                                    "[CaptureEngine] native: no frame in %.0fs — "
+                                    "restarting bridge (attempt %d/%d, backoff=%.1fs)",
+                                    elapsed, native_restart_count, MAX_NATIVE_RESTARTS, sleep_s,
+                                )
+                                time.sleep(sleep_s)
+                                if self._start_native_bridge():
+                                    native_first_frame = False
+                                    native_last_frame_at = 0.0
+                                    native_started_at = time.monotonic()
+                                    native_last_status_log = 0.0
+                                else:
+                                    logger.warning("[CaptureEngine] native: restart %d failed",
+                                                   native_restart_count)
+                                    native_dead = True
+                                    use_native = False
+                                    if _dxcam_available:
+                                        use_dxcam = True
+                                        dxcam_started_at = 0.0
+                                        self._active_backend = "dxcam"
+                                    else:
+                                        self._active_backend = "printwindow"
+                                        retry_native_at = time.monotonic() + 30.0
                             else:
-                                self._active_backend = "printwindow"
+                                logger.warning(
+                                    "[CaptureEngine] native: no frame in %.0fs "
+                                    "(max %d restarts exhausted) — falling back to dxcam",
+                                    elapsed, MAX_NATIVE_RESTARTS,
+                                )
+                                native_dead = True
+                                use_native = False
+                                if _dxcam_available:
+                                    use_dxcam = True
+                                    dxcam_started_at = 0.0
+                                    self._active_backend = "dxcam"
+                                else:
+                                    self._active_backend = "printwindow"
+                                    retry_native_at = time.monotonic() + 30.0
                         elif (
                             native_first_frame
                             and native_last_frame_at > 0
-                            and (time.monotonic() - native_last_frame_at) > 5.0
+                            and (now_t - native_last_frame_at) > 5.0
                         ):
-                            logger.warning(
-                                "[CaptureEngine] native: frame stall >5 s, "
-                                "falling back to dxcam"
+                            is_alive = (
+                                self._native_bridge is not None
+                                and getattr(self._native_bridge, '_proc', None) is not None
+                                and self._native_bridge._proc.poll() is None
                             )
+                            stall_s = now_t - native_last_frame_at
                             self._cleanup_native()
-                            native_dead = True
-                            use_native = False
-                            if _dxcam_available:
-                                use_dxcam = True
-                                self._active_backend = "dxcam"
+                            if native_restart_count < MAX_NATIVE_RESTARTS:
+                                native_restart_count += 1
+                                sleep_s = 1.5 * native_restart_count
+                                logger.warning(
+                                    "[CaptureEngine] native: frame stall %.0fs "
+                                    "(proc_alive=%s) — restarting bridge "
+                                    "(attempt %d/%d, backoff=%.1fs)",
+                                    stall_s, is_alive,
+                                    native_restart_count, MAX_NATIVE_RESTARTS, sleep_s,
+                                )
+                                time.sleep(sleep_s)
+                                if self._start_native_bridge():
+                                    native_first_frame = False
+                                    native_last_frame_at = 0.0
+                                    native_started_at = time.monotonic()
+                                    native_last_status_log = 0.0
+                                else:
+                                    logger.warning("[CaptureEngine] native: restart %d failed",
+                                                   native_restart_count)
+                                    native_dead = True
+                                    use_native = False
+                                    if _dxcam_available:
+                                        use_dxcam = True
+                                        dxcam_started_at = 0.0
+                                        self._active_backend = "dxcam"
+                                    else:
+                                        self._active_backend = "printwindow"
+                                        retry_native_at = time.monotonic() + 30.0
                             else:
-                                self._active_backend = "printwindow"
+                                logger.warning(
+                                    "[CaptureEngine] native: frame stall %.0fs "
+                                    "(max %d restarts exhausted) — falling back to dxcam",
+                                    stall_s, MAX_NATIVE_RESTARTS,
+                                )
+                                native_dead = True
+                                use_native = False
+                                if _dxcam_available:
+                                    use_dxcam = True
+                                    dxcam_started_at = 0.0
+                                    self._active_backend = "dxcam"
+                                else:
+                                    self._active_backend = "printwindow"
+                                    retry_native_at = time.monotonic() + 30.0
 
                 # ── Tier 2: dxcam ─────────────────────────────────────
                 elif use_dxcam and not dxcam_dead:
@@ -795,20 +909,42 @@ class CaptureEngine:
                             dxcam_started_at = time.monotonic()
                         if (
                             not dxcam_first_frame
-                            and (time.monotonic() - dxcam_started_at) > 3.0
+                            and (time.monotonic() - dxcam_started_at) > 8.0
                         ):
                             logger.warning(
-                                "[CaptureEngine] dxcam: no frame in 3 s, "
+                                "[CaptureEngine] dxcam: no frame in 8 s, "
                                 "falling back to PrintWindow"
                             )
                             self._cleanup_dxcam()
                             dxcam_dead = True
                             use_dxcam = False
                             self._active_backend = "printwindow"
+                            if _native_available:
+                                retry_native_at = time.monotonic() + 30.0
 
                 # ── Tier 3: PrintWindow (last resort) ─────────────────
                 else:
                     backend_used = "printwindow"
+                    # Periodically retry native backend (e.g. after DXGI releases)
+                    if (
+                        _native_available and native_dead
+                        and retry_native_at > 0
+                        and time.monotonic() >= retry_native_at
+                    ):
+                        logger.info("[CaptureEngine] PrintWindow: retrying native backend")
+                        self._cleanup_native()
+                        time.sleep(0.5)
+                        if self._start_native_bridge():
+                            native_dead = False
+                            use_native = True
+                            native_first_frame = False
+                            native_last_frame_at = 0.0
+                            native_started_at = time.monotonic()
+                            native_restart_count = 0
+                            retry_native_at = 0.0
+                            self._active_backend = "native"
+                        else:
+                            retry_native_at = time.monotonic() + 30.0
                     frame = self._grab_printwindow()
 
             except Exception:
@@ -981,9 +1117,12 @@ class CaptureEngine:
                         if ok:
                             self._native_hwnd = hwnd_int
                             self._native_wgc_ok = True
+                            self._native_hwnd_set_at = now
+                            logger.info("[CaptureEngine] native: WGC set_hwnd OK "
+                                        "(hwnd=%d) — waiting for frames", hwnd_int)
                         else:
-                            logger.info("[CaptureEngine] native: WGC unavailable, "
-                                        "falling back to DXGI set_region")
+                            logger.info("[CaptureEngine] native: WGC set_hwnd failed "
+                                        "(hwnd=%d) — falling back to DXGI set_region", hwnd_int)
                             self._native_wgc_ok = False
                     # DXGI rect fallback when WGC is unavailable
                     if self._native_wgc_ok is False:
@@ -999,11 +1138,20 @@ class CaptureEngine:
                             )
                             if ok2:
                                 self._native_hwnd = hwnd_int
+                                self._native_hwnd_set_at = now
             else:
                 logger.debug("[CaptureEngine] native: iRacing window not found")
             self._pw_last_hwnd_check = now
 
         return bridge.grab_frame()
+
+    @property
+    def _native_hwnd_set_at(self) -> float:
+        return getattr(self, "_native_hwnd_set_at_val", 0.0)
+
+    @_native_hwnd_set_at.setter
+    def _native_hwnd_set_at(self, v: float) -> None:
+        self._native_hwnd_set_at_val = v
 
     def _cleanup_native(self) -> None:
         """Stop and release the native capture bridge."""
@@ -1045,8 +1193,11 @@ class CaptureEngine:
 
         try:
             if self._dxcam_camera is None:
+                if time.monotonic() < self._dxcam_create_next_try:
+                    return None  # still in backoff window — don't retry yet
                 # output_color="BGR" gives us BGR numpy arrays directly
                 self._dxcam_camera = _dxcam.create(output_color="BGR")
+                self._dxcam_create_fails = 0  # successful create resets the counter
 
             if not self._dxcam_started:
                 self._dxcam_camera.start(
@@ -1065,8 +1216,27 @@ class CaptureEngine:
                 frame = np.ascontiguousarray(frame)
             return frame
 
-        except Exception:
-            logger.warning("[CaptureEngine] dxcam grab error", exc_info=True)
+        except Exception as exc:
+            # DXGI_ERROR_NOT_CURRENTLY_AVAILABLE (-2005270494): DXGI Desktop
+            # Duplication is exclusive — another process holds it.  Back off
+            # rather than spamming a full traceback on every frame tick.
+            _DXGI_BUSY = -2005270494
+            is_dxgi_busy = (exc.args[0] if exc.args else None) == _DXGI_BUSY
+            self._dxcam_camera = None
+            self._dxcam_started = False
+            self._dxcam_create_fails += 1
+            backoff = 2.0 if self._dxcam_create_fails < 3 else 4.0
+            self._dxcam_create_next_try = time.monotonic() + backoff
+            if self._dxcam_create_fails == 1:
+                logger.warning(
+                    "[CaptureEngine] dxcam init failed: %s%s",
+                    exc,
+                    " (DXGI exclusive lock held; will retry with backoff)"
+                    if is_dxgi_busy else "",
+                )
+            if self._dxcam_create_fails >= 3:
+                # Three consecutive failures — signal outer loop to abandon dxcam
+                raise
             return None
 
     def _cleanup_dxcam(self) -> None:

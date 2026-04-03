@@ -45,8 +45,11 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+import logging
+
 from server.services.iracing_bridge import bridge
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/iracing", tags=["iracing"])
 
 # Validates HLS filenames: only 'playlist.m3u8' or 'seg#####.ts' are accepted,
@@ -120,27 +123,41 @@ def _start_hls_session_locked(ffmpeg: str, fps: int, crf: int, max_width: int) -
     tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="lrs_hls_"))
     playlist_path = tmpdir / "playlist.m3u8"
 
-    # Ensure the capture engine is running and warmed up
+    # IMPORTANT: do NOT pass max_width — HLS must never mutate the engine's
+    # output resolution (same reasoning as H.264 endpoint).  Instead, let
+    # FFmpeg's -vf scale handle downscaling to the desired HLS output width.
     if not capture_engine.is_running:
-        capture_engine.start(fps=fps, quality=85, max_width=max_width)
+        capture_engine.start(fps=fps, quality=85, max_width=1280)
     else:
-        capture_engine.update_params(fps=fps, max_width=max_width)
+        capture_engine.update_params(fps=fps)
 
     for _ in range(50):
         if capture_engine._out_w > 0:
             break
         time.sleep(0.1)
 
-    out_w = (capture_engine._out_w or max_width) & ~1
-    out_h = (capture_engine._out_h or 720) & ~1
+    # Lock the raw input dimensions for this FFmpeg process
+    input_w = (capture_engine._out_w or max_width) & ~1
+    input_h = (capture_engine._out_h or 720) & ~1
+
+    # Compute desired HLS output dimensions — never upscale
+    desired_w = min(max_width, input_w) & ~1
+    desired_h = int(input_h * desired_w / input_w) & ~1 if input_w > 0 else input_h
+    scale_filter: list[str] = []
+    if desired_w != input_w:
+        scale_filter = ["-vf", f"scale={desired_w}:{desired_h}:flags=fast_bilinear"]
+
+    logger.info("[Stream] HLS session starting (fps=%d crf=%d input=%dx%d output=%dx%d)",
+                  fps, crf, input_w, input_h, desired_w, desired_h)
 
     cmd = [
         ffmpeg, "-hide_banner", "-loglevel", "error",
         "-f", "rawvideo",
         "-pixel_format", "bgr24",
-        "-video_size", f"{out_w}x{out_h}",
+        "-video_size", f"{input_w}x{input_h}",   # raw input — never changes
         "-framerate", str(fps),
         "-i", "pipe:0",
+        *scale_filter,                              # optional FFmpeg-side downscale
         "-c:v", "libx264",
         "-preset", "ultrafast",
         "-tune", "zerolatency",
@@ -175,6 +192,17 @@ def _start_hls_session_locked(ffmpeg: str, fps: int, crf: int, max_width: int) -
                 except IndexError:
                     time.sleep(0.004)
                     continue
+                # Dimension guard: resize to locked input dims so that minor
+                # source resolution fluctuations don't corrupt the HLS bitstream.
+                if frame.shape[1] != input_w or frame.shape[0] != input_h:
+                    try:
+                        import cv2 as _cv2_hls
+                        frame = _cv2_hls.resize(
+                            frame, (input_w, input_h),
+                            interpolation=_cv2_hls.INTER_LINEAR,
+                        )
+                    except Exception:
+                        continue  # cv2 unavailable → skip corrupted frame
                 if proc.stdin is None or proc.stdin.closed:
                     break
                 try:
@@ -405,6 +433,7 @@ async def replay_state() -> dict:
         "session_num": snap.get("session_num", 0),
         "session_state": snap.get("session_state", 0),
         "cam_car_idx": snap.get("cam_car_idx", 0),
+        "cam_group_num": snap.get("cam_group_num", 0),
         "race_laps": snap.get("race_laps", 0),
     }
 
@@ -524,6 +553,9 @@ async def iracing_stream(
     max_width = max(320, min(max_width, 3840))
     interval = 1.0 / fps
 
+    logger.info("[Stream] MJPEG client connected (fps=%d quality=%d max_width=%d)",
+                fps, quality, max_width)
+
     # Start the engine if not already running, or live-update params if it is
     if not capture_engine.is_running:
         capture_engine.start(fps=fps, quality=quality, max_width=max_width)
@@ -594,6 +626,9 @@ async def iracing_stream_h264(
         ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise HTTPException(status_code=503, detail="FFmpeg not found in PATH")
+
+    logger.info("[Stream] H.264 client connected (fps=%d crf=%d max_width=%d)",
+                fps, crf, max_width)
 
     # Start the engine if it isn't running.
     # IMPORTANT: do NOT pass max_width here — H.264 must never mutate the
@@ -691,7 +726,17 @@ async def iracing_stream_h264(
                 # FFmpeg was launched with.  This handles the brief race window
                 # when the engine's max_width changes between two requests.
                 if frame.shape[0] != input_h or frame.shape[1] != input_w:
-                    continue
+                    # Resize to locked dims rather than dropping — the source
+                    # resolution can fluctuate slightly (e.g. ±2 px on window
+                    # resize) and dropping would make the stream choppy.
+                    try:
+                        import cv2 as _cv2_h264
+                        frame = _cv2_h264.resize(
+                            frame, (input_w, input_h),
+                            interpolation=_cv2_h264.INTER_LINEAR,
+                        )
+                    except Exception:
+                        continue  # cv2 unavailable or resize failed → skip
                 if proc.stdin is None or proc.stdin.closed:
                     break
                 try:

@@ -306,7 +306,18 @@ class NativeCaptureBridge:
         self._grab_calls += 1
 
         try:
-            # Read header from shared memory
+            # ── Sequence-lock read ────────────────────────────────────────
+            # Read frame_id BEFORE reading the rest of the header/pixels.
+            # After reading all pixel data we re-read frame_id and compare.
+            # If it changed, the C++ producer wrote a new frame while we were
+            # reading → torn data → discard and try again next tick.
+            self._shm_mmap.seek(0)
+            pre_id_bytes = self._shm_mmap.read(8)
+            if len(pre_id_bytes) < 8:
+                return None
+            (pre_frame_id,) = struct.unpack('<Q', pre_id_bytes)
+
+            # Read full header from shared memory
             self._shm_mmap.seek(0)
             header_bytes = self._shm_mmap.read(HEADER_STRUCT.size)
             if len(header_bytes) < HEADER_STRUCT.size:
@@ -323,10 +334,10 @@ class NativeCaptureBridge:
                 proc_alive = self._proc is not None and self._proc.poll() is None
                 logger.info(
                     "[NativeCapture] status: running=%s proc_alive=%s "
-                    "calls=%d frames=%d frame_id=%d shm=(%dx%d sz=%d)",
+                    "calls=%d frames=%d frame_id=%d shm=(%dx%d sz=%d stride=%d fmt=%d)",
                     self._running, proc_alive,
                     self._grab_calls, self._grab_frames,
-                    frame_id, width, height, data_size,
+                    frame_id, width, height, data_size, stride, pixel_format,
                 )
                 self._last_grab_log = now
 
@@ -339,26 +350,63 @@ class NativeCaptureBridge:
                              "(id=%d w=%d h=%d sz=%d)", frame_id, width, height, data_size)
                 return None
 
-            if data_size > MAX_FRAME_BYTES:
-                logger.warning("[NativeCapture] grab_frame: data_size %d exceeds max %d",
-                               data_size, MAX_FRAME_BYTES)
+            # Determine the true byte count to read.
+            # stride = bytes per row as written by C++.  Use it directly when
+            # non-zero; fall back to data_size so older builds still work.
+            bytes_per_row = stride if stride > 0 else (data_size // height if height else 0)
+            read_size = bytes_per_row * height if bytes_per_row > 0 else data_size
+
+            if read_size > MAX_FRAME_BYTES:
+                logger.warning("[NativeCapture] grab_frame: read_size %d exceeds max %d "
+                               "(stride=%d w=%d h=%d)", read_size, MAX_FRAME_BYTES,
+                               stride, width, height)
                 return None
 
             # Read pixel data
             self._shm_mmap.seek(HEADER_SIZE)
-            pixel_bytes = self._shm_mmap.read(data_size)
-            if len(pixel_bytes) < data_size:
+            pixel_bytes = self._shm_mmap.read(read_size)
+            if len(pixel_bytes) < read_size:
                 logger.debug("[NativeCapture] grab_frame: short pixel read "
-                             "(%d < %d)", len(pixel_bytes), data_size)
+                             "(%d < %d)", len(pixel_bytes), read_size)
                 return None
+
+            # ── Sequence-lock verification ────────────────────────────
+            # Re-read frame_id to confirm C++ didn't update the frame
+            # while we were reading pixel data.
+            self._shm_mmap.seek(0)
+            post_id_bytes = self._shm_mmap.read(8)
+            if len(post_id_bytes) >= 8:
+                (post_frame_id,) = struct.unpack('<Q', post_id_bytes)
+                if post_frame_id != pre_frame_id:
+                    # Producer wrote a new frame mid-read → torn data → skip
+                    logger.debug(
+                        "[NativeCapture] grab_frame: torn read detected "
+                        "(pre_id=%d post_id=%d) — discarding frame",
+                        pre_frame_id, post_frame_id,
+                    )
+                    return None
 
             self._last_frame_id = frame_id
             self._grab_frames += 1
 
-            # Create numpy array (BGR24)
-            frame = np.frombuffer(pixel_bytes, dtype=np.uint8).reshape(height, width, 3)
-            # Make a contiguous copy so the shared memory can be overwritten
-            return np.ascontiguousarray(frame)
+            # Decode to BGR24 numpy array, handling BGRA stride correctly.
+            arr = np.frombuffer(pixel_bytes, dtype=np.uint8)
+            if bytes_per_row == width * 4:
+                # BGRA layout (DXGI/WGC native) — reshape to (H, W, 4) then drop alpha
+                bgra = arr.reshape(height, width, 4)
+                frame = np.ascontiguousarray(bgra[:, :, :3])  # drop A → BGR
+            elif bytes_per_row == width * 3:
+                # Packed BGR24 — reshape directly
+                frame = np.ascontiguousarray(arr.reshape(height, width, 3))
+            else:
+                # Unknown stride: extract the first width*3 bytes from each row
+                logger.warning("[NativeCapture] grab_frame: unexpected stride %d "
+                               "(expected %d for BGR or %d for BGRA) — slicing rows",
+                               bytes_per_row, width * 3, width * 4)
+                rows = arr.reshape(height, bytes_per_row)
+                frame = np.ascontiguousarray(rows[:, : width * 3].reshape(height, width, 3))
+
+            return frame
 
         except Exception:
             logger.debug("[NativeCapture] grab_frame error", exc_info=True)

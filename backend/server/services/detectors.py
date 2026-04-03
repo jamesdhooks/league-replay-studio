@@ -1050,7 +1050,7 @@ class CloseCallDetector(BaseDetector):
 
             nearby_car = nearby["car_idx"]
             # Base 3, +1 for top-5 position battles (more entertaining)
-            severity = min(5, 3 + int(row.get("position", 10) <= 5))
+            severity = min(5, 3 + int((row["position"] or 10) <= 5))
 
             events.append({
                 "event_type": self.event_type,

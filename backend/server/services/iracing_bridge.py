@@ -274,6 +274,7 @@ class IRacingBridge:
                 "replay_frame":  self._ir["ReplayFrameNum"] or 0,
                 "race_laps":     self._ir["RaceLaps"]       or 0,
                 "cam_car_idx":   self._ir["CamCarIdx"]      or 0,
+                "cam_group_num": self._ir["CamGroupNumber"] or 0,
                 "flags":         self._ir["SessionFlags"]   or 0,
                 "car_states":    car_states,
             }
