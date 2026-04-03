@@ -16,6 +16,9 @@ POST /api/iracing/replay/seek         — seek to specific frame
 POST /api/iracing/replay/speed        — set replay speed (1/2/4/8/16)
 POST /api/iracing/replay/camera       — switch camera to car / position
 GET  /api/iracing/stream               — MJPEG live preview stream
+GET  /api/iracing/stream/h264          — H.264 fMP4 live stream (MSE player)
+GET  /api/iracing/stream/hls/{filename} — HLS playlist (.m3u8) and segments (.ts)
+POST /api/iracing/stream/hls/stop      — stop HLS segmenter and clean up
 GET  /api/iracing/stream/capabilities  — preview + capture engine availability
 GET  /api/iracing/stream/metrics       — capture engine metrics
 POST /api/iracing/stream/start         — start/restart capture engine
@@ -30,17 +33,176 @@ from typing import Optional
 
 import asyncio
 import io
+import pathlib
+import re
 import shutil
 import subprocess
+import tempfile
+import threading
 import time
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from server.services.iracing_bridge import bridge
 
 router = APIRouter(prefix="/api/iracing", tags=["iracing"])
+
+# Validates HLS filenames: only 'playlist.m3u8' or 'seg#####.ts' are accepted,
+# ruling out any path-separator or traversal characters.
+_SAFE_HLS_FILENAME_RE = re.compile(r'^(?:playlist\.m3u8|seg\d{5}\.ts)$')
+
+
+# ── HLS session state ─────────────────────────────────────────────────────────
+# A single shared FFmpeg HLS segmenter process feeds all HLS clients.
+# Restarted automatically if fps/crf/max_width change.
+
+_hls_lock = threading.Lock()
+_hls_session: dict = {
+    "tmpdir": None,
+    "proc": None,
+    "feed_thread": None,
+    "gen_token": None,
+    "feed_state": None,
+    "active": False,
+    "fps": 0,
+    "crf": 0,
+    "max_width": 0,
+}
+
+
+def _stop_hls_session_locked() -> None:
+    """Tear down the active HLS session. Caller must hold _hls_lock."""
+    from server.utils.capture_engine import capture_engine
+
+    if not _hls_session.get("active"):
+        return
+
+    if _hls_session.get("feed_state"):
+        _hls_session["feed_state"]["active"] = False
+
+    gen_token = _hls_session.get("gen_token")
+    if gen_token is not None:
+        try:
+            capture_engine.stop_h264_feed(gen_token)
+        except Exception:
+            pass
+
+    proc = _hls_session.get("proc")
+    if proc is not None:
+        try:
+            proc.kill()
+            proc.wait(timeout=2)
+        except Exception:
+            pass
+
+    tmpdir = _hls_session.get("tmpdir")
+    if tmpdir and pathlib.Path(tmpdir).exists():
+        try:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
+
+    _hls_session.update({
+        "tmpdir": None, "proc": None, "feed_thread": None,
+        "gen_token": None, "feed_state": None, "active": False,
+        "fps": 0, "crf": 0, "max_width": 0,
+    })
+
+
+def _start_hls_session_locked(ffmpeg: str, fps: int, crf: int, max_width: int) -> pathlib.Path:
+    """Start the FFmpeg HLS segmenter. Returns the tmpdir path. Caller must hold _hls_lock."""
+    from server.utils.capture_engine import capture_engine
+
+    _stop_hls_session_locked()
+
+    tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="lrs_hls_"))
+    playlist_path = tmpdir / "playlist.m3u8"
+
+    # Ensure the capture engine is running and warmed up
+    if not capture_engine.is_running:
+        capture_engine.start(fps=fps, quality=85, max_width=max_width)
+    else:
+        capture_engine.update_params(fps=fps, max_width=max_width)
+
+    for _ in range(50):
+        if capture_engine._out_w > 0:
+            break
+        time.sleep(0.1)
+
+    out_w = (capture_engine._out_w or max_width) & ~1
+    out_h = (capture_engine._out_h or 720) & ~1
+
+    cmd = [
+        ffmpeg, "-hide_banner", "-loglevel", "error",
+        "-f", "rawvideo",
+        "-pixel_format", "bgr24",
+        "-video_size", f"{out_w}x{out_h}",
+        "-framerate", str(fps),
+        "-i", "pipe:0",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-tune", "zerolatency",
+        "-crf", str(crf),
+        "-pix_fmt", "yuv420p",
+        "-profile:v", "baseline",
+        "-level:v", "4.0",
+        "-f", "hls",
+        "-hls_time", "1",
+        "-hls_list_size", "3",
+        "-hls_flags", "delete_segments+append_list",
+        "-hls_segment_filename", str(tmpdir / "seg%05d.ts"),
+        str(playlist_path),
+    ]
+
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        bufsize=0,
+    )
+
+    gen_token = capture_engine.start_h264_feed()
+    feed_state = {"active": True}
+
+    def _feed_stdin() -> None:
+        try:
+            while feed_state["active"]:
+                try:
+                    frame = capture_engine._h264_queue.popleft()
+                except IndexError:
+                    time.sleep(0.004)
+                    continue
+                if proc.stdin is None or proc.stdin.closed:
+                    break
+                try:
+                    proc.stdin.write(frame.tobytes())
+                except (BrokenPipeError, OSError):
+                    break
+        finally:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+
+    feed_thread = threading.Thread(target=_feed_stdin, daemon=True)
+    feed_thread.start()
+
+    _hls_session.update({
+        "tmpdir": str(tmpdir),
+        "proc": proc,
+        "feed_thread": feed_thread,
+        "gen_token": gen_token,
+        "feed_state": feed_state,
+        "active": True,
+        "fps": fps,
+        "crf": crf,
+        "max_width": max_width,
+    })
+
+    return tmpdir
 
 
 # ── Response models ───────────────────────────────────────────────────────────
@@ -567,6 +729,120 @@ async def iracing_stream_h264(
         generate(),
         media_type="video/mp4",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/stream/hls/stop")
+async def hls_stop():
+    """Stop the HLS segmenter and delete temporary segment files.
+
+    Safe to call even when no HLS session is active.
+    """
+    def _stop() -> None:
+        with _hls_lock:
+            _stop_hls_session_locked()
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _stop)
+    return {"status": "stopped"}
+
+
+@router.get("/stream/hls/{filename}")
+async def hls_file(
+    filename: str,
+    fps: int = 15,
+    crf: int = 23,
+    max_width: int = 1280,
+):
+    """Serve HLS playlist and transport-stream segments.
+
+    The browser (or hls.js) first fetches ``playlist.m3u8``.  On that request
+    the backend starts (or restarts, if parameters changed) the FFmpeg HLS
+    segmenter and waits up to 5 s for the first segment to be written.
+    Subsequent segment requests (``seg*.ts``) are served directly from the
+    temp directory.
+
+    Query params (only used when requesting the playlist):
+      fps       — target frames per second (1–30, default 15)
+      crf       — H.264 CRF quality (0–51, lower=better, default 23)
+      max_width — max output width in px (default 1280)
+
+    Client usage::
+
+        <video src="/api/iracing/stream/hls/playlist.m3u8?fps=15&crf=23" />
+        // or via hls.js:
+        hls.loadSource("/api/iracing/stream/hls/playlist.m3u8?fps=15&crf=23")
+    """
+    # Strictly validate filename: only allow 'playlist.m3u8' or 'seg#####.ts'
+    # This rejects any path separators, dots, or other traversal characters.
+    if not _SAFE_HLS_FILENAME_RE.match(filename):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    try:
+        from server.utils.gpu_detection import find_ffmpeg
+        ffmpeg = find_ffmpeg()
+    except Exception:
+        ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise HTTPException(status_code=503, detail="FFmpeg not found in PATH")
+
+    fps       = max(1, min(fps, 30))
+    crf       = max(0, min(crf, 51))
+    max_width = max(320, min(max_width, 3840))
+
+    if filename == "playlist.m3u8":
+        # Start (or restart on param change) the HLS segmenter
+        def _ensure_session() -> pathlib.Path:
+            with _hls_lock:
+                needs_restart = (
+                    not _hls_session["active"]
+                    or _hls_session["fps"] != fps
+                    or _hls_session["crf"] != crf
+                    or _hls_session["max_width"] != max_width
+                )
+                if needs_restart:
+                    return _start_hls_session_locked(ffmpeg, fps, crf, max_width)
+                return pathlib.Path(_hls_session["tmpdir"])
+
+        loop = asyncio.get_running_loop()
+        tmpdir = await loop.run_in_executor(None, _ensure_session)
+        playlist_path = tmpdir / "playlist.m3u8"
+
+        # Wait up to 5 s for FFmpeg to write the first segment
+        for _ in range(50):
+            if playlist_path.exists() and playlist_path.stat().st_size > 0:
+                break
+            await asyncio.sleep(0.1)
+
+        if not playlist_path.exists():
+            raise HTTPException(status_code=503, detail="HLS playlist not ready yet")
+
+        return FileResponse(
+            str(playlist_path),
+            media_type="application/vnd.apple.mpegurl",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    # Segment request — filename already validated as 'seg#####.ts' by the regex above
+    with _hls_lock:
+        tmpdir_str = _hls_session.get("tmpdir")
+
+    if not tmpdir_str:
+        raise HTTPException(status_code=404, detail="No active HLS session")
+
+    # Build path from the validated filename (no separators possible after regex check)
+    segment_path = pathlib.Path(tmpdir_str) / filename
+    # Defense-in-depth: ensure the resolved path stays inside the HLS temp dir
+    if not segment_path.resolve().is_relative_to(pathlib.Path(tmpdir_str).resolve()):
+        raise HTTPException(status_code=400, detail="Invalid segment path")
+
+    if not segment_path.exists():
+        raise HTTPException(status_code=404, detail="Segment not found")
+
+    return FileResponse(
+        str(segment_path),
+        media_type="video/mp2t",
+        headers={"Cache-Control": "no-cache"},
     )
 
 

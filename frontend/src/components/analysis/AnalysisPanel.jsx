@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import Hls from 'hls.js'
 import { useAnalysis } from '../../context/AnalysisContext'
 import { useProject } from '../../context/ProjectContext'
 import { useIRacing } from '../../context/IRacingContext'
@@ -141,6 +142,73 @@ function H264StreamPlayer({ src, className, onLoad, onError }) {
 }
 
 /**
+ * HlsStreamPlayer — HLS live stream player.
+ * Uses hls.js on browsers that lack native HLS support (Chrome, Edge, Firefox).
+ * Falls back to the native <video> HLS player on Safari.
+ *
+ * Connects to /api/iracing/stream/hls/playlist.m3u8 which the backend serves
+ * via FFmpeg's HLS segmenter (~1–3 s latency, smooth H.264 quality).
+ */
+function HlsStreamPlayer({ src, className, onLoad, onError }) {
+  const videoRef = useRef(null)
+
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video || !src) return
+
+    // Safari has native HLS — no hls.js needed
+    if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = src
+      const handleLoadedMetadata = () => { video.play().catch(() => {}); onLoad?.() }
+      const handleError = () => onError?.(new Error('HLS stream error'))
+      video.addEventListener('loadedmetadata', handleLoadedMetadata, { once: true })
+      video.addEventListener('error', handleError, { once: true })
+      return () => {
+        video.removeEventListener('loadedmetadata', handleLoadedMetadata)
+        video.removeEventListener('error', handleError)
+        video.removeAttribute('src')
+        video.load()
+      }
+    }
+
+    if (!Hls.isSupported()) {
+      onError?.(new Error('HLS is not supported in this browser'))
+      return
+    }
+
+    // lowLatencyMode reduces the default buffer target from ~30 s to ~3 s,
+    // which is appropriate for this near-live streaming use case.
+    const hls = new Hls({ lowLatencyMode: true })
+    hls.loadSource(src)
+    hls.attachMedia(video)
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      video.play().catch(() => {})
+      onLoad?.()
+    })
+    hls.on(Hls.Events.ERROR, (_, data) => {
+      if (data.fatal) onError?.(new Error(data.details || 'HLS playback error'))
+    })
+
+    return () => {
+      hls.destroy()
+      video.removeAttribute('src')
+      video.load()
+    }
+  }, [src, onLoad, onError])
+
+  return (
+    <video
+      ref={videoRef}
+      className={className}
+      style={{ pointerEvents: 'none' }}
+      autoPlay
+      muted
+      playsInline
+    />
+  )
+}
+
+/**
  * AnalysisPanel — Full layout with:
  *  - Fixed top bar: controls + progress + clear analysis
  *  - Full-height middle: resizable/collapsible tabbed sidebar (Log/Events/Files) + 16:9 MJPEG TV + playback controls
@@ -190,6 +258,8 @@ export default function AnalysisPanel() {
   // H.264-specific
   const [h264Crf, setH264Crf] = useLocalStorage('lrs:analysis:h264Crf', 23)
   const [h264MaxWidth, setH264MaxWidth] = useLocalStorage('lrs:analysis:h264MaxWidth', 1280)
+  const [streamCrf, setStreamCrf] = useLocalStorage('lrs:analysis:streamCrf', 23)
+  const [streamHlsCrf, setStreamHlsCrf] = useLocalStorage('lrs:analysis:streamHlsCrf', 23)
   const [showQualitySettings, setShowQualitySettings] = useState(false)
 
   // Detection tuning parameters
@@ -429,7 +499,8 @@ export default function AnalysisPanel() {
 
   const streamUrl = `/api/iracing/stream?fps=${streamFps}&quality=${mjpegQuality}&max_width=${mjpegMaxWidth}&_k=${streamKey}`
   const h264Url   = `/api/iracing/stream/h264?fps=${streamFps}&crf=${h264Crf}&max_width=${h264MaxWidth}&_k=${streamKey}`
-  const activeStreamUrl = streamFormat === 'h264' ? h264Url : streamUrl
+  const hlsUrl    = `/api/iracing/stream/hls/playlist.m3u8?fps=${streamFps}&crf=${streamHlsCrf}&max_width=${streamMaxWidth}&_k=${streamKey}`
+  const activeStreamUrl = streamFormat === 'h264' ? h264Url : streamFormat === 'hls' ? hlsUrl : streamUrl
 
   // ── Idle state: no analysis running, no events ────────────────────────
   if (!isAnalyzing && !hasEvents && discoveredEvents.length === 0) {
@@ -862,8 +933,16 @@ export default function AnalysisPanel() {
                  title={isConnected ? (isPlaying ? 'Click to pause' : 'Click to play') : undefined}>
               {isConnected ? (
                 <>
-                  {/* Stream: H.264 (MSE) or MJPEG depending on format setting */}
-                  {streamFormat === 'h264' ? (
+                  {/* Stream: HLS, H.264 (MSE), or MJPEG depending on format setting */}
+                  {streamFormat === 'hls' ? (
+                    <HlsStreamPlayer
+                      key={streamKey}
+                      src={activeStreamUrl}
+                      className="w-full h-full object-cover"
+                      onLoad={() => setStreamLoaded(true)}
+                      onError={(err) => setStreamError(err?.message || 'HLS stream error')}
+                    />
+                  ) : streamFormat === 'h264' ? (
                     <H264StreamPlayer
                       key={streamKey}
                       src={activeStreamUrl}
@@ -1009,6 +1088,28 @@ export default function AnalysisPanel() {
                   {/* FPS — shared across formats */}
                   <div className="space-y-2">
                     <label className="flex items-center justify-between text-xxs text-text-secondary">
+                      <span>Format</span>
+                      <div className="flex rounded overflow-hidden border border-border">
+                        {['mjpeg', 'h264', 'hls'].map(fmt => (
+                          <button
+                            key={fmt}
+                            onClick={() => {
+                              setStreamFormat(fmt)
+                              setStreamKey(k => k + 1)
+                              setShowQualitySettings(false)
+                            }}
+                            className={`px-2 py-0.5 text-xxs transition-colors ${
+                              streamFormat === fmt
+                                ? 'bg-accent text-white'
+                                : 'bg-surface text-text-secondary hover:bg-bg-hover'
+                            }`}
+                          >
+                            {fmt === 'mjpeg' ? 'MJPEG' : fmt === 'h264' ? 'H.264' : 'HLS'}
+                          </button>
+                        ))}
+                      </div>
+                    </label>
+                    <label className="flex items-center justify-between text-xxs text-text-secondary">
                       <span>FPS</span>
                       <select value={streamFps} onChange={e => { setStreamFps(+e.target.value); setStreamKey(k => k + 1) }}
                         className="bg-surface border border-border rounded px-1.5 py-0.5 text-xxs text-text-primary">
@@ -1022,29 +1123,27 @@ export default function AnalysisPanel() {
 
                     {/* Format-specific settings — no overlap */}
                     {streamFormat === 'h264' ? (
-                      <>
-                        <label className="flex items-center justify-between text-xxs text-text-secondary">
-                          <span>Quality (CRF)</span>
-                          <select value={h264Crf} onChange={e => { setH264Crf(+e.target.value); setStreamKey(k => k + 1) }}
-                            className="bg-surface border border-border rounded px-1.5 py-0.5 text-xxs text-text-primary">
-                            <option value={18}>Visually lossless (18)</option>
-                            <option value={23}>High (23)</option>
-                            <option value={28}>Medium (28)</option>
-                            <option value={33}>Low (33)</option>
-                          </select>
-                        </label>
-                        <label className="flex items-center justify-between text-xxs text-text-secondary">
-                          <span title="Downscale cap — never upscales beyond source">Max width</span>
-                          <select value={h264MaxWidth} onChange={e => { setH264MaxWidth(+e.target.value); setStreamKey(k => k + 1) }}
-                            className="bg-surface border border-border rounded px-1.5 py-0.5 text-xxs text-text-primary">
-                            <option value={640}>640px</option>
-                            <option value={960}>960px</option>
-                            <option value={1280}>1280px</option>
-                            <option value={1920}>1920px</option>
-                            <option value={9999}>Source (no limit)</option>
-                          </select>
-                        </label>
-                      </>
+                      <label className="flex items-center justify-between text-xxs text-text-secondary">
+                        <span>Quality (CRF)</span>
+                        <select value={streamCrf} onChange={e => { setStreamCrf(+e.target.value); setStreamKey(k => k + 1) }}
+                          className="bg-surface border border-border rounded px-1.5 py-0.5 text-xxs text-text-primary">
+                          <option value={18}>Visually lossless (18)</option>
+                          <option value={23}>High (23)</option>
+                          <option value={28}>Medium (28)</option>
+                          <option value={33}>Low (33)</option>
+                        </select>
+                      </label>
+                    ) : streamFormat === 'hls' ? (
+                      <label className="flex items-center justify-between text-xxs text-text-secondary">
+                        <span>Quality (CRF)</span>
+                        <select value={streamHlsCrf} onChange={e => { setStreamHlsCrf(+e.target.value); setStreamKey(k => k + 1) }}
+                          className="bg-surface border border-border rounded px-1.5 py-0.5 text-xxs text-text-primary">
+                          <option value={18}>Visually lossless (18)</option>
+                          <option value={23}>High (23)</option>
+                          <option value={28}>Medium (28)</option>
+                          <option value={33}>Low (33)</option>
+                        </select>
+                      </label>
                     ) : (
                       <>
                         <label className="flex items-center justify-between text-xxs text-text-secondary">
@@ -1072,6 +1171,11 @@ export default function AnalysisPanel() {
                           </select>
                         </label>
                       </>
+                    )}
+                    {streamFormat === 'hls' && (
+                      <p className="text-xxs text-text-disabled leading-relaxed pt-0.5">
+                        HLS buffers ~1–3 s for smooth H.264 quality.
+                      </p>
                     )}
                   </div>
                 </div>
