@@ -11,10 +11,11 @@ import {
   XCircle, Terminal, ChevronRight, ChevronDown, Camera, Video, Monitor,
   SkipBack, SkipForward, Rewind, FastForward, List, Trash2, Settings,
   Eye, Users, RefreshCw, Flame, RotateCcw, CircleDot, ShieldAlert, WifiOff, AlertCircle, Minus, Plus,
-  Folder, SlidersHorizontal,
+  Folder, SlidersHorizontal, Info, CarFront,
 } from 'lucide-react'
 import ProjectFileBrowser from '../projects/ProjectFileBrowser'
 import ResizableSidebar from '../layout/ResizableSidebar'
+import Tooltip from '../ui/Tooltip'
 
 /**
  * Event type display configuration — icons, labels, and colors.
@@ -26,6 +27,7 @@ const EVENT_CONFIG = {
   pit_stop:      { icon: Fuel,              label: 'Pit Stop',       color: 'text-event-pit',       bg: 'bg-event-pit/10' },
   fastest_lap:   { icon: Zap,              label: 'Fastest Lap',    color: 'text-event-fastest',   bg: 'bg-event-fastest/10' },
   leader_change: { icon: Crown,            label: 'Leader Change',  color: 'text-event-leader',    bg: 'bg-event-leader/10' },
+  pace_lap:      { icon: CarFront,         label: 'Pace Lap',       color: 'text-event-firstlap',  bg: 'bg-event-firstlap/10' },
   first_lap:     { icon: FlagTriangleRight, label: 'First Lap',     color: 'text-event-firstlap',  bg: 'bg-event-firstlap/10' },
   last_lap:      { icon: Flag,             label: 'Last Lap',       color: 'text-event-lastlap',   bg: 'bg-event-lastlap/10' },
   crash:         { icon: Flame,            label: 'Crash',          color: 'text-event-incident',  bg: 'bg-event-incident/10' },
@@ -221,6 +223,7 @@ export default function AnalysisPanel() {
     analysisLog, discoveredEvents,
     startAnalysis, cancelAnalysis, clearAnalysis,
     fetchEvents, fetchEventSummary, fetchAnalysisStatus,
+    loadAnalysisLog, clearDiscoveredEvents,
   } = useAnalysis()
   const { activeProject, advanceStep } = useProject()
   const { isConnected } = useIRacing()
@@ -232,6 +235,34 @@ export default function AnalysisPanel() {
   // Sidebar tab: 'log' | 'events' | 'files' — synced with ResizableSidebar via shared storage key
   const [sidebarTab, setSidebarTab] = useLocalStorage('lrs:analysis:sidebar:tab', 'log')
   const wasAnalyzingRef = useRef(false)
+
+  // Event feed overlay — auto-dismiss after a few seconds
+  const [feedEvents, setFeedEvents] = useState([])
+  const feedTimersRef = useRef(new Map())
+  const FEED_LIFETIME_MS = 5000
+
+  // When new discovered events come in, add them to feed with auto-dismiss
+  useEffect(() => {
+    if (discoveredEvents.length === 0) {
+      setFeedEvents([])
+      feedTimersRef.current.forEach(t => clearTimeout(t))
+      feedTimersRef.current.clear()
+      return
+    }
+    const latest = discoveredEvents[discoveredEvents.length - 1]
+    if (feedTimersRef.current.has(latest.id)) return
+    setFeedEvents(prev => [...prev.slice(-4), latest])
+    const timer = setTimeout(() => {
+      setFeedEvents(prev => prev.filter(e => e.id !== latest.id))
+      feedTimersRef.current.delete(latest.id)
+    }, FEED_LIFETIME_MS)
+    feedTimersRef.current.set(latest.id, timer)
+  }, [discoveredEvents])
+
+  // Cleanup timers on unmount
+  useEffect(() => {
+    return () => feedTimersRef.current.forEach(t => clearTimeout(t))
+  }, [])
 
   // Camera follow toggle
   const [cameraFollow, setCameraFollow] = useLocalStorage('lrs:analysis:cameraFollow', false)
@@ -348,8 +379,16 @@ export default function AnalysisPanel() {
       fetchAnalysisStatus(activeProject.id)
       fetchEvents(activeProject.id)
       fetchEventSummary(activeProject.id)
+      // Auto-reload analysis log from project files if available
+      apiGet(`/projects/${activeProject.id}/analysis/log`)
+        .then(data => {
+          if (data?.entries?.length > 0) {
+            loadAnalysisLog(data.entries)
+          }
+        })
+        .catch(() => {})
     }
-  }, [activeProject?.id, fetchAnalysisStatus, fetchEvents, fetchEventSummary])
+  }, [activeProject?.id, fetchAnalysisStatus, fetchEvents, fetchEventSummary, loadAnalysisLog])
 
   // Fetch race duration for timeline scrubber
   useEffect(() => {
@@ -425,6 +464,7 @@ export default function AnalysisPanel() {
   const handleRedetect = async () => {
     if (!activeProject?.id || isRedetecting) return
     setIsRedetecting(true)
+    clearDiscoveredEvents()
     try {
       await apiPost(`/projects/${activeProject.id}/analyze/redetect`, tuningParams)
       await fetchEvents(activeProject.id)
@@ -661,86 +701,115 @@ export default function AnalysisPanel() {
         {/* ── Detection Tuning Panel ────────────────────────────────── */}
         {showTuning && (
           <div className="border-t border-border bg-bg-secondary px-4 py-3">
-            <div className="grid grid-cols-3 gap-x-6 gap-y-2 text-xxs">
-              {/* Battle */}
-              <label className="flex flex-col gap-0.5">
-                <span className="text-text-secondary font-medium">Battle gap (s)</span>
-                <input type="number" step="0.1" min="0.1" max="5"
+            {/* ── Battle Detection ── */}
+            <div className="mb-3">
+              <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
+                <Swords size={11} className="text-event-battle" /> Battle Detection
+              </span>
+              <div className="grid grid-cols-3 gap-x-6 gap-y-2 text-xxs">
+                <TuneField
+                  label="Gap threshold (s)"
+                  tooltip="Maximum time gap (seconds) between two adjacent-position cars for a battle to be detected. Lower values require tighter racing. At 0.5s only very close battles are captured; increase to 1.0–1.5s to catch more side-by-side action. Battles must be sustained for 10+ seconds."
                   value={tuningParams.battle_gap_threshold}
-                  onChange={e => updateTuning('battle_gap_threshold', parseFloat(e.target.value) || 0.5)}
-                  className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
+                  onChange={v => updateTuning('battle_gap_threshold', v || 0.5)}
+                  step={0.1} min={0.1} max={5}
                 />
-              </label>
-              {/* Crash */}
-              <label className="flex flex-col gap-0.5">
-                <span className="text-text-secondary font-medium">Crash min time loss (s)</span>
-                <input type="number" step="1" min="1" max="60"
-                  value={tuningParams.crash_min_time_loss}
-                  onChange={e => updateTuning('crash_min_time_loss', parseFloat(e.target.value) || 10)}
-                  className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
-                />
-              </label>
-              <label className="flex flex-col gap-0.5">
-                <span className="text-text-secondary font-medium">Crash min off-track (s)</span>
-                <input type="number" step="0.5" min="0.5" max="30"
-                  value={tuningParams.crash_min_off_track_duration}
-                  onChange={e => updateTuning('crash_min_off_track_duration', parseFloat(e.target.value) || 3)}
-                  className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
-                />
-              </label>
-              {/* Spinout */}
-              <label className="flex flex-col gap-0.5">
-                <span className="text-text-secondary font-medium">Spinout min time loss (s)</span>
-                <input type="number" step="0.5" min="0.5" max="30"
-                  value={tuningParams.spinout_min_time_loss}
-                  onChange={e => updateTuning('spinout_min_time_loss', parseFloat(e.target.value) || 2)}
-                  className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
-                />
-              </label>
-              <label className="flex flex-col gap-0.5">
-                <span className="text-text-secondary font-medium">Spinout max time loss (s)</span>
-                <input type="number" step="1" min="1" max="60"
-                  value={tuningParams.spinout_max_time_loss}
-                  onChange={e => updateTuning('spinout_max_time_loss', parseFloat(e.target.value) || 10)}
-                  className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
-                />
-              </label>
-              {/* Contact */}
-              <label className="flex flex-col gap-0.5">
-                <span className="text-text-secondary font-medium">Contact time window (s)</span>
-                <input type="number" step="0.5" min="0.5" max="10"
-                  value={tuningParams.contact_time_window}
-                  onChange={e => updateTuning('contact_time_window', parseFloat(e.target.value) || 2)}
-                  className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
-                />
-              </label>
-              <label className="flex flex-col gap-0.5">
-                <span className="text-text-secondary font-medium">Contact proximity</span>
-                <input type="number" step="0.01" min="0.01" max="1"
-                  value={tuningParams.contact_proximity}
-                  onChange={e => updateTuning('contact_proximity', parseFloat(e.target.value) || 0.05)}
-                  className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
-                />
-              </label>
-              {/* Close call */}
-              <label className="flex flex-col gap-0.5">
-                <span className="text-text-secondary font-medium">Close call proximity</span>
-                <input type="number" step="0.005" min="0.005" max="0.5"
-                  value={tuningParams.close_call_proximity}
-                  onChange={e => updateTuning('close_call_proximity', parseFloat(e.target.value) || 0.02)}
-                  className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
-                />
-              </label>
-              <label className="flex flex-col gap-0.5">
-                <span className="text-text-secondary font-medium">Close call max off-track (s)</span>
-                <input type="number" step="0.5" min="0.5" max="15"
-                  value={tuningParams.close_call_max_off_track}
-                  onChange={e => updateTuning('close_call_max_off_track', parseFloat(e.target.value) || 3)}
-                  className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
-                />
-              </label>
+              </div>
             </div>
-            <div className="mt-3 flex items-center gap-2">
+
+            {/* ── Crash Detection ── */}
+            <div className="mb-3">
+              <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
+                <Flame size={11} className="text-event-incident" /> Crash Detection
+              </span>
+              <div className="grid grid-cols-3 gap-x-6 gap-y-2 text-xxs">
+                <TuneField
+                  label="Min time loss (s)"
+                  tooltip="Minimum estimated time lost (seconds) for an off-track excursion to qualify as a crash. Higher values only catch severe incidents; lower values detect smaller offs. This measures the difference in CarIdxEstTime before and after the off-track. Default 10s means only big stops/impacts."
+                  value={tuningParams.crash_min_time_loss}
+                  onChange={v => updateTuning('crash_min_time_loss', v || 10)}
+                  step={1} min={1} max={60}
+                />
+                <TuneField
+                  label="Min off-track duration (s)"
+                  tooltip="Minimum duration (seconds) a car must remain off-track to count as a crash. Prevents brief grass clips from being flagged. Higher values only capture extended off-track excursions. Combined with time loss threshold to distinguish crashes from spinouts."
+                  value={tuningParams.crash_min_off_track_duration}
+                  onChange={v => updateTuning('crash_min_off_track_duration', v || 3)}
+                  step={0.5} min={0.5} max={30}
+                />
+              </div>
+            </div>
+
+            {/* ── Spinout Detection ── */}
+            <div className="mb-3">
+              <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
+                <RotateCcw size={11} className="text-event-battle" /> Spinout Detection
+              </span>
+              <div className="grid grid-cols-3 gap-x-6 gap-y-2 text-xxs">
+                <TuneField
+                  label="Min time loss (s)"
+                  tooltip="Minimum time loss (seconds) for an off-track moment to classify as a spinout (not just a track-limit violation). Events below this are ignored; events above the max are classified as crashes instead. Default 2s catches moderate loss-of-control moments."
+                  value={tuningParams.spinout_min_time_loss}
+                  onChange={v => updateTuning('spinout_min_time_loss', v || 2)}
+                  step={0.5} min={0.5} max={30}
+                />
+                <TuneField
+                  label="Max time loss (s)"
+                  tooltip="Maximum time loss (seconds) for a spinout. Off-track events with time loss exceeding this threshold are classified as crashes instead. This creates a band: spinouts are between min and max time loss. Default 10s means any off with 2–10s lost is a spinout, 10s+ is a crash."
+                  value={tuningParams.spinout_max_time_loss}
+                  onChange={v => updateTuning('spinout_max_time_loss', v || 10)}
+                  step={1} min={1} max={60}
+                />
+              </div>
+            </div>
+
+            {/* ── Contact Detection ── */}
+            <div className="mb-3">
+              <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
+                <CircleDot size={11} className="text-event-overtake" /> Contact Detection
+              </span>
+              <div className="grid grid-cols-3 gap-x-6 gap-y-2 text-xxs">
+                <TuneField
+                  label="Time window (s)"
+                  tooltip="Maximum time window (seconds) for grouping multiple cars going off-track as a single contact event. If two or more cars go off-track within this window at similar track positions, it's classified as car-to-car contact. Wider windows catch chain-reaction incidents."
+                  value={tuningParams.contact_time_window}
+                  onChange={v => updateTuning('contact_time_window', v || 2)}
+                  step={0.5} min={0.5} max={10}
+                />
+                <TuneField
+                  label="Proximity"
+                  tooltip="Maximum track-position difference (as fraction of lap, 0–1) for two off-track cars to be considered in contact. 0.05 = 5% of track length. Lower values require cars to be very close together; higher values group more distant incidents. At 90s lap time, 0.05 ≈ 4.5 seconds of track distance."
+                  value={tuningParams.contact_proximity}
+                  onChange={v => updateTuning('contact_proximity', v || 0.05)}
+                  step={0.01} min={0.01} max={1}
+                />
+              </div>
+            </div>
+
+            {/* ── Close Call Detection ── */}
+            <div className="mb-3">
+              <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
+                <ShieldAlert size={11} className="text-event-fastest" /> Close Call Detection
+              </span>
+              <div className="grid grid-cols-3 gap-x-6 gap-y-2 text-xxs">
+                <TuneField
+                  label="Proximity"
+                  tooltip="Maximum track-position difference (fraction of lap) between an off-track car and a nearby on-track car for a close call. Very small values (0.02 = 2% of lap) only catch true near-misses where cars are nearly side-by-side. Increase to catch wider-gap close calls."
+                  value={tuningParams.close_call_proximity}
+                  onChange={v => updateTuning('close_call_proximity', v || 0.02)}
+                  step={0.005} min={0.005} max={0.5}
+                />
+                <TuneField
+                  label="Max off-track (s)"
+                  tooltip="Maximum time loss (seconds) for a close call. The off-track car must recover quickly — if it loses more time than this, it becomes a spinout or crash instead. Low values capture only brief, exciting near-misses. These are entertainment-value events."
+                  value={tuningParams.close_call_max_off_track}
+                  onChange={v => updateTuning('close_call_max_off_track', v || 3)}
+                  step={0.5} min={0.5} max={15}
+                />
+              </div>
+            </div>
+
+            <div className="mt-1 flex items-center gap-2">
               <button
                 onClick={handleRedetect}
                 disabled={isRedetecting}
@@ -830,19 +899,25 @@ export default function AnalysisPanel() {
                         const Icon = cfg.icon || BarChart3
                         const isActive = activeFilter === event_type
                         return (
-                          <button
+                          <Tooltip
                             key={event_type}
-                            onClick={() => handleFilterChange(event_type)}
-                            className={`flex items-center gap-1 px-1.5 py-0.5 text-xxs rounded
-                                       transition-colors border
-                                       ${isActive
-                                         ? 'border-accent bg-accent/10 text-accent'
-                                         : 'border-border text-text-tertiary hover:text-text-secondary'
-                                       }`}
+                            content={`${cfg.label || event_type}: ${count} event${count !== 1 ? 's' : ''} — click to ${isActive ? 'show all' : 'filter'}`}
+                            position="bottom"
+                            delay={200}
                           >
-                            <Icon size={9} className={cfg.color} />
-                            <span>{count}</span>
-                          </button>
+                            <button
+                              onClick={() => handleFilterChange(event_type)}
+                              className={`flex items-center gap-1 px-1.5 py-0.5 text-xxs rounded
+                                         transition-colors border
+                                         ${isActive
+                                           ? 'border-accent bg-accent/10 text-accent'
+                                           : 'border-border text-text-tertiary hover:text-text-secondary'
+                                         }`}
+                            >
+                              <Icon size={9} className={cfg.color} />
+                              <span>{count}</span>
+                            </button>
+                          </Tooltip>
                         )
                       })}
                     </div>
@@ -1235,10 +1310,10 @@ export default function AnalysisPanel() {
               )}
 
               {/* ── Particle event cards overlay ──────────────────────── */}
-              {discoveredEvents.length > 0 && (
+              {feedEvents.length > 0 && (
                 <div className="absolute bottom-14 right-3 flex flex-col-reverse gap-1.5 pointer-events-none"
                      style={{ maxHeight: 'calc(100% - 80px)' }}>
-                  {discoveredEvents.slice(-5).reverse().map((ev, i) => {
+                  {feedEvents.slice(-5).reverse().map((ev, i) => {
                     const cfg = EVENT_CONFIG[ev.type] || {}
                     const Icon = cfg.icon || BarChart3
                     const names = ev.driverNames || []
@@ -1493,42 +1568,54 @@ function EventDetail({ event }) {
   const metadata = event.metadata || {}
 
   return (
-    <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-xxs">
-      {/* Left column */}
-      <div className="space-y-1.5">
-        <DetailRow label="Type" value={EVENT_CONFIG[event.event_type]?.label || event.event_type} />
-        <DetailRow label="Severity" value={`${event.severity} / 10`} />
-        <DetailRow label="Time" value={`${formatTime(event.start_time_seconds)} — ${formatTime(event.end_time_seconds)}`} />
-        <DetailRow label="Duration" value={`${((event.end_time_seconds - event.start_time_seconds) || 0).toFixed(1)}s`} />
-        {event.lap_number > 0 && (
-          <DetailRow label="Lap" value={event.lap_number} />
-        )}
+    <div className="space-y-2 text-xxs">
+      {/* Core fields */}
+      <div className="grid grid-cols-2 gap-x-6 gap-y-2">
+        <div className="space-y-1.5">
+          <DetailRow label="Type" value={EVENT_CONFIG[event.event_type]?.label || event.event_type} />
+          <DetailRow label="Severity" value={`${event.severity} / 10`} />
+          <DetailRow label="Time" value={`${formatTime(event.start_time_seconds)} — ${formatTime(event.end_time_seconds)}`} />
+          <DetailRow label="Duration" value={`${((event.end_time_seconds - event.start_time_seconds) || 0).toFixed(1)}s`} />
+          {event.lap_number > 0 && (
+            <DetailRow label="Lap" value={event.lap_number} />
+          )}
+        </div>
+        <div className="space-y-1.5">
+          {event.detector && (
+            <DetailRow label="Detected by" value={event.detector} />
+          )}
+          {involvedDrivers.length > 0 && (
+            <DetailRow label="Car Indices" value={involvedDrivers.join(', ')} />
+          )}
+        </div>
       </div>
 
-      {/* Right column */}
-      <div className="space-y-1.5">
-        {driverNames.length > 0 && (
-          <DetailRow label="Drivers" value={driverNames.join(', ')} />
-        )}
-        {involvedDrivers.length > 0 && (
-          <DetailRow label="Car Indices" value={involvedDrivers.join(', ')} />
-        )}
-        {event.detector && (
-          <DetailRow label="Detector" value={event.detector} />
-        )}
-      </div>
+      {/* Drivers — full width, no truncation */}
+      {driverNames.length > 0 && (
+        <div className="pt-1.5 border-t border-border-subtle">
+          <span className="text-text-disabled font-medium block mb-1">Drivers</span>
+          <div className="flex flex-wrap gap-1">
+            {driverNames.map((name, i) => (
+              <span key={i} className="px-1.5 py-0.5 bg-surface rounded text-text-secondary">
+                {name}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
-      {/* Metadata — full width */}
+      {/* Metadata — full width, no truncation */}
       {Object.keys(metadata).length > 0 && (
-        <div className="col-span-2 mt-1 pt-1.5 border-t border-border-subtle">
+        <div className="pt-1.5 border-t border-border-subtle">
           <span className="text-text-disabled font-medium block mb-1">Metadata</span>
-          <div className="grid grid-cols-2 gap-x-6 gap-y-1">
+          <div className="space-y-1">
             {Object.entries(metadata).map(([key, value]) => (
-              <DetailRow
-                key={key}
-                label={key.replace(/_/g, ' ')}
-                value={typeof value === 'object' ? JSON.stringify(value) : String(value)}
-              />
+              <div key={key} className="flex flex-col gap-0.5">
+                <span className="text-text-disabled capitalize">{key.replace(/_/g, ' ')}</span>
+                <span className="text-text-secondary break-all">
+                  {typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value)}
+                </span>
+              </div>
             ))}
           </div>
         </div>
@@ -1537,11 +1624,34 @@ function EventDetail({ event }) {
   )
 }
 
+/**
+ * TuneField — labelled numeric input with info-icon tooltip.
+ */
+function TuneField({ label, tooltip, value, onChange, step, min, max }) {
+  return (
+    <label className="flex flex-col gap-0.5">
+      <span className="text-text-secondary font-medium flex items-center gap-1">
+        {label}
+        {tooltip && (
+          <Tooltip content={tooltip} position="top">
+            <Info size={11} className="text-text-disabled hover:text-accent cursor-help transition-colors" />
+          </Tooltip>
+        )}
+      </span>
+      <input type="number" step={step} min={min} max={max}
+        value={value}
+        onChange={e => onChange(parseFloat(e.target.value))}
+        className="w-full px-2 py-1 rounded bg-surface border border-border text-text-primary text-xxs"
+      />
+    </label>
+  )
+}
+
 function DetailRow({ label, value }) {
   return (
     <div className="flex items-baseline gap-2 min-w-0">
       <span className="text-text-disabled capitalize shrink-0">{label}</span>
-      <span className="text-text-secondary truncate">{value}</span>
+      <span className="text-text-secondary break-words">{value}</span>
     </div>
   )
 }

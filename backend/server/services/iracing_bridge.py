@@ -270,6 +270,7 @@ class IRacingBridge:
             return {
                 "session_time":  self._ir["SessionTime"]    or 0.0,
                 "session_state": self._ir["SessionState"]   or 0,
+                "session_num":   self._ir["SessionNum"]     if self._ir["SessionNum"] is not None else 0,
                 "replay_frame":  self._ir["ReplayFrameNum"] or 0,
                 "race_laps":     self._ir["RaceLaps"]       or 0,
                 "cam_car_idx":   self._ir["CamCarIdx"]      or 0,

@@ -47,6 +47,7 @@ EVENT_CRASH       = "crash"
 EVENT_SPINOUT     = "spinout"
 EVENT_CONTACT     = "contact"
 EVENT_CLOSE_CALL  = "close_call"
+EVENT_PACE_LAP    = "pace_lap"
 
 # iRacing surface constants
 SURFACE_OFF_TRACK = 0
@@ -1074,6 +1075,49 @@ class CloseCallDetector(BaseDetector):
         return events
 
 
+# ── Pace Lap Detector ────────────────────────────────────────────────────────
+
+class PaceLapDetector(BaseDetector):
+    """Detect the pace / formation lap before the green flag.
+
+    The pace lap is the period when ``session_state == SESSION_STATE_PARADE``
+    (state 3), which indicates cars have left the grid and are circulating
+    under the pace car but before the green flag drops.
+    """
+
+    event_type = EVENT_PACE_LAP
+
+    def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
+        row = db.execute("""
+            SELECT MIN(t.session_time)  AS start_time,
+                   MAX(t.session_time)  AS end_time,
+                   MIN(t.replay_frame)  AS start_frame,
+                   MAX(t.replay_frame)  AS end_frame
+            FROM race_ticks t
+            WHERE t.session_state = ?
+        """, (SESSION_STATE_PARADE,)).fetchone()
+
+        if not row or row["start_time"] is None:
+            logger.info("[Detector:PaceLap] No parade/pace lap data found")
+            return []
+
+        events = [{
+            "event_type": self.event_type,
+            "start_time": row["start_time"],
+            "end_time": row["end_time"],
+            "start_frame": row["start_frame"],
+            "end_frame": row["end_frame"],
+            "lap_number": 0,
+            "severity": 4,
+            "involved_drivers": [],
+            "position": None,
+            "metadata": {"description": "Pace / formation lap before green flag"},
+        }]
+
+        logger.info("[Detector:PaceLap] Found pace lap event")
+        return events
+
+
 # ── Detector registry ────────────────────────────────────────────────────────
 
 ALL_DETECTORS: list[BaseDetector] = [
@@ -1083,6 +1127,7 @@ ALL_DETECTORS: list[BaseDetector] = [
     PitStopDetector(),
     FastestLapDetector(),
     LeaderChangeDetector(),
+    PaceLapDetector(),
     FirstLapDetector(),
     LastLapDetector(),
     CrashDetector(),

@@ -65,7 +65,7 @@ export default function ResizableSidebar({
   if (collapsed) {
     return (
       <>
-        <div className="w-10 flex flex-col items-center py-2 gap-2 border-r border-border bg-bg-secondary shrink-0">
+        <div className="w-10 flex flex-col items-center py-2 gap-2 border-r border-border bg-bg-secondary shrink-0 select-none">
           {tabs.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
@@ -121,7 +121,7 @@ export default function ResizableSidebar({
   // ── Expanded: full sidebar with resize handle ───────────────────────
   return (
     <div
-      className="flex flex-col overflow-hidden border-r border-border bg-bg-primary/50 shrink-0 relative"
+      className="flex flex-col overflow-hidden border-r border-border bg-bg-primary/50 shrink-0 relative select-none"
       style={{ width }}
     >
       {/* Tab bar */}
