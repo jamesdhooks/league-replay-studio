@@ -8,7 +8,7 @@ import { apiPost, apiGet, apiDelete } from '../../services/api'
 import {
   Play, Pause, Square, BarChart3, AlertTriangle, Swords, ArrowUpDown,
   Fuel, Zap, Crown, Flag, FlagTriangleRight, Loader2, CheckCircle2,
-  XCircle, Terminal, ChevronRight, ChevronDown, Camera, Video, Monitor,
+  XCircle, Terminal, ChevronRight, ChevronDown, ChevronUp, Camera, Video, Monitor,
   SkipBack, SkipForward, Rewind, FastForward, List, Trash2, Settings,
   Eye, EyeOff, Users, RefreshCw, Flame, RotateCcw, CircleDot, ShieldAlert, WifiOff, AlertCircle, Minus, Plus,
   Folder, SlidersHorizontal, Info, CarFront,
@@ -286,6 +286,9 @@ export default function AnalysisPanel() {
   const [cameraFollow, setCameraFollow] = useLocalStorage('lrs:analysis:cameraFollow', false)
   const lastCameraEventRef = useRef(null)
 
+  // Event table sort state
+  const [eventSort, setEventSort] = useState({ col: 'time', dir: 'asc' })
+
   // Window picker state
   const [showWindowPicker, setShowWindowPicker] = useState(false)
   const [windowList, setWindowList] = useState([])
@@ -549,6 +552,13 @@ export default function AnalysisPanel() {
     } catch {}
   }
 
+  const cycleSort = (col) => {
+    setEventSort(prev => prev.col === col
+      ? { col, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+      : { col, dir: 'asc' }
+    )
+  }
+
   const streamUrl = `/api/iracing/stream?fps=${streamFps}&quality=${mjpegQuality}&max_width=${mjpegMaxWidth}&_k=${streamKey}`
   const h264Url   = `/api/iracing/stream/h264?fps=${streamFps}&crf=${h264Crf}&max_width=${h264MaxWidth}&_k=${streamKey}`
   const hlsUrl    = `/api/iracing/stream/hls/playlist.m3u8?fps=${streamFps}&crf=${streamHlsCrf}&max_width=${h264MaxWidth}&_k=${streamKey}`
@@ -602,117 +612,59 @@ export default function AnalysisPanel() {
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
 
-      {/* ── Top control bar ───────────────────────────────────────────── */}
-      <div className="shrink-0 border-b border-border bg-bg-secondary">
-        <div className="flex items-center gap-4 px-4 py-2.5">
-          {/* Action buttons */}
-          <div className="flex items-center gap-2">
-            {isAnalyzing ? (
-              <button
-                onClick={handleCancel}
-                className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium
-                           text-danger bg-danger/10 rounded-lg hover:bg-danger/20 transition-colors"
-              >
-                <Square size={13} />
-                Stop
-              </button>
-            ) : (
-              <>
+      {/* ── Top control bar — only visible during analysis or on error/complete ── */}
+      {(isAnalyzing || error || progress?.percent === 100) && (
+        <div className="shrink-0 border-b border-border bg-bg-secondary">
+          <div className="flex items-center gap-4 px-4 py-2.5">
+            {/* Stop / Complete indicator */}
+            <div className="flex items-center gap-2">
+              {isAnalyzing ? (
                 <button
-                  onClick={handleStart}
-                  className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold
-                             text-white bg-gradient-to-r from-gradient-from to-gradient-to
-                             rounded-lg hover:from-gradient-via hover:to-gradient-from
-                             transition-all duration-200 shadow-glow-sm"
+                  onClick={handleCancel}
+                  className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium
+                             text-danger bg-danger/10 rounded-lg hover:bg-danger/20 transition-colors"
                 >
-                  <Play size={13} />
-                  {hasEvents ? 'Re-analyze' : 'Analyze'}
+                  <Square size={13} />
+                  Stop
                 </button>
-                {hasEvents && (
-                  <>
-                    <button
-                      onClick={() => advanceStep(activeProject.id)}
-                      className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold
-                                 text-white bg-gradient-to-r from-gradient-from to-gradient-to
-                                 rounded-lg hover:from-gradient-via hover:to-gradient-from
-                                 transition-all duration-200 shadow-glow-sm"
-                    >
-                      Open Editor
-                      <ChevronRight size={13} />
-                    </button>
-                    <button
-                      onClick={handleClear}
-                      title="Clear analysis data"
-                      className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium
-                                 text-text-secondary bg-transparent border border-border
-                                 rounded-lg hover:bg-danger/10 hover:text-danger hover:border-danger/30
-                                 transition-colors"
-                    >
-                      <Trash2 size={12} />
-                      Clear
-                    </button>
-                  </>
-                )}
-              </>
-            )}
-            {!isAnalyzing && progress?.percent === 100 && (
-              <div className="flex items-center gap-1 text-success">
-                <CheckCircle2 size={13} />
-                <span className="text-xxs font-medium">Complete</span>
+              ) : (
+                progress?.percent === 100 && (
+                  <div className="flex items-center gap-1 text-success">
+                    <CheckCircle2 size={13} />
+                    <span className="text-xxs font-medium">Complete</span>
+                  </div>
+                )
+              )}
+            </div>
+
+            {/* Progress bar */}
+            {isAnalyzing && progress && (
+              <div className="flex-1 flex items-center gap-3 min-w-0">
+                <div className="flex-1 h-1.5 bg-surface rounded-full overflow-hidden max-w-xs">
+                  <div
+                    className="h-full bg-gradient-to-r from-gradient-from via-gradient-via to-gradient-to
+                               rounded-full transition-all duration-300"
+                    style={{ width: `${progress.percent || 0}%` }}
+                  />
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <Loader2 size={11} className="text-accent animate-spin" />
+                  <span className="text-xxs text-text-secondary truncate max-w-[200px]">
+                    {progress.message || 'Analyzing...'}
+                  </span>
+                </div>
               </div>
             )}
           </div>
 
-          {/* Progress bar */}
-          {isAnalyzing && progress && (
-            <div className="flex-1 flex items-center gap-3 min-w-0">
-              <div className="flex-1 h-1.5 bg-surface rounded-full overflow-hidden max-w-xs">
-                <div
-                  className="h-full bg-gradient-to-r from-gradient-from via-gradient-via to-gradient-to
-                             rounded-full transition-all duration-300"
-                  style={{ width: `${progress.percent || 0}%` }}
-                />
-              </div>
-              <div className="flex items-center gap-1.5 shrink-0">
-                <Loader2 size={11} className="text-accent animate-spin" />
-                <span className="text-xxs text-text-secondary truncate max-w-[200px]">
-                  {progress.message || 'Analyzing...'}
-                </span>
-              </div>
+          {error && (
+            <div className="flex items-center gap-1.5 px-4 py-1.5 bg-danger/10 border-t border-danger/20">
+              <XCircle size={12} className="text-danger shrink-0" />
+              <span className="text-xxs text-danger">{error}</span>
             </div>
           )}
-
-          {/* Right controls */}
-          <div className="ml-auto flex items-center gap-3 shrink-0">
-            {isConnected && (
-              <button
-                onClick={() => setCameraFollow(prev => !prev)}
-                title={cameraFollow ? 'Camera follow ON' : 'Camera follow OFF'}
-                className={`flex items-center gap-1 px-2 py-1 rounded-md text-xxs transition-colors border
-                  ${cameraFollow
-                    ? 'bg-accent/15 border-accent/30 text-accent'
-                    : 'bg-transparent border-border text-text-disabled hover:text-text-secondary'
-                  }`}
-              >
-                <Camera size={11} />
-                <span>Follow</span>
-              </button>
-            )}
-            {(eventSummary?.total_events > 0 || discoveredEvents.length > 0) && (
-              <span className="text-xxs text-text-disabled font-mono">
-                {eventSummary?.total_events || discoveredEvents.length} events
-              </span>
-            )}
-          </div>
         </div>
-
-        {error && (
-          <div className="flex items-center gap-1.5 px-4 py-1.5 bg-danger/10 border-t border-danger/20">
-            <XCircle size={12} className="text-danger shrink-0" />
-            <span className="text-xxs text-danger">{error}</span>
-          </div>
-        )}
-      </div>
+      )}
 
       {/* ── Main area: sidebar + TV + controls (fills remaining height) ── */}
       <div className="flex-1 flex overflow-hidden min-h-0 relative">
@@ -941,62 +893,116 @@ export default function AnalysisPanel() {
                         </div>
                       )}
 
-                      {/* Event list — compact rows */}
-                      {(isAnalyzing ? discoveredEvents : events).map((ev) => {
-                        const isDiscovered = isAnalyzing
-                        const type = isDiscovered ? ev.type : ev.event_type
-                        const cfg = EVENT_CONFIG[type] || {}
-                        const Icon = cfg.icon || BarChart3
-                        const startSec = isDiscovered ? ev.startTime : ev.start_time_seconds
-                        const sev = ev.severity
-                        const eventId = ev.id
-                        const isExpanded = expandedEvent === `sidebar-${eventId}`
+                      {/* Sortable table header */}
+                      <div className="sticky top-0 z-10 grid grid-cols-[minmax(0,auto)_1fr_auto_auto] border-b border-border bg-bg-secondary">
+                        {[
+                          { key: 'type',     label: 'Type' },
+                          { key: 'driver',   label: 'Driver(s)' },
+                          { key: 'time',     label: 'Time' },
+                          { key: 'severity', label: 'Sev' },
+                        ].map(({ key, label }) => (
+                          <button key={key} onClick={() => cycleSort(key)}
+                            className="flex items-center gap-0.5 px-2 py-1.5 text-xxs font-semibold
+                                       text-text-secondary hover:text-text-primary hover:bg-bg-hover
+                                       transition-colors text-left whitespace-nowrap">
+                            {label}
+                            {eventSort.col === key
+                              ? eventSort.dir === 'asc'
+                                ? <ChevronUp size={9} className="text-accent shrink-0 ml-0.5" />
+                                : <ChevronDown size={9} className="text-accent shrink-0 ml-0.5" />
+                              : null}
+                          </button>
+                        ))}
+                      </div>
 
-                        return (
-                          <div key={`${isDiscovered ? 'd' : 'e'}-${eventId}`}
-                               className="border-b border-border-subtle/30 animate-slide-right">
-                            <div className="flex items-center hover:bg-bg-hover transition-colors">
-                              <button
+                      {/* Sorted event rows */}
+                      {(() => {
+                        const rawList = isAnalyzing ? discoveredEvents : events
+                        const sorted = [...rawList].sort((a, b) => {
+                          const dir = eventSort.dir === 'asc' ? 1 : -1
+                          switch (eventSort.col) {
+                            case 'type': {
+                              const ta = (isAnalyzing ? a.type : a.event_type) || ''
+                              const tb = (isAnalyzing ? b.type : b.event_type) || ''
+                              return dir * ta.localeCompare(tb)
+                            }
+                            case 'driver': {
+                              const da = (isAnalyzing ? a.driverNames?.[0] : a.driver_names?.[0]) || ''
+                              const db = (isAnalyzing ? b.driverNames?.[0] : b.driver_names?.[0]) || ''
+                              return dir * da.localeCompare(db)
+                            }
+                            case 'time': {
+                              const ta = (isAnalyzing ? a.startTime : a.start_time_seconds) || 0
+                              const tb = (isAnalyzing ? b.startTime : b.start_time_seconds) || 0
+                              return dir * (ta - tb)
+                            }
+                            case 'severity':
+                              return dir * ((a.severity || 0) - (b.severity || 0))
+                            default: return 0
+                          }
+                        })
+                        return sorted.map((ev) => {
+                          const isDiscovered = isAnalyzing
+                          const type = isDiscovered ? ev.type : ev.event_type
+                          const cfg = EVENT_CONFIG[type] || {}
+                          const Icon = cfg.icon || BarChart3
+                          const startSec = isDiscovered ? ev.startTime : ev.start_time_seconds
+                          const sev = ev.severity
+                          const eventId = ev.id
+                          const isExpanded = expandedEvent === `sidebar-${eventId}`
+                          const driverNames = isDiscovered ? (ev.driverNames || []) : (ev.driver_names || [])
+                          return (
+                            <div key={`${isDiscovered ? 'd' : 'e'}-${eventId}`}
+                                 className="border-b border-border-subtle/30 animate-slide-right">
+                              <div
+                                className="grid grid-cols-[minmax(0,auto)_1fr_auto_auto]
+                                           hover:bg-bg-hover transition-colors cursor-pointer"
                                 onClick={() => seekToEvent(ev)}
-                                title="Seek replay to this event"
-                                className="flex-1 flex items-center gap-1.5 px-3 py-1.5 text-left min-w-0"
                               >
-                                <Icon size={12} className={cfg.color || 'text-text-tertiary'} />
-                                <span className="text-xs font-medium text-text-primary truncate">
-                                  {cfg.label || type}
-                                </span>
-                                <span className="text-xxs text-text-disabled font-mono ml-auto">
-                                  {formatTime(startSec)}
-                                </span>
-                                <span className={`shrink-0 w-4 h-4 rounded-full flex items-center justify-center
-                                                text-xxs font-bold ${severityColor(sev)}`}>
-                                  {sev}
-                                </span>
-                              </button>
-                              {!isDiscovered && (
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation()
-                                    setExpandedEvent(prev => prev === `sidebar-${eventId}` ? null : `sidebar-${eventId}`)
-                                  }}
-                                  title={isExpanded ? 'Collapse details' : 'Expand details'}
-                                  className="shrink-0 w-6 h-6 flex items-center justify-center mr-1
-                                             rounded-md hover:bg-surface-active text-text-disabled
-                                             hover:text-text-secondary transition-colors"
-                                >
-                                  <ChevronDown size={12}
-                                    className={`transition-transform duration-150 ${isExpanded ? 'rotate-180' : ''}`} />
-                                </button>
+                                {/* Type */}
+                                <div className="flex items-center gap-1.5 px-2 py-1.5 min-w-0">
+                                  <Icon size={11} className={`${cfg.color || 'text-text-tertiary'} shrink-0`} />
+                                  <span className="text-xxs text-text-primary truncate">{cfg.label || type}</span>
+                                </div>
+                                {/* Driver(s) */}
+                                <div className="flex items-center px-2 py-1.5 min-w-0">
+                                  <span className="text-xxs text-text-secondary truncate">
+                                    {driverNames.length > 0 ? driverNames.join(', ') : '—'}
+                                  </span>
+                                </div>
+                                {/* Time */}
+                                <div className="flex items-center px-2 py-1.5">
+                                  <span className="text-xxs text-text-disabled font-mono whitespace-nowrap">{formatTime(startSec)}</span>
+                                </div>
+                                {/* Severity + expand */}
+                                <div className="flex items-center gap-0.5 px-2 py-1.5">
+                                  <span className={`w-4 h-4 rounded-full flex items-center justify-center text-xxs font-bold ${severityColor(sev)}`}>
+                                    {sev}
+                                  </span>
+                                  {!isDiscovered && (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        setExpandedEvent(prev => prev === `sidebar-${eventId}` ? null : `sidebar-${eventId}`)
+                                      }}
+                                      className="w-4 h-4 flex items-center justify-center rounded hover:bg-surface-active
+                                                 text-text-disabled hover:text-text-secondary transition-colors shrink-0"
+                                    >
+                                      <ChevronDown size={10}
+                                        className={`transition-transform duration-150 ${isExpanded ? 'rotate-180' : ''}`} />
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                              {isExpanded && !isDiscovered && (
+                                <div className="px-3 pt-2 pb-2 bg-bg-secondary/50 border-t border-border-subtle animate-fade-in">
+                                  <EventDetail event={ev} />
+                                </div>
                               )}
                             </div>
-                            {isExpanded && !isDiscovered && (
-                              <div className="px-3 pt-2 pb-2 bg-bg-secondary/50 border-t border-border-subtle animate-fade-in">
-                                <EventDetail event={ev} />
-                              </div>
-                            )}
-                          </div>
-                        )
-                      })}
+                          )
+                        })
+                      })()}
 
                       {(isAnalyzing ? discoveredEvents : events).length === 0 && (
                         <div className="flex items-center justify-center py-8 text-text-disabled text-xs">
@@ -1360,56 +1366,107 @@ export default function AnalysisPanel() {
             </div>
           </div>
 
-            {/* ── Cameras + Drivers column (floating cards, same row height as TV) ── */}
-            {isConnected && !isAnalyzing && (
-              <div className="flex flex-col gap-2 w-44 shrink-0">
+            {/* ── Options + Cameras + Drivers column ── */}
+            {!isAnalyzing && (hasEvents || isConnected) && (
+              <div className="flex flex-col gap-2 w-52 shrink-0">
+
+                {/* Options card */}
+                {hasEvents && (
+                  <div className="rounded-xl border border-border bg-bg-secondary shadow-sm p-3 shrink-0">
+                    <span className="text-xxs font-semibold text-text-primary block mb-2">Options</span>
+                    <div className="flex flex-col gap-1.5">
+                      <button
+                        onClick={handleStart}
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xxs font-semibold
+                                   text-white bg-gradient-to-r from-gradient-from to-gradient-to
+                                   rounded-lg hover:from-gradient-via hover:to-gradient-from
+                                   transition-all duration-200 shadow-glow-sm justify-center"
+                      >
+                        <Play size={11} />
+                        Re-analyze
+                      </button>
+                      <button
+                        onClick={() => advanceStep(activeProject.id)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xxs font-semibold
+                                   text-white bg-gradient-to-r from-gradient-from to-gradient-to
+                                   rounded-lg hover:from-gradient-via hover:to-gradient-from
+                                   transition-all duration-200 shadow-glow-sm justify-center"
+                      >
+                        Open Editor
+                        <ChevronRight size={11} />
+                      </button>
+                      <button
+                        onClick={handleClear}
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xxs font-medium
+                                   text-text-secondary bg-transparent border border-border
+                                   rounded-lg hover:bg-danger/10 hover:text-danger hover:border-danger/30
+                                   transition-colors justify-center"
+                      >
+                        <Trash2 size={11} />
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {/* Cameras card */}
-                <div className="rounded-xl border border-border bg-bg-secondary shadow-sm overflow-hidden flex flex-col"
-                     style={{ maxHeight: '45%' }}>
-                  <div className="shrink-0 px-3 py-2 border-b border-border">
-                    <span className="text-xxs font-medium text-text-primary flex items-center gap-1.5">
-                      <Eye size={11} />
-                      Cameras
-                    </span>
+                {isConnected && (
+                  <div className="rounded-xl border border-border bg-bg-secondary shadow-sm overflow-hidden flex flex-col"
+                       style={{ maxHeight: '45%' }}>
+                    <div className="shrink-0 px-3 py-2 border-b border-border flex items-center gap-1.5 min-w-0">
+                      <Eye size={11} className="text-text-secondary shrink-0" />
+                      <span className="text-xxs font-medium text-text-primary shrink-0">Cameras</span>
+                      {replayState?.cam_group_num != null && cameraGroups.find(c => c.group_num === replayState.cam_group_num) && (
+                        <span className="text-xxs text-accent truncate ml-auto">
+                          {cameraGroups.find(c => c.group_num === replayState.cam_group_num)?.group_name}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex-1 overflow-y-auto">
+                      {cameraGroups.map(cam => (
+                        <button key={cam.group_num}
+                          onClick={() => handleSwitchCamera(cam.group_num)}
+                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xxs
+                                     hover:bg-bg-hover transition-colors border-b border-border-subtle/30
+                                     ${replayState?.cam_group_num === cam.group_num
+                                       ? 'bg-accent/10 text-accent font-medium'
+                                       : 'text-text-secondary'}`}>
+                          <Eye size={10} className={replayState?.cam_group_num === cam.group_num ? 'text-accent' : 'text-text-disabled'} />
+                          <span className="truncate">{cam.group_name}</span>
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  <div className="flex-1 overflow-y-auto">
-                    {cameraGroups.map(cam => (
-                      <button key={cam.group_num}
-                        onClick={() => handleSwitchCamera(cam.group_num)}
-                        className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xxs
-                                   hover:bg-bg-hover transition-colors border-b border-border-subtle/30
-                                   ${replayState?.cam_group_num === cam.group_num
-                                     ? 'bg-accent/10 text-accent font-medium'
-                                     : 'text-text-secondary'}`}>
-                        <Eye size={10} className={replayState?.cam_group_num === cam.group_num ? 'text-accent' : 'text-text-disabled'} />
-                        <span className="truncate">{cam.group_name}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                )}
+
                 {/* Drivers card */}
-                <div className="flex-1 rounded-xl border border-border bg-bg-secondary shadow-sm overflow-hidden flex flex-col min-h-0">
-                  <div className="shrink-0 px-3 py-2 border-b border-border">
-                    <span className="text-xxs font-medium text-text-primary flex items-center gap-1.5">
-                      <Users size={11} />
-                      Drivers
-                    </span>
+                {isConnected && (
+                  <div className="flex-1 rounded-xl border border-border bg-bg-secondary shadow-sm overflow-hidden flex flex-col min-h-0">
+                    <div className="shrink-0 px-3 py-2 border-b border-border flex items-center gap-1.5 min-w-0">
+                      <Users size={11} className="text-text-secondary shrink-0" />
+                      <span className="text-xxs font-medium text-text-primary shrink-0">Drivers</span>
+                      {replayState?.cam_car_idx != null && drivers.find(d => d.car_idx === replayState.cam_car_idx) && (
+                        <span className="text-xxs text-accent truncate ml-auto">
+                          {drivers.find(d => d.car_idx === replayState.cam_car_idx)?.user_name}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex-1 overflow-y-auto">
+                      {drivers.filter(d => !d.is_spectator).map(d => (
+                        <button key={d.car_idx}
+                          onClick={() => handleSwitchDriver(d.car_idx)}
+                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xxs
+                                     hover:bg-bg-hover transition-colors border-b border-border-subtle/30
+                                     ${replayState?.cam_car_idx === d.car_idx
+                                       ? 'bg-accent/10 text-accent font-medium'
+                                       : 'text-text-secondary'}`}>
+                          <span className="font-mono shrink-0 w-5 text-right">#{d.car_number}</span>
+                          <span className="truncate">{d.user_name}</span>
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  <div className="flex-1 overflow-y-auto">
-                    {drivers.filter(d => !d.is_spectator).map(d => (
-                      <button key={d.car_idx}
-                        onClick={() => handleSwitchDriver(d.car_idx)}
-                        className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xxs
-                                   hover:bg-bg-hover transition-colors border-b border-border-subtle/30
-                                   ${replayState?.cam_car_idx === d.car_idx
-                                     ? 'bg-accent/10 text-accent font-medium'
-                                     : 'text-text-secondary'}`}>
-                        <span className="font-mono shrink-0 w-5 text-right">#{d.car_number}</span>
-                        <span className="truncate">{d.user_name}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                )}
               </div>
             )}
           </div>
