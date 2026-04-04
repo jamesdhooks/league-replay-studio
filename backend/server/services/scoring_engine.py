@@ -91,7 +91,8 @@ DEFAULT_SECTION_DURATIONS: dict[str, float] = {
 
 # Preferred iRacing TV camera sources for static B-roll sections.
 # Group names match iRacing's CameraInfo → Groups → GroupName entries.
-# The capture engine tries each name in order until one is found.
+# The capture engine tries each name in order, selecting the first match
+# found in the session's available camera groups.
 TV_CAM_PREFERENCES: dict[str, list[str]] = {
     "intro": ["Scenic", "TV Static", "TV1", "Blimp", "Pit Lane"],
     "qualifying_results": ["Pit Lane", "TV Static", "TV1", "Scenic"],

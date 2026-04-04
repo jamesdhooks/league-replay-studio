@@ -37,6 +37,15 @@ logger = logging.getLogger(__name__)
 # This prefix is trimmed from the final clip.
 DEFAULT_CLIP_PADDING = 0.5
 
+# Maximum characters for a sanitized segment filename component
+_MAX_FILENAME_LENGTH = 64
+
+# Minimum FFmpeg compile timeout in seconds (prevents excessively short deadlines)
+_MIN_COMPILE_TIMEOUT = 120
+
+# Seconds of FFmpeg compile budget allocated per clip
+_COMPILE_SECONDS_PER_CLIP = 60
+
 # Pattern to strip unsafe characters from segment IDs used as filenames
 _SAFE_FILENAME_RE = re.compile(r'[^a-zA-Z0-9_\-]')
 
@@ -60,7 +69,7 @@ def _sanitize_filename(name: str) -> str:
     # Strip all non-safe characters (handles path separators, spaces, etc.)
     sanitized = _SAFE_FILENAME_RE.sub("_", name or "clip")
     # Limit length and ensure non-empty
-    return (sanitized[:64] or "clip")
+    return (sanitized[:_MAX_FILENAME_LENGTH] or "clip")
 
 
 class ScriptCaptureEngine:
@@ -87,7 +96,8 @@ class ScriptCaptureEngine:
             clip_padding: Seconds of pre-roll before each clip (trimmed later).
             progress_callback: Optional callable for progress events.
             compile_timeout: Timeout in seconds for the FFmpeg compile step.
-                0 = auto (60 seconds × number of clips, minimum 120).
+                0 = auto (_COMPILE_SECONDS_PER_CLIP × clip count,
+                minimum _MIN_COMPILE_TIMEOUT seconds).
         """
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
@@ -279,10 +289,10 @@ class ScriptCaptureEngine:
         ]
 
         try:
-            # Auto-calculate timeout: 60s per clip, minimum 120s
+            # Auto-calculate timeout: budget per clip, capped at minimum
             timeout = self._compile_timeout
             if timeout <= 0:
-                timeout = max(120, len(sorted_clips) * 60)
+                timeout = max(_MIN_COMPILE_TIMEOUT, len(sorted_clips) * _COMPILE_SECONDS_PER_CLIP)
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             if result.returncode != 0:
                 logger.error("[ScriptCapture] Compile failed: %s", result.stderr[:500])

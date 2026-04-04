@@ -31,6 +31,11 @@ from server.services.analysis_db import get_project_db
 
 logger = logging.getLogger(__name__)
 
+# Gap display precision: gaps narrower than this threshold (in seconds)
+# are shown with millisecond precision (e.g. "+3.456"); wider gaps
+# use decisecond precision (e.g. "+72.1") to avoid long strings.
+_GAP_PRECISION_THRESHOLD = 60.0
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -200,7 +205,10 @@ def build_frame_data(
             if leader_est is not None and est is not None and est >= leader_est:
                 gap_secs = est - leader_est
                 entry["gap"] = (
-                    f"+{gap_secs:.3f}" if gap_secs < 60.0 else f"+{gap_secs:.1f}"
+                    f"+{gap_secs:.3f}"
+                    if gap_secs < _GAP_PRECISION_THRESHOLD
+                    else f"+{gap_secs:.1f}"
+                )
                 )
             else:
                 entry["gap"] = "---"

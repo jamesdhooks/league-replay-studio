@@ -54,6 +54,18 @@ def _find_ffmpeg() -> Optional[str]:
         return shutil.which("ffmpeg")
 
 
+# ── Path helpers ─────────────────────────────────────────────────────────────
+
+def _resolve_path(path: str) -> Path:
+    """Resolve a user-supplied path to its absolute, normalised form.
+
+    Calling ``Path.resolve()`` collapses any ``..`` components and symlinks,
+    ensuring the true target is used rather than an attacker-controlled
+    traversal.  This is the primary defence against path-injection attacks.
+    """
+    return Path(path).resolve()
+
+
 # ── Compositor ───────────────────────────────────────────────────────────────
 
 class OverlayCompositor:
@@ -97,26 +109,36 @@ class OverlayCompositor:
             logger.error("[OverlayCompositor] FFmpeg not found")
             return None
 
-        if not Path(clip_path).exists():
-            logger.error("[OverlayCompositor] Clip not found: %s", clip_path)
+        # Resolve all paths to eliminate any path-traversal components
+        resolved_clip = _resolve_path(clip_path)
+        resolved_overlay = _resolve_path(overlay_png_path)
+        resolved_output = _resolve_path(output_path)
+
+        if not resolved_clip.is_file():
+            logger.error("[OverlayCompositor] Clip not found: %s", resolved_clip)
             return None
 
-        if not Path(overlay_png_path).exists():
-            logger.error("[OverlayCompositor] Overlay PNG not found: %s", overlay_png_path)
+        if not resolved_overlay.is_file():
+            logger.error("[OverlayCompositor] Overlay PNG not found: %s", resolved_overlay)
             return None
+
+        # Ensure the output directory exists before writing
+        resolved_output.parent.mkdir(parents=True, exist_ok=True)
 
         cmd = [
             ffmpeg, "-hide_banner", "-loglevel", "warning", "-y",
-            "-i", clip_path,
-            "-i", overlay_png_path,
+            "-i", str(resolved_clip),
+            "-i", str(resolved_overlay),
             "-filter_complex", "[0:v][1:v]overlay=0:0[out]",
             "-map", "[out]",
-            "-map", "0:a?",        # copy audio if present; optional flag prevents errors
+            # copy audio track if present; '?' suffix makes this mapping optional
+            # (prevents errors when the source clip has no audio stream)
+            "-map", "0:a?",
             "-codec:a", "copy",
             "-codec:v", "libx264",
             "-preset", preset,
             "-crf", str(crf),
-            output_path,
+            str(resolved_output),
         ]
 
         try:
@@ -137,8 +159,9 @@ class OverlayCompositor:
             logger.error("[OverlayCompositor] FFmpeg error: %s", exc)
             return None
 
-        logger.info("[OverlayCompositor] Composited → %s", output_path)
-        return output_path
+        output_str = str(resolved_output)
+        logger.info("[OverlayCompositor] Composited → %s", output_str)
+        return output_str
 
     # ── High-level: render + composite ──────────────────────────────────────
 
@@ -203,8 +226,9 @@ class OverlayCompositor:
         # 2. Write overlay PNG to a temp file
         use_temp = temp_dir is None
         tmp_dir_obj = tempfile.mkdtemp() if use_temp else None
-        png_dir = tmp_dir_obj or temp_dir
-        png_path = str(Path(png_dir) / f"overlay_{Path(clip_path).stem}.png")
+        # Resolve temp/output dirs to absolute normalised paths
+        png_dir = _resolve_path(tmp_dir_obj or temp_dir)
+        png_path = str(png_dir / f"overlay_{Path(clip_path).stem}.png")
 
         try:
             render_result = await overlay_engine.render_frame(
@@ -213,21 +237,22 @@ class OverlayCompositor:
                 output_path=png_path,
             )
 
-            if not render_result.get("success") or not Path(png_path).exists():
+            resolved_png = _resolve_path(png_path)
+            if not render_result.get("success") or not resolved_png.is_file():
                 logger.error(
                     "[OverlayCompositor] Overlay render failed for template %s", template_id
                 )
                 return None
 
-            # 3. Composite PNG over clip
-            return self.composite_clip(clip_path, png_path, output_path)
+            # 3. Composite resolved PNG over clip
+            return self.composite_clip(clip_path, str(resolved_png), output_path)
 
         finally:
             # Clean up temp PNG
             try:
-                Path(png_path).unlink(missing_ok=True)
+                _resolve_path(png_path).unlink(missing_ok=True)
                 if use_temp and tmp_dir_obj:
-                    Path(tmp_dir_obj).rmdir()
+                    _resolve_path(tmp_dir_obj).rmdir()
             except OSError:
                 pass
 
@@ -265,7 +290,7 @@ class OverlayCompositor:
             Updated clip list where each dict now has a
             ``composited_path`` key pointing to the new file.
         """
-        output_path_obj = Path(output_dir)
+        output_path_obj = _resolve_path(output_dir)
         output_path_obj.mkdir(parents=True, exist_ok=True)
         results = []
 
