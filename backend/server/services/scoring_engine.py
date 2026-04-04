@@ -446,7 +446,7 @@ def build_composition_script(
                 "start_time": seg.get("start_time_seconds", 0),
                 "end_time": seg.get("end_time_seconds", 0),
                 "duration": round(duration, 2),
-                "drivers": seg.get("involved_drivers", []),
+                "drivers": list(_get_drivers(seg)),
                 "priority_score": seg.get("score", 0),
                 "notes": seg.get("notes", ""),
                 "camera": seg.get("camera", {
