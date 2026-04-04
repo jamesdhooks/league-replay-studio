@@ -40,6 +40,9 @@ from pydantic import BaseModel
 from server.services.preset_service import preset_service, VIDEO_SECTIONS
 
 logger = logging.getLogger(__name__)
+
+MAX_ASSET_SIZE_BYTES = 10 * 1024 * 1024      # 10 MB
+MAX_VIDEO_SIZE_BYTES = 500 * 1024 * 1024      # 500 MB
 router = APIRouter(prefix="/api/presets", tags=["presets"])
 
 
@@ -192,10 +195,10 @@ async def list_assets(preset_id: str):
 @router.post("/{preset_id}/assets")
 async def upload_asset(preset_id: str, file: UploadFile = File(...)):
     """Upload an image asset for a preset."""
-    if file.size is not None and file.size > 10 * 1024 * 1024:
+    if file.size is not None and file.size > MAX_ASSET_SIZE_BYTES:
         raise HTTPException(status_code=413, detail="File too large (max 10 MB)")
     content = await file.read()
-    if len(content) > 10 * 1024 * 1024:
+    if len(content) > MAX_ASSET_SIZE_BYTES:
         raise HTTPException(status_code=413, detail="File too large (max 10 MB)")
     result = preset_service.upload_asset(preset_id, file.filename or "asset.png", content)
     return {"success": True, **result}
@@ -223,10 +226,10 @@ async def serve_asset(preset_id: str, filename: str):
 @router.post("/{preset_id}/intro-video")
 async def upload_intro_video(preset_id: str, file: UploadFile = File(...)):
     """Upload an intro video for a preset."""
-    if file.size is not None and file.size > 500 * 1024 * 1024:
+    if file.size is not None and file.size > MAX_VIDEO_SIZE_BYTES:
         raise HTTPException(status_code=413, detail="File too large (max 500 MB)")
     content = await file.read()
-    if len(content) > 500 * 1024 * 1024:
+    if len(content) > MAX_VIDEO_SIZE_BYTES:
         raise HTTPException(status_code=413, detail="File too large (max 500 MB)")
     result = preset_service.upload_intro_video(preset_id, file.filename or "intro.mp4", content)
     return {"success": True, **result}
