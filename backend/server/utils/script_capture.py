@@ -58,7 +58,10 @@ def _sanitize_filename(name: str) -> str:
     prevent path traversal or command injection.
     """
     # Remove path components — use only the basename
-    name = Path(name).name if name else "clip"
+    try:
+        name = Path(name).name if name else "clip"
+    except (OSError, ValueError):
+        name = "clip"
     # Strip all non-safe characters
     sanitized = _SAFE_FILENAME_RE.sub("_", name)
     # Limit length and ensure non-empty
@@ -173,6 +176,7 @@ class ScriptCaptureEngine:
             seek_time_ms = max(0, int((start - padding) * 1000))
             session_num = iracing_bridge.get_replay_session_num()
             if session_num < 0:
+                logger.warning("[ScriptCapture] Replay session num unavailable, defaulting to 0")
                 session_num = 0
             iracing_bridge.replay_search_session_time(session_num, seek_time_ms)
             time.sleep(0.5)  # allow seek to settle
@@ -258,8 +262,7 @@ class ScriptCaptureEngine:
         concat_list = self._output_dir / "_concat_list.txt"
         with open(concat_list, "w") as f:
             for clip in sorted_clips:
-                # FFmpeg concat requires forward slashes or escaped paths
-                safe_path = clip["path"].replace("\\", "/")
+                safe_path = Path(clip["path"]).as_posix()
                 f.write(f"file '{safe_path}'\n")
 
         cmd = [

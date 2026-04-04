@@ -386,7 +386,11 @@ def insert_transitions(timeline: list[dict]) -> list[dict]:
 
 
 def insert_broll(timeline: list[dict], gap_threshold: float = BROLL_GAP_THRESHOLD) -> list[dict]:
-    """Insert b-roll gap filler segments where gaps are ≥ threshold."""
+    """Insert b-roll gap filler segments where gaps are ≥ threshold.
+
+    Each b-roll segment includes camera_preferences from TV_CAM_PREFERENCES
+    so the capture engine can select an appropriate iRacing TV cam.
+    """
     if len(timeline) < 2:
         return list(timeline)
 
