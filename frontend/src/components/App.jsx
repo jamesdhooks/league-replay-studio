@@ -20,6 +20,7 @@ import { PipelineProvider } from '../context/PipelineContext'
 import { wsClient } from '../services/websocket'
 import ErrorBoundary from './ui/ErrorBoundary'
 import ComposeProviders from './ui/ComposeProviders'
+import KeyboardShortcutsHelp from './ui/KeyboardShortcutsHelp'
 import AppShell from './layout/AppShell'
 import SetupWizard from './wizard/SetupWizard'
 
@@ -116,6 +117,7 @@ function App() {
     <ComposeProviders providers={PROVIDER_STACK}>
       <ErrorBoundary name="App">
         <AppShell />
+        <KeyboardShortcutsHelp />
       </ErrorBoundary>
       <WizardController />
     </ComposeProviders>

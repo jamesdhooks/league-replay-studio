@@ -3,9 +3,10 @@ api_system.py
 --------------
 System information and health check endpoints.
 
-GET  /api/system/info     — system info (version, platform, etc.)
-GET  /api/system/health   — health check
-POST /api/system/browse   — open native folder/file picker dialog
+GET  /api/system/info           — system info (version, platform, etc.)
+GET  /api/system/health         — health check
+GET  /api/system/update-check   — check for updates
+POST /api/system/browse         — open native folder/file picker dialog
 """
 
 import platform
@@ -19,6 +20,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from version import __version__, APP_NAME
+from server.services.update_service import update_service
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -41,6 +43,17 @@ async def system_info() -> dict:
         "architecture": platform.machine(),
         "frozen": getattr(sys, "frozen", False),
     }
+
+
+@router.get("/update-check")
+async def check_for_updates(force: bool = False) -> dict:
+    """Check for available updates via GitHub Releases API.
+
+    Query params:
+        force: Bypass cached result and check immediately.
+    """
+    info = await update_service.check_for_updates(force=force)
+    return info.to_dict()
 
 
 class BrowseRequest(BaseModel):

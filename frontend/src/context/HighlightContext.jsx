@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, useMemo, useEffect, useRef } from 'react'
+import { createContext, useContext, useState, useCallback, useMemo, useEffect, useRef, useTransition } from 'react'
 import { apiGet, apiPut, apiPost, apiDelete } from '../services/api'
 import { useAnalysis } from './AnalysisContext'
 import { useTimeline } from './TimelineContext'
@@ -103,6 +103,9 @@ export function HighlightProvider({ children }) {
   const { events } = useAnalysis()
   const { raceDuration, seekTo } = useTimeline()
   const { pushAction } = useUndoRedo()
+
+  // React 19: Use transition for heavy reprocessing operations
+  const [isReprocessing, startReprocessTransition] = useTransition()
 
   // ── Computed selection (memoised, <100ms) ───────────────────────────────
   const selection = useMemo(
@@ -223,8 +226,11 @@ export function HighlightProvider({ children }) {
         },
       })
       if (result.scored_events) {
-        setServerScoredEvents(result.scored_events)
-        setServerMetrics(result.metrics || null)
+        // Use transition to keep UI responsive during heavy state updates
+        startReprocessTransition(() => {
+          setServerScoredEvents(result.scored_events)
+          setServerMetrics(result.metrics || null)
+        })
       }
       return result
     } catch (err) {
@@ -233,7 +239,7 @@ export function HighlightProvider({ children }) {
     } finally {
       setServerScoring(false)
     }
-  }, [weights, targetDuration, minSeverity])
+  }, [weights, targetDuration, minSeverity, startReprocessTransition])
 
   const generateVideoScript = useCallback(async (projectId, opts = {}) => {
     try {
@@ -530,6 +536,7 @@ export function HighlightProvider({ children }) {
     serverScoring,
     serverScoredEvents,
     serverMetrics,
+    isReprocessing,
 
     // Video Script
     videoScript,

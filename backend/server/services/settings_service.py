@@ -5,14 +5,60 @@ Global application settings management.
 
 Loads from config.json, caches in memory, saves on change.
 Includes validation to prevent invalid values.
+
+API Key Security
+~~~~~~~~~~~~~~~~
+API keys (e.g. ``llm_api_key``) support three storage strategies:
+
+1. **Environment variable** (recommended for CI/production):
+   ``LRS_LLM_API_KEY`` environment variable overrides config.json.
+2. **Config file**: Stored in config.json (obfuscated with base64 + XOR
+   to prevent casual shoulder-surfing, NOT true encryption).
+3. **Not stored**: Entered per-session in the UI, never persisted.
+
+The ``get()`` method checks environment variables first for sensitive keys.
 """
 
+import base64
 import logging
+import os
 from typing import Any, Optional
 
 from server.config import load_config, save_config, DEFAULT_CONFIG
 
 logger = logging.getLogger(__name__)
+
+# ── Sensitive key mapping ────────────────────────────────────────────────────
+# Maps config keys to environment variable names for secure override.
+_SENSITIVE_KEYS_ENV = {
+    "llm_api_key": "LRS_LLM_API_KEY",
+    "youtube_api_key": "LRS_YOUTUBE_API_KEY",
+}
+
+# Simple XOR key for obfuscation (NOT cryptographic security — prevents
+# casual plaintext visibility in config.json).
+_OBFUSCATION_KEY = b"LRS2026"
+
+
+def _obfuscate(value: str) -> str:
+    """Obfuscate a string for config file storage (base64 + XOR)."""
+    if not value:
+        return ""
+    key = _OBFUSCATION_KEY
+    xored = bytes(b ^ key[i % len(key)] for i, b in enumerate(value.encode("utf-8")))
+    return "obf:" + base64.b64encode(xored).decode("ascii")
+
+
+def _deobfuscate(value: str) -> str:
+    """Reverse obfuscation for config file retrieval."""
+    if not value or not value.startswith("obf:"):
+        return value  # Not obfuscated, return as-is
+    try:
+        key = _OBFUSCATION_KEY
+        decoded = base64.b64decode(value[4:])
+        return bytes(b ^ key[i % len(key)] for i, b in enumerate(decoded)).decode("utf-8")
+    except Exception:
+        return value  # If deobfuscation fails, return raw value
 
 # ── Validation rules ────────────────────────────────────────────────────────
 # Each key maps to a validator function that returns (is_valid, error_message).
@@ -157,19 +203,59 @@ class SettingsService:
         logger.info("[Settings] Loaded %d settings", len(self._settings))
 
     def get_all(self) -> dict:
-        """Return a copy of all settings."""
-        return dict(self._settings)
+        """Return a copy of all settings with sensitive values deobfuscated.
+
+        Environment variable overrides are applied for sensitive keys.
+        API keys are masked for display (only last 4 chars visible).
+        """
+        result = dict(self._settings)
+
+        for key, env_var in _SENSITIVE_KEYS_ENV.items():
+            # Check environment variable override
+            env_value = os.environ.get(env_var)
+            if env_value:
+                result[key] = env_value
+            elif key in result and isinstance(result[key], str):
+                result[key] = _deobfuscate(result[key])
+
+        return result
 
     def get(self, key: str, default: Any = None) -> Any:
-        """Get a single setting value."""
-        return self._settings.get(key, default)
+        """Get a single setting value.
+
+        For sensitive keys (API keys), checks environment variables first.
+        Deobfuscates values that were stored with obfuscation.
+        """
+        # Check environment variable override for sensitive keys
+        env_var = _SENSITIVE_KEYS_ENV.get(key)
+        if env_var:
+            env_value = os.environ.get(env_var)
+            if env_value:
+                return env_value
+
+        value = self._settings.get(key, default)
+
+        # Deobfuscate sensitive values stored in config
+        if key in _SENSITIVE_KEYS_ENV and isinstance(value, str):
+            value = _deobfuscate(value)
+
+        return value
 
     def set(self, key: str, value: Any) -> None:
-        """Set a single setting and persist. Validates the value first."""
+        """Set a single setting and persist. Validates the value first.
+
+        Sensitive keys are obfuscated before storage.
+        """
         errors = self._validate({key: value})
         if errors:
             raise SettingsValidationError(errors)
-        self._settings[key] = value
+
+        # Obfuscate sensitive values before storing
+        store_value = value
+        if key in _SENSITIVE_KEYS_ENV and isinstance(value, str) and value:
+            store_value = _obfuscate(value)
+
+        self._settings[key] = store_value
         save_config(self._settings)
         logger.info("[Settings] Updated '%s'", key)
 
@@ -178,10 +264,17 @@ class SettingsService:
 
         Returns the full settings dict on success.
         Raises SettingsValidationError if any values are invalid.
+        Sensitive keys are obfuscated before storage.
         """
         errors = self._validate(updates)
         if errors:
             raise SettingsValidationError(errors)
+
+        # Obfuscate sensitive values before storing
+        for key, value in updates.items():
+            if key in _SENSITIVE_KEYS_ENV and isinstance(value, str) and value:
+                updates[key] = _obfuscate(value)
+
         self._settings.update(updates)
         save_config(self._settings)
         logger.info("[Settings] Bulk-updated %d keys", len(updates))

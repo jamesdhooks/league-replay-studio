@@ -185,6 +185,10 @@ async def lifespan(app: FastAPI):
     register_default_skills()
     logger.info("[App] LLM skills registered")
 
+    # ── Background update check ──────────────────────────────────────────────
+    from server.services.update_service import update_service
+    asyncio.create_task(update_service.startup_check(delay=10.0))
+
     logger.info("[App] Startup complete — v%s", __version__)
     yield
 
