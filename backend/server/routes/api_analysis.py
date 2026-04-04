@@ -18,9 +18,6 @@ REST endpoints for the replay analysis engine.
   PUT  /api/projects/{id}/highlights/config — Save highlight configuration
   POST /api/projects/{id}/highlights/apply — Batch apply highlight selections
   POST /api/projects/{id}/highlights/reprocess — Run full scoring pipeline
-  GET  /api/projects/{id}/highlights/script — Get Video Composition Script
-  POST /api/projects/{id}/highlights/script/validate — Validate script
-  POST /api/projects/{id}/highlights/llm-refine — LLM editorial pass
   GET  /api/projects/{id}/scored-events — Get scored + tiered events
   GET  /api/projects/{id}/analysis/drivers — Get driver list
   GET  /api/highlights/presets — List global highlight presets
@@ -978,14 +975,7 @@ class ReprocessRequest(BaseModel):
     """Extended recompute request for multi-pass scoring pipeline."""
     weights: dict[str, float] = {}
     constraints: dict[str, Any] = {}
-    llm_enabled: bool = False
 
-
-class ScriptValidateRequest(BaseModel):
-    """Validate a Video Composition Script against constraints."""
-    script: dict
-    target_duration: float = 300.0
-    max_driver_exposure: float = 0.25
 
 
 @router.post("/projects/{project_id}/highlights/reprocess")
@@ -1111,141 +1101,6 @@ async def get_scored_events(project_id: int):
             conn.close()
     except Exception as exc:
         logger.error("[Analysis API] Scored events error: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.get("/projects/{project_id}/highlights/script")
-async def get_highlight_script(project_id: int):
-    """Get the current Video Composition Script for a project."""
-    project = project_service.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    project_dir = project["project_dir"]
-    try:
-        init_analysis_db(project_dir)
-        conn = get_project_db(project_dir)
-        try:
-            conn.row_factory = _dict_factory
-            row = conn.execute(
-                "SELECT * FROM highlight_scripts ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            if not row:
-                return {"project_id": project_id, "script": None}
-            script = json.loads(row["script_json"]) if row["script_json"] else {}
-            return {
-                "project_id": project_id,
-                "version": row["version"],
-                "script": script,
-                "validation_status": row["validation_status"],
-                "llm_used": bool(row["llm_used"]),
-            }
-        finally:
-            conn.close()
-    except Exception as exc:
-        logger.error("[Highlights API] Script fetch error: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.post("/projects/{project_id}/highlights/script/validate")
-async def validate_highlight_script(project_id: int, body: ScriptValidateRequest):
-    """Validate a Video Composition Script against all constraints."""
-    from server.services.scoring_engine import validate_composition_script
-
-    project = project_service.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    is_valid, errors = validate_composition_script(
-        body.script,
-        target_duration=body.target_duration,
-        max_driver_exposure=body.max_driver_exposure,
-    )
-
-    return {
-        "project_id": project_id,
-        "valid": is_valid,
-        "errors": errors,
-    }
-
-
-@router.post("/projects/{project_id}/highlights/llm-refine")
-async def llm_refine_highlights(project_id: int):
-    """Trigger an LLM editorial pass on the current candidate timeline.
-
-    Requires an Anthropic API key in settings. If unavailable, returns
-    the deterministic timeline as-is with llm_used=false.
-    """
-    from server.services.llm_editorial import (
-        llm_editorial_pass,
-        validate_llm_output,
-        merge_llm_annotations,
-        get_llm_metadata,
-    )
-    from server.services.scoring_engine import generate_highlights
-
-    project = project_service.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    project_dir = project["project_dir"]
-    try:
-        init_analysis_db(project_dir)
-        conn = get_project_db(project_dir)
-        try:
-            # Generate current timeline
-            events = get_events(conn, limit=10000)
-            config = get_highlight_config(conn)
-
-            conn.row_factory = _dict_factory
-            row = conn.execute(
-                "SELECT MAX(session_time) as max_time FROM race_ticks"
-            ).fetchone()
-            race_duration = row["max_time"] if row and row["max_time"] else 0
-            drivers = get_drivers(conn)
-
-            race_context = {
-                "track": project.get("track_name", "Unknown"),
-                "total_laps": project.get("num_laps", 0),
-                "num_drivers": len(drivers) if drivers else 1,
-                "target_duration": config.get("target_duration", 300),
-                "max_driver_exposure": 0.25,
-            }
-
-            result = generate_highlights(
-                events=events,
-                target_duration=config.get("target_duration", 300),
-                weights=config.get("weights", {}),
-                race_info=race_context,
-            )
-            timeline = result["timeline"]
-
-            # Try LLM pass (graceful fallback if no API key)
-            llm_result = await llm_editorial_pass(
-                timeline=timeline,
-                race_context=race_context,
-            )
-
-            if llm_result is not None:
-                is_valid, errors = validate_llm_output(llm_result, timeline)
-                if is_valid:
-                    timeline = merge_llm_annotations(timeline, llm_result)
-                    llm_meta = get_llm_metadata(llm_result)
-                else:
-                    logger.warning("[LLM] Validation failed: %s", errors)
-                    llm_meta = {"llm_used": False, "validation_errors": errors}
-            else:
-                llm_meta = get_llm_metadata(None)
-
-            return {
-                "project_id": project_id,
-                "timeline": timeline,
-                "llm": llm_meta,
-            }
-        finally:
-            conn.close()
-    except Exception as exc:
-        logger.error("[Highlights API] LLM refine error: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
 

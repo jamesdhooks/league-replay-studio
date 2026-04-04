@@ -137,9 +137,6 @@ class TelemetryWriter:
                 car.get("est_time", 0.0),
                 car.get("best_lap_time", -1.0),
                 car_speed,
-                car.get("f2_time", None),
-                car.get("last_lap_time", -1.0),
-                car.get("steer_angle", None),
             ))
 
             # Detect lap completions
@@ -194,8 +191,8 @@ class TelemetryWriter:
             conn.executemany(
                 """INSERT INTO car_states
                    (tick_id, car_idx, position, class_position, lap, lap_pct,
-                    surface, est_time, best_lap_time, speed_ms, f2_time, last_lap_time, steer_angle)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    surface, est_time, best_lap_time, speed_ms)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 resolved_cars,
             )
 

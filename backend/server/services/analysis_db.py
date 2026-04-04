@@ -48,10 +48,7 @@ CREATE TABLE IF NOT EXISTS car_states (
     surface         INTEGER NOT NULL DEFAULT 0,
     est_time        REAL    NOT NULL DEFAULT 0.0,
     best_lap_time   REAL    NOT NULL DEFAULT -1.0,
-    speed_ms        REAL    DEFAULT NULL,
-    f2_time         REAL    DEFAULT NULL,
-    last_lap_time   REAL    DEFAULT -1.0,
-    steer_angle     REAL    DEFAULT NULL
+    speed_ms        REAL    DEFAULT NULL
 );
 
 -- Detected race events
@@ -121,17 +118,6 @@ CREATE TABLE IF NOT EXISTS highlight_config (
     updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
--- Video Composition Scripts (declarative render contracts)
-CREATE TABLE IF NOT EXISTS highlight_scripts (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    version         INTEGER NOT NULL DEFAULT 1,
-    script_json     TEXT    NOT NULL DEFAULT '{}',
-    validation_status TEXT  NOT NULL DEFAULT 'pending',
-    llm_used        INTEGER NOT NULL DEFAULT 0,
-    llm_prompt_hash TEXT    DEFAULT NULL,
-    created_at      TEXT    DEFAULT (datetime('now'))
-);
-
 -- ── Indexes ─────────────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_car_states_tick ON car_states(tick_id);
 CREATE INDEX IF NOT EXISTS idx_car_states_car  ON car_states(car_idx);
@@ -168,19 +154,13 @@ def init_analysis_db(project_dir: str) -> None:
         if "params" not in cols:
             conn.execute("ALTER TABLE highlight_config ADD COLUMN params TEXT NOT NULL DEFAULT '{}'")
 
-        # Migration: add new car_states columns if missing
+        # Migration: add speed_ms column to car_states if missing (older DBs)
         cs_cols = [r[1] for r in conn.execute("PRAGMA table_info(car_states)").fetchall()]
-        for col, ddl in [
-            ("speed_ms",      "REAL DEFAULT NULL"),
-            ("f2_time",       "REAL DEFAULT NULL"),
-            ("last_lap_time", "REAL DEFAULT -1.0"),
-            ("steer_angle",   "REAL DEFAULT NULL"),
-        ]:
-            if col not in cs_cols:
-                try:
-                    conn.execute(f"ALTER TABLE car_states ADD COLUMN {col} {ddl}")
-                except sqlite3.OperationalError as exc:
-                    logger.debug("car_states migration skip %s: %s", col, exc)
+        if "speed_ms" not in cs_cols:
+            try:
+                conn.execute("ALTER TABLE car_states ADD COLUMN speed_ms REAL DEFAULT NULL")
+            except sqlite3.OperationalError as exc:
+                logger.debug("car_states migration skip speed_ms: %s", exc)
 
         # Migration: add new race_ticks columns if missing
         rt_cols = [r[1] for r in conn.execute("PRAGMA table_info(race_ticks)").fetchall()]

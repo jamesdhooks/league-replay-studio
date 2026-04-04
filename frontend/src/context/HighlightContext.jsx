@@ -96,6 +96,10 @@ const REFERENCE_SPEED_MS = 70.0
  * Stage 5: Narrative bonus
  * Stage 6: User weight override
  *
+ * Note: Exposure adjustment (backend Stage 6) is omitted client-side because
+ * it requires cross-event state (driver screen-time accumulator).  Use the
+ * server-side reprocess endpoint for authoritative scoring with exposure balance.
+ *
  * Returns { score, tier, bucket, components }
  */
 function computeEventScore(event, weights, params = {}, raceDuration = 0) {
@@ -601,8 +605,8 @@ export function HighlightProvider({ children }) {
 
   // ── Server-side reprocessing (v2 pipeline) ────────────────────────────────
   const [serverScoring, setServerScoring] = useState(false)
-  const [llmEnabled, setLlmEnabled] = useState(false)
-  const [lastScript, setLastScript] = useState(null)
+  const [serverScoredEvents, setServerScoredEvents] = useState(null)
+  const [serverMetrics, setServerMetrics] = useState(null)
 
   const reprocessHighlights = useCallback(async (projectId, opts = {}) => {
     try {
@@ -615,11 +619,10 @@ export function HighlightProvider({ children }) {
           pip_threshold: opts.pipThreshold || 7.0,
           max_driver_exposure: opts.maxDriverExposure || 0.25,
         },
-        llm_enabled: llmEnabled,
       })
       if (result.scored_events) {
-        // Update local scoring from server results
-        setLastScript(result.script || null)
+        setServerScoredEvents(result.scored_events)
+        setServerMetrics(result.metrics || null)
       }
       return result
     } catch (err) {
@@ -628,17 +631,7 @@ export function HighlightProvider({ children }) {
     } finally {
       setServerScoring(false)
     }
-  }, [weights, targetDuration, minSeverity, llmEnabled])
-
-  const fetchScript = useCallback(async (projectId) => {
-    try {
-      const result = await apiGet(`/projects/${projectId}/highlights/script`)
-      setLastScript(result.script || null)
-      return result
-    } catch (err) {
-      console.error('[Highlights] Script fetch error:', err)
-    }
-  }, [])
+  }, [weights, targetDuration, minSeverity])
 
   // ── Load drivers ───────────────────────────────────────────────────────
   const loadDrivers = useCallback(async (projectId) => {
@@ -892,13 +885,11 @@ export function HighlightProvider({ children }) {
     autoBalance,
     jumpToEvent,
     reprocessHighlights,
-    fetchScript,
 
     // v2 scoring state
     serverScoring,
-    llmEnabled,
-    setLlmEnabled,
-    lastScript,
+    serverScoredEvents,
+    serverMetrics,
 
     // A/B compare
     abMode,
@@ -933,8 +924,8 @@ export function HighlightProvider({ children }) {
     overrides, toggleOverride, setOverrideValue,
     selection, filteredEvents,
     loadConfig, saveConfig, applyHighlights, loadDrivers, autoBalance, jumpToEvent,
-    reprocessHighlights, fetchScript,
-    serverScoring, llmEnabled, lastScript,
+    reprocessHighlights,
+    serverScoring, serverScoredEvents, serverMetrics,
     abMode, activeConfig, startABCompare, stopABCompare, switchABConfig,
     presets, loadPresets, savePreset, loadPreset, deletePreset,
     sortColumn, sortDirection, handleSort,

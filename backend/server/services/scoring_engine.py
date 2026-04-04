@@ -171,7 +171,11 @@ def score_events(
             except (json.JSONDecodeError, TypeError):
                 involved = []
         if num_drivers > 0 and involved:
-            target_exposure = target_duration / max(num_drivers, 1) * driver_weight
+            # Use race_duration for exposure target — we want proportional
+            # representation relative to the race, not equal slices of the
+            # highlight budget.
+            effective_duration = race_duration if race_duration > 0 else target_duration
+            target_exposure = effective_duration / max(num_drivers, 1) * driver_weight
             avg_exposure = sum(exposure_map.get(d, 0) for d in involved) / len(involved)
             exposure_adj = 1 + (target_exposure - avg_exposure) * 0.5
             exposure_adj = max(0.5, min(exposure_adj, 2.0))  # Clamp
@@ -382,173 +386,6 @@ def insert_broll(timeline: list[dict], gap_threshold: float = BROLL_GAP_THRESHOL
     return result
 
 
-# ── Video Composition Script Builder ─────────────────────────────────────────
-
-
-def build_composition_script(
-    timeline: list[dict],
-    race_info: Optional[dict] = None,
-    render_config: Optional[dict] = None,
-    total_events: int = 0,
-    llm_used: bool = False,
-    llm_model: str = "",
-    llm_prompt_hash: str = "",
-    validation_status: str = "passed",
-) -> dict:
-    """Build a Video Composition Script JSON from a finalized timeline.
-
-    The script is a declarative, fully validated document that serves as the
-    single source of truth for the render engine.
-    """
-    race_info = race_info or {}
-    render_config = render_config or {}
-
-    segments = []
-    for i, seg in enumerate(timeline):
-        seg_type = seg.get("type", "event")
-        seg_id = seg.get("id", f"seg_{i + 1:03d}")
-
-        if seg_type == "transition":
-            segments.append({
-                "id": seg_id,
-                "type": "transition",
-                "transition_type": seg.get("transition_type", "cut"),
-                "duration": seg.get("duration", 0.5),
-                "from_segment": seg.get("from_segment", ""),
-                "to_segment": seg.get("to_segment", ""),
-            })
-        elif seg_type == "broll":
-            segments.append({
-                "id": seg_id,
-                "type": "broll",
-                "source": seg.get("source", "track_side_camera"),
-                "start_time": seg.get("start_time_seconds", 0),
-                "end_time": seg.get("end_time_seconds", 0),
-                "purpose": seg.get("purpose", "gap_filler"),
-            })
-        elif seg_type == "pip":
-            segments.append({
-                "id": seg_id,
-                "type": "pip",
-                "primary": seg.get("primary", {}),
-                "secondary": seg.get("secondary", {}),
-                "start_time": seg.get("start_time_seconds", 0),
-                "end_time": seg.get("end_time_seconds", 0),
-                "synchronization": {"mode": "time_aligned"},
-            })
-        else:
-            # Event segment
-            duration = max(0, seg.get("end_time_seconds", 0) - seg.get("start_time_seconds", 0))
-            segments.append({
-                "id": seg_id,
-                "type": "event",
-                "source_event_id": seg.get("id", ""),
-                "start_time": seg.get("start_time_seconds", 0),
-                "end_time": seg.get("end_time_seconds", 0),
-                "duration": round(duration, 2),
-                "drivers": list(_get_drivers(seg)),
-                "priority_score": seg.get("score", 0),
-                "notes": seg.get("notes", ""),
-                "camera": seg.get("camera", {
-                    "mode": "auto",
-                    "angle": "broadcast",
-                    "follow_driver": None,
-                }),
-                "capture": seg.get("capture", {
-                    "padding_before": 2.0,
-                    "padding_after": 3.0,
-                }),
-                "pip": None,
-            })
-
-    # Calculate totals
-    event_segments = [s for s in segments if s["type"] == "event"]
-    total_duration = sum(s.get("duration", s.get("end_time", 0) - s.get("start_time", 0)) for s in event_segments)
-    selected_count = len(event_segments)
-
-    # Driver exposure
-    driver_exposure: dict[str, float] = defaultdict(float)
-    for s in event_segments:
-        dur = s.get("duration", 0)
-        for d in s.get("drivers", []):
-            driver_key = str(d)
-            driver_exposure[driver_key] += dur
-    if total_duration > 0:
-        driver_exposure = {k: round(v / total_duration, 3) for k, v in driver_exposure.items()}
-
-    return {
-        "version": "1.0",
-        "meta": {
-            "title": race_info.get("title", "League Race Highlights"),
-            "source_race_id": race_info.get("race_id", ""),
-            "generated_at": race_info.get("generated_at", ""),
-            "duration_seconds": round(total_duration, 1),
-            "generator": {
-                "algorithm_version": "scoring_v3",
-                "llm_used": llm_used,
-                "llm_model": llm_model if llm_used else "",
-            },
-        },
-        "timeline": segments,
-        "render": {
-            "resolution": render_config.get("resolution", {"width": 1920, "height": 1080}),
-            "frame_rate": render_config.get("frame_rate", 60),
-            "codec": render_config.get("codec", "h264"),
-            "bitrate": render_config.get("bitrate", "10M"),
-            "output_format": render_config.get("output_format", "mp4"),
-            "pip_enabled": render_config.get("pip_enabled", True),
-        },
-        "metadata": {
-            "total_events_considered": total_events,
-            "events_selected": selected_count,
-            "events_rejected": total_events - selected_count,
-            "driver_exposure": dict(driver_exposure),
-            "llm_used": llm_used,
-            "llm_prompt_hash": llm_prompt_hash if llm_used else "",
-            "validation_status": validation_status,
-        },
-    }
-
-
-def validate_composition_script(script: dict, target_duration: float = 300.0,
-                                 max_driver_exposure: float = 0.25) -> tuple[bool, list[str]]:
-    """Validate a Video Composition Script against all constraints.
-
-    Returns:
-        (is_valid, list_of_error_messages)
-    """
-    errors = []
-    timeline = script.get("timeline", [])
-
-    # 1. Duration within ±5s of target
-    event_segs = [s for s in timeline if s.get("type") == "event"]
-    actual_duration = sum(s.get("duration", 0) for s in event_segs)
-    if abs(actual_duration - target_duration) > 5.0 and target_duration > 0:
-        errors.append(f"Duration {actual_duration:.1f}s exceeds ±5s tolerance of target {target_duration:.1f}s")
-
-    # 2. No overlapping non-PIP segments
-    for i in range(len(event_segs) - 1):
-        end_i = event_segs[i].get("end_time", 0)
-        start_next = event_segs[i + 1].get("start_time", 0)
-        if end_i > start_next:
-            errors.append(f"Segments {event_segs[i]['id']} and {event_segs[i+1]['id']} overlap")
-
-    # 3. Transition types valid
-    for seg in timeline:
-        if seg.get("type") == "transition":
-            tt = seg.get("transition_type", "")
-            if tt not in VALID_TRANSITIONS:
-                errors.append(f"Invalid transition type '{tt}' in {seg.get('id', '?')}")
-
-    # 4. Driver exposure check
-    metadata = script.get("metadata", {})
-    for driver, exposure in metadata.get("driver_exposure", {}).items():
-        if exposure > max_driver_exposure:
-            errors.append(f"Driver {driver} exposure {exposure:.2%} exceeds max {max_driver_exposure:.2%}")
-
-    return len(errors) == 0, errors
-
-
 # ── Full Pipeline ────────────────────────────────────────────────────────────
 
 
@@ -571,7 +408,7 @@ def generate_highlights(
         race_info: Race metadata (track, num_drivers, duration, etc.).
 
     Returns:
-        Dict with scored_events, timeline, script, and metrics.
+        Dict with scored_events, timeline, and metrics.
     """
     weights = weights or {}
     constraints = constraints or {}
@@ -584,7 +421,7 @@ def generate_highlights(
     # Stage 1: Score all events
     scored = score_events(events, weights, race_duration, num_drivers, target_duration)
 
-    # Stage 2: Apply manual overrides (pre-LLM)
+    # Stage 2: Apply manual overrides
     scored = _apply_overrides(scored, overrides, phase="pre")
 
     # Stage 3: Allocate timeline
@@ -600,20 +437,12 @@ def generate_highlights(
     # Stage 6: Insert transitions
     timeline = insert_transitions(timeline)
 
-    # Stage 7: Build composition script
-    script = build_composition_script(
-        timeline,
-        race_info=race_info,
-        total_events=len(events),
-    )
-
-    # Stage 8: Compute metrics
+    # Stage 7: Compute metrics
     metrics = _compute_metrics(scored, timeline, target_duration, race_duration, num_drivers)
 
     return {
         "scored_events": scored,
         "timeline": timeline,
-        "script": script,
         "metrics": metrics,
     }
 
@@ -712,15 +541,20 @@ def _smooth_timeline(timeline: list[dict], pip_threshold: float,
     # Sort by time for smoothing
     timeline.sort(key=lambda e: e.get("start_time_seconds", 0))
 
-    # Remove back-to-back same-type events unless score differential > 2
+    # Compute a relative score threshold (15% of observed score range)
+    scores = [e.get("score", 0) for e in timeline]
+    score_range = max(scores) - min(scores) if scores else 0
+    threshold = max(score_range * 0.15, 0.5)  # Floor at 0.5 to avoid zero
+
+    # Remove back-to-back same-type events unless score differential is significant
     smoothed = [timeline[0]]
     for evt in timeline[1:]:
         prev = smoothed[-1]
         if (evt.get("event_type") == prev.get("event_type")
-                and abs(evt.get("score", 0) - prev.get("score", 0)) <= 2.0):
-            # Skip repetitive event unless it scores significantly higher
+                and abs(evt.get("score", 0) - prev.get("score", 0)) <= threshold):
+            # Keep the higher-scoring one
             if evt.get("score", 0) > prev.get("score", 0):
-                smoothed[-1] = evt  # Replace with higher scoring
+                smoothed[-1] = evt
         else:
             smoothed.append(evt)
 
@@ -730,8 +564,8 @@ def _smooth_timeline(timeline: list[dict], pip_threshold: float,
 def _apply_overrides(events: list[dict], overrides: dict, phase: str = "pre") -> list[dict]:
     """Apply manual overrides to scored events.
 
-    Pre-LLM overrides: force_include, force_exclude, swap
-    Post-LLM overrides: adjust_padding, set_pip
+    Pre-allocation overrides: force_include, force_exclude, swap
+    Post-allocation overrides: adjust_padding, set_pip
     """
     if not overrides:
         return events
