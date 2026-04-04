@@ -112,7 +112,7 @@ class TelemetryWriter:
             if prev is not None:
                 prev_pct, prev_time = prev
                 dt = session_time - prev_time
-                if dt > 0 and dt < 2.0:  # Guard against large time gaps
+                if 0 < dt < 2.0:  # Guard against large time gaps
                     dpct = current_pct - prev_pct
                     # Handle lap boundary wrap (pct goes from ~1.0 back to ~0.0)
                     if dpct < -0.5:
@@ -123,7 +123,8 @@ class TelemetryWriter:
                     speed_ms = abs(dpct * track_length / dt)
             self._prev_lap_pct[car_idx] = (current_pct, session_time)
             # Use the computed speed_ms or the one from snapshot if provided
-            car_speed = car.get("speed_ms") or speed_ms
+            raw = car.get("speed_ms")
+            car_speed = raw if raw is not None else speed_ms
 
             self._car_batch.append((
                 tick_index,  # placeholder for tick_id
