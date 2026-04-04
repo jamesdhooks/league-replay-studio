@@ -139,6 +139,43 @@ export function CaptureProvider({ children }) {
     }
   }, [])
 
+  // ── Script capture state ───────────────────────────────────────────────
+  const [scriptCaptureRunning, setScriptCaptureRunning] = useState(false)
+  const [scriptCaptureProgress, setScriptCaptureProgress] = useState(null)
+  // { percentage, segment_id, section, message, segment_index, segment_total }
+  const [scriptCaptureClips, setScriptCaptureClips] = useState([])
+  const [scriptCompiledPath, setScriptCompiledPath] = useState(null)
+  const [scriptCaptureError, setScriptCaptureError] = useState(null)
+
+  // ── Script capture actions ──────────────────────────────────────────────
+  const startScriptCapture = useCallback(async (projectId, script, options = {}) => {
+    setScriptCaptureRunning(true)
+    setScriptCaptureProgress(null)
+    setScriptCaptureClips([])
+    setScriptCompiledPath(null)
+    setScriptCaptureError(null)
+    try {
+      const result = await apiPost('/capture/script-capture', {
+        project_id: projectId,
+        script,
+        clip_padding: options.clipPadding ?? 0.5,
+        output_filename: options.outputFilename ?? 'highlight_compiled.mp4',
+      })
+      return result
+    } catch (err) {
+      setScriptCaptureRunning(false)
+      setScriptCaptureError(err.message)
+      return { accepted: false, error: err.message }
+    }
+  }, [])
+
+  const cancelScriptCapture = useCallback(async () => {
+    try {
+      await apiPost('/capture/script-capture/cancel')
+    } catch (err) {
+      console.error('[Capture] Script cancel error:', err)
+    }
+  }, [])
   // ── WebSocket subscriptions ─────────────────────────────────────────────
   useEffect(() => {
     const unsubs = [
@@ -174,6 +211,43 @@ export function CaptureProvider({ children }) {
         setCaptureState('error')
         setError(data.error || 'Capture error')
       }),
+
+      // Script capture events
+      wsClient.subscribe('capture:script_started', (data) => {
+        setScriptCaptureRunning(true)
+        setScriptCaptureError(null)
+        setScriptCaptureProgress({
+          percentage: 0,
+          message: 'Starting...',
+          segment_index: 0,
+          segment_total: data.total_segments || 0,
+        })
+      }),
+      wsClient.subscribe('capture:script_progress', (data) => {
+        setScriptCaptureProgress({
+          percentage: data.percentage || 0,
+          message: data.message || '',
+          segment_id: data.segment_id,
+          section: data.section,
+          segment_index: data.segment_index || 0,
+          segment_total: data.segment_total || 0,
+          step: data.step,
+        })
+      }),
+      wsClient.subscribe('capture:script_completed', (data) => {
+        setScriptCaptureRunning(false)
+        setScriptCaptureClips(data.clips || [])
+        setScriptCompiledPath(data.compiled_path || null)
+        setScriptCaptureProgress({
+          percentage: 100,
+          message: `Completed — ${data.total_clips} clips`,
+          step: 'compile_complete',
+        })
+      }),
+      wsClient.subscribe('capture:script_error', (data) => {
+        setScriptCaptureRunning(false)
+        setScriptCaptureError(data.error || 'Script capture failed')
+      }),
     ]
 
     return () => unsubs.forEach(fn => fn())
@@ -194,6 +268,13 @@ export function CaptureProvider({ children }) {
     testResult,
     loading,
 
+    // Script capture
+    scriptCaptureRunning,
+    scriptCaptureProgress,
+    scriptCaptureClips,
+    scriptCompiledPath,
+    scriptCaptureError,
+
     // Actions
     detectSoftware,
     fetchStatus,
@@ -201,10 +282,14 @@ export function CaptureProvider({ children }) {
     startCapture,
     stopCapture,
     resetCapture,
+    startScriptCapture,
+    cancelScriptCapture,
   }), [
     software, activeSoftware, hotkeys, watchDir,
     captureState, elapsedSeconds, filePath, fileSize, error, testResult, loading,
+    scriptCaptureRunning, scriptCaptureProgress, scriptCaptureClips, scriptCompiledPath, scriptCaptureError,
     detectSoftware, fetchStatus, testHotkey, startCapture, stopCapture, resetCapture,
+    startScriptCapture, cancelScriptCapture,
   ])
 
   return (

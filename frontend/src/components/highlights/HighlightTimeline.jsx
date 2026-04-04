@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useHighlight } from '../../context/HighlightContext'
 import { useTimeline, EVENT_COLORS } from '../../context/TimelineContext'
+import { useIRacing } from '../../context/IRacingContext'
 
 /** Section display colors */
 const SECTION_COLORS = {
@@ -254,12 +255,27 @@ export default function HighlightTimeline() {
 /**
  * SectionEditor — Inline editor for non-race section properties.
  * Allows changing duration and camera preference.
+ * Camera groups are populated from live iRacing session data.
  */
 function SectionEditor({ sectionName, region, onUpdate, onClose }) {
+  const { sessionData } = useIRacing()
+  const cameras = sessionData?.cameras || []
+
   const duration = region ? (region.end - region.start) : 10
   const segment = region?.segments?.[0] || {}
   const camPrefs = segment.camera_preferences || []
-  const currentCam = segment.camera_group
+  const currentCam = segment.camera_group ?? ''
+
+  // Sort cameras: show preferred ones first (those matching the section preferences)
+  const sortedCameras = useMemo(() => {
+    if (!cameras.length) return []
+    const prefSet = new Set(camPrefs)
+    return [...cameras].sort((a, b) => {
+      const aPreferred = prefSet.has(a.group_name) ? 0 : 1
+      const bPreferred = prefSet.has(b.group_name) ? 0 : 1
+      return aPreferred - bPreferred || a.group_name.localeCompare(b.group_name)
+    })
+  }, [cameras, camPrefs])
 
   return (
     <div className="mt-1.5 p-2 bg-bg-tertiary rounded border border-border-subtle text-xs">
@@ -274,7 +290,7 @@ function SectionEditor({ sectionName, region, onUpdate, onClose }) {
           ✕
         </button>
       </div>
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-4 flex-wrap">
         <label className="flex items-center gap-1.5">
           <span className="text-text-tertiary">Duration:</span>
           <input
@@ -292,13 +308,23 @@ function SectionEditor({ sectionName, region, onUpdate, onClose }) {
           <span className="text-text-tertiary">Camera:</span>
           <select
             className="px-1.5 py-0.5 bg-bg-primary border border-border rounded text-text-primary text-xs"
-            value={currentCam || ''}
+            value={currentCam}
             onChange={(e) => onUpdate(sectionName, {
-              camera_group: e.target.value ? Number(e.target.value) : null,
+              camera_group: e.target.value !== '' ? Number(e.target.value) : null,
             })}
           >
-            <option value="">Auto ({camPrefs[0] || 'Default'})</option>
-            {/* Dynamic camera options would come from iRacing bridge */}
+            <option value="">
+              Auto {camPrefs[0] ? `(${camPrefs[0]})` : ''}
+            </option>
+            {sortedCameras.map((cam) => (
+              <option key={cam.group_num} value={cam.group_num}>
+                {cam.group_name}
+                {camPrefs.includes(cam.group_name) ? ' ★' : ''}
+              </option>
+            ))}
+            {!cameras.length && (
+              <option disabled value="">iRacing not connected</option>
+            )}
           </select>
         </label>
         <label className="flex items-center gap-1.5">
