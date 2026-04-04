@@ -200,8 +200,10 @@ class EditorialSkill(LLMSkill):
 
     def validate_output(self, output: dict) -> tuple[bool, str]:
         if "modifications" not in output:
+            logger.warning("[EditorialSkill] validation failed: Missing 'modifications' key")
             return False, "Missing 'modifications' key."
         if "narrative_summary" not in output:
+            logger.warning("[EditorialSkill] validation failed: Missing 'narrative_summary' key")
             return False, "Missing 'narrative_summary' key."
         if not isinstance(output["modifications"], list):
             return False, "'modifications' must be a list."
@@ -243,9 +245,8 @@ class EditorialSkill(LLMSkill):
                         f"segment_id string for 'swap_with'."
                     )
 
+        logger.info("[EditorialSkill] validation passed: %d modifications", len(output["modifications"]))
         return True, ""
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 #  Template variable reference (shared by overlay skills)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -570,20 +571,29 @@ class OverlayDesignSkill(LLMSkill):
 
     def validate_output(self, output: dict) -> tuple[bool, str]:
         if "element" not in output:
+            logger.warning("[OverlayDesignSkill] validation failed: Missing 'element' key")
             return False, "Missing 'element' key."
         if "explanation" not in output:
+            logger.warning("[OverlayDesignSkill] validation failed: Missing 'explanation' key")
             return False, "Missing 'explanation' key."
 
         el = output["element"]
         if not isinstance(el, dict):
+            logger.warning("[OverlayDesignSkill] validation failed: 'element' is not an object")
             return False, "'element' must be an object."
 
         # Required fields
         for key in ("id", "name", "template", "position", "z_index", "visible"):
             if key not in el:
+                logger.warning("[OverlayDesignSkill] validation failed: missing field '%s'", key)
                 return False, f"element missing required field '{key}'."
 
-        return _validate_element_fields(el)
+        ok, msg = _validate_element_fields(el)
+        if ok:
+            logger.info("[OverlayDesignSkill] validation passed: element '%s'", el.get("id"))
+        else:
+            logger.warning("[OverlayDesignSkill] validation failed: %s", msg)
+        return ok, msg
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -759,19 +769,28 @@ class OverlayAugmentSkill(LLMSkill):
 
     def validate_output(self, output: dict) -> tuple[bool, str]:
         if "element" not in output:
+            logger.warning("[OverlayAugmentSkill] validation failed: Missing 'element' key")
             return False, "Missing 'element' key."
         if "explanation" not in output:
+            logger.warning("[OverlayAugmentSkill] validation failed: Missing 'explanation' key")
             return False, "Missing 'explanation' key."
 
         el = output["element"]
         if not isinstance(el, dict):
+            logger.warning("[OverlayAugmentSkill] validation failed: 'element' is not an object")
             return False, "'element' must be an object."
 
         for key in ("id", "name", "template", "position", "z_index", "visible"):
             if key not in el:
+                logger.warning("[OverlayAugmentSkill] validation failed: missing field '%s'", key)
                 return False, f"element missing required field '{key}'."
 
-        return _validate_element_fields(el)
+        ok, msg = _validate_element_fields(el)
+        if ok:
+            logger.info("[OverlayAugmentSkill] validation passed: element '%s'", el.get("id"))
+        else:
+            logger.warning("[OverlayAugmentSkill] validation failed: %s", msg)
+        return ok, msg
 
 
 # ═══════════════════════════════════════════════════════════════════════════

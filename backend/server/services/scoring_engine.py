@@ -139,7 +139,13 @@ def score_events(
         and 'score_components' fields added.
     """
     if not events:
+        logger.debug("score_events: no events to score")
         return []
+
+    logger.info(
+        "score_events: scoring %d events (race_duration=%.1fs, num_drivers=%d, target=%.1fs)",
+        len(events), race_duration, num_drivers, target_duration,
+    )
 
     exposure_map: dict[int, float] = defaultdict(float)
     driver_weight = 1.0  # Equal weight for all drivers
@@ -266,6 +272,13 @@ def score_events(
             "score_components": components,
         })
 
+    tier_counts = defaultdict(int)
+    for r in results:
+        tier_counts[r["tier"]] += 1
+    logger.info(
+        "score_events: scored %d events — S:%d A:%d B:%d C:%d",
+        len(results), tier_counts["S"], tier_counts["A"], tier_counts["B"], tier_counts["C"],
+    )
     return results
 
 
@@ -292,6 +305,7 @@ def allocate_timeline(
         Ordered list of selected timeline segments.
     """
     if not scored_events:
+        logger.debug("allocate_timeline: no events to allocate")
         return []
 
     constraints = constraints or {}
@@ -344,6 +358,14 @@ def allocate_timeline(
     # Sort by time
     timeline.sort(key=lambda e: e.get("start_time_seconds", 0))
 
+    total_dur = sum(
+        e.get("end_time_seconds", 0) - e.get("start_time_seconds", 0)
+        for e in timeline
+    )
+    logger.info(
+        "allocate_timeline: selected %d segments (%.1fs total) for %.1fs target",
+        len(timeline), total_dur, target_duration,
+    )
     return timeline
 
 
@@ -464,6 +486,11 @@ def generate_highlights(
     race_duration = race_info.get("duration", 0)
     num_drivers = race_info.get("num_drivers", 1)
 
+    logger.info(
+        "generate_highlights: %d events, target=%.1fs, overrides=%d",
+        len(events), target_duration, len(overrides),
+    )
+
     # Stage 1: Score all events
     scored = score_events(events, weights, race_duration, num_drivers, target_duration)
 
@@ -485,6 +512,13 @@ def generate_highlights(
 
     # Stage 7: Compute metrics
     metrics = _compute_metrics(scored, timeline, target_duration, race_duration, num_drivers)
+
+    logger.info(
+        "generate_highlights: complete — %d scored, %d timeline segments, "
+        "coverage=%.1f%%, balance=%.2f",
+        len(scored), len(timeline),
+        metrics.get("coverage_pct", 0), metrics.get("balance", 0),
+    )
 
     return {
         "scored_events": scored,

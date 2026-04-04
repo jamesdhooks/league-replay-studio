@@ -50,8 +50,8 @@
 
 | # | Issue | File(s) | Status |
 |---|-------|---------|--------|
-| 5 | **Zero logging in scoring_engine.py**: No debug visibility into 8-stage pipeline | `backend/server/services/scoring_engine.py` | ⬜ TODO |
-| 6 | **Zero logging in llm_skills.py**: No debug info if skill validation fails | `backend/server/services/llm_skills.py` | ⬜ TODO |
+| 5 | **Zero logging in scoring_engine.py**: No debug visibility into 8-stage pipeline | `backend/server/services/scoring_engine.py` | ✅ FIXED |
+| 6 | **Zero logging in llm_skills.py**: No debug info if skill validation fails | `backend/server/services/llm_skills.py` | ✅ FIXED |
 | 7 | **Minimal logging in frame_data_builder.py & element_renderer.py** | `backend/server/utils/` | ⬜ TODO |
 | 8 | **API client has no retry/timeout**: Single attempt, no timeout, no interceptors | `frontend/src/services/api.js` | ⬜ TODO |
 | 9 | **No React.memo**: 0 memoized components, useCallback wasted without memo | `frontend/src/components/` | ⬜ TODO |
