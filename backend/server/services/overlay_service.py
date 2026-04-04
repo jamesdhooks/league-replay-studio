@@ -133,6 +133,7 @@ BUILTIN_TEMPLATES: list[dict[str, Any]] = [
 # ── Sample frame data for editor preview ────────────────────────────────────
 
 SAMPLE_FRAME_DATA: dict[str, Any] = {
+    "section": "race",
     "series_name": "IMSA SportsCar Championship",
     "track_name": "Daytona International Speedway",
     "current_lap": 7,
@@ -160,6 +161,7 @@ SAMPLE_FRAME_DATA: dict[str, Any] = {
 }
 
 VARIABLE_DOCS: dict[str, str] = {
+    "frame.section": "Active video section: 'intro', 'qualifying_results', 'race', or 'race_results'",
     "frame.series_name": "Name of the racing series (e.g., 'IMSA SportsCar Championship')",
     "frame.track_name": "Name of the track (e.g., 'Daytona International Speedway')",
     "frame.current_lap": "Current lap number (integer)",

@@ -23,6 +23,9 @@ Endpoints:
   POST   /overrides/{project_id}/{template_id}  — Save per-project override
   GET    /overrides/{project_id}/{template_id}   — Get per-project override
   DELETE /overrides/{project_id}/{template_id}  — Delete per-project override
+  POST   /frame-data/{project_id} — Build frame_data from project telemetry
+  POST   /editor/preview        — Live editor preview
+  GET    /editor/context/{id}   — Template variable documentation
 """
 
 from __future__ import annotations
@@ -87,6 +90,15 @@ class EditorPreviewRequest(BaseModel):
     template_id: str
     html_content: str
     frame_data: dict[str, Any] = {}
+
+
+class FrameDataRequest(BaseModel):
+    """Request body for building frame_data from project telemetry."""
+    session_time: float
+    section: str = "race"
+    focused_car_idx: Optional[int] = None
+    series_name: str = ""
+    track_name: str = ""
 
 
 # ── Status ──────────────────────────────────────────────────────────────────
@@ -308,3 +320,58 @@ async def get_template_context(template_id: str):
     if context is None:
         raise HTTPException(status_code=404, detail="Template not found")
     return context
+
+
+# ── Frame data from telemetry ────────────────────────────────────────────────
+
+@router.post("/frame-data/{project_id}")
+async def build_frame_data_endpoint(project_id: int, body: FrameDataRequest):
+    """Build a frame_data dict from the project's telemetry database.
+
+    Queries the analysis database for the car state nearest to
+    ``session_time`` and returns a complete frame context dict that can be
+    passed directly to the ``/render`` endpoint or used for batch rendering.
+
+    This is the bridge between the raw telemetry stored during the analysis
+    pass and the overlay rendering system — it converts recorded car positions,
+    lap counts, and flag states into the ``frame.*`` variables that overlay
+    templates consume.
+
+    Args:
+        project_id:    Project to load telemetry from.
+        session_time:  Target replay time in seconds.
+        section:       Video section context (``intro``, ``qualifying_results``,
+                       ``race``, or ``race_results``).
+        focused_car_idx: iRacing car index of the hero driver. Defaults to the
+                         camera car stored in the telemetry snapshot.
+        series_name:   Racing series label (not in DB; use project metadata).
+        track_name:    Track name label (not in DB; use project metadata).
+    """
+    from server.services.project_service import project_service
+    from server.utils.frame_data_builder import build_frame_data
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project.get("project_dir", "")
+    if not project_dir:
+        raise HTTPException(status_code=400, detail="Project has no directory configured")
+
+    # Allow caller to override series/track; fall back to project metadata
+    series_name = body.series_name or ""
+    track_name = body.track_name or project.get("track_name", "")
+
+    try:
+        frame_data = build_frame_data(
+            project_dir=project_dir,
+            session_time=body.session_time,
+            section=body.section,
+            focused_car_idx=body.focused_car_idx,
+            series_name=series_name,
+            track_name=track_name,
+        )
+        return {"frame_data": frame_data, "project_id": project_id}
+    except Exception as exc:
+        logger.error("[Overlay API] Frame data build failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to build frame data")
