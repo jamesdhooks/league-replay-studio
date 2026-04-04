@@ -534,7 +534,7 @@ def generate_video_script(
     race_start = 0.0
     race_end = race_duration
     if race_timeline:
-        event_segs = [s for s in race_timeline if s.get("type") not in ("transition",)]
+        event_segs = [s for s in race_timeline if s.get("type") != "transition"]
         if event_segs:
             race_start = event_segs[0].get("start_time_seconds", 0)
             race_end = event_segs[-1].get("end_time_seconds", race_duration)

@@ -14,8 +14,11 @@ REST endpoints for video capture (OBS / ShadowPlay / ReLive).
 from __future__ import annotations
 
 import logging
+from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from server.services.capture_service import capture_service
 
@@ -122,9 +125,6 @@ async def reset_capture():
 
 # ── Script-based capture ───────────────────────────────────────────────────
 
-from pydantic import BaseModel
-from typing import Optional
-
 
 class ScriptCaptureRequest(BaseModel):
     """Request body for script-based capture."""
@@ -199,6 +199,3 @@ async def start_script_capture(body: ScriptCaptureRequest):
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
         capture_engine.stop()
-
-
-from pathlib import Path

@@ -297,7 +297,7 @@ function SectionEditor({ sectionName, region, onUpdate, onClose }) {
               camera_group: e.target.value ? Number(e.target.value) : null,
             })}
           >
-            <option value="">Auto ({camPrefs[0] || 'TV Static'})</option>
+            <option value="">Auto ({camPrefs[0] || 'Default'})</option>
             {/* Dynamic camera options would come from iRacing bridge */}
           </select>
         </label>

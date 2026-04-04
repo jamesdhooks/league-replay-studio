@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -36,6 +37,9 @@ logger = logging.getLogger(__name__)
 # This prefix is trimmed from the final clip.
 DEFAULT_CLIP_PADDING = 0.5
 
+# Pattern to strip unsafe characters from segment IDs used as filenames
+_SAFE_FILENAME_RE = re.compile(r'[^a-zA-Z0-9_\-]')
+
 
 def _find_ffmpeg() -> Optional[str]:
     """Locate the FFmpeg binary."""
@@ -45,6 +49,20 @@ def _find_ffmpeg() -> Optional[str]:
     except Exception:
         import shutil
         return shutil.which("ffmpeg")
+
+
+def _sanitize_filename(name: str) -> str:
+    """Sanitize a string for safe use as a filename component.
+
+    Strips path separators, special characters, and limits length to
+    prevent path traversal or command injection.
+    """
+    # Remove path components — use only the basename
+    name = Path(name).name if name else "clip"
+    # Strip all non-safe characters
+    sanitized = _SAFE_FILENAME_RE.sub("_", name)
+    # Limit length and ensure non-empty
+    return (sanitized[:64] or "clip")
 
 
 class ScriptCaptureEngine:
@@ -145,7 +163,7 @@ class ScriptCaptureEngine:
                 "message": f"Capturing {section}: {seg_id}",
             })
 
-            clip_path = str(self._output_dir / f"{seg_id}.mp4")
+            clip_path = str(self._output_dir / f"{_sanitize_filename(seg_id)}.mp4")
 
             # 1. Pause replay
             iracing_bridge.set_replay_speed(0)
@@ -363,7 +381,7 @@ class ScriptCaptureEngine:
                 pass
 
 
-def _interruptible_sleep(seconds: float, cancelled_fn) -> None:
+def _interruptible_sleep(seconds: float, cancelled_fn: Callable[[], bool]) -> None:
     """Sleep for *seconds*, checking cancellation every 0.25s."""
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
