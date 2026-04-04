@@ -74,6 +74,34 @@ DEFAULT_PIP_THRESHOLD = 7.0
 # Reference speed for normalisation (70 m/s ≈ 250 km/h)
 REFERENCE_SPEED_MS = 70.0
 
+# ── Video Sections ──────────────────────────────────────────────────────────
+# The final highlight video is composed of four ordered sections.
+# Each non-race section uses a static "TV cam" (iRacing camera group)
+# so graphics can be overlaid cleanly in a later pipeline step.
+
+VIDEO_SECTIONS = ("intro", "qualifying_results", "race", "race_results")
+
+# Default durations for non-race sections (seconds)
+DEFAULT_SECTION_DURATIONS: dict[str, float] = {
+    "intro": 10.0,
+    "qualifying_results": 15.0,
+    "race_results": 20.0,
+    # "race" duration is determined by the event-driven timeline
+}
+
+# Preferred iRacing TV camera sources for static B-roll sections.
+# Group names match iRacing's CameraInfo → Groups → GroupName entries.
+# The capture engine tries each name in order until one is found.
+TV_CAM_PREFERENCES: dict[str, list[str]] = {
+    "intro": ["Scenic", "TV Static", "TV1", "Blimp", "Pit Lane"],
+    "qualifying_results": ["Pit Lane", "TV Static", "TV1", "Scenic"],
+    "race_results": ["TV Static", "TV1", "Pit Lane", "Scenic", "Blimp"],
+    "gap_filler": ["TV Static", "TV1", "Scenic"],
+}
+
+# Default clip-start padding (seconds) — trimmed after capture
+DEFAULT_CLIP_PADDING = 0.5
+
 
 # ── Scoring Pipeline ────────────────────────────────────────────────────────
 
@@ -377,6 +405,7 @@ def insert_broll(timeline: list[dict], gap_threshold: float = BROLL_GAP_THRESHOL
                         "id": f"broll_{broll_idx:03d}",
                         "type": "broll",
                         "source": "track_side_camera",
+                        "camera_preferences": TV_CAM_PREFERENCES.get("gap_filler", []),
                         "start_time": prev_end,
                         "end_time": cur_start,
                         "start_time_seconds": prev_end,
@@ -445,6 +474,148 @@ def generate_highlights(
         "scored_events": scored,
         "timeline": timeline,
         "metrics": metrics,
+    }
+
+
+def generate_video_script(
+    events: list[dict],
+    target_duration: float = 300.0,
+    weights: Optional[dict[str, float]] = None,
+    constraints: Optional[dict] = None,
+    overrides: Optional[dict] = None,
+    race_info: Optional[dict] = None,
+    section_config: Optional[dict] = None,
+    clip_padding: float = DEFAULT_CLIP_PADDING,
+) -> dict:
+    """Generate a full Video Composition Script with four sections.
+
+    The script contains ordered segments for:
+      1. **intro** — Static B-roll with scenic/blimp cam for title card overlay
+      2. **qualifying_results** — Pit-lane / static cam for grid graphics
+      3. **race** — Event-driven highlight timeline (from generate_highlights)
+      4. **race_results** — Static cam for finishing order graphics
+
+    Each segment carries enough info for the capture engine to:
+      - Seek the replay to the correct point (minus clip_padding)
+      - Select the right iRacing camera group
+      - Start/stop recording independently
+      - Name the clip for association with its script ID
+
+    Args:
+        events: Raw race events from the database.
+        target_duration: Target *race* highlight duration in seconds.
+        weights: Per-event-type weight overrides (0–100).
+        constraints: max_driver_exposure, pip_threshold, min_severity.
+        overrides: Manual overrides {event_id: action}.
+        race_info: Race metadata (track, num_drivers, duration, etc.).
+        section_config: Override durations/cameras per section.
+        clip_padding: Seconds to pre-roll before each clip (trimmed later).
+
+    Returns:
+        Dict with 'script' (ordered segment list), 'scored_events',
+        'timeline' (race section only), 'metrics', and 'sections' summary.
+    """
+    race_info = race_info or {}
+    section_config = section_config or {}
+    race_duration = race_info.get("duration", 0)
+
+    # ── Build race section via existing pipeline ────────────────────────────
+    hl_result = generate_highlights(
+        events=events,
+        target_duration=target_duration,
+        weights=weights,
+        constraints=constraints,
+        overrides=overrides,
+        race_info=race_info,
+    )
+    race_timeline = hl_result["timeline"]
+
+    # Determine race start/end from the timeline or race_info
+    race_start = 0.0
+    race_end = race_duration
+    if race_timeline:
+        event_segs = [s for s in race_timeline if s.get("type") not in ("transition",)]
+        if event_segs:
+            race_start = event_segs[0].get("start_time_seconds", 0)
+            race_end = event_segs[-1].get("end_time_seconds", race_duration)
+
+    # ── Build non-race sections (B-roll) ────────────────────────────────────
+    script: list[dict] = []
+    section_idx = 0
+
+    for section_name in VIDEO_SECTIONS:
+        if section_name == "race":
+            # Inject the race event timeline segments
+            for seg in race_timeline:
+                script.append({
+                    **seg,
+                    "section": "race",
+                    "clip_padding": clip_padding,
+                })
+            continue
+
+        # Static B-roll section
+        cfg = section_config.get(section_name, {})
+        duration = cfg.get("duration", DEFAULT_SECTION_DURATIONS.get(section_name, 10.0))
+        cam_prefs = cfg.get(
+            "camera_preferences",
+            TV_CAM_PREFERENCES.get(section_name, ["TV Static", "TV1"]),
+        )
+        camera_group = cfg.get("camera_group")  # User-selected override
+
+        # Choose a replay time to capture this B-roll from
+        if section_name == "intro":
+            # Use a time shortly before the race starts (formation / grid)
+            broll_time = max(0, race_start - 30)
+        elif section_name == "qualifying_results":
+            # Use the very start of the race session (pre-green)
+            broll_time = max(0, race_start - 10)
+        elif section_name == "race_results":
+            # Use a time after the race ends (cooldown lap / podium)
+            broll_time = race_end + 5
+        else:
+            broll_time = race_start
+
+        broll_time = cfg.get("start_time_seconds", broll_time)
+
+        section_idx += 1
+        script.append({
+            "id": f"section_{section_name}",
+            "type": "broll",
+            "section": section_name,
+            "source": "tv_cam",
+            "camera_preferences": cam_prefs,
+            "camera_group": camera_group,
+            "start_time_seconds": broll_time,
+            "end_time_seconds": broll_time + duration,
+            "duration": duration,
+            "purpose": section_name,
+            "clip_padding": clip_padding,
+            "editable": True,
+        })
+
+    # ── Sections summary for frontend ───────────────────────────────────────
+    sections_summary = []
+    for section_name in VIDEO_SECTIONS:
+        segs = [s for s in script if s.get("section") == section_name]
+        total_dur = sum(
+            s.get("end_time_seconds", 0) - s.get("start_time_seconds", 0)
+            for s in segs
+        )
+        sections_summary.append({
+            "name": section_name,
+            "segment_count": len(segs),
+            "duration": round(total_dur, 1),
+            "editable": section_name != "race",
+        })
+
+    return {
+        "script": script,
+        "scored_events": hl_result["scored_events"],
+        "timeline": race_timeline,
+        "metrics": hl_result["metrics"],
+        "sections": sections_summary,
+        "clip_padding": clip_padding,
     }
 
 

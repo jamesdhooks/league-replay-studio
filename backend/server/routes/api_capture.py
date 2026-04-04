@@ -118,3 +118,87 @@ async def reset_capture():
     """Reset capture state to idle."""
     capture_service.reset()
     return {"status": "reset", "state": "idle"}
+
+
+# ── Script-based capture ───────────────────────────────────────────────────
+
+from pydantic import BaseModel
+from typing import Optional
+
+
+class ScriptCaptureRequest(BaseModel):
+    """Request body for script-based capture."""
+    project_id: int
+    script: list[dict]
+    clip_padding: float = 0.5
+    output_filename: str = "highlight_compiled.mp4"
+
+
+@router.post("/script-capture")
+async def start_script_capture(body: ScriptCaptureRequest):
+    """Capture video clips for each segment in a Video Composition Script.
+
+    This endpoint:
+      1. Iterates through each script segment
+      2. For each: pauses replay → seeks → sets camera → records → trims
+      3. Compiles all clips into a single output video
+      4. Returns the list of clips and compiled video path
+
+    This is a long-running operation — progress is reported via WebSocket.
+    """
+    from server.services.project_service import project_service
+    from server.services.iracing_bridge import bridge as iracing_bridge
+    from server.utils.script_capture import ScriptCaptureEngine
+
+    project = project_service.get_project(body.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not iracing_bridge.is_connected:
+        raise HTTPException(status_code=400, detail="iRacing is not connected")
+
+    project_dir = project.get("project_dir", "")
+    if not project_dir:
+        raise HTTPException(status_code=400, detail="Project directory not set")
+
+    clips_dir = str(Path(project_dir) / "clips")
+
+    # Get available cameras from iRacing
+    cameras = getattr(iracing_bridge, "cameras", []) or []
+
+    # Create the CaptureEngine for recording
+    from server.utils.capture_engine import CaptureEngine
+    capture_engine = CaptureEngine()
+    if not capture_engine.is_running:
+        capture_engine.start(fps=30, quality=80, max_width=1920)
+
+    try:
+        engine = ScriptCaptureEngine(
+            output_dir=clips_dir,
+            clip_padding=body.clip_padding,
+        )
+
+        clips = engine.capture_script(
+            script=body.script,
+            iracing_bridge=iracing_bridge,
+            capture_engine=capture_engine,
+            available_cameras=cameras,
+        )
+
+        output_path = str(Path(project_dir) / body.output_filename)
+        compiled = engine.compile_clips(output_path)
+
+        return {
+            "success": True,
+            "clips": clips,
+            "compiled_path": compiled,
+            "total_clips": len(clips),
+        }
+    except Exception as exc:
+        logger.error("[Capture API] Script capture error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        capture_engine.stop()
+
+
+from pathlib import Path

@@ -1058,6 +1058,86 @@ async def reprocess_highlights(project_id: int, body: ReprocessRequest):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+class VideoScriptRequest(BaseModel):
+    """Request body for generating a Video Composition Script."""
+    weights: dict = {}
+    constraints: dict = {}
+    section_config: dict = {}
+    clip_padding: float = 0.5
+
+
+@router.post("/projects/{project_id}/highlights/video-script")
+async def generate_video_script_endpoint(project_id: int, body: VideoScriptRequest):
+    """Generate a full Video Composition Script with intro/qualifying/race/results sections.
+
+    Returns the ordered script segments, scored events, race timeline,
+    metrics, and a sections summary for the frontend.
+    """
+    from server.services.scoring_engine import generate_video_script
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project["project_dir"]
+    try:
+        init_analysis_db(project_dir)
+        conn = get_project_db(project_dir)
+        try:
+            events = get_events(conn, limit=10000)
+
+            config = get_highlight_config(conn)
+            overrides = config.get("overrides", {})
+
+            conn.row_factory = _dict_factory
+            row = conn.execute(
+                "SELECT MAX(session_time) as max_time FROM race_ticks"
+            ).fetchone()
+            race_duration = row["max_time"] if row and row["max_time"] else 0
+
+            drivers = get_drivers(conn)
+            num_drivers = len(drivers) if drivers else 1
+
+            race_info = {
+                "duration": race_duration,
+                "num_drivers": num_drivers,
+                "track": project.get("track_name", "Unknown"),
+                "total_laps": project.get("num_laps", 0),
+                "target_duration": body.constraints.get("target_duration", 300),
+            }
+
+            weights = {**config.get("weights", {}), **body.weights}
+
+            result = generate_video_script(
+                events=events,
+                target_duration=body.constraints.get("target_duration", 300),
+                weights=weights,
+                constraints=body.constraints,
+                overrides=overrides,
+                race_info=race_info,
+                section_config=body.section_config,
+                clip_padding=body.clip_padding,
+            )
+
+            logger.info(
+                "[Highlights API] Video script generated for project #%d: "
+                "%d script segments, %d sections",
+                project_id,
+                len(result.get("script", [])),
+                len(result.get("sections", [])),
+            )
+
+            return {
+                "project_id": project_id,
+                **result,
+            }
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.error("[Highlights API] Video script error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.get("/projects/{project_id}/scored-events")
 async def get_scored_events(project_id: int):
     """Get all events scored and tiered using the multi-pass pipeline."""
