@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width={{ resolution.width }}, height={{ resolution.height }}">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: {{ resolution.width }}px; height: {{ resolution.height }}px; background: transparent; overflow: hidden; }
+    .overlay { width: 100%; height: 100%; position: relative; font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; }
+  </style>
+</head>
+<body>
+  <div class="overlay">
+
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {# INTRO — Track name badge (bottom-center)                               #}
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {% if frame.section is defined and frame.section == 'intro' %}
+
+    {% if frame.track_name or frame.series_name %}
+    <div class="absolute bottom-6 left-1/2 -translate-x-1/2 text-center">
+      <div class="rounded-full px-6 py-2"
+           style="background: rgba(0,0,0,0.7); backdrop-filter: blur(8px);">
+        {% if frame.series_name %}
+        <div class="text-gray-400 text-xs uppercase tracking-[0.25em] mb-0.5">
+          {{ frame.series_name }}
+        </div>
+        {% endif %}
+        {% if frame.track_name %}
+        <div class="text-white font-bold text-base tracking-wide">
+          {{ frame.track_name }}
+        </div>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {# QUALIFYING RESULTS — Grid position badge                               #}
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {% elif frame.section is defined and frame.section == 'qualifying_results' %}
+
+    {% if frame.position is defined %}
+    <div class="absolute top-4 left-4">
+      <div class="flex items-center gap-3 rounded-full px-4 py-2"
+           style="background: rgba(0,0,0,0.7); backdrop-filter: blur(8px);">
+        <div class="w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm"
+             style="background: {{ frame.team_color | default('#3B82F6') }}; color: white;">
+          {{ frame.position | default(1) }}
+        </div>
+        <div>
+          <div class="text-white font-medium text-sm">
+            {{ frame.driver_name | default('Driver') }}
+          </div>
+          <div class="text-gray-400 text-xs uppercase tracking-wider">Starting Grid</div>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {# RACE RESULTS — Final position badge                                    #}
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {% elif frame.section is defined and frame.section == 'race_results' %}
+
+    {% if frame.position is defined %}
+    <div class="absolute bottom-6 left-4">
+      <div class="flex items-center gap-3 rounded-full px-4 py-2"
+           style="background: rgba(0,0,0,0.7); backdrop-filter: blur(8px);">
+        <div class="w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm"
+             style="background: {{ frame.team_color | default('#3B82F6') }}; color: white;">
+          {{ frame.position | default(1) }}
+        </div>
+        <div>
+          <div class="text-white font-medium text-sm">
+            {{ frame.driver_name | default('Driver') }}
+          </div>
+          <div class="text-gray-400 text-xs uppercase tracking-wider">Finished</div>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+    {% if frame.best_lap_time is defined %}
+    <div class="absolute bottom-6 right-4">
+      <div class="rounded-full px-4 py-2"
+           style="background: rgba(0,0,0,0.7); backdrop-filter: blur(8px);">
+        <span class="text-gray-400 text-xs mr-2">BEST</span>
+        <span class="text-white font-mono text-sm tabular-nums">
+          {{ frame.best_lap_time | default('--:--.---') }}
+        </span>
+      </div>
+    </div>
+    {% endif %}
+
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {# RACE (default) — Position badge + lap time                             #}
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {% else %}
+
+    {# ── Minimal: Position badge (top-left) ────────────────────────────── #}
+    {% if frame.position is defined %}
+    <div class="absolute top-4 left-4">
+      <div class="flex items-center gap-3 rounded-full px-4 py-2"
+           style="background: rgba(0,0,0,0.7); backdrop-filter: blur(8px);">
+        <div class="w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm"
+             style="background: {{ frame.team_color | default('#3B82F6') }}; color: white;">
+          {{ frame.position | default(1) }}
+        </div>
+        <div>
+          <div class="text-white font-medium text-sm">
+            {{ frame.driver_name | default('Driver') }}
+          </div>
+          <div class="text-gray-400 text-xs">
+            Lap {{ frame.current_lap | default(1) }}/{{ frame.total_laps | default(20) }}
+          </div>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    {# ── Minimal: Lap time (top-right) ─────────────────────────────────── #}
+    {% if frame.last_lap_time is defined %}
+    <div class="absolute top-4 right-4">
+      <div class="rounded-full px-4 py-2"
+           style="background: rgba(0,0,0,0.7); backdrop-filter: blur(8px);">
+        <span class="text-gray-400 text-xs mr-2">LAP</span>
+        <span class="text-white font-mono text-sm tabular-nums">
+          {{ frame.last_lap_time | default('--:--.---') }}
+        </span>
+      </div>
+    </div>
+    {% endif %}
+
+    {# ── Minimal: Flag indicator ───────────────────────────────────────── #}
+    {% if frame.flag is defined and frame.flag != 'green' %}
+    <div class="absolute top-4 left-1/2 -translate-x-1/2">
+      <div class="rounded-full px-4 py-1.5 text-xs font-bold uppercase tracking-wider
+                  {% if frame.flag == 'yellow' %}bg-yellow-500/90 text-black
+                  {% elif frame.flag == 'red' %}bg-red-600/90 text-white
+                  {% else %}bg-gray-700/90 text-white{% endif %}"
+           style="backdrop-filter: blur(8px);">
+        {{ frame.flag | upper }}
+      </div>
+    </div>
+    {% endif %}
+
+  {% endif %}
+
+  </div>
+</body>
+</html>

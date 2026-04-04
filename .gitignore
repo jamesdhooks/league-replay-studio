@@ -59,6 +59,17 @@ desktop.ini
 
 # Project data (user-generated, not source)
 backend/data/projects/
+backend/config.json
 
 # Build output
 backend/static/
+node_modules/
+
+# Native capture build artifacts
+backend/native_capture/build/
+*.exe
+
+# Windows reserved device names (created by errant shell redirects)
+nul
+exhaustive
+quality

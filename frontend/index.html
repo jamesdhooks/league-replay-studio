@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>League Replay Studio</title>
+    <!-- Google Fonts — Inter with full weight range -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
+    <!-- FOUC prevention: apply saved theme before first paint -->
+    <script>
+      (function() {
+        try {
+          var stored = localStorage.getItem('lrs-theme');
+          if (!stored) {
+            try {
+              var config = JSON.parse(localStorage.getItem('lrs-settings') || '{}');
+              stored = config.theme;
+            } catch(e) {}
+          }
+          if (stored === 'light') {
+            document.documentElement.classList.remove('dark');
+            document.documentElement.classList.add('light');
+          } else if (stored === 'system') {
+            var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            document.documentElement.classList.toggle('dark', prefersDark);
+            document.documentElement.classList.toggle('light', !prefersDark);
+          }
+          // default is 'dark' — already set on <html>
+        } catch(e) {}
+      })();
+    </script>
+  </head>
+  <body class="bg-bg-primary text-text-primary antialiased">
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
