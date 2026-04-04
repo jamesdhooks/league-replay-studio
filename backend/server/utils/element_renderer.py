@@ -39,6 +39,8 @@ def render_element_template(
     frame_data: dict[str, Any],
     position: dict[str, float],
     variables: dict[str, Any] | None = None,
+    pagination: dict[str, Any] | None = None,
+    page_index: int = 0,
 ) -> str:
     """Render a single element's Jinja2 template with position and frame data.
 
@@ -46,12 +48,17 @@ def render_element_template(
       - ``frame.*``    — telemetry data (same schema as SAMPLE_FRAME_DATA)
       - ``pos.x``, ``pos.y``, ``pos.w``, ``pos.h`` — percentage position values
       - ``vars.*``     — user-defined CSS variable values
+      - ``page_start``, ``page_end`` — slice indices for paginated lists
+      - ``page_index``, ``total_pages`` — current page number and total
 
     Args:
         template_str: Jinja2 HTML template string.
         frame_data:   Per-frame overlay context.
         position:     Dict with x, y, w, h percentage values.
         variables:    User-defined variables dict.
+        pagination:   Optional pagination config
+                      ``{ enabled: bool, items_per_page: int }``.
+        page_index:   Which page to render (0-based) when pagination is active.
 
     Returns:
         Rendered HTML string for this element.
@@ -73,12 +80,28 @@ def render_element_template(
             else:
                 var_values[k] = v
 
+    # Build pagination context — compute page_start / page_end slice indices
+    items_per_page = 20  # default: show all
+    if pagination and pagination.get("enabled"):
+        items_per_page = pagination.get("items_per_page", 10)
+
+    page_start = page_index * items_per_page
+    page_end = page_start + items_per_page
+
+    # Total pages based on standings length (primary paginated list)
+    standings = frame_data.get("standings", [])
+    total_pages = max(1, -(-len(standings) // items_per_page))  # ceil division
+
     try:
         template = _jinja_env.from_string(template_str)
         return template.render(
             frame=frame_data,
             pos=pos,
             vars=var_values,
+            page_start=page_start,
+            page_end=page_end,
+            page_index=page_index,
+            total_pages=total_pages,
         )
     except Exception as exc:
         logger.warning("[ElementRenderer] Template render error: %s", exc)
@@ -92,6 +115,7 @@ def compose_preset_html(
     resolution: dict[str, int] | None = None,
     asset_base_url: str = "/api/presets",
     element_filter: str | None = None,
+    page_index: int = 0,
 ) -> str:
     """Compose all visible elements for a section into a single HTML document.
 
@@ -100,6 +124,7 @@ def compose_preset_html(
       - A relative container matching the viewport size
       - Each visible element absolutely positioned within the container
       - Jinja2-rendered content for each element
+      - Pagination support for list-based elements
 
     The result is a single HTML string ready for Playwright rendering.
 
@@ -110,6 +135,7 @@ def compose_preset_html(
         resolution:    Rendering resolution {width, height}. Defaults to 1920×1080.
         asset_base_url: Base URL prefix for asset image references.
         element_filter: If set, only render this specific element ID.
+        page_index:    Page index for paginated elements (0-based).
 
     Returns:
         Complete HTML document string.
@@ -177,7 +203,9 @@ def compose_preset_html(
 
         # Render this element's Jinja2 template
         rendered_content = render_element_template(
-            template_str, frame_data, pos, variables
+            template_str, frame_data, pos, variables,
+            pagination=elem.get("pagination"),
+            page_index=page_index,
         )
 
         html_parts.append(

@@ -180,6 +180,11 @@ async def lifespan(app: FastAPI):
 
     pipeline_service.set_broadcast_fn(_broadcast_pipeline)
 
+    # ── Register LLM skills ─────────────────────────────────────────────────
+    from server.services.llm_skills import register_default_skills
+    register_default_skills()
+    logger.info("[App] LLM skills registered")
+
     logger.info("[App] Startup complete — v%s", __version__)
     yield
 

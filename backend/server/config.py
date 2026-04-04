@@ -52,6 +52,13 @@ DEFAULT_CONFIG: dict = {
     "wizard_completed": False,
     "theme": "dark",
     "sidebar_collapsed": False,
+    # ── LLM / AI settings ────────────────────────────────────────────────────
+    "llm_enabled": False,
+    "llm_provider": "none",
+    "llm_api_key": "",
+    "llm_model": "",
+    "llm_custom_endpoint": "",
+    "llm_temperature": 0.3,
 }
 
 

@@ -27,6 +27,7 @@ VALID_ENCODING_PRESETS = {
 }
 VALID_GPU = {"auto", "nvidia", "amd", "intel", "cpu"}
 VALID_PREVIEW_BACKENDS = {"auto", "native", "dxcam", "printwindow"}
+VALID_LLM_PROVIDERS = {"none", "openai", "anthropic", "google", "custom"}
 
 
 def _validate_theme(value: Any) -> tuple[bool, str]:
@@ -101,6 +102,18 @@ def _validate_pipeline_config(value: Any) -> tuple[bool, str]:
     return True, ""
 
 
+def _validate_llm_provider(value: Any) -> tuple[bool, str]:
+    if value not in VALID_LLM_PROVIDERS:
+        return False, f"llm_provider must be one of {sorted(VALID_LLM_PROVIDERS)}"
+    return True, ""
+
+
+def _validate_llm_temperature(value: Any) -> tuple[bool, str]:
+    if not isinstance(value, (int, float)) or value < 0.0 or value > 1.0:
+        return False, "llm_temperature must be a number between 0.0 and 1.0"
+    return True, ""
+
+
 VALIDATORS: dict[str, Any] = {
     "theme": _validate_theme,
     "capture_software": _validate_capture_software,
@@ -118,6 +131,12 @@ VALIDATORS: dict[str, Any] = {
     "default_project_dir": _validate_string_or_empty,
     "pipeline_default_config": _validate_pipeline_config,
     "wizard_completed": _validate_bool,
+    "llm_enabled": _validate_bool,
+    "llm_provider": _validate_llm_provider,
+    "llm_api_key": _validate_string_or_empty,
+    "llm_model": _validate_string_or_empty,
+    "llm_custom_endpoint": _validate_string_or_empty,
+    "llm_temperature": _validate_llm_temperature,
 }
 
 
