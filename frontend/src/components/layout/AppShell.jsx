@@ -5,6 +5,7 @@ import { useProject } from '../../context/ProjectContext'
 import { useAnalysis } from '../../context/AnalysisContext'
 import { useUndoRedo } from '../../context/UndoRedoContext'
 import { useSettings } from '../../context/SettingsContext'
+import { useHotkeys } from '../../hooks/useHotkeys'
 
 // ── Lazy-loaded panels (code splitting) ──────────────────────────────────────
 const ProjectLibrary = lazy(() => import('../projects/ProjectLibrary'))
@@ -74,6 +75,28 @@ function AppShell() {
   const closeSettings = useCallback(() => setShowSettings(false), [])
   const openHelp = useCallback(() => setShowHelp(true), [])
   const closeHelp = useCallback(() => setShowHelp(false), [])
+
+  // ── Global keyboard shortcuts ──────────────────────────────────────────
+  useHotkeys('mod+z', () => canUndo && undo(), {
+    description: 'Undo',
+    scope: 'global',
+  })
+  useHotkeys('mod+shift+z', () => canRedo && redo(), {
+    description: 'Redo',
+    scope: 'global',
+  })
+  useHotkeys('mod+,', () => setShowSettings((v) => !v), {
+    description: 'Toggle settings',
+    scope: 'global',
+  })
+  useHotkeys('escape', () => {
+    if (showSettings) closeSettings()
+    else if (showHelp) closeHelp()
+  }, {
+    description: 'Close panel',
+    scope: 'global',
+    enabled: showSettings || showHelp,
+  })
 
   // Compute undo/redo descriptions for toolbar tooltips
   const undoDescription = canUndo ? history[currentIndex]?.description : undefined

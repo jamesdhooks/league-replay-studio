@@ -106,3 +106,72 @@ async def browse_dialog(req: BrowseRequest) -> dict:
     await loop.run_in_executor(None, _run_dialog)
 
     return result
+
+
+# ── Frontend error reporting ─────────────────────────────────────────────────
+
+import logging as _logging
+
+_frontend_logger = _logging.getLogger("frontend")
+
+
+class FrontendErrorReport(BaseModel):
+    """Error report from the frontend React application."""
+    message: str
+    source: str = "unknown"     # Component or module name
+    stack: str = ""             # JavaScript stack trace
+    level: str = "error"        # error | warning | info
+    category: str = "UI"        # UI, NETWORK, RENDER, etc.
+    user_agent: str = ""
+
+
+@router.post("/report-error")
+async def report_frontend_error(report: FrontendErrorReport) -> dict:
+    """Receive and log errors from the frontend application.
+
+    This allows the backend log to capture frontend errors for unified debugging.
+    """
+    log_fn = {
+        "error": _frontend_logger.error,
+        "warning": _frontend_logger.warning,
+        "info": _frontend_logger.info,
+    }.get(report.level, _frontend_logger.error)
+
+    log_fn(
+        "[%s] %s — source: %s | stack: %s",
+        report.category,
+        report.message,
+        report.source,
+        report.stack[:200] if report.stack else "(none)",
+    )
+
+    return {"status": "logged"}
+
+
+@router.get("/logs")
+async def get_recent_logs(lines: int = 100) -> dict:
+    """Return the most recent log lines from the application log file.
+
+    Query params:
+        lines: Number of recent lines to return (default: 100, max: 500).
+    """
+    from server.config import LOG_DIR
+
+    lines = min(lines, 500)
+    log_path = LOG_DIR / "app.log"
+
+    if not log_path.exists():
+        return {"lines": [], "total_size": 0}
+
+    try:
+        content = log_path.read_text(encoding="utf-8", errors="replace")
+        all_lines = content.strip().split("\n")
+        recent = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        return {
+            "lines": recent,
+            "total_lines": len(all_lines),
+            "total_size": log_path.stat().st_size,
+        }
+    except OSError:
+        return {"lines": [], "total_size": 0}
+

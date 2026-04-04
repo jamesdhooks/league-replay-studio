@@ -31,6 +31,23 @@ export default class ErrorBoundary extends Component {
       errorInfo?.componentStack,
     )
     this.props.onError?.(error, errorInfo)
+
+    // Report error to backend for unified logging
+    try {
+      fetch('/api/system/report-error', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: error?.message || String(error),
+          source: `ErrorBoundary:${this.props.name || 'unknown'}`,
+          stack: errorInfo?.componentStack || error?.stack || '',
+          level: 'error',
+          category: 'RENDER',
+        }),
+      }).catch(() => {}) // Fire-and-forget
+    } catch {
+      // Ignore network errors in error reporting
+    }
   }
 
   reset = () => this.setState({ error: null })
