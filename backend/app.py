@@ -54,6 +54,7 @@ from server.routes.api_preset import router as preset_router
 from server.routes.api_youtube import router as youtube_router
 from server.routes.api_pipeline import router as pipeline_router
 from server.routes.api_wizard import router as wizard_router
+from server.routes.api_llm import router as llm_router
 
 # Services
 from server.services.iracing_bridge import bridge as iracing_bridge
@@ -216,6 +217,7 @@ app.include_router(preset_router)
 app.include_router(youtube_router)
 app.include_router(pipeline_router)
 app.include_router(wizard_router)
+app.include_router(llm_router)
 
 
 # ── WebSocket endpoint ──────────────────────────────────────────────────────
