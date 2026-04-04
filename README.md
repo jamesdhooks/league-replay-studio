@@ -52,11 +52,32 @@ The app runs as a native desktop window (FastAPI + pywebview). Open a replay, le
 | **Python** | 3.11 or newer |
 | **Node.js** | 20 or newer (for frontend build) |
 | **iRacing** | Installed with replays available |
-| **Capture** | OBS Studio or Nvidia ShadowPlay |
+| **Capture** | OBS Studio or Nvidia ShadowPlay (optional — built-in native capture available) |
 | **GPU** | NVIDIA / AMD / Intel for hardware encoding (CPU fallback available) |
 | **FFmpeg** | Bundled or installed separately |
+| **Visual Studio** | 2022 Build Tools (optional — required to build native C++ capture service) |
 
 > **Note on capture:** iRacing does not expose raw frames, and in-game audio requires real-time recording. Screen capture via OBS or ShadowPlay is unavoidable — League Replay Studio makes this integration reliable with configurable hotkeys, process detection, and capture validation.
+
+> **Built-in live preview:** The analysis and editing workflow uses a built-in capture engine for the live preview feed. It automatically selects the best available backend: a native C++ DXGI/WGC service (`lrs_capture.exe`), the Python `dxcam` library, or the GDI `PrintWindow` fallback — no external capture software required for preview. The native backend crops to the DPI-accurate client area (no titlebar) and supports two stream formats selectable in the quality settings dropdown: **MJPEG** (low-latency, universal) and **H.264** (MediaSource Extensions player, higher quality at lower bandwidth).
+
+---
+
+## Native Capture Service (Optional)
+
+For the best live preview performance, LRS includes a native C++ capture service (`lrs_capture.exe`) built with DXGI Desktop Duplication. `start.bat` will build it automatically if Visual Studio 2022 is detected.
+
+**Manual build:**
+```bat
+build-native.bat          # Release build (default)
+build-native.bat Debug    # Debug build
+```
+
+**Requirements:** Visual Studio 2022 (any edition) with the "Desktop development with C++" workload and CMake.
+
+If the native service is not available, LRS falls back to `dxcam` (Python DXGI) and then `PrintWindow` (GDI). The live preview still works perfectly with either fallback backend.
+
+**Settings:** The active preview backend can be selected in **Settings → Encoding → Preview Backend**, which also shows which backends are currently available on your system.
 
 ---
 
@@ -129,7 +150,8 @@ See the [master plan](documentation/master-plan.md#710-cli--headless-mode) for f
 | Overlays | HTML/Tailwind templates via Playwright headless Chromium + Jinja2 |
 | Project Storage | SQLite (Python stdlib `sqlite3` — zero dependency) |
 | YouTube | google-api-python-client + google-auth-oauthlib |
-| Capture | OBS / Nvidia ShadowPlay (configurable hotkeys) |
+| Capture (preview) | Native C++ DXGI service (`lrs_capture.exe`) → dxcam → PrintWindow (3-tier fallback) |
+| Capture (record) | OBS / Nvidia ShadowPlay (configurable hotkeys) |
 
 ---
 

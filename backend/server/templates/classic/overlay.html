@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width={{ resolution.width }}, height={{ resolution.height }}">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: {{ resolution.width }}px; height: {{ resolution.height }}px; background: transparent; overflow: hidden; }
+    .overlay { width: 100%; height: 100%; position: relative; font-family: 'Courier New', monospace; }
+  </style>
+</head>
+<body>
+  <div class="overlay">
+
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {# INTRO — Series + track name header                                     #}
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {% if frame.section is defined and frame.section == 'intro' %}
+
+    <div class="absolute top-0 left-0 right-0 h-10 flex items-center justify-between px-4"
+         style="background: rgba(20,20,40,0.9); border-bottom: 2px solid #FFD700;">
+      <div class="text-yellow-400 font-bold text-sm uppercase tracking-widest">
+        {{ frame.series_name | default('Race Series') }}
+      </div>
+      <div class="text-white font-bold text-sm uppercase tracking-widest">
+        {{ frame.track_name | default('') }}
+      </div>
+    </div>
+
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {# QUALIFYING RESULTS — Starting grid header + board                      #}
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {% elif frame.section is defined and frame.section == 'qualifying_results' %}
+
+    <div class="absolute top-0 left-0 right-0 h-10 flex items-center justify-between px-4"
+         style="background: rgba(20,20,40,0.9); border-bottom: 2px solid #FFD700;">
+      <div class="text-yellow-400 font-bold text-sm uppercase tracking-widest">
+        {{ frame.series_name | default('Race Series') }}
+      </div>
+      <div class="text-white font-bold tabular-nums">QUALIFYING</div>
+      <div class="text-gray-300 font-bold tabular-nums text-sm">
+        {{ frame.track_name | default('') }}
+      </div>
+    </div>
+
+    {% if frame.standings is defined and frame.standings %}
+    <div class="absolute top-12 left-2 w-56" style="background: rgba(20,20,40,0.85); border: 1px solid #444;">
+      <div class="flex items-center text-xs text-yellow-400 uppercase px-2 py-1"
+           style="border-bottom: 1px solid #444;">
+        <span class="w-6 text-center">P</span>
+        <span class="flex-1 px-1">Driver</span>
+        <span class="w-14 text-right">Car #</span>
+      </div>
+      {% for entry in frame.standings[:10] %}
+      <div class="flex items-center text-xs px-2 py-0.5
+                  {% if entry.is_player | default(false) %}bg-blue-900/50 text-yellow-300{% else %}text-white{% endif %}"
+           style="{% if not loop.last %}border-bottom: 1px solid rgba(68,68,68,0.5);{% endif %}">
+        <span class="w-6 text-center font-bold">{{ entry.position | default(loop.index) }}</span>
+        <span class="flex-1 px-1 truncate">{{ entry.driver_name | default('Driver') }}</span>
+        <span class="w-14 text-right tabular-nums text-gray-400">#{{ entry.car_number | default('') }}</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {# RACE RESULTS — Final result header + podium board                      #}
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {% elif frame.section is defined and frame.section == 'race_results' %}
+
+    <div class="absolute top-0 left-0 right-0 h-10 flex items-center justify-between px-4"
+         style="background: rgba(20,20,40,0.9); border-bottom: 2px solid #FFD700;">
+      <div class="text-yellow-400 font-bold text-sm uppercase tracking-widest">
+        {{ frame.series_name | default('Race Series') }}
+      </div>
+      <div class="text-yellow-300 font-bold uppercase">RACE RESULT</div>
+      <div class="text-gray-300 font-bold tabular-nums text-sm">
+        {{ frame.track_name | default('') }}
+      </div>
+    </div>
+
+    {% if frame.standings is defined and frame.standings %}
+    <div class="absolute top-12 left-2 w-56" style="background: rgba(20,20,40,0.85); border: 1px solid #444;">
+      <div class="flex items-center text-xs text-yellow-400 uppercase px-2 py-1"
+           style="border-bottom: 1px solid #444;">
+        <span class="w-6 text-center">P</span>
+        <span class="flex-1 px-1">Driver</span>
+        <span class="w-20 text-right">Gap</span>
+      </div>
+      {% for entry in frame.standings[:10] %}
+      <div class="flex items-center text-xs px-2 py-0.5
+                  {% if entry.is_player | default(false) %}bg-blue-900/50 text-yellow-300
+                  {% elif loop.index == 1 %}bg-yellow-900/40 text-yellow-200
+                  {% else %}text-white{% endif %}"
+           style="{% if not loop.last %}border-bottom: 1px solid rgba(68,68,68,0.5);{% endif %}">
+        <span class="w-6 text-center font-bold">{{ entry.position | default(loop.index) }}</span>
+        <span class="flex-1 px-1 truncate">{{ entry.driver_name | default('Driver') }}</span>
+        <span class="w-20 text-right tabular-nums text-gray-300">
+          {% if loop.index == 1 %}WINNER{% else %}{{ entry.gap | default('') }}{% endif %}
+        </span>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {# RACE (default) — Live header + timing board + driver info              #}
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {% else %}
+
+    {# ── Classic: Header bar ───────────────────────────────────────────── #}
+    <div class="absolute top-0 left-0 right-0 h-10 flex items-center justify-between px-4"
+         style="background: rgba(20,20,40,0.9); border-bottom: 2px solid #FFD700;">
+      <div class="text-yellow-400 font-bold text-sm uppercase tracking-widest">
+        {{ frame.series_name | default('Race Series') }}
+      </div>
+      <div class="text-white font-bold tabular-nums">
+        LAP {{ frame.current_lap | default(1) }} / {{ frame.total_laps | default(20) }}
+      </div>
+      <div class="text-green-400 font-bold tabular-nums">
+        {{ frame.session_time | default('00:00:00') }}
+      </div>
+    </div>
+
+    {# ── Classic: Timing board (left) ──────────────────────────────────── #}
+    {% if frame.standings is defined and frame.standings %}
+    <div class="absolute top-12 left-2 w-56" style="background: rgba(20,20,40,0.85); border: 1px solid #444;">
+      <div class="flex items-center text-xs text-yellow-400 uppercase px-2 py-1"
+           style="border-bottom: 1px solid #444;">
+        <span class="w-6 text-center">P</span>
+        <span class="flex-1 px-1">Driver</span>
+        <span class="w-20 text-right">Gap</span>
+      </div>
+      {% for entry in frame.standings[:10] %}
+      <div class="flex items-center text-xs px-2 py-0.5
+                  {% if entry.is_player | default(false) %}bg-blue-900/50 text-yellow-300{% else %}text-white{% endif %}"
+           style="{% if not loop.last %}border-bottom: 1px solid rgba(68,68,68,0.5);{% endif %}">
+        <span class="w-6 text-center font-bold">{{ entry.position | default(loop.index) }}</span>
+        <span class="flex-1 px-1 truncate">{{ entry.driver_name | default('Driver') }}</span>
+        <span class="w-20 text-right tabular-nums text-gray-300">
+          {% if loop.index == 1 %}---{% else %}{{ entry.gap | default('+0.0') }}{% endif %}
+        </span>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {# ── Classic: Driver info (bottom center) ──────────────────────────── #}
+    {% if frame.driver_name is defined %}
+    <div class="absolute bottom-4 left-1/2 -translate-x-1/2">
+      <div class="flex items-center gap-0" style="border: 1px solid #FFD700;">
+        <div class="px-3 py-2 font-bold text-lg text-black"
+             style="background: #FFD700;">
+          P{{ frame.position | default(1) }}
+        </div>
+        <div class="px-4 py-2" style="background: rgba(20,20,40,0.9);">
+          <span class="text-white font-bold text-base">
+            {{ frame.driver_name | default('Driver Name') }}
+          </span>
+          <span class="text-gray-400 text-sm ml-3">
+            {{ frame.car_name | default('Car') }}
+          </span>
+        </div>
+        {% if frame.last_lap_time is defined %}
+        <div class="px-3 py-2 tabular-nums" style="background: rgba(20,20,40,0.9); border-left: 1px solid #444;">
+          <span class="text-green-400 font-bold">{{ frame.last_lap_time }}</span>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+
+  {% endif %}
+
+  </div>
+</body>
+</html>

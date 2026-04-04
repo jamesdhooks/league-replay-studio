@@ -41,7 +41,9 @@ A ground-up rewrite of the legacy iRacingReplayDirector (.NET WinForms) into a m
 
 **Total time for a 45-minute race: 2–4 hours**
 
-In League Replay Studio, this becomes a **step-based workflow** (Setup → Capture → Analysis → Editing → Export → Upload) that can be run interactively step-by-step, or fully automated via a **one-click pipeline** (see Sections 4.1, 7.12, 7.13).
+In League Replay Studio, this becomes a **step-based workflow** (Setup → Analysis → Editing → Capture → Export → Upload) that can be run interactively step-by-step, or fully automated via a **one-click pipeline** (see Sections 4.1, 7.12, 7.13).
+
+> **Critical workflow insight from the legacy app:** The original iRacingReplayDirector **always** analysed the replay first (rewinding to the race start and fast-forwarding at 16× to detect all events), and **then** captured video at 1× speed using those analysis results to direct cameras. Video capture never comes before analysis. Our enhanced workflow inserts an Editing step between Analysis and Capture so the user can tune highlights, configure cameras, and make manual overrides before the guided capture begins.
 
 ### 1.3 Features to Preserve
 
@@ -78,7 +80,7 @@ In League Replay Studio, this becomes a **step-based workflow** (Setup → Captu
 | No undo/redo | Destructive workflow |
 | Cannot save/resume projects | Must redo everything from scratch each session |
 
-> **Note:** Recording the replay at 1× speed is an accepted constraint — iRacing does not expose raw frames and we need the in-game audio. The capture itself goes through OBS/Nvidia ShadowPlay via hotkeys, which is unavoidable. The real wins are in the **encoding pipeline**, **preview system**, and **highlight editing workflow**.
+> **Note:** Recording the replay at 1× speed is an accepted constraint — iRacing does not expose raw frames and we need the in-game audio. Capture can be done internally via our CaptureEngine (3-tier: native C++ DXGI → dxcam → PrintWindow GDI → FFmpeg NVENC encoding) or externally through OBS/Nvidia ShadowPlay via hotkeys. The internal engine automatically selects the fastest available backend: a compiled native C++ service for zero-overhead DXGI capture, dxcam as a Python DXGI fallback, and PrintWindow as a GDI safety net. The real wins are in the **encoding pipeline**, **preview system**, and **highlight editing workflow**.
 
 ---
 
@@ -100,7 +102,7 @@ In League Replay Studio, this becomes a **step-based workflow** (Setup → Captu
 8. **Modern web UI** — React + Tailwind CSS in a native desktop window (pywebview)
 9. **HTML/Tailwind overlay engine** — Every overlay is an editable `.html` file with Tailwind CSS, rendered via headless Chromium. Design, tweak, and preview overlays in-app with a Monaco editor and live preview — or create entirely new templates from scratch
 10. **YouTube channel integration** — Link your YouTube channel, browse uploaded videos alongside their source projects, and auto-upload highlights/full race directly from the export step
-11. **Step-based project workflow** — Every race is a project with clear phases: Capture → Analysis → Editing → Export → Upload. The UI flows intuitively between steps, with a file browser for all intermediary and output files
+11. **Step-based project workflow** — Every race is a project with clear phases: Analysis → Editing → Capture → Export → Upload. The UI flows intuitively between steps, with a file browser for all intermediary and output files
 12. **One-click automated pipeline** — Hit "Go" and the app steps through the entire workflow automatically, with the ability to pause, intervene, tweak, and resume at any point — plus full failure recovery per step
 
 ---
@@ -144,9 +146,9 @@ In League Replay Studio, this becomes a **step-based workflow** (Setup → Captu
 │  ┌─────────────────────────────────────────────────────────┐  │
 │  │                   SYSTEM LAYER                           │  │
 │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────┐ │  │
-│  │  │ iRacing  │ │ GPU      │ │ FFmpeg   │ │ OBS /     │ │  │
-│  │  │ SDK/Mem  │ │ (NVENC/  │ │ (libx264 │ │ ShadowPlay│ │  │
-│  │  │ Map      │ │  AMF/QSV)│ │  /libx265│ │ (capture) │ │  │
+│  │  │ iRacing  │ │ GPU      │ │ FFmpeg   │ │ Capture   │ │  │
+│  │  │ SDK/Mem  │ │ (NVENC/  │ │ (libx264 │ │ Engine    │ │  │
+│  │  │ Map      │ │  AMF/QSV)│ │  /libx265│ │ (dxcam/PW)│ │  │
 │  │  └──────────┘ └──────────┘ │  /AV1)   │ └───────────┘ │  │
 │  │                             └──────────┘               │  │
 │  └─────────────────────────────────────────────────────────┘  │
@@ -160,8 +162,8 @@ In League Replay Studio, this becomes a **step-based workflow** (Setup → Captu
 | **Web Framework** | FastAPI | Async REST API + WebSocket for real-time updates |
 | **iRacing Interface** | irsdk (`pip install irsdk`) | Python iRacing SDK — shared memory telemetry + Broadcasting API for replay/camera control |
 | **Video Encoding** | FFmpeg (via ffmpeg-python) | GPU-accelerated encoding (NVENC, AMF, QSV) |
-| **Frame Capture** | OBS / Nvidia ShadowPlay (via configurable hotkeys) | Screen capture through user's preferred recording software |
-| **Capture Control** | pyautogui / pynput + process detection | Configurable hotkey automation with validation |
+| **Frame Capture** | Native C++ DXGI service + dxcam (Python DXGI) + PrintWindow fallback; OBS / Nvidia ShadowPlay optional | Internal 3-tier capture engine with automatic backend selection; external capture via user's recording software |
+| **Capture Control** | CaptureEngine (multi-threaded) + pyautogui / pynput | Internal capture engine or configurable hotkey automation with validation |
 | **Image Processing** | Pillow / OpenCV | Frame manipulation, overlay compositing (alpha_composite) |
 | **Overlay Rendering** | Playwright (headless Chromium) + Jinja2 | HTML/Tailwind templates → transparent PNG frames (see Section 7.6) |
 | **Template Editing** | Monaco Editor (frontend) | In-app HTML/Tailwind overlay editor with live preview |
@@ -304,7 +306,7 @@ The frontend includes a **project file browser** panel that provides clear visib
 │ 🏁 REPLAY                                                    │
 │   └── race.rpy                          (245 MB, copied)    │
 │                                                              │
-│ 🎬 CAPTURES                                    Step 2       │
+│ 🎬 CAPTURES                                    Step 4       │
 │   ├── intro_001.mp4                     (120 MB, 0:32)      │
 │   └── race_001.mp4                      (8.4 GB, 44:21)     │
 │                                                              │
@@ -347,7 +349,7 @@ CREATE TABLE project_meta (
     num_laps INTEGER,
     num_drivers INTEGER,
     replay_file_path TEXT,
-    current_step TEXT DEFAULT 'setup',  -- 'setup', 'capture', 'analysis', 'editing', 'export', 'upload'
+    current_step TEXT DEFAULT 'setup',  -- 'setup', 'analysis', 'editing', 'capture', 'export', 'upload'
     pipeline_config_id INTEGER REFERENCES pipeline_configs(id),  -- active config preset
     version TEXT DEFAULT '1.0.0'
 );
@@ -573,7 +575,10 @@ CREATE TABLE race_ticks (
     session_state   INTEGER NOT NULL,   -- 0=Invalid..4=Racing,5=Checkered,6=CoolDown
     race_laps       INTEGER,            -- ir['RaceLaps'] — leader's current lap
     cam_car_idx     INTEGER,            -- ir['CamCarIdx'] — which car iRacing's auto-director is watching
-    flags           INTEGER DEFAULT 0   -- ir['SessionFlags'] bitfield — yellow, green, checkered, etc.
+    flags           INTEGER DEFAULT 0,  -- ir['SessionFlags'] bitfield — yellow, green, checkered, etc.
+    flag_yellow     INTEGER DEFAULT 0,   -- Parsed yellow flag bit
+    flag_red        INTEGER DEFAULT 0,   -- Parsed red flag bit
+    flag_checkered  INTEGER DEFAULT 0    -- Parsed checkered flag bit
 );
 
 CREATE INDEX idx_tick_time  ON race_ticks(session_time);
@@ -590,7 +595,11 @@ CREATE TABLE car_states (
     lap_pct     REAL    NOT NULL,      -- ir['CarIdxLapDistPct'][car_idx] — 0.0-1.0 track %
     surface     INTEGER NOT NULL,      -- ir['CarIdxTrackSurface'][car_idx] — enum (see below)
     est_time    REAL,                  -- ir['CarIdxEstTime'][car_idx] — est. time to cross S/F
-    best_lap_time REAL DEFAULT -1      -- ir['CarIdxBestLapTime'][car_idx] — personal best (-1 = none)
+    best_lap_time REAL DEFAULT -1,      -- ir['CarIdxBestLapTime'][car_idx] — personal best (-1 = none)
+    speed_ms        REAL    DEFAULT NULL,     -- Derived per-car speed (m/s) from lap_pct rate of change
+    f2_time         REAL    DEFAULT NULL,     -- CarIdxF2Time — more accurate gap timing
+    last_lap_time   REAL    DEFAULT -1.0,     -- CarIdxLastLapTime — for lap regression detection
+    steer_angle     REAL    DEFAULT NULL      -- CarIdxSteer — for spin detection
 );
 
 -- Composite indexes tuned for the actual query patterns:
@@ -639,6 +648,14 @@ There are two data streams in this interface:
 | **Session info string** | On change | YAML blob with static session data — drivers, track, car classes, camera groups |
 
 Critically: **telemetry is emitted during replay playback just as it is during live racing.** When you scrub a replay to frame N and set it to 16× speed, iRacing writes telemetry at 60Hz reflecting what was happening at those replay frames. This is exactly how the legacy app worked and how League Replay Studio will work.
+
+#### Race Session Jumping
+
+The `replay_search_session_time(session_num, session_time_ms)` Broadcasting API call lets us jump directly to the start of the race session without scanning through practice/qualifying. The bridge detects the race `session_num` from `SessionInfo.Sessions` YAML and uses it to skip ahead immediately. A fallback to scanning from frame 0 is used when session jumping is unavailable.
+
+#### iRacing Window Screenshot Endpoint
+
+`GET /api/iracing/screenshot` captures the iRacing window via `mss` + `Pillow` (ctypes `FindWindowW` + `GetWindowRect` for the region) and returns JPEG bytes. The AnalysisPanel polls this endpoint at 2 Hz during analysis to show a live iRacing preview embed.
 
 #### 4.3.2 Python Library: `irsdk`
 
@@ -977,7 +994,7 @@ The analyser runs the analysis loop against a live 16× replay and produces the 
 
 **Two-pass approach:**
 
-1. **Analysis Scan** (1-3 minutes): Set replay to 16× speed, run the full analysis loop. Each `freeze_var_buffer_latest()` call produces one `race_ticks` row and N `car_states` rows (one per active car). This produces a complete, queryable record of the entire race.
+1. **Analysis Scan** (1-3 minutes): Jump directly to the race session via `replay_search_session_time(race_session_num, 0)` to skip practice/qualifying, then set replay to 16× speed and run the full analysis loop. Each `freeze_var_buffer_latest()` call produces one `race_ticks` row and N `car_states` rows (one per active car). This produces a complete, queryable record of the entire race. Falls back to legacy frame-0 scan if session jumping is unavailable.
 2. **Event Detection** (seconds, from cached data): Run all detectors against the normalised tables — no iRacing connection needed after this point. Results populate the `race_events` table. The Highlight Editing Suite reprocesses this same cached data instantly.
 
 > **Key insight:** After the scan is complete, all event detection and highlight editing operates entirely on cached SQLite data. Reprocessing the highlight algorithm takes milliseconds because it never touches iRacing or the video file.
@@ -1059,6 +1076,10 @@ class TelemetryWriter:
         Args:
             snapshot: The dict emitted by IRacingBridge._emit_telemetry()
         """
+        # v2 additions: Also captures speed_ms (derived from lap_pct
+        # rate of change × track_length), f2_time, last_lap_time,
+        # steer_angle, and parsed flag bits (flag_yellow, flag_red,
+        # flag_checkered) for enhanced event detection and scoring.
         cur = self.db.execute(
             """INSERT INTO race_ticks 
                (session_time, replay_frame, session_state, race_laps, cam_car_idx, flags)
@@ -1221,6 +1242,11 @@ class BattleDetector:
                 open_battles[pair]['end_frame'] = replay_frame
 
         return events
+# Extended in v2: After the adjacent-pair SQL query runs, a Python
+# post-processing step builds a graph of qualifying pairs and finds
+# connected components (N-car chains). A 4-car train produces a single
+# battle event with chain_length in metadata. The narrative bonus formula
+# log(chain_length + 1) * 0.5 now has accurate input.
 ```
 
 #### Full Detector List
@@ -1387,6 +1413,137 @@ class EncodingEngine:
         
         return cmd
 ```
+
+### 4.6.1 Internal Capture Engine Architecture
+
+The CaptureEngine (v6) provides high-performance internal screen capture with a 3-tier backend and a decoupled pipeline. Writer threads isolate capture from pipe I/O so a blocked encoder never stalls frame grabbing. Frames are dropped rather than queued to prefer latency over completeness. Dual recording modes: GPU-native (FFmpeg gdigrab, zero Python in hot path) or CPU pipe (capture → queue → writer → FFmpeg stdin). A separate H.264 live-stream path feeds raw BGR frames from the same capture loop to FFmpeg via stdin pipe, encoding to fragmented MP4 served over HTTP and consumed by the frontend MediaSource Extensions (MSE) player — no second capture path required.
+
+```
+ +-----------------------------------------------------------------+
+ |                CAPTURE ENGINE ARCHITECTURE (v5)                  |
+ +-----------------------------------------------------------------+
+ |                                                                  |
+ |  Backend Selection (auto / manual via preview_backend setting)   |
+ |  +-- Tier 1: Native C++ (lrs_capture.exe)                       |
+ |  |   +-- DXGI Desktop Duplication, D3D11 staging texture        |
+ |  |   +-- Named pipe IPC (commands) + shared memory (frames)     |
+ |  |   +-- BGRA→BGR24 in C++, zero Python in hot path            |
+ |  |   +-- Configurable output_index (0–7) and fps_cap           |
+ |  |   +-- 5-second no-frame timeout triggers fallback            |
+ |  |                                                               |
+ |  +-- Tier 2: dxcam (DXGI Desktop Duplication API)               |
+ |  |   +-- GPU-backed capture, 60-240 FPS capable                 |
+ |  |   +-- Uses camera.start(target_fps=N) for jitter-free pacing |
+ |  |   +-- output_color="BGR" — numpy arrays, no conversion       |
+ |  |   +-- 3-second no-frame timeout triggers fallback            |
+ |  |                                                               |
+ |  +-- Tier 3: PrintWindow (Win32 GDI)                             |
+ |      +-- Captures window content regardless of Z-order          |
+ |      +-- GetDIBits writes into pre-allocated numpy buffer       |
+ |      +-- BGRA[:,:,:3] slice to BGR — zero extra allocation      |
+ |      +-- ~10-20 FPS (GDI overhead, acceptable for preview)      |
+ |                                                                  |
+ |  Decoupled Pipeline (writer threads + frame dropping)            |
+ |                                                                  |
+ |   Capture Thread      deque(2)     Preview Writer   Reader Thrd |
+ |   +--------------+  +--------+   +--------------+ +----------+  |
+ |   | native/dxcam |->| frames |==>| FFmpeg stdin |>| SOI/EOI  |  |
+ |   | /PW -> BGR   |  | (drop) |   | -c:v mjpeg   | | scanner  |  |
+ |   +--------------+  +--------+   +--------------+ +----------+  |
+ |          |                                              |        |
+ |          |                                       latest_jpeg     |
+ |          |                                       (atomic swap)   |
+ |          |                                                       |
+ |          |  H.264 live stream mode:                              |
+ |          |  +-- deque(4) → Feeder Thread → FFmpeg stdin         |
+ |          |      (frame drop)    (daemon)    rawvideo bgr24       |
+ |          |                                  -c:v libx264         |
+ |          |                                  ultrafast/zerolatency |
+ |          |                                  fMP4 pipe:1 → HTTP  |
+ |          |                                  → MSE player (React) |
+ |          |                                                       |
+ |          |  CPU recording mode:                                  |
+ |          |  +-- deque(2) → Record Writer → FFmpeg stdin          |
+ |          |      (frame drop)    thread       -c:v h264_nvenc     |
+ |          |                                    → output.mp4       |
+ |          |                                                       |
+ |          |  GPU recording mode (alternative):                    |
+ |          |  +-- FFmpeg subprocess (standalone)                   |
+ |          |      -f gdigrab → h264_nvenc → output.mp4            |
+ |          |      Zero Python in recording hot path                |
+ |          |      Python = control plane only (spawn/stop)         |
+ |                                                                  |
+ |  Key design decisions:                                           |
+ |  - Native C++ exe communicates via shared memory (zero copy)    |
+ |  - WGC: DWM DPI-aware client-area crop (no titlebar bleed)      |
+ |  - SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2) at init  |
+ |  - NO PIL/Pillow in capture or encoding loop                    |
+ |  - memoryview(frame) for stdin writes (no .tobytes() copy)      |
+ |  - JPEG 4:4:4 chroma (IMWRITE_JPEG_SAMPLING_FACTOR) for quality |
+ |  - Writer threads decouple capture from pipe I/O                |
+ |  - Frame dropping > latency (deque maxlen=2, oldest dropped)    |
+ |  - H.264 stream uses separate deque(4) — larger buffer OK       |
+ |    because latency tolerance is higher than MJPEG preview       |
+ |  - H.264 feeder is a daemon thread; FFmpeg dims known before    |
+ |    proc spawn (waits up to 5 s for first frame resolution)      |
+ |  - update_params(): live quality/fps/maxwidth without restart   |
+ |  - GPU recording via gdigrab = zero Python in hot path          |
+ |  - CPU recording via queue + writer thread as fallback          |
+ |  - dxcam drives FPS natively (no Python sleep jitter)           |
+ |  - FFmpeg handles scaling via fast_bilinear filter              |
+ |  - Recording auto-detects best GPU: NVENC > AMF > QSV > CPU    |
+ |  - Graceful recorder shutdown (CTRL_BREAK on Windows)           |
+ |  - OBS/ShadowPlay still supported via existing hotkey system    |
+ |                                                                  |
+ |  REST API                                                        |
+ |  +-- GET  /api/iracing/stream              -- MJPEG preview     |
+ |  +-- GET  /api/iracing/stream/h264         -- H.264 fMP4 stream |
+ |  +-- GET  /api/iracing/stream/metrics      -- FPS, drops, etc   |
+ |  +-- GET  /api/iracing/stream/capabilities -- backend avail.    |
+ |  +-- POST /api/iracing/stream/start        -- start engine      |
+ |  +-- POST /api/iracing/stream/stop         -- stop engine       |
+ |  +-- POST /api/iracing/stream/record/start -- recording (mode)  |
+ |  +-- POST /api/iracing/stream/record/stop  -- stop recording    |
+ |                                                                  |
+ +-----------------------------------------------------------------+
+```
+
+**Performance evolution:**
+
+| Metric | v1 (PIL pipeline) | v2 (FFmpeg MJPEG) | v3 (dual output) | v6 (current) |
+|--------|-------------------|-------------------|-------------------|--------------|
+| Frame path | numpy→PIL→JPEG | numpy.tobytes()→FFmpeg | memoryview→FFmpeg | capture→deque→writer→FFmpeg |
+| Encoder | Pillow (1 thread) | libjpeg-turbo SIMD | libjpeg-turbo SIMD | libjpeg-turbo SIMD (MJPEG) / libx264 (H.264) |
+| Copy cost | 3 copies | 1 copy | 0 Python copies | 0 Python copies |
+| Recording | N/A | N/A | CPU pipe (same thread) | GPU gdigrab OR CPU pipe (separate thread) |
+| H.264 preview | N/A | N/A | N/A | deque(4) → daemon feeder → libx264 → fMP4 → MSE |
+| Backpressure | blocks capture | blocks capture | blocks capture | frame drop (deque maxlen=2/4) |
+| Pipe writes | N/A | capture thread | capture thread (2 pipes) | dedicated writer threads |
+| FPS (dxcam) | 15-25 | 40-60 | 60+ | 60+ (isolated from encoding) |
+| WGC crop | N/A | N/A | N/A | DWM client-area crop, DPI-aware — no titlebar |
+
+**Capture Mode Comparison:**
+
+| Mode | FPS | Window Behind Others | GPU Load | Install Requirement |
+|------|-----|---------------------|----------|-------------------|
+| dxcam (DXGI) | 60-240 | No (captures desktop) | Very low | `pip install dxcam` |
+| PrintWindow (GDI) | 10-20 | Yes (captures window) | Low | Built-in (Win32) |
+| OBS (external) | Configurable | Yes (game capture) | Medium | OBS Studio |
+| ShadowPlay (external) | Configurable | Yes (game capture) | Low | GeForce Experience |
+
+**Known Constraints:**
+- dxcam captures the composited desktop, not a specific window -- if iRacing is behind another window, the capture will include the overlapping app. Ideal for fullscreen iRacing.
+- dxcam requires GPU access and will not work over Remote Desktop (no DXGI).
+- PrintWindow is the only option that captures specific window content behind other windows, but limited to ~10-20 FPS due to GDI overhead.
+- FFmpeg must be installed and in PATH. Required for MJPEG preview, H.264 live stream, and GPU H.264 recording.
+- The engine uses a singleton pattern -- MJPEG and H.264 stream consumers share the same capture loop, avoiding duplicate captures.
+- H.264 live stream uses the same capture backend; the **feeder queue** (`_h264_streaming` flag + `deque(maxlen=4)`) is enabled/disabled per HTTP request. No second capture path.
+- MSE H.264 player (`H264StreamPlayer`) uses `AbortController` for clean fetch cancellation. `video.play()` must be called explicitly after the first `appendBuffer` / `updateend` — the `autoPlay` attribute is ignored when `video.src` is assigned programmatically.
+- GPU recording mode uses gdigrab desktop-region capture; if iRacing window is moved during recording, the capture region will be stale. CPU recording mode is unaffected.
+- Writer threads use `deque(maxlen=2)` -- frames are dropped (oldest first) when encoders can't keep up. The `frames_dropped` metric tracks this.
+- OBS/ShadowPlay remain fully supported via the existing hotkey-based capture orchestration system.
+- Remaining bottleneck for CPU recording mode: `memoryview(frame)` still incurs one kernel-level memcpy (~6MB/frame at 1080p). GPU recording mode avoids this entirely by keeping capture inside FFmpeg's native gdigrab pipeline.
+- True zero-copy (DXGI texture → NVENC directly) would require a C++/Rust bridge. GPU recording mode is the practical alternative that eliminates Python from the recording hot path.
 
 ### 4.7 Video Preview System — Engineering for Multi-GB Files
 
@@ -1800,11 +1957,14 @@ src/
 │   │   └── CameraTimeline.jsx     # Camera assignment timeline
 │   ├── overlays/
 │   │   ├── OverlayEditor.jsx      # Split-pane Monaco HTML editor + live preview
-│   │   ├── OverlayPreview.jsx     # Live overlay preview composited on video
-│   │   ├── OverlayTemplateList.jsx # Template browser (built-in + custom)
-│   │   ├── OverlayPropertyPanel.jsx # No-code visual controls (position, font, colour)
-│   │   ├── OverlayDataInspector.jsx # Template variable browser with live sample data
-│   │   └── OverlayElement.jsx     # Draggable/resizable overlay element in preview
+│   │   ├── OverlayPanel.jsx       # Template library browser + preset section launcher
+│   │   ├── EditorPreview.jsx      # Live overlay preview composited on video
+│   │   ├── DataContextInspector.jsx # Template variable browser with live sample data
+│   │   ├── AnimationPicker.jsx    # CSS keyframe animation generator
+│   │   ├── PresetDesigner.jsx     # Full preset design suite — section tabs, element list, live preview
+│   │   ├── ElementEditor.jsx      # Per-element editor: position %, z-index, Jinja2 template + guide
+│   │   ├── VariableEditor.jsx     # CSS custom property editor with color picker
+│   │   └── AssetManager.jsx       # Image asset upload/management with copy-URL
 │   ├── export/
 │   │   ├── ExportPanel.jsx        # Export settings and controls
 │   │   ├── ExportPresets.jsx      # Preset manager
@@ -1841,13 +2001,22 @@ src/
 │       ├── Tooltip.jsx            # Tooltip component
 │       └── ProgressBar.jsx        # Progress bar component
 ├── context/
-│   ├── ProjectContext.jsx         # Current project state + step workflow
-│   ├── TimelineContext.jsx        # Timeline state (zoom, position, selection)
+│   ├── AnalysisContext.jsx        # Analysis state, event feed, analysis log
+│   ├── CaptureContext.jsx         # Capture orchestration state
+│   ├── EncodingContext.jsx        # Encoding engine state + export presets
+│   ├── HighlightContext.jsx       # Highlight scoring, weights, overrides, metrics
 │   ├── IRacingContext.jsx         # iRacing connection state
-│   ├── SettingsContext.jsx        # Application settings
+│   ├── ModalContext.jsx           # Global modal dialog system
+│   ├── OverlayContext.jsx         # Template engine state + CRUD
+│   ├── PresetContext.jsx          # Overlay preset state — per-section elements, variables, assets
 │   ├── PipelineContext.jsx        # Pipeline execution state (running, paused, step statuses)
-│   ├── YouTubeContext.jsx         # YouTube auth state + channel info
-│   └── ToastContext.jsx           # Toast notification state
+│   ├── PreviewContext.jsx         # Tiered video preview state
+│   ├── ProjectContext.jsx         # Current project state + step workflow
+│   ├── SettingsContext.jsx        # Application settings
+│   ├── TimelineContext.jsx        # Timeline state (zoom, position, selection)
+│   ├── ToastContext.jsx           # Toast notification state
+│   ├── UndoRedoContext.jsx        # Undo/redo history
+│   └── YouTubeContext.jsx         # YouTube auth state + channel info
 ├── hooks/
 │   ├── useProject.js              # Project operations + step navigation
 │   ├── useTimeline.js             # Timeline interaction
@@ -1990,7 +2159,7 @@ GET     /api/track-cameras                     # List all track configs
 GET     /api/track-cameras/{track}             # Get config for track
 PUT     /api/track-cameras/{track}             # Update track camera config
 
-# Overlay Templates
+# Overlay Templates (legacy — project-scoped)
 GET     /api/projects/{id}/overlays/templates       # List available templates (built-in + custom)
 GET     /api/projects/{id}/overlays/templates/{tid} # Get template HTML source
 PUT     /api/projects/{id}/overlays/templates/{tid} # Update template HTML/config
@@ -1998,7 +2167,31 @@ POST    /api/projects/{id}/overlays/templates       # Create new template (or du
 DELETE  /api/projects/{id}/overlays/templates/{tid} # Delete custom template
 POST    /api/projects/{id}/overlays/render-frame    # Render single overlay frame → PNG (for preview)
 GET     /api/projects/{id}/overlays/data-context    # Get available template variables with sample data
-PUT     /api/projects/{id}/overlays/active           # Set which template is active for this project
+PUT     /api/projects/{id}/overlays/active          # Set which template is active for this project
+POST    /api/overlay/preset/render-preview          # Render preset elements for live design suite preview
+POST    /api/overlay/intro-video/composite/{id}     # Composite uploaded intro video onto intro clip
+POST    /api/composite/{project_id}                 # Composite overlay onto a single clip
+POST    /api/composite/batch/{project_id}           # Batch composite overlays onto all script clips
+
+# Overlay Presets (global — not per-project)
+GET     /api/presets                                        # List all presets
+POST    /api/presets                                        # Create new preset
+GET     /api/presets/{id}                                   # Get preset details + elements
+PUT     /api/presets/{id}                                   # Update preset metadata / variables
+DELETE  /api/presets/{id}                                   # Delete preset
+POST    /api/presets/{id}/duplicate                         # Duplicate a preset
+POST    /api/presets/{id}/export                            # Export preset as JSON
+POST    /api/presets/import                                 # Import preset from JSON
+POST    /api/presets/{id}/sections/{section}/elements       # Add element to section
+PUT     /api/presets/{id}/sections/{section}/elements/{eid} # Update element
+DELETE  /api/presets/{id}/sections/{section}/elements/{eid} # Remove element
+POST    /api/presets/{id}/assets                            # Upload image asset (global, not per-project)
+GET     /api/presets/{id}/assets                            # List preset assets
+GET     /api/presets/{id}/assets/{filename}                 # Serve asset file
+DELETE  /api/presets/{id}/assets/{filename}                 # Delete asset
+POST    /api/presets/{id}/intro-video                       # Upload intro video for intro section
+DELETE  /api/presets/{id}/intro-video                       # Remove intro video
+POST    /api/presets/{id}/render-preview                    # Render live preview PNG for design suite
 
 # Edit Decision List
 GET     /api/projects/{id}/edl                 # Get edit decision list
@@ -2106,7 +2299,7 @@ GET     /api/system/health                     # Health check
 **Project Library:**
 - Grid or list view of all projects
 - Thumbnail preview (first frame of captured video, or track map if no capture yet)
-- Project metadata: track, date, number of drivers, **current step** (setup/capture/analysis/editing/export/upload)
+- Project metadata: track, date, number of drivers, **current step** (setup/analysis/editing/capture/export/upload)
 - **Step indicator** shows workflow progress at a glance: ✅✅✅🔄⏳⏳
 - Search and filter by track, date, status, step
 - Quick actions: open, duplicate, delete, export, **run pipeline**
@@ -2515,6 +2708,82 @@ This separates the rendering concern (Playwright/HTML → PNG) from the encoding
 | **In-app editing** | Custom property panels per overlay type | Monaco editor + live preview — edit anything |
 | **Maintenance** | Every new overlay = new Python code | Every new overlay = new HTML file |
 
+#### 7.6.8 Overlay Preset & Element System
+
+The overlay system supports a **preset-based, per-section element architecture** that gives users full control over overlay design for each video section.
+
+##### Preset Structure
+
+A preset bundles:
+- **Per-section element lists**: Each of the four sections (intro, qualifying_results, race, race_results) has its own list of overlay elements.
+- **Custom CSS variables**: User-defined CSS custom properties (colors, fonts) applied to all templates.
+- **Global assets**: Uploaded images/logos stored alongside the preset (not per-project).
+- **Intro video**: Optional video file overlaid on the intro section.
+
+```json
+{
+  "id": "broadcast_preset",
+  "name": "Broadcast",
+  "sections": {
+    "intro": [{ "id": "title_card", "template": "...", "position": {"x": 15, "y": 30, "w": 70, "h": 40} }],
+    "race": [
+      { "id": "timing_tower", "template": "...", "position": {"x": 1, "y": 8, "w": 18, "h": 50} },
+      { "id": "focused_driver", "template": "...", "position": {"x": 3, "y": 78, "w": 30, "h": 18} },
+      { "id": "lap_counter", "template": "...", "position": {"x": 85, "y": 2, "w": 13, "h": 10} }
+    ]
+  },
+  "variables": {
+    "--color-primary": { "value": "#ffffff", "type": "color" },
+    "--color-accent": { "value": "#3B82F6", "type": "color" },
+    "--font-primary": { "value": "'Inter', sans-serif", "type": "font" }
+  }
+}
+```
+
+##### Element Architecture
+
+Each element has:
+- **Template**: Jinja2 HTML with `{{ frame.* }}` data bindings and `{{ pos.x/y/w/h }}` position placeholders.
+- **Position**: Percentage-based (x%, y%, w%, h%) — resolution-independent.
+- **Z-index**: Stacking order.
+- **Visibility**: Can be toggled per-element.
+
+Elements are composed into a single HTML document by `element_renderer.compose_preset_html()`, rendered via Playwright, and composited onto video clips via FFmpeg.
+
+##### Resolution Independence
+
+All positioning uses CSS percentages:
+- `left: X%`, `top: Y%`, `width: W%`, `height: H%`
+- Font sizes use `clamp()` for responsive scaling
+- CSS custom properties applied via `:root` declarations
+
+##### API
+
+```
+GET    /api/presets                                    # List presets
+POST   /api/presets                                    # Create preset
+PUT    /api/presets/{id}                               # Update preset
+DELETE /api/presets/{id}                               # Delete preset
+POST   /api/presets/{id}/sections/{section}/elements   # Add element
+PUT    /api/presets/{id}/sections/{section}/elements/{eid}  # Update element
+DELETE /api/presets/{id}/sections/{section}/elements/{eid}  # Remove element
+POST   /api/presets/{id}/assets                        # Upload image asset
+GET    /api/presets/{id}/assets/{filename}              # Serve asset
+POST   /api/presets/{id}/intro-video                   # Upload intro video
+POST   /api/presets/{id}/render-preview                # Render live preview
+```
+
+##### Frontend Design Suite
+
+The Preset Designer (`PresetDesigner.jsx`) provides:
+- **Section tabs**: Switch between intro/qualifying/race/results with element counts.
+- **Element list**: Add, remove, reorder, toggle visibility for each section.
+- **Property editor**: Edit element name, position (%), z-index, and Jinja2 HTML template.
+- **Template guide**: Inline documentation of available variables (`{{ frame.driver_name }}`, loops, conditionals).
+- **Variable editor**: Color picker and text input for CSS custom properties.
+- **Asset manager**: Upload/delete images with copy-URL for template references.
+- **Live preview**: Real-time rendering of the current section's elements via Playwright.
+
 ### 7.7 Export System
 
 **Export Presets:**
@@ -2657,7 +2926,23 @@ The highlight editing suite is the **primary differentiator** of League Replay S
 
 ```python
 class HighlightEditor:
-    """The highlight editing suite backend logic."""
+    """The highlight editing suite backend logic.
+    
+    Uses the multi-pass scoring pipeline (scoring_v3):
+      Stage 1: Base score by event type
+      Stage 2: Position importance multiplier  
+      Stage 3: Position change multiplier
+      Stage 4: Consequence weighting (speed_ms, positions lost, race impact)
+      Stage 5: Narrative bonus (chain length, recency)
+      Stage 6: Exposure adjustment (driver screen-time balance)
+      Stage 7: User weight override
+      Stage 8: Tier classification (S/A/B/C)
+    
+    Plus multi-pass timeline allocation:
+      Pass 1: Must-have events (mandatory types + Tier S)
+      Pass 2: Bucket fill (intro/early/mid/late)
+      Pass 3: Smoothing (repetition, spacing, exposure rebalance)
+    """
     
     async def reprocess(
         self,
@@ -2666,53 +2951,107 @@ class HighlightEditor:
         min_severity: int,
         target_duration_seconds: int,
         manual_overrides: List[ManualOverride],
+        constraints: Dict = None,
+        llm_enabled: bool = False,
     ) -> HighlightResult:
-        """Reprocess event selection with updated parameters.
+        """Reprocess event selection with the v2 multi-pass pipeline.
         Returns instantly from cached telemetry data."""
         
-        # 1. Score all events with current weights
-        scored_events = []
-        for event in project.race_events:
-            weight = rule_weights.get(event.event_type, 50)
-            score = event.severity * (weight / 100)
-            scored_events.append(ScoredEvent(event, score))
+        from scoring_engine import generate_highlights
         
-        # 2. Apply manual overrides (force include/exclude)
-        for override in manual_overrides:
-            event = find_event(scored_events, override.event_id)
-            if override.force_include:
-                event.force_included = True
-            elif override.force_exclude:
-                event.force_excluded = True
-        
-        # 3. Select events to fit target duration
-        # Mandatory events first (first lap, last lap)
-        # Then by score descending until target duration reached
-        selected = self._select_to_fit(
-            scored_events, target_duration_seconds
-        )
-        
-        # 4. Compute metrics
-        metrics = HighlightMetrics(
-            total_duration=sum(e.duration for e in selected),
+        # Run the full 8-stage scoring pipeline with multi-pass allocation
+        result = generate_highlights(
+            events=project.race_events,
             target_duration=target_duration_seconds,
-            event_counts=Counter(e.event_type for e in selected),
-            coverage_percent=self._compute_coverage(selected, project),
-            balance_score=self._compute_balance(selected, project),
-            pacing_score=self._compute_pacing(selected),
-            driver_coverage=self._compute_driver_coverage(selected, project),
+            weights=rule_weights,
+            constraints=constraints or {},
+            overrides={o.event_id: o.action for o in manual_overrides},
+            race_info={
+                'duration': project.race_duration,
+                'num_drivers': project.num_drivers,
+            },
         )
         
-        # 5. Generate EDL for the highlight reel
-        edl = self._generate_edl(selected)
+        # Optional LLM editorial refinement
+        if llm_enabled:
+            result = await self._apply_llm_editorial(result)
+        
+        # Build Video Composition Script (replaces EDL)
+        script = result['script']
         
         return HighlightResult(
-            selected_events=selected,
-            all_events=scored_events,
-            metrics=metrics,
-            edl=edl,
+            selected_events=result['scored_events'],
+            all_events=result['scored_events'],
+            metrics=result['metrics'],
+            script=script,  # Video Composition Script (replaces EDL)
         )
 ```
+
+### 7.8.1 LLM Editorial Layer (New in v2)
+
+The LLM editorial layer operates after the deterministic scoring pipeline has produced a candidate timeline. It does not replace the algorithmic selection — it refines the narrative, adds segment notes, and can swap events within a tier without changing the overall structure. Implemented as the `EditorialSkill` in `llm_skills.py`, registered with the `LLMService` (see Section 7.14).
+
+**LLM Permitted Actions:**
+- Add a `notes` field to any segment (shown in UI and written to segment in output script)
+- Swap two events of equal tier within the same bucket if it improves narrative continuity
+- Suggest a `transition_type` between two adjacent segments (`cut`, `fade`, `crossfade`, `whip`, `zoom`)
+- Flag a segment as `narrative_anchor` if it is pivotal to the race story
+
+**Not permitted:** Changing event inclusion/exclusion, overriding tier classification, modifying timestamps, or adjusting scores. These remain deterministic.
+
+**API:** `POST /api/llm/editorial` — accepts timeline, scored events, metrics, race info, and user prompt. Returns modifications array. See Section 7.14.3 for full details.
+
+### 7.8.2 Video Composition Script (New in v2)
+
+The Video Composition Script replaces the EDL (Edit Decision List) as the declarative render contract. It is a fully validated JSON document containing:
+- `meta` — title, source_race_id, algorithm_version, llm metadata
+- `timeline` — ordered segments: event, pip, transition, broll
+- `render` — resolution, codec, frame_rate, bitrate, output_format
+- `metadata` — event selection statistics, driver exposure, validation status
+
+Segment types in the timeline:
+- **event** — A single race event clip with camera config and padding
+- **pip** — Picture-in-picture: two simultaneous views composited
+- **transition** — cut/fade/crossfade/whip/zoom between clips
+- **broll** — Gap filler from track-side cameras (inserted for gaps ≥ 8s)
+
+### 7.8.3 Four-Section Video Structure
+
+The highlight video is composed of four ordered sections:
+
+1. **Intro** — Static B-roll from scenic/blimp iRacing TV cams. Used for title card overlay.
+   Default duration: 10s. Captured from ~30s before race start.
+2. **Qualifying Results** — Pit-lane or static TV cam. Used for starting grid graphics overlay.
+   Default duration: 15s. Captured from just before race start.
+3. **Race** — Event-driven highlight timeline from the scoring engine.
+   Duration determined by event selection algorithm and target duration.
+4. **Race Results** — Static TV cam. Used for finishing order graphics overlay.
+   Default duration: 20s. Captured from after race end (cooldown lap).
+
+Each section carries:
+- `section` — Section identifier (intro | qualifying_results | race | race_results)
+- `camera_preferences` — Ordered list of iRacing camera group names to try
+- `camera_group` — Optional user override (camera group number)
+- `clip_padding` — Seconds of pre-roll before each clip (trimmed post-capture)
+- `editable` — Whether the user can adjust timing/camera in the frontend
+
+The `generate_video_script()` function in `scoring_engine.py` wraps `generate_highlights()` with intro, qualifying, and results B-roll sections. The frontend shows these as color-coded regions on both the HighlightTimeline and the NLE TimelineCanvas.
+
+### 7.8.4 Script-Based Capture Engine
+
+The `ScriptCaptureEngine` (in `script_capture.py`) processes each Video Composition Script segment independently:
+
+1. Pause the replay
+2. Seek to the segment's start time minus configurable padding
+3. Switch to the appropriate iRacing camera (from preferences or user override)
+4. Start recording via `CaptureEngine.start_recording()`
+5. Resume replay at 1× speed
+6. Wait for segment duration + padding
+7. Stop recording
+8. Trim the padding using FFmpeg `-ss` seek
+9. Save the clip with a filename matching the script segment ID
+
+After all segments are captured, `compile_clips()` concatenates them using FFmpeg's concat demuxer. The pipeline service uses this engine when a `video_script` is present in the capture config.
 
 ### 7.9 Settings System
 
@@ -3204,17 +3543,17 @@ Once a project's configuration settings are dialled in (camera weights, highligh
 ┌─────────────────────────────────────────────────────────────────┐
 │                    AUTOMATED PIPELINE                            │
 │                                                                  │
-│  ┌──────┐   ┌────────┐   ┌───────┐   ┌──────┐   ┌──────────┐  │
-│  │CAPTURE│──▸│ANALYSIS│──▸│EDITING│──▸│EXPORT│──▸│  UPLOAD   │  │
-│  │  OBS  │   │  16× + │   │ Apply │   │ GPU  │   │  YouTube  │  │
-│  │  rec  │   │ detect │   │ config│   │ enc  │   │  (opt.)   │  │
-│  └──┬───┘   └───┬────┘   └──┬────┘   └──┬───┘   └─────┬────┘  │
-│     │           │            │           │             │        │
-│  ┌──▼───┐   ┌───▼────┐   ┌──▼────┐   ┌──▼───┐   ┌────▼────┐  │
-│  │Pause?│   │Pause?  │   │Pause? │   │Pause?│   │ Done!   │  │
-│  │Tweak │   │Review  │   │Adjust │   │Cancel│   │ Video   │  │
-│  │Resume│   │events  │   │cuts   │   │Retry │   │ live!   │  │
-│  └──────┘   └────────┘   └───────┘   └──────┘   └─────────┘  │
+│  ┌────────┐   ┌───────┐   ┌──────┐   ┌──────┐   ┌──────────┐  │
+│  │ANALYSIS│──▸│EDITING│──▸│CAPTURE│──▸│EXPORT│──▸│  UPLOAD   │  │
+│  │  16× + │   │ Tune  │   │ OBS  │   │ GPU  │   │  YouTube  │  │
+│  │ detect │   │ config│   │ rec  │   │ enc  │   │  (opt.)   │  │
+│  └───┬────┘   └──┬────┘   └──┬───┘   └──┬───┘   └─────┬────┘  │
+│      │           │           │           │             │        │
+│  ┌───▼────┐   ┌──▼────┐   ┌──▼───┐   ┌──▼───┐   ┌────▼────┐  │
+│  │Pause?  │   │Pause? │   │Pause?│   │Pause?│   │ Done!   │  │
+│  │Review  │   │Adjust │   │Tweak │   │Cancel│   │ Video   │  │
+│  │events  │   │cuts   │   │Resume│   │Retry │   │ live!   │  │
+│  └────────┘   └───────┘   └──────┘   └──────┘   └─────────┘  │
 │                                                                  │
 │  [▶ GO]  [⏸ PAUSE]  [⏹ STOP]  [↻ RETRY STEP]                   │
 └─────────────────────────────────────────────────────────────────┘
@@ -3230,7 +3569,7 @@ Users can save and version their pipeline configurations:
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
 │ 📋 League Race Default             ★ Active                  │
-│    Capture + Analyse + Highlights (5 min) + Upload (unlisted)│
+│    Analyse + Capture + Highlights (5 min) + Upload (unlisted)│
 │    Last modified: 2026-03-31                                 │
 │    [Edit] [Duplicate] [Set Active]                           │
 │                                                              │
@@ -3240,7 +3579,7 @@ Users can save and version their pipeline configurations:
 │    [Edit] [Duplicate] [Set Active]                           │
 │                                                              │
 │ 📋 Full Broadcast Package                                    │
-│    Capture + Full analysis + Highlights (10 min) +           │
+│    Full analysis + Capture + Highlights (10 min) +           │
 │    Full race + Upload both (public)                          │
 │    Last modified: 2026-03-25                                 │
 │    [Edit] [Duplicate] [Set Active]                           │
@@ -3430,6 +3769,178 @@ Each step has specific failure recovery strategies:
 
 ---
 
+### 7.14 LLM Integration Layer
+
+The LLM integration layer provides AI-powered capabilities across the application through a **skill-based architecture** with multi-provider support. The backend owns all system prompts and context injection — users provide simple natural-language requests and receive results that plug directly into application data structures.
+
+#### 7.14.1 Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                        LLM Service                           │
+│                                                              │
+│  ┌──────────┐    ┌──────────────┐    ┌───────────────────┐  │
+│  │ Settings  │◀──│  LLMService  │──▸ │  Provider Layer   │  │
+│  │ (config)  │   │  (router)    │    │  (httpx calls)    │  │
+│  └──────────┘    └──────┬───────┘    └──────┬────────────┘  │
+│                         │                    │               │
+│           ┌─────────────┼────────────┐      │               │
+│           │             │            │      ▼               │
+│     ┌─────▼────┐  ┌─────▼────┐ ┌─────▼────┐                │
+│     │Editorial │  │ Overlay  │ │ Overlay  │  ···future···   │
+│     │  Skill   │  │ Design   │ │ Augment  │                 │
+│     │          │  │  Skill   │ │  Skill   │                 │
+│     └──────────┘  └──────────┘ └──────────┘                 │
+│                                                              │
+│  Each skill:                                                 │
+│   • Builds its own system prompt with full context           │
+│   • Defines expected JSON output schema                      │
+│   • Validates + parses LLM responses                         │
+│   • User only supplies a plain-text prompt                   │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Key design principles:**
+- **Backend owns prompts**: The backend constructs rich system prompts for each context with full template variable documentation, example elements, positioning rules, and output format requirements. Users only need to write simple requests.
+- **Skill isolation**: Each AI capability is encapsulated as an `LLMSkill` subclass with its own prompt, schema, and validation — adding new capabilities requires only a new skill class.
+- **No vendor SDKs**: All provider communication uses raw `httpx` HTTP calls for minimal dependency footprint.
+- **Hot-swappable config**: Provider/model/key changes take effect immediately (config read at call time).
+
+#### 7.14.2 Multi-Provider Support
+
+| Provider | Models | API Format |
+|----------|--------|------------|
+| **OpenAI** | GPT-4o, GPT-4o-mini, GPT-4 Turbo | Chat Completions API |
+| **Anthropic** | Claude 3.5 Sonnet, Claude 3 Haiku | Messages API |
+| **Google** | Gemini 1.5 Pro, Gemini 1.5 Flash | generateContent API |
+| **Custom** | Any model via OpenAI-compatible API | Chat Completions (compatible) |
+| **None** | — | LLM features disabled |
+
+**Settings** (stored in `config.json` via settings_service):
+- `llm_enabled` (bool) — master toggle
+- `llm_provider` — "openai" | "anthropic" | "google" | "custom" | "none"
+- `llm_api_key` — provider API key (stored locally, never transmitted)
+- `llm_model` — model identifier (provider-specific)
+- `llm_custom_endpoint` — base URL for custom providers
+- `llm_temperature` — 0.0–1.0 (default 0.3)
+
+**Resilience:**
+- 3-attempt retry with exponential backoff on provider errors
+- 60-second HTTP timeout per request
+- Structured error types: `LLMProviderError`, `LLMConfigError`, `LLMSkillError`, `LLMNotAvailableError`
+
+#### 7.14.3 Skill: Editorial Refinement
+
+Operates on completed highlight timelines to refine narrative flow. The LLM acts as a professional motorsport broadcast editor.
+
+**Permitted actions:**
+- Add `notes` to any segment (shown in UI, included in script output)
+- Swap two events of equal tier within the same timeline bucket
+- Suggest `transition_type` between adjacent segments (cut/fade/crossfade/whip/zoom)
+- Flag segments as `narrative_anchor` (pivotal to race story)
+
+**NOT permitted:** Change inclusion/exclusion, override tier classification, modify timestamps, adjust scores.
+
+**Context injected into system prompt:**
+- Full scored timeline with event types, tiers, positions
+- All scored events with scores and metadata
+- Highlight metrics (duration, coverage, driver exposure)
+- Race metadata (track, series, driver count, duration)
+
+#### 7.14.4 Skill: Overlay Element Design
+
+Generates complete overlay elements from natural language descriptions. The system prompt contains:
+
+1. **Full template variable reference** — every `{{ frame.* }}`, `{{ pos.* }}`, and `{{ vars.* }}` variable with types and descriptions
+2. **Positioning rules** — CSS percentage-based layout, `clamp()` font sizing, CSS variable usage
+3. **Pagination system** — `page_start`, `page_end`, `page_index`, `total_pages` for list-based elements
+4. **6 reference element examples** — real working templates from built-in presets:
+   - Title Card (intro)
+   - Starting Grid (qualifying_results)
+   - Timing Tower (race)
+   - Focused Driver Card (race)
+   - Battle Indicator (race)
+   - Final Results Board (race_results)
+5. **Section awareness** — which data is most relevant per video section
+6. **Output validation** — position 0–100%, z_index 0–100, valid element ID, non-empty template, only documented variables
+
+**Context injected:**
+- Target section (intro/qualifying_results/race/race_results)
+- Existing elements in that section (to avoid overlap)
+- Current preset CSS variables
+- Available asset URLs
+
+#### 7.14.5 Skill: Overlay Element Augmentation
+
+Modifies existing elements while preserving identity. System prompt includes the current element's template, position, and properties alongside all design documentation. Supports commands like:
+- "Make the timing tower show team colors"
+- "Add gap bars to the leaderboard"
+- "Show more drivers and paginate the results"
+- "Make the fonts larger and change the background to semi-transparent blue"
+
+#### 7.14.6 Element Pagination System
+
+Overlay elements that display lists (standings, results, grids) support automatic pagination:
+
+```json
+{
+  "pagination": {
+    "enabled": true,
+    "items_per_page": 10,
+    "cycle_duration_seconds": 5
+  }
+}
+```
+
+**Template variables provided:**
+- `page_start` — 0-based start index for current page
+- `page_end` — exclusive end index for current page
+- `page_index` — current page number (0-based)
+- `total_pages` — total number of pages
+
+**Template usage:**
+```html
+{% for entry in frame.standings[page_start:page_end] %}
+  <div>{{ entry.position }} {{ entry.driver_name }}</div>
+{% endfor %}
+<div>Page {{ page_index + 1 }} / {{ total_pages }}</div>
+```
+
+During overlay rendering for export, the render engine cycles through pages based on `cycle_duration_seconds`, producing different renders at different timestamps within a section.
+
+#### 7.14.7 API Endpoints
+
+```
+GET    /api/llm/status                    # Provider availability + registered skills
+GET    /api/llm/skills                    # List skill metadata
+POST   /api/llm/execute                   # Execute any skill by ID
+POST   /api/llm/editorial                 # Shortcut: editorial skill
+POST   /api/llm/overlay/generate          # Shortcut: generate new overlay element
+POST   /api/llm/overlay/augment           # Shortcut: augment existing element
+```
+
+#### 7.14.8 Frontend Integration
+
+- **Settings Panel** — AI/LLM category with provider dropdown, API key (masked), model selector, temperature slider
+- **LLMContext** — React context providing `generateElement()`, `augmentElement()`, `runEditorial()`, `isAvailable()`
+- **PresetDesigner** — AI prompt bar with create/augment mode toggle, section-aware placeholders, generation progress indicator
+- **LLMProvider** in App.jsx provider tree (inside PresetProvider, outside YouTubeProvider)
+
+#### 7.14.9 Adding New Skills
+
+To add a new LLM capability:
+
+1. Create a class extending `LLMSkill` in `llm_skills.py`
+2. Implement `build_system_prompt(context)` — construct the full prompt with context
+3. Implement `get_response_schema()` — define expected JSON output
+4. Implement `validate_output(output)` — verify response integrity
+5. Register in `register_default_skills()` — `llm_service.register_skill(MySkill())`
+6. Optionally add a shortcut endpoint in `api_llm.py`
+
+No additional boilerplate is needed — the service handles provider routing, retry, parsing, and error handling.
+
+---
+
 ## 8. Development Phases
 
 ### Phase 1 — Foundation (Weeks 1-4)
@@ -3564,7 +4075,7 @@ Each step has specific failure recovery strategies:
 
 ### Phase 7 — Overlay Template Engine (Weeks 31-36)
 
-**Goal**: HTML/Tailwind overlay system with in-app editor, live preview, and template library.
+**Goal**: HTML/Tailwind overlay system with in-app editor, live preview, preset/element design suite, and template library.
 
 | Task | Description |
 |------|-------------|
@@ -3582,6 +4093,24 @@ Each step has specific failure recovery strategies:
 | 7.12 | Export integration: batch pre-render to PNG sequence, FFmpeg overlay filter |
 | 7.13 | Resolution-aware rendering: templates adapt to 1080p, 1440p, 4K output |
 | 7.14 | Per-project template overrides: customise without modifying originals |
+| 7.15 | `preset_service.py`: global preset CRUD — per-section element lists, CSS variables, assets, intro video |
+| 7.16 | `element_renderer.py`: `compose_preset_html()` — assemble per-section elements into one HTML doc with CSS %-based positioning and `:root` custom variables |
+| 7.17 | `api_preset.py`: 18 REST endpoints under `/api/presets` — presets, elements, assets, intro video, render-preview |
+| 7.18 | `OverlayCompositor.render_preset_and_composite()`: preset-based video clip compositing |
+| 7.19 | `OverlayCompositor.composite_intro_video()`: FFmpeg alpha-blend uploaded intro video onto intro section clip |
+| 7.20 | `PresetContext.jsx`: React context with full preset lifecycle (CRUD, element ops, asset upload, intro video) |
+| 7.21 | `PresetDesigner.jsx`: Full design suite — section tabs, element list, live preview canvas, property editor sidebar |
+| 7.22 | `ElementEditor.jsx`: Per-element editor with Jinja2 syntax guide, position/size %, z-index |
+| 7.23 | `VariableEditor.jsx`: CSS custom property editor with color picker |
+| 7.24 | `AssetManager.jsx`: Image asset upload/management with copy-URL-to-clipboard |
+| 7.25 | `llm_service.py`: Multi-provider LLM service with skill-based architecture (OpenAI, Anthropic, Google, custom) |
+| 7.26 | `llm_skills.py`: EditorialSkill (highlight refinement), OverlayDesignSkill (element generation), OverlayAugmentSkill (element modification) |
+| 7.27 | `api_llm.py`: 6 REST endpoints — status, skills, execute, editorial, overlay/generate, overlay/augment |
+| 7.28 | LLM settings: `llm_enabled`, `llm_provider`, `llm_api_key`, `llm_model`, `llm_custom_endpoint`, `llm_temperature` with validators |
+| 7.29 | Element pagination: `page_start`/`page_end`/`page_index`/`total_pages` template variables, `pagination` element config |
+| 7.30 | `LLMContext.jsx`: React context with generateElement, augmentElement, runEditorial, isAvailable |
+| 7.31 | AI Settings UI: Provider dropdown, masked API key, model selector, temperature slider in SettingsPanel |
+| 7.32 | AI prompt bar in PresetDesigner: create/augment mode toggle, section-aware placeholders, LLM generation
 
 ### Phase 8 — Polish & Distribution (Weeks 35-38)
 
@@ -3657,49 +4186,50 @@ league-replay-studio/
 │   │   │   └── edl.py               # Edit decision list models
 │   │   ├── services/
 │   │   │   ├── iracing_bridge.py    # pyirsdk wrapper + connection management
-│   │   │   ├── replay_analyser.py   # Replay analysis orchestrator
-│   │   │   ├── telemetry_writer.py  # Normalised telemetry → race_ticks + car_states
-│   │   │   ├── detectors/
-│   │   │   │   ├── incident.py
-│   │   │   │   ├── battle.py
-│   │   │   │   ├── overtake.py
-│   │   │   │   ├── pit_stop.py
-│   │   │   │   ├── fastest_lap.py
-│   │   │   │   ├── first_last_lap.py
-│   │   │   │   └── restart.py
-│   │   │   ├── camera_director.py   # Intelligent camera direction
-│   │   │   ├── highlight_editor.py  # Highlight editing suite (rule tuning, reprocessing, metrics)
-│   │   │   ├── encoding_engine.py   # FFmpeg GPU encoding
-│   │   │   ├── video_preview.py     # Tiered preview server (sprites, proxy, source)
-│   │   │   ├── asset_pipeline.py    # Background generation: keyframe index, sprites, proxy, audio
-│   │   │   ├── overlay_renderer.py  # HTML/Tailwind → PNG rendering via Playwright headless Chromium
-│   │   │   ├── project_manager.py   # Project CRUD + SQLite + step workflow
-│   │   │   ├── capture_service.py   # OBS/ShadowPlay capture orchestration
+│   │   │   ├── replay_analysis.py   # Replay analysis orchestrator + telemetry writer
+│   │   │   ├── detectors.py         # All 13 race event detectors (flat module)
+│   │   │   ├── analysis_db.py       # SQLite schema: race_ticks, car_states, events
+│   │   │   ├── scoring_engine.py    # 7-stage highlight scoring + video section structure
+│   │   │   ├── encoding_service.py  # FFmpeg GPU encoding + export presets
+│   │   │   ├── preview_service.py   # Tiered preview server (sprites, proxy, source)
+│   │   │   ├── overlay_service.py   # HTML/Tailwind → PNG rendering via Playwright headless Chromium
+│   │   │   ├── preset_service.py    # Global overlay preset CRUD (per-section elements, CSS vars, assets, intro video)
+│   │   │   ├── capture_service.py   # OBS/ShadowPlay + internal capture orchestration
+│   │   │   ├── project_service.py   # Project CRUD + SQLite + step workflow
 │   │   │   ├── youtube_service.py   # YouTube Data API v3: OAuth, upload, video listing
-│   │   │   ├── pipeline_engine.py   # Automated pipeline: sequential step execution, pause/resume/retry
-│   │   │   └── settings_service.py  # Settings management
+│   │   │   ├── pipeline_service.py  # Automated pipeline: sequential step execution, pause/resume/retry
+│   │   │   ├── settings_service.py  # Settings management
+│   │   │   ├── llm_service.py       # LLM integration: multi-provider service, skill registry, httpx calls
+│   │   │   └── llm_skills.py        # LLM skills: EditorialSkill, OverlayDesignSkill, OverlayAugmentSkill
 │   │   ├── routes/
 │   │   │   ├── api_projects.py      # /api/projects/* (includes step workflow)
 │   │   │   ├── api_iracing.py       # /api/iracing/*
-│   │   │   ├── api_analysis.py      # /api/projects/{id}/analyse
-│   │   │   ├── api_events.py        # /api/projects/{id}/events/*
-│   │   │   ├── api_cameras.py       # /api/projects/{id}/cameras/*
-│   │   │   ├── api_overlays.py      # /api/projects/{id}/overlays/*
-│   │   │   ├── api_edl.py           # /api/projects/{id}/edl/*
-│   │   │   ├── api_highlights.py    # /api/projects/{id}/highlights/* (editing suite)
-│   │   │   ├── api_export.py        # /api/projects/{id}/export/*
+│   │   │   ├── api_analysis.py      # /api/projects/{id}/analyse + highlights
+│   │   │   ├── api_capture.py       # /api/capture/* (OBS/ShadowPlay + internal capture control)
+│   │   │   ├── api_encoding.py      # /api/projects/{id}/export/*
+│   │   │   ├── api_overlay.py       # /api/overlay/* (template engine, composite endpoints)
+│   │   │   ├── api_preset.py        # /api/presets/* (global preset CRUD — elements, assets, intro video)
 │   │   │   ├── api_preview.py       # /api/projects/{id}/preview/*
-│   │   │   ├── api_capture.py       # /api/capture/* (OBS/ShadowPlay control)
-│   │   │   ├── api_youtube.py       # /api/youtube/* + /api/projects/{id}/upload/*
 │   │   │   ├── api_pipeline.py      # /api/pipeline/* + /api/projects/{id}/pipeline/*
+│   │   │   ├── api_youtube.py       # /api/youtube/* + /api/projects/{id}/upload/*
 │   │   │   ├── api_settings.py      # /api/settings (includes YouTube settings)
 │   │   │   ├── api_system.py        # /api/system/*
-│   │   │   └── api_track_cameras.py # /api/track-cameras/*
+│   │   │   ├── api_wizard.py        # /api/wizard/* (first-run setup wizard)
+│   │   │   └── api_llm.py           # /api/llm/* (LLM skill execution, status, generate/augment)
 │   │   └── utils/
-│   │       ├── gpu_detect.py        # GPU detection (NVENC/AMF/QSV)
-│   │       ├── ffmpeg.py            # FFmpeg command builder
+│   │       ├── gpu_detection.py     # GPU detection (NVENC/AMF/QSV)
+│   │       ├── ffmpeg_builder.py    # FFmpeg command builder
 │   │       ├── obs_integration.py   # OBS/ShadowPlay hotkey automation & process detection
-│   │       ├── capture_validator.py # Post-capture file validation
+│   │       ├── capture_engine.py    # Internal 3-tier capture engine (native DXGI / dxcam / PrintWindow)
+│   │       ├── native_capture_bridge.py  # Named-pipe IPC + shared-memory frame transport to C++ service
+│   │       ├── window_capture.py    # PrintWindow GDI fallback + WGC client-area crop
+│   │       ├── overlay_engine.py    # Playwright browser context lifecycle + render_frame() / render_raw_html()
+│   │       ├── overlay_compositor.py # FFmpeg overlay compositing — composite_clip(), render_and_composite(), composite_intro_video()
+│   │       ├── element_renderer.py  # compose_preset_html() — assemble preset elements into one HTML doc (with pagination support)
+│   │       ├── frame_data_builder.py # build_frame_data() — telemetry → overlay context dict
+│   │       ├── script_capture.py    # ScriptCaptureEngine: pause→seek→camera→record→trim→compile per segment
+│   │       ├── preview_utils.py     # Keyframe indexer, sprite sheet generator, proxy encoder helpers
+│   │       ├── youtube_client.py    # Low-level YouTube Data API v3 wrapper (resumable upload, quota)
 │   │       └── logging_config.py    # Structured logging setup
 │   ├── data/                        # Default data directory
 │   │   └── projects/                # Project storage
@@ -3719,6 +4249,23 @@ league-replay-studio/
 │       ├── index.css
 │       ├── components/              # (see section 5.2)
 │       ├── context/
+│       │   ├── AnalysisContext.jsx    # Analysis state, event feed, log loading
+│       │   ├── CaptureContext.jsx     # Capture orchestration state
+│       │   ├── EncodingContext.jsx    # Encoding engine state + export presets
+│       │   ├── HighlightContext.jsx   # Highlight scoring, weights, overrides, metrics
+│       │   ├── IRacingContext.jsx     # iRacing connection + session data
+│       │   ├── ModalContext.jsx       # Global modal dialog system
+│       │   ├── OverlayContext.jsx     # Template engine state + CRUD
+│       │   ├── PresetContext.jsx      # Overlay preset state — per-section elements, variables, assets
+│       │   ├── LLMContext.jsx         # LLM integration state — AI provider status, skill execution
+│       │   ├── PipelineContext.jsx    # One-click pipeline state
+│       │   ├── PreviewContext.jsx     # Tiered video preview state
+│       │   ├── ProjectContext.jsx     # Project library + step workflow
+│       │   ├── SettingsContext.jsx    # App settings
+│       │   ├── TimelineContext.jsx    # NLE timeline state
+│       │   ├── ToastContext.jsx       # Toast notification system
+│       │   ├── UndoRedoContext.jsx    # Undo/redo history
+│       │   └── YouTubeContext.jsx     # YouTube OAuth + upload state
 │       ├── hooks/
 │       ├── services/
 │       └── utils/
@@ -3891,7 +4438,7 @@ Capture remains via OBS/ShadowPlay (an unavoidable constraint — iRacing doesn'
 - **Encoding**: from 60-90 minutes (CPU) to 3-8 minutes (GPU)
 - **Preview**: from nothing to full-length video preview with overlay compositing
 - **Editing**: from a black-box algorithm to a full interactive highlight editing suite
-- **Workflow**: from start-and-pray to a **step-based project workflow** (Setup → Capture → Analysis → Editing → Export → Upload) with file browser, replay picker, and intuitive navigation
+- **Workflow**: from start-and-pray to a **step-based project workflow** (Setup → Analysis → Editing → Capture → Export → Upload) with file browser, replay picker, and intuitive navigation
 - **Pipeline**: from manual multi-step process to **one-click "Go"** with pause/resume/intervene, failure recovery, and saveable configuration presets
 - **YouTube**: from manual upload to **integrated YouTube channel** — auto-upload with templated metadata, video browser, project association
 - **CLI**: once configured, `lrs.bat --project ... --highlights` spits out the video — no UI needed
@@ -3929,7 +4476,7 @@ League Replay Studio follows [Semantic Versioning](https://semver.org/) and [Kee
 ---
 
 *Document created: 2026-03-31*
-*Version: 2.0 (Final planning phase)*
+*Version: 2.1 (Post-implementation update — overlay preset system, element renderer, preset design suite)*
 *Author: League Replay Studio Team*
 
-> This document was iteratively developed through 6 revision cycles (v1.0–v1.6) covering legacy analysis, telemetry deep-dives, schema normalisation, overlay engine redesign, YouTube integration, step-based workflows, and automated pipeline design. All revisions have been consolidated into this final v2.0 for agent handoff.
+> This document was iteratively developed through 7 revision cycles (v1.0–v2.1) covering legacy analysis, telemetry deep-dives, schema normalisation, overlay engine redesign, YouTube integration, step-based workflows, automated pipeline design, and the full overlay preset/element system. All revisions have been consolidated into this v2.1 for agent handoff.

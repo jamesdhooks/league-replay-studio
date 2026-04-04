@@ -1,7 +1,7 @@
 import { CheckCircle, XCircle, AlertTriangle, Info, X } from 'lucide-react'
 
 /**
- * Toast notification component.
+ * Toast notification component — larger, friendlier.
  *
  * @param {Object} props
  * @param {'success' | 'error' | 'warning' | 'info'} props.type
@@ -40,17 +40,17 @@ function Toast({ type = 'info', message, onClose }) {
 
   return (
     <div
-      className={`pointer-events-auto flex items-center gap-3 px-4 py-3 rounded-lg border
-                  shadow-lg animate-slide-up min-w-[280px] max-w-[400px] ${bg}`}
+      className={`pointer-events-auto flex items-center gap-3 px-5 py-3.5 rounded-xl border
+                  shadow-elevated animate-slide-up min-w-[320px] max-w-[440px] ${bg}`}
       role="alert"
     >
-      <Icon className={`w-4 h-4 shrink-0 ${iconColor}`} />
-      <span className={`text-sm flex-1 ${textColor}`}>{message}</span>
+      <Icon className={`w-5 h-5 shrink-0 ${iconColor}`} />
+      <span className={`text-sm font-medium flex-1 ${textColor}`}>{message}</span>
       <button
         onClick={onClose}
-        className="p-0.5 rounded hover:bg-white/10 transition-colors shrink-0"
+        className="p-1 rounded-lg hover:bg-white/10 transition-colors shrink-0 cursor-pointer"
       >
-        <X className="w-3.5 h-3.5 text-text-tertiary" />
+        <X className="w-4 h-4 text-text-tertiary" />
       </button>
     </div>
   )

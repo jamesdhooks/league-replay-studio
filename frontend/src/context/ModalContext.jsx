@@ -1,17 +1,22 @@
 import { createContext, useContext, useCallback, useState } from 'react'
 import Modal from '../components/ui/Modal'
+import ContentModal from '../components/ui/ContentModal'
 
 const ModalContext = createContext(null)
 
 /**
  * Modal dialog provider.
- * Provides openModal and closeModal functions.
+ * Provides openModal, openContentModal, and closeModal functions.
  */
 export function ModalProvider({ children }) {
   const [modal, setModal] = useState(null)
 
   const openModal = useCallback((id, type, options = {}) => {
-    setModal({ id, type, ...options })
+    setModal({ id, type, mode: 'dialog', ...options })
+  }, [])
+
+  const openContentModal = useCallback((options = {}) => {
+    setModal({ mode: 'content', ...options })
   }, [])
 
   const closeModal = useCallback(() => {
@@ -19,9 +24,18 @@ export function ModalProvider({ children }) {
   }, [])
 
   return (
-    <ModalContext.Provider value={{ openModal, closeModal, modal }}>
+    <ModalContext.Provider value={{ openModal, openContentModal, closeModal, modal }}>
       {children}
-      {modal && (
+      {modal && modal.mode === 'content' && (
+        <ContentModal
+          title={modal.title}
+          wide={modal.wide}
+          onClose={closeModal}
+        >
+          {modal.content}
+        </ContentModal>
+      )}
+      {modal && modal.mode !== 'content' && (
         <Modal
           title={modal.title}
           message={modal.message}
@@ -46,7 +60,7 @@ export function ModalProvider({ children }) {
 /**
  * Hook to access modal dialog functions.
  *
- * @returns {{ openModal, closeModal, modal }}
+ * @returns {{ openModal, openContentModal, closeModal, modal }}
  */
 export function useModal() {
   const context = useContext(ModalContext)

@@ -39,11 +39,26 @@ DEFAULT_CONFIG: dict = {
     "capture_hotkey_stop": "F9",
     "encoding_preset": "youtube_1080p",
     "preferred_gpu": "auto",
+    "preview_backend": "auto",
+    "native_output_index": 0,
+    "native_capture_fps": 0,
     "youtube_auto_upload": False,
     "youtube_default_privacy": "unlisted",
+    "youtube_default_playlist": "",
+    "youtube_title_template": "{{ track_name }} - {{ series_name }} Race Highlights",
+    "youtube_description_template": "Race highlights from {{ track_name }} in the {{ series_name }} series.\n\nDrivers: {{ drivers }}\nDate: {{ date }}",
+    "youtube_default_tags": "iracing,sim racing,highlights",
     "pipeline_default_config": None,
+    "wizard_completed": False,
     "theme": "dark",
     "sidebar_collapsed": False,
+    # ── LLM / AI settings ────────────────────────────────────────────────────
+    "llm_enabled": False,
+    "llm_provider": "none",
+    "llm_api_key": "",
+    "llm_model": "",
+    "llm_custom_endpoint": "",
+    "llm_temperature": 0.3,
 }
 
 
