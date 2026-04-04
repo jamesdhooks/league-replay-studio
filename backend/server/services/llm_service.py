@@ -326,7 +326,7 @@ class LLMService:
         logger.info(
             "[LLM] Executing skill '%s' (model=%s)",
             skill_id,
-            self._get_config()["model"],
+            settings_service.get("llm_model", ""),
         )
 
         raw = await self._call_provider(
@@ -368,9 +368,11 @@ class LLMService:
         attempts).  Raises :class:`LLMProviderError` if all attempts fail.
         """
         cfg = self._get_config()
-        provider = cfg["provider"]
+        # Extract provider name separately so log statements never
+        # reference the cfg dict that contains the API key.
+        provider_name: str = str(settings_service.get("llm_provider", "none"))
 
-        if provider == "none":
+        if provider_name == "none":
             raise LLMConfigError("LLM provider is set to 'none'")
 
         dispatchers = {
@@ -380,9 +382,9 @@ class LLMService:
             "custom": self._call_custom,
         }
 
-        dispatch_fn = dispatchers.get(provider)
+        dispatch_fn = dispatchers.get(provider_name)
         if dispatch_fn is None:
-            raise LLMConfigError(f"Unsupported LLM provider: '{provider}'")
+            raise LLMConfigError(f"Unsupported LLM provider: '{provider_name}'")
 
         last_exc: Optional[Exception] = None
 
@@ -398,7 +400,7 @@ class LLMService:
                 elapsed = time.monotonic() - t0
                 logger.info(
                     "[LLM] %s call succeeded in %.2fs (attempt %d)",
-                    provider,
+                    provider_name,
                     elapsed,
                     attempt,
                 )
@@ -408,7 +410,7 @@ class LLMService:
                 last_exc = exc
                 logger.warning(
                     "[LLM] %s call failed in %.2fs (attempt %d/%d): %s",
-                    provider,
+                    provider_name,
                     elapsed,
                     attempt,
                     _MAX_RETRIES,
