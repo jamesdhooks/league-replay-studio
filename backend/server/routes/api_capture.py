@@ -222,8 +222,8 @@ async def start_script_capture(body: ScriptCaptureRequest):
         raise HTTPException(status_code=400, detail="Project directory not set")
 
     # Grab loop and broadcast function from capture_service (already wired in app.py)
-    loop = capture_service._loop
-    broadcast_fn = capture_service._broadcast_fn
+    loop = capture_service.get_event_loop()
+    broadcast_fn = capture_service.get_broadcast_fn()
 
     def _do_broadcast(event_type: str, data: dict) -> None:
         """Thread-safe broadcast via the capture service loop."""

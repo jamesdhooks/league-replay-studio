@@ -57,13 +57,8 @@ def _sanitize_filename(name: str) -> str:
     Strips path separators, special characters, and limits length to
     prevent path traversal or command injection.
     """
-    # Remove path components — use only the basename
-    try:
-        name = Path(name).name if name else "clip"
-    except (OSError, ValueError):
-        name = "clip"
-    # Strip all non-safe characters
-    sanitized = _SAFE_FILENAME_RE.sub("_", name)
+    # Strip all non-safe characters (handles path separators, spaces, etc.)
+    sanitized = _SAFE_FILENAME_RE.sub("_", name or "clip")
     # Limit length and ensure non-empty
     return (sanitized[:64] or "clip")
 
@@ -84,11 +79,21 @@ class ScriptCaptureEngine:
         output_dir: str,
         clip_padding: float = DEFAULT_CLIP_PADDING,
         progress_callback: Optional[Callable[[dict], None]] = None,
+        compile_timeout: int = 0,
     ) -> None:
+        """
+        Args:
+            output_dir: Directory to write clip files.
+            clip_padding: Seconds of pre-roll before each clip (trimmed later).
+            progress_callback: Optional callable for progress events.
+            compile_timeout: Timeout in seconds for the FFmpeg compile step.
+                0 = auto (60 seconds × number of clips, minimum 120).
+        """
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._clip_padding = clip_padding
         self._progress_cb = progress_callback
+        self._compile_timeout = compile_timeout
         self._clips: list[dict] = []  # {id, path, section, order}
         self._cancelled = False
 
@@ -274,7 +279,11 @@ class ScriptCaptureEngine:
         ]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            # Auto-calculate timeout: 60s per clip, minimum 120s
+            timeout = self._compile_timeout
+            if timeout <= 0:
+                timeout = max(120, len(sorted_clips) * 60)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             if result.returncode != 0:
                 logger.error("[ScriptCapture] Compile failed: %s", result.stderr[:500])
                 return None

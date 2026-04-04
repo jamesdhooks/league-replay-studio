@@ -310,7 +310,9 @@ function SectionEditor({ sectionName, region, onUpdate, onClose }) {
             className="px-1.5 py-0.5 bg-bg-primary border border-border rounded text-text-primary text-xs"
             value={currentCam}
             onChange={(e) => onUpdate(sectionName, {
-              camera_group: e.target.value !== '' ? Number(e.target.value) : null,
+              camera_group: e.target.value !== '' && !Number.isNaN(Number(e.target.value))
+                ? Number(e.target.value)
+                : null,
             })}
           >
             <option value="">

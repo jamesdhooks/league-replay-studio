@@ -97,6 +97,14 @@ class CaptureService:
         """Set the asyncio event loop for scheduling broadcasts."""
         self._loop = loop
 
+    def get_broadcast_fn(self) -> Optional[Callable]:
+        """Return the configured WebSocket broadcast function."""
+        return self._broadcast_fn
+
+    def get_event_loop(self) -> Optional[asyncio.AbstractEventLoop]:
+        """Return the asyncio event loop for scheduling async broadcasts."""
+        return self._loop
+
     # ── Software detection ──────────────────────────────────────────────────
 
     def detect_software(self) -> list[dict[str, Any]]:
