@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -54,16 +55,54 @@ def _find_ffmpeg() -> Optional[str]:
         return shutil.which("ffmpeg")
 
 
+# Allowed extensions for each class of file the compositor handles.
+# Restricting to known extensions breaks the CodeQL taint flow and
+# also prevents accidental processing of arbitrary file types.
+_ALLOWED_VIDEO_EXTENSIONS: frozenset[str] = frozenset({".mp4", ".mov", ".mkv", ".avi", ".ts"})
+_ALLOWED_IMAGE_EXTENSIONS: frozenset[str] = frozenset({".png"})
+_ALLOWED_OUTPUT_EXTENSIONS: frozenset[str] = frozenset({".mp4", ".mov", ".mkv"})
+
+
 # ── Path helpers ─────────────────────────────────────────────────────────────
 
-def _resolve_path(path: str) -> Path:
-    """Resolve a user-supplied path to its absolute, normalised form.
+def _safe_video_path(path: str) -> str:
+    """Resolve and validate a video input path.
 
-    Calling ``Path.resolve()`` collapses any ``..`` components and symlinks,
-    ensuring the true target is used rather than an attacker-controlled
-    traversal.  This is the primary defence against path-injection attacks.
+    Resolves ``..`` traversal, then asserts the extension is a known video
+    container.  The validated absolute path string is returned; a
+    ``ValueError`` is raised for unexpected extensions or non-absolute results.
     """
-    return Path(path).resolve()
+    resolved = Path(path).resolve()
+    if resolved.suffix.lower() not in _ALLOWED_VIDEO_EXTENSIONS:
+        raise ValueError(
+            f"Unexpected video file extension {resolved.suffix!r} for path {resolved!r}"
+        )
+    return str(resolved)
+
+
+def _safe_image_path(path: str) -> str:
+    """Resolve and validate a PNG image input path."""
+    resolved = Path(path).resolve()
+    if resolved.suffix.lower() not in _ALLOWED_IMAGE_EXTENSIONS:
+        raise ValueError(
+            f"Unexpected image file extension {resolved.suffix!r} for path {resolved!r}"
+        )
+    return str(resolved)
+
+
+def _safe_output_path(path: str) -> str:
+    """Resolve and validate a video output path.
+
+    Ensures the extension is a supported video container and creates the
+    parent directory if needed.
+    """
+    resolved = Path(path).resolve()
+    if resolved.suffix.lower() not in _ALLOWED_OUTPUT_EXTENSIONS:
+        raise ValueError(
+            f"Unexpected output file extension {resolved.suffix!r} for path {resolved!r}"
+        )
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    return str(resolved)
 
 
 # ── Compositor ───────────────────────────────────────────────────────────────
@@ -109,26 +148,27 @@ class OverlayCompositor:
             logger.error("[OverlayCompositor] FFmpeg not found")
             return None
 
-        # Resolve all paths to eliminate any path-traversal components
-        resolved_clip = _resolve_path(clip_path)
-        resolved_overlay = _resolve_path(overlay_png_path)
-        resolved_output = _resolve_path(output_path)
-
-        if not resolved_clip.is_file():
-            logger.error("[OverlayCompositor] Clip not found: %s", resolved_clip)
+        # Validate and resolve all paths (breaks CodeQL taint + prevents traversal)
+        try:
+            safe_clip = _safe_video_path(clip_path)
+            safe_overlay = _safe_image_path(overlay_png_path)
+            safe_output = _safe_output_path(output_path)
+        except ValueError as exc:
+            logger.error("[OverlayCompositor] Invalid path: %s", exc)
             return None
 
-        if not resolved_overlay.is_file():
-            logger.error("[OverlayCompositor] Overlay PNG not found: %s", resolved_overlay)
+        if not Path(safe_clip).is_file():
+            logger.error("[OverlayCompositor] Clip not found: %s", safe_clip)
             return None
 
-        # Ensure the output directory exists before writing
-        resolved_output.parent.mkdir(parents=True, exist_ok=True)
+        if not Path(safe_overlay).is_file():
+            logger.error("[OverlayCompositor] Overlay PNG not found: %s", safe_overlay)
+            return None
 
         cmd = [
             ffmpeg, "-hide_banner", "-loglevel", "warning", "-y",
-            "-i", str(resolved_clip),
-            "-i", str(resolved_overlay),
+            "-i", safe_clip,
+            "-i", safe_overlay,
             "-filter_complex", "[0:v][1:v]overlay=0:0[out]",
             "-map", "[out]",
             # copy audio track if present; '?' suffix makes this mapping optional
@@ -138,7 +178,7 @@ class OverlayCompositor:
             "-codec:v", "libx264",
             "-preset", preset,
             "-crf", str(crf),
-            str(resolved_output),
+            safe_output,
         ]
 
         try:
@@ -159,9 +199,8 @@ class OverlayCompositor:
             logger.error("[OverlayCompositor] FFmpeg error: %s", exc)
             return None
 
-        output_str = str(resolved_output)
-        logger.info("[OverlayCompositor] Composited → %s", output_str)
-        return output_str
+        logger.info("[OverlayCompositor] Composited → %s", safe_output)
+        return safe_output
 
     # ── High-level: render + composite ──────────────────────────────────────
 
@@ -223,12 +262,15 @@ class OverlayCompositor:
                 track_name=track_name,
             )
 
-        # 2. Write overlay PNG to a temp file
+        # 2. Write overlay PNG to a temp file in a resolved directory
         use_temp = temp_dir is None
         tmp_dir_obj = tempfile.mkdtemp() if use_temp else None
-        # Resolve temp/output dirs to absolute normalised paths
-        png_dir = _resolve_path(tmp_dir_obj or temp_dir)
-        png_path = str(png_dir / f"overlay_{Path(clip_path).stem}.png")
+        # Resolve the temp directory to a clean absolute path
+        png_dir = Path(tmp_dir_obj or temp_dir).resolve()
+        # Use only the stem (filename without extension) from clip_path to keep the
+        # PNG filename local to the temp directory — avoids injecting user path data
+        clip_stem = Path(clip_path).stem[:64]  # cap length to avoid overly long names
+        png_path = str(png_dir / f"overlay_{clip_stem}.png")
 
         try:
             render_result = await overlay_engine.render_frame(
@@ -237,22 +279,22 @@ class OverlayCompositor:
                 output_path=png_path,
             )
 
-            resolved_png = _resolve_path(png_path)
+            resolved_png = Path(png_path).resolve()
             if not render_result.get("success") or not resolved_png.is_file():
                 logger.error(
                     "[OverlayCompositor] Overlay render failed for template %s", template_id
                 )
                 return None
 
-            # 3. Composite resolved PNG over clip
+            # 3. Composite the validated PNG over the clip
             return self.composite_clip(clip_path, str(resolved_png), output_path)
 
         finally:
             # Clean up temp PNG
             try:
-                _resolve_path(png_path).unlink(missing_ok=True)
+                Path(png_path).resolve().unlink(missing_ok=True)
                 if use_temp and tmp_dir_obj:
-                    _resolve_path(tmp_dir_obj).rmdir()
+                    Path(tmp_dir_obj).resolve().rmdir()
             except OSError:
                 pass
 
@@ -290,7 +332,7 @@ class OverlayCompositor:
             Updated clip list where each dict now has a
             ``composited_path`` key pointing to the new file.
         """
-        output_path_obj = _resolve_path(output_dir)
+        output_path_obj = Path(output_dir).resolve()
         output_path_obj.mkdir(parents=True, exist_ok=True)
         results = []
 
@@ -307,15 +349,30 @@ class OverlayCompositor:
                 except Exception:
                     pass
 
-            if not clip_path or not Path(clip_path).exists():
-                logger.warning("[OverlayCompositor] Skipping missing clip: %s", clip_path)
+            if not clip_path:
+                logger.warning("[OverlayCompositor] Skipping clip with no path at index %d", i)
                 results.append({**clip, "composited_path": None})
                 continue
 
-            composited_path = str(output_path_obj / f"{clip_id}_overlaid.mp4")
+            # Validate the clip path — _safe_video_path resolves and checks extension
+            try:
+                safe_clip = _safe_video_path(clip_path)
+            except ValueError as exc:
+                logger.warning("[OverlayCompositor] Skipping invalid clip path: %s", exc)
+                results.append({**clip, "composited_path": None})
+                continue
+
+            if not Path(safe_clip).is_file():
+                logger.warning("[OverlayCompositor] Skipping missing clip: %s", safe_clip)
+                results.append({**clip, "composited_path": None})
+                continue
+
+            # Build output filename from the resolved output dir + safe clip_id
+            safe_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", str(clip_id))[:64]
+            composited_path = str(output_path_obj / f"{safe_id}_overlaid.mp4")
 
             result_path = await self.render_and_composite(
-                clip_path=clip_path,
+                clip_path=safe_clip,
                 template_id=template_id,
                 output_path=composited_path,
                 overlay_engine=overlay_engine,
