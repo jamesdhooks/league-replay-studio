@@ -76,6 +76,7 @@ class TelemetryWriter:
         self._lap_batch: list[tuple] = []
         self._total_ticks = 0
         self._last_laps: dict[int, int] = {}  # car_idx → last known lap
+        self._prev_lap_pct: dict[int, tuple[float, float]] = {}  # car_idx → (lap_pct, session_time)
 
     @property
     def total_ticks(self) -> int:
@@ -93,12 +94,37 @@ class TelemetryWriter:
             data.get("race_laps", 0),
             data.get("cam_car_idx", 0),
             data.get("flags", 0),
+            data.get("flag_yellow", 0),
+            data.get("flag_red", 0),
+            data.get("flag_checkered", 0),
         ))
         tick_index = self._total_ticks  # Will become the tick_id after insert
         self._total_ticks += 1
 
         # Buffer car states (tick_id is a placeholder — resolved at flush)
         for car in data.get("car_states", []):
+            # Derive speed from lap_pct rate of change
+            car_idx = car.get("car_idx", 0)
+            current_pct = car.get("lap_pct", 0.0)
+            session_time = data.get("session_time", 0.0)
+            prev = self._prev_lap_pct.get(car_idx)
+            speed_ms = None
+            if prev is not None:
+                prev_pct, prev_time = prev
+                dt = session_time - prev_time
+                if dt > 0 and dt < 2.0:  # Guard against large time gaps
+                    dpct = current_pct - prev_pct
+                    # Handle lap boundary wrap (pct goes from ~1.0 back to ~0.0)
+                    if dpct < -0.5:
+                        dpct += 1.0
+                    elif dpct > 0.5:
+                        dpct -= 1.0
+                    track_length = data.get("track_length", 4000.0)  # meters, default 4km
+                    speed_ms = abs(dpct * track_length / dt)
+            self._prev_lap_pct[car_idx] = (current_pct, session_time)
+            # Use the computed speed_ms or the one from snapshot if provided
+            car_speed = car.get("speed_ms") or speed_ms
+
             self._car_batch.append((
                 tick_index,  # placeholder for tick_id
                 car.get("car_idx", 0),
@@ -109,6 +135,10 @@ class TelemetryWriter:
                 car.get("surface", 0),
                 car.get("est_time", 0.0),
                 car.get("best_lap_time", -1.0),
+                car_speed,
+                car.get("f2_time", None),
+                car.get("last_lap_time", -1.0),
+                car.get("steer_angle", None),
             ))
 
             # Detect lap completions
@@ -139,8 +169,9 @@ class TelemetryWriter:
         for tick_row in self._tick_batch:
             cursor = conn.execute(
                 """INSERT INTO race_ticks
-                   (session_time, replay_frame, session_state, race_laps, cam_car_idx, flags)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                   (session_time, replay_frame, session_state, race_laps, cam_car_idx, flags,
+                    flag_yellow, flag_red, flag_checkered)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 tick_row,
             )
             tick_ids.append(cursor.lastrowid)  # type: ignore[arg-type]
@@ -162,8 +193,8 @@ class TelemetryWriter:
             conn.executemany(
                 """INSERT INTO car_states
                    (tick_id, car_idx, position, class_position, lap, lap_pct,
-                    surface, est_time, best_lap_time)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    surface, est_time, best_lap_time, speed_ms, f2_time, last_lap_time, steer_angle)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 resolved_cars,
             )
 
