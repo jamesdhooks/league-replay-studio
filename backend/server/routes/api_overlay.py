@@ -31,6 +31,7 @@ Endpoints:
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -120,10 +121,13 @@ class CompositeRequest(BaseModel):
 
 
 class BatchCompositeRequest(BaseModel):
-    """Request body for batch compositing all clips from a script capture."""
-    clips: list[dict[str, Any]]
-    output_dir: str
-    project_id: int
+    """Request body for batch compositing all clips from a script capture.
+
+    Accepts clip IDs and metadata instead of raw file paths.  Paths are
+    constructed server-side from ``project_dir/captures/{clip_id}.*``.
+    """
+    clips: list[dict[str, Any]]     # each must have 'id', 'section', 'start_time_seconds', 'overlay_template_id'
+    output_subdir: str = "composited"  # subdirectory name under project_dir (basename only)
     series_name: str = ""
     track_name: str = ""
     focused_car_idx: Optional[int] = None
@@ -491,13 +495,17 @@ async def composite_overlay(project_id: int, body: CompositeRequest):
 async def composite_batch(project_id: int, body: BatchCompositeRequest):
     """Composite overlays over all clips from a script capture result.
 
-    Takes the ``clips`` list returned by ``GET /capture/script-capture/status``
-    and renders + composites each clip using its assigned ``overlay_template_id``
-    (or ``"broadcast"`` as default).  Results include a ``composited_path`` on
-    each clip dict.
+    Takes clip metadata (IDs, sections, timestamps) and resolves file paths
+    entirely server-side from ``{project_dir}/captures/``.  User input never
+    controls file paths directly, preventing path-injection attacks.
+
+    Output files are written to ``{project_dir}/{output_subdir}/``.
 
     The overlay engine must be initialised before calling this endpoint.
     """
+    import os
+    from pathlib import Path as _Path
+
     from server.services.project_service import project_service
     from server.utils.overlay_engine import overlay_engine
     from server.utils.overlay_compositor import overlay_compositor
@@ -513,14 +521,40 @@ async def composite_batch(project_id: int, body: BatchCompositeRequest):
         raise HTTPException(status_code=404, detail="Project not found")
 
     project_dir = project.get("project_dir", "")
+    if not project_dir:
+        raise HTTPException(status_code=400, detail="Project has no directory configured")
+
     track_name = body.track_name or project.get("track_name", "")
+
+    # Reconstruct paths from project_dir + sanitised clip IDs (server-controlled)
+    captures_dir = _Path(project_dir) / "captures"
+    output_subdir = os.path.basename(body.output_subdir or "composited")
+    output_dir = str(_Path(project_dir) / output_subdir)
+
+    # Build clip dicts with server-constructed paths (user provides only metadata)
+    resolved_clips: list[dict] = []
+    for clip in body.clips:
+        clip_id = str(clip.get("id", ""))
+        # Find the capture file for this clip ID in the captures directory
+        # Look for any video file whose stem matches the sanitised clip ID
+        safe_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", clip_id)[:64]
+        clip_path: Optional[str] = None
+        for ext in (".mp4", ".mov", ".mkv"):
+            candidate = captures_dir / f"{safe_id}{ext}"
+            if candidate.is_file():
+                clip_path = str(candidate)
+                break
+        resolved_clips.append({
+            **clip,
+            "path": clip_path,  # server-constructed path (or None if not found)
+        })
 
     try:
         composited_clips = await overlay_compositor.composite_script_clips(
-            clips=body.clips,
+            clips=resolved_clips,
             overlay_engine=overlay_engine,
-            output_dir=body.output_dir,
-            project_dir=project_dir or None,
+            output_dir=output_dir,
+            project_dir=project_dir,
             series_name=body.series_name,
             track_name=track_name,
             focused_car_idx=body.focused_car_idx,
