@@ -102,16 +102,21 @@ class FrameDataRequest(BaseModel):
 
 
 class CompositeRequest(BaseModel):
-    """Request body for overlay compositing."""
-    clip_path: str
+    """Request body for overlay compositing.
+
+    Paths are constructed server-side from ``project_dir`` + filenames to
+    prevent path-injection vulnerabilities.  Only the basename is accepted
+    for each file parameter.
+    """
+    clip_filename: str          # basename of the clip inside project_dir/captures/
+    output_filename: str        # basename for the output inside project_dir/composited/
     template_id: str
-    output_path: str
     session_time: float = 0.0
     section: str = "race"
     focused_car_idx: Optional[int] = None
     series_name: str = ""
     track_name: str = ""
-    frame_data: Optional[dict[str, Any]] = None  # provide directly to skip telemetry lookup
+    frame_data: Optional[dict[str, Any]] = None  # supply directly to skip telemetry lookup
 
 
 class BatchCompositeRequest(BaseModel):
@@ -402,30 +407,37 @@ async def build_frame_data_endpoint(project_id: int, body: FrameDataRequest):
 
 # ── Overlay compositing ──────────────────────────────────────────────────────
 
-@router.post("/composite")
-async def composite_overlay(body: CompositeRequest):
+@router.post("/composite/{project_id}")
+async def composite_overlay(project_id: int, body: CompositeRequest):
     """Render an overlay frame and composite it over a captured video clip.
 
     Renders a single static overlay PNG (using the Playwright engine) at the
     given ``session_time`` / ``section`` context and burns it over the clip
     with FFmpeg ``overlay=0:0``.
 
+    Paths are constructed server-side from the project directory:
+      - clip is read from  ``{project_dir}/captures/{clip_filename}``
+      - output is written to ``{project_dir}/composited/{output_filename}``
+
     The overlay engine must be initialised (call ``POST /init``) before this
     endpoint can be used.
 
     Args:
-        clip_path:    Absolute path to the source .mp4 clip.
-        template_id:  Overlay template ID to render.
-        output_path:  Destination path for the composited .mp4.
-        session_time: Replay time in seconds (used for telemetry look-up when
-                      ``frame_data`` is not provided).
-        section:      Video section context.
-        focused_car_idx: iRacing hero driver index.
-        series_name:  Series label.
-        track_name:   Track label.
-        frame_data:   If provided, skips telemetry look-up and uses this dict
-                      directly.
+        project_id:       Project whose captures directory holds the clip.
+        clip_filename:    Basename of the source .mp4 clip.
+        output_filename:  Basename for the composited output .mp4.
+        template_id:      Overlay template ID to render.
+        session_time:     Replay time in seconds for telemetry look-up.
+        section:          Video section context.
+        focused_car_idx:  iRacing hero driver index.
+        series_name:      Series label.
+        track_name:       Track label.
+        frame_data:       If provided, skips telemetry look-up.
     """
+    import os
+    from pathlib import Path as _Path
+
+    from server.services.project_service import project_service
     from server.utils.overlay_engine import overlay_engine
     from server.utils.overlay_compositor import overlay_compositor
 
@@ -435,18 +447,35 @@ async def composite_overlay(body: CompositeRequest):
             detail="Overlay engine not initialised — call POST /api/overlay/init first",
         )
 
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project.get("project_dir", "")
+    if not project_dir:
+        raise HTTPException(status_code=400, detail="Project has no directory configured")
+
+    # Build paths entirely from server-controlled project_dir + validated basename
+    clip_basename = os.path.basename(body.clip_filename)
+    output_basename = os.path.basename(body.output_filename)
+    clip_path = str(_Path(project_dir) / "captures" / clip_basename)
+    output_path = str(_Path(project_dir) / "composited" / output_basename)
+
+    track_name = body.track_name or project.get("track_name", "")
+
     try:
         result = await overlay_compositor.render_and_composite(
-            clip_path=body.clip_path,
+            clip_path=clip_path,
             template_id=body.template_id,
-            output_path=body.output_path,
+            output_path=output_path,
             overlay_engine=overlay_engine,
             frame_data=body.frame_data,
+            project_dir=project_dir,
             session_time=body.session_time,
             section=body.section,
             focused_car_idx=body.focused_car_idx,
             series_name=body.series_name,
-            track_name=body.track_name,
+            track_name=track_name,
         )
         if result is None:
             raise HTTPException(status_code=500, detail="Compositing failed")
