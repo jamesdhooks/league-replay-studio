@@ -43,7 +43,7 @@
 |---|-------|---------|--------|
 | 1 | **Syntax error**: Extra `)` on line 212 prevents module import — overlay rendering crashes | `backend/server/utils/frame_data_builder.py:212` | ✅ FIXED |
 | 2 | **Import at bottom**: `import os` at line 681 instead of top — style issue + fragile | `backend/server/services/encoding_service.py:681` | ✅ FIXED |
-| 3 | **No error boundaries**: Any context crash takes down entire app | `frontend/src/components/` | ⬜ TODO |
+| 3 | **No error boundaries**: Any context crash takes down entire app | `frontend/src/components/` | ✅ FIXED |
 | 4 | **Silent WebSocket broadcast failure**: `except Exception: pass` drops errors | `backend/app.py:92` | ⬜ TODO |
 
 ### 🟡 HIGH PRIORITY (Tier 2) — Required for production quality

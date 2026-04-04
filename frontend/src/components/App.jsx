@@ -18,6 +18,7 @@ import { LLMProvider } from '../context/LLMContext'
 import { YouTubeProvider } from '../context/YouTubeContext'
 import { PipelineProvider } from '../context/PipelineContext'
 import { wsClient } from '../services/websocket'
+import ErrorBoundary from './ui/ErrorBoundary'
 import AppShell from './layout/AppShell'
 import SetupWizard from './wizard/SetupWizard'
 
@@ -89,6 +90,7 @@ function App() {
         <SettingsProvider>
           <IRacingProvider>
             <ProjectProvider>
+              <ErrorBoundary name="Analysis">
               <AnalysisProvider>
                 <CaptureProvider>
                   <EncodingProvider>
@@ -100,10 +102,14 @@ function App() {
                           <PipelineProvider>
                             <UndoRedoProvider>
                             <TimelineProvider>
+                              <ErrorBoundary name="Highlights">
                               <HighlightProvider>
-                                <AppShell />
+                                <ErrorBoundary name="App">
+                                  <AppShell />
+                                </ErrorBoundary>
                                 <WizardController />
                               </HighlightProvider>
+                              </ErrorBoundary>
                             </TimelineProvider>
                             </UndoRedoProvider>
                           </PipelineProvider>
@@ -115,6 +121,7 @@ function App() {
                   </EncodingProvider>
                 </CaptureProvider>
               </AnalysisProvider>
+              </ErrorBoundary>
             </ProjectProvider>
           </IRacingProvider>
         </SettingsProvider>
