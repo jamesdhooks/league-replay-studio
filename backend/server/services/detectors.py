@@ -65,6 +65,11 @@ SESSION_STATE_RACING     = 4
 SESSION_STATE_CHECKERED  = 5
 SESSION_STATE_COOLDOWN   = 6
 
+# Speed-based severity constants
+REFERENCE_SPEED_MS = 70.0    # ~250 km/h — used to normalise speed to 0–1
+TIME_LOSS_WEIGHT   = 0.6     # weight for time-loss component in blended severity
+SPEED_WEIGHT       = 0.4     # weight for speed component in blended severity
+
 
 # ── Base class ───────────────────────────────────────────────────────────────
 
@@ -161,7 +166,7 @@ class IncidentDetector(BaseDetector):
 
             # Speed-based severity: normalise to ~70 m/s ≈ 250 km/h
             if speed_ms is not None and speed_ms > 0:
-                speed_severity = min(speed_ms / 70.0, 1.0)
+                speed_severity = min(speed_ms / REFERENCE_SPEED_MS, 1.0)
                 severity = max(round(speed_severity * 10), 1)
             else:
                 severity = 6  # fallback to original default
@@ -805,8 +810,11 @@ class CrashDetector(BaseDetector):
             # Blend speed component if available
             speed_ms = row["speed_ms"]
             if speed_ms is not None and speed_ms > 0:
-                speed_factor = min(speed_ms / 70.0, 1.0)
-                severity = max(round(base_severity * 0.6 + speed_factor * 10 * 0.4), 1)
+                speed_factor = min(speed_ms / REFERENCE_SPEED_MS, 1.0)
+                severity = max(round(
+                    base_severity * TIME_LOSS_WEIGHT
+                    + speed_factor * 10 * SPEED_WEIGHT
+                ), 1)
             else:
                 severity = base_severity
 
