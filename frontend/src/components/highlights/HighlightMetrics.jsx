@@ -1,4 +1,4 @@
-import { useHighlight } from '../../context/HighlightContext'
+import { useHighlight, tierColor } from '../../context/HighlightContext'
 import { useTimeline } from '../../context/TimelineContext'
 import { Clock, BarChart3, Activity, Users, Target } from 'lucide-react'
 
@@ -82,7 +82,7 @@ export default function HighlightMetrics() {
                 <span
                   className="inline-block w-4 h-4 rounded text-white font-bold flex items-center justify-center"
                   style={{
-                    backgroundColor: tier === 'S' ? '#ef4444' : tier === 'A' ? '#f97316' : tier === 'B' ? '#3b82f6' : '#6b7280',
+                    backgroundColor: tierColor(tier),
                     fontSize: '8px',
                   }}
                 >

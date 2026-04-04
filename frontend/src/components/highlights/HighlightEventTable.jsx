@@ -1,4 +1,4 @@
-import { useHighlight, EVENT_TYPE_LABELS } from '../../context/HighlightContext'
+import { useHighlight, EVENT_TYPE_LABELS, tierColor } from '../../context/HighlightContext'
 import { EVENT_COLORS } from '../../context/TimelineContext'
 import { formatTime } from '../../utils/time'
 import {
@@ -229,15 +229,4 @@ function severityColor(severity) {
   if (severity >= 4) return '#eab308'
   if (severity >= 2) return '#22c55e'
   return '#6b7280'
-}
-
-/** Map tier to color (S/A/B/C) */
-function tierColor(tier) {
-  switch (tier) {
-    case 'S': return '#ef4444'  // Red — must-have
-    case 'A': return '#f97316'  // Orange — high priority
-    case 'B': return '#3b82f6'  // Blue — medium priority
-    case 'C': return '#6b7280'  // Gray — low priority
-    default:  return '#6b7280'
-  }
 }

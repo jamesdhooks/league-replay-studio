@@ -53,6 +53,19 @@ export const EVENT_TYPE_LABELS = {
   restart: 'Restart',
 }
 
+/** Tier color map (S/A/B/C) */
+export const TIER_COLORS = {
+  S: '#ef4444',  // Red — must-have
+  A: '#f97316',  // Orange — high priority
+  B: '#3b82f6',  // Blue — medium priority
+  C: '#6b7280',  // Gray — low priority
+}
+
+/** Get color for a tier value */
+export function tierColor(tier) {
+  return TIER_COLORS[tier] || '#6b7280'
+}
+
 /** Base scores by event type for the multi-pass scoring pipeline */
 const BASE_SCORES = {
   crash: 1.5,
@@ -152,7 +165,9 @@ function computeEventScore(event, weights, params = {}, raceDuration = 0) {
   if (raceDuration > 0) {
     const racePct = (event.start_time_seconds || 0) / raceDuration
     if (racePct > 0.9) {
+      const lateRaceBonus = score * 0.2 // 20% boost for late-race events
       score *= 1.2
+      narrativeBonus += lateRaceBonus
     }
   }
   score += narrativeBonus

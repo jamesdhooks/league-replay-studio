@@ -158,8 +158,9 @@ def score_events(
         if race_duration > 0:
             race_pct = event.get("start_time_seconds", 0) / race_duration
             if race_pct > 0.9:
+                late_race_bonus = score * 0.2  # 20% boost for late-race events
                 score *= 1.2
-                narrative_bonus += score * 0.2 - score  # Track the bonus
+                narrative_bonus += late_race_bonus
         score += narrative_bonus
         components["narrative_bonus"] = round(narrative_bonus, 3)
 
@@ -544,7 +545,7 @@ def _smooth_timeline(timeline: list[dict], pip_threshold: float,
     # Compute a relative score threshold (15% of observed score range)
     scores = [e.get("score", 0) for e in timeline]
     score_range = max(scores) - min(scores) if scores else 0
-    threshold = max(score_range * 0.15, 0.5)  # Floor at 0.5 to avoid zero
+    threshold = max(score_range * 0.15, 0.5)  # Minimum 0.5 for narrow score distributions
 
     # Remove back-to-back same-type events unless score differential is significant
     smoothed = [timeline[0]]
