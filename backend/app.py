@@ -50,6 +50,7 @@ from server.routes.api_capture import router as capture_router
 from server.routes.api_encoding import router as encoding_router
 from server.routes.api_preview import router as preview_router
 from server.routes.api_overlay import router as overlay_router
+from server.routes.api_preset import router as preset_router
 from server.routes.api_youtube import router as youtube_router
 from server.routes.api_pipeline import router as pipeline_router
 from server.routes.api_wizard import router as wizard_router
@@ -211,6 +212,7 @@ app.include_router(capture_router)
 app.include_router(encoding_router)
 app.include_router(preview_router)
 app.include_router(overlay_router)
+app.include_router(preset_router)
 app.include_router(youtube_router)
 app.include_router(pipeline_router)
 app.include_router(wizard_router)
