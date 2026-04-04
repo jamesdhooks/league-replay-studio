@@ -311,6 +311,12 @@ Canvas-based multi-track timeline: Camera, Events, Overlays, Cuts, Audio tracks.
 - [x] Tier distribution shown in metrics dashboard
 - [x] LLM toggle for optional narrative refinement (notes, transitions, anchors)
 - [x] Video Composition Script generation (replaces EDL)
+- [x] Four-section video structure: intro → qualifying results → race → race results
+- [x] B-roll camera selection from iRacing TV cams for non-race sections (configurable per section)
+- [x] Script-based capture engine: per-segment pause → seek → camera → record → trim → compile
+- [x] Section markers visible on NLE timeline canvas (dashed boundaries + labels)
+- [x] Inline section editor for duration/camera/start time of non-race sections
+- [x] Configurable clip-start padding (trimmed post-capture)
 
 ---
 

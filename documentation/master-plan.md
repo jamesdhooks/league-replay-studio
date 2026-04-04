@@ -2901,6 +2901,44 @@ Segment types in the timeline:
 - **transition** — cut/fade/crossfade/whip/zoom between clips
 - **broll** — Gap filler from track-side cameras (inserted for gaps ≥ 8s)
 
+### 7.8.3 Four-Section Video Structure
+
+The highlight video is composed of four ordered sections:
+
+1. **Intro** — Static B-roll from scenic/blimp iRacing TV cams. Used for title card overlay.
+   Default duration: 10s. Captured from ~30s before race start.
+2. **Qualifying Results** — Pit-lane or static TV cam. Used for starting grid graphics overlay.
+   Default duration: 15s. Captured from just before race start.
+3. **Race** — Event-driven highlight timeline from the scoring engine.
+   Duration determined by event selection algorithm and target duration.
+4. **Race Results** — Static TV cam. Used for finishing order graphics overlay.
+   Default duration: 20s. Captured from after race end (cooldown lap).
+
+Each section carries:
+- `section` — Section identifier (intro | qualifying_results | race | race_results)
+- `camera_preferences` — Ordered list of iRacing camera group names to try
+- `camera_group` — Optional user override (camera group number)
+- `clip_padding` — Seconds of pre-roll before each clip (trimmed post-capture)
+- `editable` — Whether the user can adjust timing/camera in the frontend
+
+The `generate_video_script()` function in `scoring_engine.py` wraps `generate_highlights()` with intro, qualifying, and results B-roll sections. The frontend shows these as color-coded regions on both the HighlightTimeline and the NLE TimelineCanvas.
+
+### 7.8.4 Script-Based Capture Engine
+
+The `ScriptCaptureEngine` (in `script_capture.py`) processes each Video Composition Script segment independently:
+
+1. Pause the replay
+2. Seek to the segment's start time minus configurable padding
+3. Switch to the appropriate iRacing camera (from preferences or user override)
+4. Start recording via `CaptureEngine.start_recording()`
+5. Resume replay at 1× speed
+6. Wait for segment duration + padding
+7. Stop recording
+8. Trim the padding using FFmpeg `-ss` seek
+9. Save the clip with a filename matching the script segment ID
+
+After all segments are captured, `compile_clips()` concatenates them using FFmpeg's concat demuxer. The pipeline service uses this engine when a `video_script` is present in the capture config.
+
 ### 7.9 Settings System
 
 **General Settings:**
