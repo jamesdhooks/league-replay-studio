@@ -192,8 +192,10 @@ async def list_assets(preset_id: str):
 @router.post("/{preset_id}/assets")
 async def upload_asset(preset_id: str, file: UploadFile = File(...)):
     """Upload an image asset for a preset."""
+    if file.size is not None and file.size > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large (max 10 MB)")
     content = await file.read()
-    if len(content) > 10 * 1024 * 1024:  # 10 MB limit
+    if len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="File too large (max 10 MB)")
     result = preset_service.upload_asset(preset_id, file.filename or "asset.png", content)
     return {"success": True, **result}
@@ -221,8 +223,10 @@ async def serve_asset(preset_id: str, filename: str):
 @router.post("/{preset_id}/intro-video")
 async def upload_intro_video(preset_id: str, file: UploadFile = File(...)):
     """Upload an intro video for a preset."""
+    if file.size is not None and file.size > 500 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large (max 500 MB)")
     content = await file.read()
-    if len(content) > 500 * 1024 * 1024:  # 500 MB limit
+    if len(content) > 500 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="File too large (max 500 MB)")
     result = preset_service.upload_intro_video(preset_id, file.filename or "intro.mp4", content)
     return {"success": True, **result}
@@ -294,5 +298,9 @@ async def render_preset_preview(preset_id: str, body: RenderPreviewRequest):
     html_content = "\n".join(html_parts)
 
     # Render via overlay engine
-    result = await overlay_service.render_preview("__preset__", html_content, frame_data)
+    try:
+        result = await overlay_service.render_preview("__preset__", html_content, frame_data)
+    except Exception:
+        logger.exception("[Preset] Render preview failed for %s", preset_id)
+        raise HTTPException(status_code=500, detail="Failed to render preview")
     return result

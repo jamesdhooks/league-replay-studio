@@ -44,6 +44,27 @@ def _safe_id(value: str) -> str:
         raise ValueError(f"Invalid identifier: {value!r}")
     return value
 
+
+def _safe_filename(filename: str) -> str:
+    """Sanitize a filename, stripping path separators and traversal sequences."""
+    # Strip directory components
+    name = Path(filename).name
+    # Remove anything not alphanumeric, underscore, hyphen, or dot
+    name = re.sub(r'[^a-zA-Z0-9_.\-]', '_', name)
+    # Collapse consecutive dots to prevent traversal
+    name = re.sub(r'\.{2,}', '.', name)
+    # Strip leading dots
+    name = name.lstrip('.')
+    return name or f"file_{uuid.uuid4().hex[:8]}"
+
+
+def _ensure_within(path: Path, parent: Path) -> Path:
+    """Resolve *path* and verify it stays within *parent*."""
+    resolved = path.resolve()
+    if not str(resolved).startswith(str(parent.resolve())):
+        raise ValueError(f"Path escapes allowed directory: {resolved}")
+    return resolved
+
 # ── Video sections ───────────────────────────────────────────────────────────
 
 VIDEO_SECTIONS = ("intro", "qualifying_results", "race", "race_results")
@@ -416,14 +437,11 @@ class PresetService:
         Assets are stored globally in {DATA_DIR}/overlay_assets/{preset_id}/
         """
         safe_pid = _safe_id(preset_id)
-        # Sanitize filename
-        safe_name = re.sub(r'[^a-zA-Z0-9_.\-]', '_', filename)
-        if not safe_name:
-            safe_name = f"asset_{uuid.uuid4().hex[:8]}.png"
+        safe_name = _safe_filename(filename) or f"asset_{uuid.uuid4().hex[:8]}.png"
 
         asset_dir = GLOBAL_ASSETS_DIR / safe_pid
         asset_dir.mkdir(parents=True, exist_ok=True)
-        asset_path = asset_dir / safe_name
+        asset_path = _ensure_within(asset_dir / safe_name, GLOBAL_ASSETS_DIR)
 
         asset_path.write_bytes(content)
         logger.info("[Preset] Asset uploaded: %s/%s", safe_pid, safe_name)
@@ -455,8 +473,8 @@ class PresetService:
     def delete_asset(self, preset_id: str, filename: str) -> bool:
         """Delete an asset file."""
         safe_pid = _safe_id(preset_id)
-        safe_name = re.sub(r'[^a-zA-Z0-9_.\-]', '_', filename)
-        asset_path = GLOBAL_ASSETS_DIR / safe_pid / safe_name
+        safe_name = _safe_filename(filename)
+        asset_path = _ensure_within(GLOBAL_ASSETS_DIR / safe_pid / safe_name, GLOBAL_ASSETS_DIR)
         if asset_path.exists():
             asset_path.unlink()
             return True
@@ -465,8 +483,8 @@ class PresetService:
     def get_asset_path(self, preset_id: str, filename: str) -> Optional[Path]:
         """Get the filesystem path for an asset."""
         safe_pid = _safe_id(preset_id)
-        safe_name = re.sub(r'[^a-zA-Z0-9_.\-]', '_', filename)
-        asset_path = GLOBAL_ASSETS_DIR / safe_pid / safe_name
+        safe_name = _safe_filename(filename)
+        asset_path = _ensure_within(GLOBAL_ASSETS_DIR / safe_pid / safe_name, GLOBAL_ASSETS_DIR)
         return asset_path if asset_path.exists() else None
 
     # ── Intro video ──────────────────────────────────────────────────────────
@@ -474,7 +492,7 @@ class PresetService:
     def upload_intro_video(self, preset_id: str, filename: str, content: bytes) -> dict[str, Any]:
         """Upload an intro video for a preset."""
         safe_pid = _safe_id(preset_id)
-        safe_name = re.sub(r'[^a-zA-Z0-9_.\-]', '_', filename)
+        safe_name = _safe_filename(filename)
         if not safe_name.lower().endswith(('.mp4', '.mov', '.webm')):
             safe_name += '.mp4'
 
@@ -486,7 +504,7 @@ class PresetService:
             if existing.is_file():
                 existing.unlink()
 
-        video_path = video_dir / safe_name
+        video_path = _ensure_within(video_dir / safe_name, PRESETS_DIR)
         video_path.write_bytes(content)
 
         # Update preset
