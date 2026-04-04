@@ -30,7 +30,10 @@ CREATE TABLE IF NOT EXISTS race_ticks (
     session_state   INTEGER NOT NULL DEFAULT 0,
     race_laps       INTEGER NOT NULL DEFAULT 0,
     cam_car_idx     INTEGER NOT NULL DEFAULT 0,
-    flags           INTEGER NOT NULL DEFAULT 0
+    flags           INTEGER NOT NULL DEFAULT 0,
+    flag_yellow     INTEGER NOT NULL DEFAULT 0,
+    flag_red        INTEGER NOT NULL DEFAULT 0,
+    flag_checkered  INTEGER NOT NULL DEFAULT 0
 );
 
 -- Per-car state (N rows per race_tick, one per active car)
@@ -44,7 +47,11 @@ CREATE TABLE IF NOT EXISTS car_states (
     lap_pct         REAL    NOT NULL DEFAULT 0.0,
     surface         INTEGER NOT NULL DEFAULT 0,
     est_time        REAL    NOT NULL DEFAULT 0.0,
-    best_lap_time   REAL    NOT NULL DEFAULT -1.0
+    best_lap_time   REAL    NOT NULL DEFAULT -1.0,
+    speed_ms        REAL    DEFAULT NULL,
+    f2_time         REAL    DEFAULT NULL,
+    last_lap_time   REAL    DEFAULT -1.0,
+    steer_angle     REAL    DEFAULT NULL
 );
 
 -- Detected race events
@@ -114,6 +121,17 @@ CREATE TABLE IF NOT EXISTS highlight_config (
     updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Video Composition Scripts (declarative render contracts)
+CREATE TABLE IF NOT EXISTS highlight_scripts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    version         INTEGER NOT NULL DEFAULT 1,
+    script_json     TEXT    NOT NULL DEFAULT '{}',
+    validation_status TEXT  NOT NULL DEFAULT 'pending',
+    llm_used        INTEGER NOT NULL DEFAULT 0,
+    llm_prompt_hash TEXT    DEFAULT NULL,
+    created_at      TEXT    DEFAULT (datetime('now'))
+);
+
 -- ── Indexes ─────────────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_car_states_tick ON car_states(tick_id);
 CREATE INDEX IF NOT EXISTS idx_car_states_car  ON car_states(car_idx);
@@ -149,6 +167,34 @@ def init_analysis_db(project_dir: str) -> None:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(highlight_config)").fetchall()]
         if "params" not in cols:
             conn.execute("ALTER TABLE highlight_config ADD COLUMN params TEXT NOT NULL DEFAULT '{}'")
+
+        # Migration: add new car_states columns if missing
+        cs_cols = [r[1] for r in conn.execute("PRAGMA table_info(car_states)").fetchall()]
+        for col, ddl in [
+            ("speed_ms",      "REAL DEFAULT NULL"),
+            ("f2_time",       "REAL DEFAULT NULL"),
+            ("last_lap_time", "REAL DEFAULT -1.0"),
+            ("steer_angle",   "REAL DEFAULT NULL"),
+        ]:
+            if col not in cs_cols:
+                try:
+                    conn.execute(f"ALTER TABLE car_states ADD COLUMN {col} {ddl}")
+                except sqlite3.OperationalError:
+                    pass
+
+        # Migration: add new race_ticks columns if missing
+        rt_cols = [r[1] for r in conn.execute("PRAGMA table_info(race_ticks)").fetchall()]
+        for col, ddl in [
+            ("flag_yellow",    "INTEGER NOT NULL DEFAULT 0"),
+            ("flag_red",       "INTEGER NOT NULL DEFAULT 0"),
+            ("flag_checkered", "INTEGER NOT NULL DEFAULT 0"),
+        ]:
+            if col not in rt_cols:
+                try:
+                    conn.execute(f"ALTER TABLE race_ticks ADD COLUMN {col} {ddl}")
+                except sqlite3.OperationalError:
+                    pass
+
         conn.commit()
         logger.info("[AnalysisDB] Initialised project database at %s", project_dir)
     finally:
