@@ -68,6 +68,34 @@ export default function HighlightMetrics() {
         value={`${metrics.driverCount} / ${metrics.totalDrivers}`}
         suffix={` (${metrics.driverCoverage}%)`}
       />
+
+      {/* Tier distribution */}
+      {metrics.tierCounts && (
+        <div className="pt-1 border-t border-border-subtle">
+          <div className="flex items-center gap-2 mb-1">
+            <BarChart3 className="w-3 h-3 text-text-tertiary shrink-0" />
+            <span className="text-xxs text-text-secondary">Tier Distribution</span>
+          </div>
+          <div className="flex gap-1.5 ml-5">
+            {['S', 'A', 'B', 'C'].map(tier => (
+              <div key={tier} className="flex items-center gap-0.5">
+                <span
+                  className="inline-block w-4 h-4 rounded text-white font-bold flex items-center justify-center"
+                  style={{
+                    backgroundColor: tier === 'S' ? '#ef4444' : tier === 'A' ? '#f97316' : tier === 'B' ? '#3b82f6' : '#6b7280',
+                    fontSize: '8px',
+                  }}
+                >
+                  {tier}
+                </span>
+                <span className="text-xxs text-text-secondary font-mono">
+                  {metrics.tierCounts[tier] || 0}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

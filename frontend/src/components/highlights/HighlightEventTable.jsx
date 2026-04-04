@@ -65,6 +65,7 @@ export default function HighlightEventTable() {
           <thead className="sticky top-0 bg-bg-secondary z-10">
             <tr className="border-b border-border">
               <th className="w-8 px-1 py-1.5 text-center text-text-tertiary font-medium">✓</th>
+              <th className="w-8 px-1 py-1.5 text-center text-text-tertiary font-medium">Tier</th>
               <SortableHeader column="score" label="Score" current={sortColumn} direction={sortDirection} onSort={handleSort} />
               <SortableHeader column="severity" label="Sev" current={sortColumn} direction={sortDirection} onSort={handleSort} />
               <SortableHeader column="duration" label="Dur" current={sortColumn} direction={sortDirection} onSort={handleSort} />
@@ -127,6 +128,17 @@ export default function HighlightEventTable() {
                       {!override && evt.inclusion === 'highlight' && <Minus className="w-2.5 h-2.5" />}
                       {!override && evt.inclusion === 'full-video' && <Film className="w-2 h-2 opacity-50" />}
                     </button>
+                  </td>
+
+                  {/* Tier badge */}
+                  <td className="px-1 py-1 text-center">
+                    <span
+                      className="inline-block w-5 h-5 rounded text-white font-bold flex items-center justify-center"
+                      style={{ backgroundColor: tierColor(evt.tier), fontSize: '9px' }}
+                      title={`Tier ${evt.tier}${evt.bucket ? ` (${evt.bucket})` : ''}`}
+                    >
+                      {evt.tier || '-'}
+                    </span>
                   </td>
 
                   {/* Score */}
@@ -217,4 +229,15 @@ function severityColor(severity) {
   if (severity >= 4) return '#eab308'
   if (severity >= 2) return '#22c55e'
   return '#6b7280'
+}
+
+/** Map tier to color (S/A/B/C) */
+function tierColor(tier) {
+  switch (tier) {
+    case 'S': return '#ef4444'  // Red — must-have
+    case 'A': return '#f97316'  // Orange — high priority
+    case 'B': return '#3b82f6'  // Blue — medium priority
+    case 'C': return '#6b7280'  // Gray — low priority
+    default:  return '#6b7280'
+  }
 }

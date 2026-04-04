@@ -1,6 +1,6 @@
 import { useHighlight, EVENT_TYPE_LABELS } from '../../context/HighlightContext'
 import { EVENT_COLORS } from '../../context/TimelineContext'
-import { Wand2, SlidersHorizontal } from 'lucide-react'
+import { Wand2, SlidersHorizontal, Sparkles } from 'lucide-react'
 
 /**
  * HighlightWeightSliders — Priority sliders for each event type.
@@ -15,6 +15,7 @@ export default function HighlightWeightSliders() {
     minSeverity, setMinSeverity,
     targetDuration, setTargetDuration,
     params, setParams,
+    llmEnabled, setLlmEnabled,
   } = useHighlight()
 
   const eventTypes = Object.keys(EVENT_TYPE_LABELS)
@@ -193,6 +194,35 @@ export default function HighlightWeightSliders() {
                        focus:outline-none focus:border-accent"
           />
         </div>
+      </div>
+
+      {/* LLM Editorial Layer Toggle */}
+      <div className="pt-2 border-t border-border-subtle space-y-1.5">
+        <div className="flex items-center gap-1.5">
+          <Sparkles className="w-3 h-3 text-text-tertiary" />
+          <h4 className="text-xxs font-semibold text-text-tertiary uppercase tracking-wider">
+            AI Narrative Layer
+          </h4>
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={llmEnabled}
+              onChange={(e) => setLlmEnabled(e.target.checked)}
+              className="w-3 h-3 accent-accent cursor-pointer"
+            />
+            <span className="text-xxs text-text-secondary">
+              Enable LLM editorial pass
+            </span>
+          </label>
+        </div>
+        {llmEnabled && (
+          <p className="text-xxs text-text-disabled ml-5">
+            Adds narrative notes, transition suggestions, and story anchors.
+            Requires API key in settings.
+          </p>
+        )}
       </div>
     </div>
   )
