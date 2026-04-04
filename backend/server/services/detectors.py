@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from collections import defaultdict
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,11 @@ SESSION_STATE_PARADE     = 3
 SESSION_STATE_RACING     = 4
 SESSION_STATE_CHECKERED  = 5
 SESSION_STATE_COOLDOWN   = 6
+
+# Speed-based severity constants
+REFERENCE_SPEED_MS = 70.0    # ~250 km/h — used to normalise speed to 0–1
+TIME_LOSS_WEIGHT   = 0.6     # weight for time-loss component in blended severity
+SPEED_WEIGHT       = 0.4     # weight for speed component in blended severity
 
 
 # ── Base class ───────────────────────────────────────────────────────────────
@@ -124,7 +130,7 @@ class IncidentDetector(BaseDetector):
                 WHERE t.session_state IN (?, ?)
             )
             SELECT sw.session_time, sw.replay_frame, sw.cam_car_idx,
-                   cs.position, cs.lap
+                   cs.position, cs.lap, cs.speed_ms
             FROM cam_switches sw
             JOIN car_states cs ON cs.tick_id = sw.tick_id
                               AND cs.car_idx = sw.cam_car_idx
@@ -145,6 +151,7 @@ class IncidentDetector(BaseDetector):
             car_idx = row["cam_car_idx"]
             position = row["position"]
             lap = row["lap"]
+            speed_ms = row["speed_ms"]
 
             last = seen.get(car_idx, -999)
             if time_s - last < self.DEDUP_SECONDS:
@@ -157,6 +164,13 @@ class IncidentDetector(BaseDetector):
                         break
                 continue
 
+            # Speed-based severity: normalise to ~70 m/s ≈ 250 km/h
+            if speed_ms is not None and speed_ms > 0:
+                speed_severity = min(speed_ms / REFERENCE_SPEED_MS, 1.0)
+                severity = max(round(speed_severity * 10), 1)
+            else:
+                severity = 6  # fallback to original default
+
             events.append({
                 "event_type": self.event_type,
                 "start_time": max(0, time_s - self.LEAD_IN),
@@ -164,7 +178,7 @@ class IncidentDetector(BaseDetector):
                 "start_frame": max(0, frame),
                 "end_frame": frame,
                 "lap_number": lap,
-                "severity": 6,
+                "severity": severity,
                 "involved_drivers": [car_idx],
                 "position": position,
                 "metadata": {"detected_by": "cam_switch_off_track"},
@@ -176,6 +190,34 @@ class IncidentDetector(BaseDetector):
 
 
 # ── Battle Detector ──────────────────────────────────────────────────────────
+
+
+def _find_chains(pairs):
+    """Find connected components from a list of (a, b) pairs using union-find."""
+    parent = {}
+
+    def find(x):
+        if x not in parent:
+            parent[x] = x
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for a, b in pairs:
+        union(a, b)
+
+    chains = defaultdict(set)
+    for node in parent:
+        chains[find(node)].add(node)
+
+    return list(chains.values())
+
 
 class BattleDetector(BaseDetector):
     """Detect sustained battles between adjacent position cars.
@@ -225,21 +267,46 @@ class BattleDetector(BaseDetector):
             avg_lap_time, gap_threshold,
         )).fetchall()
 
-        # Group consecutive close-gap samples into battle windows
-        battles: list[dict] = []
+        # Group rows by tick time and find N-car chains per tick
+        tick_pairs: dict[float, list[tuple]] = defaultdict(list)
+        tick_meta: dict[float, dict] = {}
         for row in rows:
             time_s = row["session_time"]
-            frame = row["replay_frame"]
-            pair = sorted([row["leader_idx"], row["follower_idx"]])
+            tick_pairs[time_s].append((row["leader_idx"], row["follower_idx"]))
+            if time_s not in tick_meta:
+                tick_meta[time_s] = {
+                    "frame": row["replay_frame"],
+                    "lap": row["lap"],
+                    "position": row["leader_pos"],
+                }
 
-            # Try to extend last battle with same pair
+        # Build per-tick chains (connected components)
+        tick_chains: list[tuple[float, frozenset]] = []
+        for time_s in sorted(tick_pairs):
+            chains = _find_chains(tick_pairs[time_s])
+            for chain in chains:
+                tick_chains.append((time_s, frozenset(chain)))
+
+        # Group consecutive ticks with overlapping chains into battle windows.
+        # A chain is "the same battle" if it shares at least one car with the
+        # previous tick's chain and is within MERGE_GAP seconds.
+        battles: list[dict] = []
+        for time_s, chain in tick_chains:
+            meta = tick_meta[time_s]
+            drivers = sorted(chain)
+
+            # Try to extend an existing battle whose drivers overlap
             extended = False
             if battles:
                 last = battles[-1]
-                last_pair = sorted(last["involved_drivers"])
-                if last_pair == pair and time_s - last["end_time"] < self.MERGE_GAP:
+                last_drivers = set(last["involved_drivers"])
+                if chain & last_drivers and time_s - last["end_time"] < self.MERGE_GAP:
+                    # Merge drivers into the existing battle
+                    merged = last_drivers | chain
+                    last["involved_drivers"] = sorted(merged)
                     last["end_time"] = time_s
-                    last["end_frame"] = frame
+                    last["end_frame"] = meta["frame"]
+                    last["metadata"]["chain_length"] = len(merged)
                     extended = True
 
             if not extended:
@@ -247,13 +314,16 @@ class BattleDetector(BaseDetector):
                     "event_type": self.event_type,
                     "start_time": time_s,
                     "end_time": time_s,
-                    "start_frame": frame,
-                    "end_frame": frame,
-                    "lap_number": row["lap"],
+                    "start_frame": meta["frame"],
+                    "end_frame": meta["frame"],
+                    "lap_number": meta["lap"],
                     "severity": 5,
-                    "involved_drivers": pair,
-                    "position": row["leader_pos"],
-                    "metadata": {"gap_threshold": gap_threshold},
+                    "involved_drivers": drivers,
+                    "position": meta["position"],
+                    "metadata": {
+                        "gap_threshold": gap_threshold,
+                        "chain_length": len(drivers),
+                    },
                 })
 
         # Filter out battles shorter than minimum duration
@@ -693,7 +763,7 @@ class CrashDetector(BaseDetector):
         rows = db.execute("""
             WITH off_track AS (
                 SELECT cs.car_idx, cs.position, cs.lap, cs.lap_pct,
-                       cs.est_time, cs.best_lap_time,
+                       cs.est_time, cs.best_lap_time, cs.speed_ms,
                        t.session_time, t.replay_frame,
                        LAG(cs.surface) OVER (
                            PARTITION BY cs.car_idx ORDER BY t.session_time
@@ -707,7 +777,7 @@ class CrashDetector(BaseDetector):
                   AND cs.position > 0
             )
             SELECT session_time, replay_frame, car_idx, position, lap,
-                   lap_pct, est_time, next_est_time, best_lap_time
+                   lap_pct, est_time, next_est_time, best_lap_time, speed_ms
             FROM off_track
             WHERE prev_surface = ?
               AND next_est_time IS NOT NULL
@@ -734,8 +804,19 @@ class CrashDetector(BaseDetector):
                 continue
 
             time_loss = row["next_est_time"] - row["est_time"]
-            # Severity: base 6, scale up with time lost (capped at 10)
-            severity = min(10, 6 + int(time_loss / 10))
+            # Base severity from time loss: base 6, scale up (capped at 10)
+            base_severity = min(10, 6 + int(time_loss / 10))
+
+            # Blend speed component if available
+            speed_ms = row["speed_ms"]
+            if speed_ms is not None and speed_ms > 0:
+                speed_factor = min(speed_ms / REFERENCE_SPEED_MS, 1.0)
+                severity = max(round(
+                    base_severity * TIME_LOSS_WEIGHT
+                    + speed_factor * 10 * SPEED_WEIGHT
+                ), 1)
+            else:
+                severity = base_severity
 
             events.append({
                 "event_type": self.event_type,

@@ -30,7 +30,10 @@ CREATE TABLE IF NOT EXISTS race_ticks (
     session_state   INTEGER NOT NULL DEFAULT 0,
     race_laps       INTEGER NOT NULL DEFAULT 0,
     cam_car_idx     INTEGER NOT NULL DEFAULT 0,
-    flags           INTEGER NOT NULL DEFAULT 0
+    flags           INTEGER NOT NULL DEFAULT 0,
+    flag_yellow     INTEGER NOT NULL DEFAULT 0,
+    flag_red        INTEGER NOT NULL DEFAULT 0,
+    flag_checkered  INTEGER NOT NULL DEFAULT 0
 );
 
 -- Per-car state (N rows per race_tick, one per active car)
@@ -44,7 +47,8 @@ CREATE TABLE IF NOT EXISTS car_states (
     lap_pct         REAL    NOT NULL DEFAULT 0.0,
     surface         INTEGER NOT NULL DEFAULT 0,
     est_time        REAL    NOT NULL DEFAULT 0.0,
-    best_lap_time   REAL    NOT NULL DEFAULT -1.0
+    best_lap_time   REAL    NOT NULL DEFAULT -1.0,
+    speed_ms        REAL    DEFAULT NULL
 );
 
 -- Detected race events
@@ -149,6 +153,28 @@ def init_analysis_db(project_dir: str) -> None:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(highlight_config)").fetchall()]
         if "params" not in cols:
             conn.execute("ALTER TABLE highlight_config ADD COLUMN params TEXT NOT NULL DEFAULT '{}'")
+
+        # Migration: add speed_ms column to car_states if missing (older DBs)
+        cs_cols = [r[1] for r in conn.execute("PRAGMA table_info(car_states)").fetchall()]
+        if "speed_ms" not in cs_cols:
+            try:
+                conn.execute("ALTER TABLE car_states ADD COLUMN speed_ms REAL DEFAULT NULL")
+            except sqlite3.OperationalError as exc:
+                logger.debug("car_states migration skip speed_ms: %s", exc)
+
+        # Migration: add new race_ticks columns if missing
+        rt_cols = [r[1] for r in conn.execute("PRAGMA table_info(race_ticks)").fetchall()]
+        for col, ddl in [
+            ("flag_yellow",    "INTEGER NOT NULL DEFAULT 0"),
+            ("flag_red",       "INTEGER NOT NULL DEFAULT 0"),
+            ("flag_checkered", "INTEGER NOT NULL DEFAULT 0"),
+        ]:
+            if col not in rt_cols:
+                try:
+                    conn.execute(f"ALTER TABLE race_ticks ADD COLUMN {col} {ddl}")
+                except sqlite3.OperationalError as exc:
+                    logger.debug("race_ticks migration skip %s: %s", col, exc)
+
         conn.commit()
         logger.info("[AnalysisDB] Initialised project database at %s", project_dir)
     finally:

@@ -194,6 +194,7 @@ export default function HighlightWeightSliders() {
           />
         </div>
       </div>
+
     </div>
   )
 }

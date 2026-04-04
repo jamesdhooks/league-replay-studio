@@ -83,7 +83,7 @@ export default function HighlightTimeline() {
                 backgroundColor: color,
                 opacity: 0.12,
               }}
-              title={`✗ ${evt.event_type} (score ${evt.score}) — ${evt.reason}`}
+              title={`✗ ${evt.event_type} [${evt.tier || '?'}] (score ${evt.score}) — ${evt.reason}`}
             />
           )
         })}
@@ -104,7 +104,7 @@ export default function HighlightTimeline() {
                 backgroundColor: color,
                 opacity: 0.4,
               }}
-              title={`○ ${evt.event_type} (score ${evt.score}) — full-video only`}
+              title={`○ ${evt.event_type} [${evt.tier || '?'}] (score ${evt.score}) — full-video only`}
             />
           )
         })}
@@ -125,7 +125,7 @@ export default function HighlightTimeline() {
                 backgroundColor: color,
                 opacity: 0.85,
               }}
-              title={`✓ ${evt.event_type} (score ${evt.score})`}
+              title={`✓ ${evt.event_type} [${evt.tier || '?'}] (score ${evt.score})`}
             />
           )
         })}

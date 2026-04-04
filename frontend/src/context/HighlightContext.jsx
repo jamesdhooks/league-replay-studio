@@ -16,6 +16,10 @@ const DEFAULT_WEIGHTS = {
   leader_change: 90,
   first_lap: 100,
   last_lap: 100,
+  crash: 80,
+  spinout: 60,
+  contact: 65,
+  close_call: 40,
 }
 
 /** Default detection/camera tuning parameters (inspired by iRacingReplayDirector) */
@@ -45,32 +49,136 @@ export const EVENT_TYPE_LABELS = {
   spinout: 'Spinouts',
   contact: 'Contacts',
   close_call: 'Close Calls',
+  pace_lap: 'Pace Lap',
+  restart: 'Restart',
 }
 
-/**
- * Compute highlight score for a single event.
- *
- * Base: (severity / 10) × (type_weight / 100) × 100
- * Then apply boosts: overtake, preferred driver, first/last lap multipliers.
- */
-function computeEventScore(event, weights, params = {}) {
-  const typeWeight = weights[event.event_type] ?? 50
-  let score = (event.severity / 10) * (typeWeight / 100) * 100
+/** Tier color map (S/A/B/C) */
+export const TIER_COLORS = {
+  S: '#ef4444',  // Red — must-have
+  A: '#f97316',  // Orange — high priority
+  B: '#3b82f6',  // Blue — medium priority
+  C: '#6b7280',  // Gray — low priority
+}
 
-  // Overtake boost — events with position changes get a multiplier
-  if (event.metadata?.with_overtake && params.overtakeBoost) {
+/** Get color for a tier value */
+export function tierColor(tier) {
+  return TIER_COLORS[tier] || '#6b7280'
+}
+
+/** Base scores by event type for the multi-pass scoring pipeline */
+const BASE_SCORES = {
+  crash: 1.5,
+  incident: 1.5,
+  battle: 1.3,
+  spinout: 1.2,
+  overtake: 1.0,
+  leader_change: 0.9,
+  fastest_lap: 0.7,
+  pit_stop: 0.5,
+  contact: 1.2,
+  close_call: 0.8,
+}
+
+/** Event types that are always included (mandatory) */
+const MANDATORY_TYPES = new Set(['first_lap', 'last_lap', 'restart', 'pace_lap'])
+
+/** Tier classification thresholds */
+const TIER_S_THRESHOLD = 9.0
+const TIER_A_THRESHOLD = 7.0
+const TIER_B_THRESHOLD = 5.0
+
+/** Timeline bucket boundaries (fraction of total race) */
+const BUCKET_BOUNDARIES = {
+  intro: [0.0, 0.15],
+  early: [0.15, 0.40],
+  mid: [0.40, 0.70],
+  late: [0.70, 1.0],
+}
+
+/** Reference speed for normalisation (70 m/s ≈ 250 km/h) */
+const REFERENCE_SPEED_MS = 70.0
+
+/**
+ * Compute highlight score using the multi-pass scoring pipeline (v2).
+ *
+ * Stage 1: Base score by event type
+ * Stage 2: Position importance multiplier
+ * Stage 3: Position change multiplier
+ * Stage 4: Consequence weighting
+ * Stage 5: Narrative bonus
+ * Stage 6: User weight override
+ *
+ * Note: Exposure adjustment (backend Stage 6) is omitted client-side because
+ * it requires cross-event state (driver screen-time accumulator).  Use the
+ * server-side reprocess endpoint for authoritative scoring with exposure balance.
+ *
+ * Returns { score, tier, bucket, components }
+ */
+function computeEventScore(event, weights, params = {}, raceDuration = 0) {
+  const eventType = event.event_type || ''
+  const components = {}
+
+  // Stage 1 — Base Score
+  let score
+  if (MANDATORY_TYPES.has(eventType)) {
+    score = 10.0
+    components.base = 10.0
+  } else {
+    const base = BASE_SCORES[eventType] ?? 0.5
+    score = base
+    components.base = base
+  }
+
+  // Stage 2 — Position Importance Multiplier
+  const position = event.position || 99
+  let posMult = 1.0
+  if (position <= 3) posMult = 2.0
+  else if (position <= 10) posMult = 1.5
+  score *= posMult
+  components.position = posMult
+
+  // Stage 3 — Position Change Multiplier
+  const metadata = (typeof event.metadata === 'string')
+    ? (() => { try { return JSON.parse(event.metadata) } catch { return {} } })()
+    : (event.metadata || {})
+  const positionDelta = Math.abs(metadata.position_delta || 0)
+  const posChangeMult = 1 + positionDelta * 0.3
+  score *= posChangeMult
+  components.position_change = posChangeMult
+
+  // Stage 4 — Consequence Weighting
+  const positionsLost = Math.abs(metadata.positions_lost || 0)
+  const speedMs = metadata.speed_ms || event.speed_ms || 0
+  const damageSeverity = speedMs > 0 ? Math.min(speedMs / REFERENCE_SPEED_MS, 1.0) : 0
+  const raceImpact = metadata.race_impact || 0
+  const consequence = (positionsLost * 0.3) + (damageSeverity * 0.4) + (raceImpact * 0.3)
+  score *= (1 + consequence)
+  components.consequence = Math.round(consequence * 1000) / 1000
+
+  // Stage 5 — Narrative Bonus
+  let narrativeBonus = 0
+  if (eventType === 'battle') {
+    const chainLength = metadata.chain_length || 2
+    narrativeBonus += Math.log(chainLength + 1) * 0.5
+  }
+  if (raceDuration > 0) {
+    const racePct = (event.start_time_seconds || 0) / raceDuration
+    if (racePct > 0.9) {
+      const lateRaceBonus = score * 0.2 // 20% boost for late-race events
+      score *= 1.2
+      narrativeBonus += lateRaceBonus
+    }
+  }
+  score += narrativeBonus
+  components.narrative_bonus = Math.round(narrativeBonus * 1000) / 1000
+
+  // Overtake boost (legacy param support)
+  if (metadata.with_overtake && params.overtakeBoost) {
     score *= params.overtakeBoost
   }
 
-  // Race phase multiplier
-  if (event.event_type === 'first_lap' && params.firstLapWeight != null) {
-    score *= params.firstLapWeight
-  }
-  if (event.event_type === 'last_lap' && params.lastLapWeight != null) {
-    score *= params.lastLapWeight
-  }
-
-  // Preferred driver boost
+  // Preferred driver boost (legacy param support)
   if (params.preferredDrivers && params.preferredDriverBoost) {
     const preferred = params.preferredDrivers.split(',').map(n => n.trim().toLowerCase()).filter(Boolean)
     if (preferred.length > 0 && event.driver_names) {
@@ -83,22 +191,57 @@ function computeEventScore(event, weights, params = {}) {
     }
   }
 
-  return Math.round(score)
+  // Stage 6 — User Weight Override
+  const userWeight = (weights[eventType] ?? 50) / 100.0
+  if (!MANDATORY_TYPES.has(eventType)) {
+    score *= userWeight
+  }
+  components.user_weight = userWeight
+
+  // Round score
+  score = Math.round(score * 100) / 100
+
+  // Tier classification
+  let tier
+  if (MANDATORY_TYPES.has(eventType) || score > TIER_S_THRESHOLD) {
+    tier = 'S'
+  } else if (score >= TIER_A_THRESHOLD) {
+    tier = 'A'
+  } else if (score >= TIER_B_THRESHOLD) {
+    tier = 'B'
+  } else {
+    tier = 'C'
+  }
+
+  // Bucket classification
+  let bucket = 'mid'
+  if (raceDuration > 0) {
+    const pct = (event.start_time_seconds || 0) / raceDuration
+    for (const [bname, [lo, hi]] of Object.entries(BUCKET_BOUNDARIES)) {
+      if (pct >= lo && pct < hi) {
+        bucket = bname
+        break
+      }
+    }
+  }
+
+  return { score, tier, bucket, components }
 }
 
 /**
- * Build selection reason string for an event.
+ * Build selection reason string for an event (v2 — includes tier).
  */
-function buildReason(event, score, overrides, minSeverity, inclusion) {
+function buildReason(event, score, overrides, minSeverity, inclusion, tier) {
   const eid = String(event.id)
   const override = normalizeOverride(overrides[eid])
   if (override === 'highlight') return 'Manual highlight'
   if (override === 'full-video') return 'Manual full-video'
   if (override === 'exclude') return 'Manual exclude'
+  if (MANDATORY_TYPES.has(event.event_type)) return 'Mandatory'
   if (event.severity < minSeverity) return `Below min severity (${minSeverity})`
   if (score <= 0) return 'Zero weight'
-  if (inclusion === 'full-video') return `Score ${score} — over highlight budget`
-  return `Score ${score} (sev ${event.severity} × weight)`
+  if (inclusion === 'full-video') return `Tier ${tier} — over budget`
+  return `Tier ${tier} — score ${score}`
 }
 
 /** Normalize legacy override values: 'include' → 'highlight' */
@@ -113,30 +256,57 @@ const TARGET_DURATION_TOLERANCE = 1.1
 /**
  * Run the highlight selection algorithm entirely on the client.
  *
+ * Uses the multi-pass scoring pipeline (v2) with tier classification
+ * and bucket-based timeline allocation.
+ *
  * Returns { scoredEvents, selectedIds, metrics }
  */
 function computeHighlightSelection(events, weights, targetDuration, minSeverity, overrides, raceDuration, drivers, params = {}) {
-  // 1. Score all events
-  const scored = events.map(evt => ({
-    ...evt,
-    score: computeEventScore(evt, weights, params),
-    override: normalizeOverride(overrides[String(evt.id)]),
-    duration: Math.max(0, evt.end_time_seconds - evt.start_time_seconds),
-  }))
+  // 1. Score all events using multi-pass pipeline
+  const scored = events.map(evt => {
+    const { score, tier, bucket, components } = computeEventScore(evt, weights, params, raceDuration)
+    return {
+      ...evt,
+      score,
+      tier,
+      bucket,
+      score_components: components,
+      override: normalizeOverride(overrides[String(evt.id)]),
+      duration: Math.max(0, evt.end_time_seconds - evt.start_time_seconds),
+    }
+  })
 
-  // 2. Determine inclusion into 3 tiers: highlight / full-video / excluded
-  const sortedByScore = [...scored].sort((a, b) => b.score - a.score)
+  // 2. Multi-pass selection:
+  //    Pass 1 — Must-have events (mandatory types + Tier S) + manual overrides
+  //    Pass 2 — Bucket fill by local score
+  //    Pass 3 — Remainder → full-video tier
+  const sortedByScore = [...scored].sort((a, b) => {
+    // Sort by tier priority first, then by score
+    const tierPri = { S: 4, A: 3, B: 2, C: 1 }
+    const tp = (tierPri[b.tier] || 0) - (tierPri[a.tier] || 0)
+    if (tp !== 0) return tp
+    return b.score - a.score
+  })
 
   let highlightDuration = 0
   const highlightIds = new Set()
   const fullVideoIds = new Set()
   const excludedIds = new Set()
 
-  // First pass: manual overrides
+  // Initialize bucket budgets
+  const bucketBudgets = {}
+  const bucketUsed = {}
+  for (const [name, [lo, hi]] of Object.entries(BUCKET_BOUNDARIES)) {
+    bucketBudgets[name] = (targetDuration || 300) * (hi - lo)
+    bucketUsed[name] = 0
+  }
+
+  // Pass 1: Manual overrides
   for (const evt of sortedByScore) {
     if (evt.override === 'highlight') {
       highlightIds.add(evt.id)
       highlightDuration += evt.duration
+      bucketUsed[evt.bucket] = (bucketUsed[evt.bucket] || 0) + evt.duration
     } else if (evt.override === 'full-video') {
       fullVideoIds.add(evt.id)
     } else if (evt.override === 'exclude') {
@@ -144,7 +314,17 @@ function computeHighlightSelection(events, weights, targetDuration, minSeverity,
     }
   }
 
-  // Second pass: algorithm selection
+  // Pass 1b: Must-have events (Tier S + mandatory types)
+  for (const evt of sortedByScore) {
+    if (highlightIds.has(evt.id) || fullVideoIds.has(evt.id) || excludedIds.has(evt.id)) continue
+    if (evt.tier === 'S' || MANDATORY_TYPES.has(evt.event_type)) {
+      highlightIds.add(evt.id)
+      highlightDuration += evt.duration
+      bucketUsed[evt.bucket] = (bucketUsed[evt.bucket] || 0) + evt.duration
+    }
+  }
+
+  // Pass 2: Bucket fill — select by score within bucket budgets
   for (const evt of sortedByScore) {
     if (highlightIds.has(evt.id) || fullVideoIds.has(evt.id) || excludedIds.has(evt.id)) continue
 
@@ -168,7 +348,7 @@ function computeHighlightSelection(events, weights, targetDuration, minSeverity,
       continue
     }
 
-    // Fits in highlight budget → highlight; otherwise → full-video (still a valid event)
+    // Check overall budget
     if (targetDuration && targetDuration > 0) {
       if (highlightDuration + evt.duration > targetDuration * TARGET_DURATION_TOLERANCE) {
         fullVideoIds.add(evt.id)
@@ -176,11 +356,19 @@ function computeHighlightSelection(events, weights, targetDuration, minSeverity,
       }
     }
 
+    // Check bucket budget
+    const budget = bucketBudgets[evt.bucket] || (targetDuration || 300) * 0.3
+    if ((bucketUsed[evt.bucket] || 0) >= budget) {
+      fullVideoIds.add(evt.id)
+      continue
+    }
+
     highlightIds.add(evt.id)
     highlightDuration += evt.duration
+    bucketUsed[evt.bucket] = (bucketUsed[evt.bucket] || 0) + evt.duration
   }
 
-  // 3. Build scored events with inclusion tier and reasons
+  // 3. Build scored events with inclusion tier, bucket, and reasons
   const scoredEvents = scored.map(evt => {
     const inclusion = highlightIds.has(evt.id) ? 'highlight'
       : fullVideoIds.has(evt.id) ? 'full-video'
@@ -189,7 +377,7 @@ function computeHighlightSelection(events, weights, targetDuration, minSeverity,
       ...evt,
       included: inclusion === 'highlight', // backward compat
       inclusion,
-      reason: buildReason(evt, evt.score, overrides, minSeverity, inclusion),
+      reason: buildReason(evt, evt.score, overrides, minSeverity, inclusion, evt.tier),
     }
   })
 
@@ -243,6 +431,12 @@ function computeHighlightSelection(events, weights, targetDuration, minSeverity,
   const totalDrivers = drivers.length || 1
   const driverCoveragePct = Math.round((allDriverIds.size / totalDrivers) * 100)
 
+  // Tier distribution
+  const tierCounts = { S: 0, A: 0, B: 0, C: 0 }
+  for (const evt of scored) {
+    tierCounts[evt.tier] = (tierCounts[evt.tier] || 0) + 1
+  }
+
   const metrics = {
     duration: Math.round(totalHighlightDuration * 10) / 10,
     fullVideoDuration: Math.round(totalFullVideoDuration * 10) / 10,
@@ -256,6 +450,7 @@ function computeHighlightSelection(events, weights, targetDuration, minSeverity,
     driverCount: allDriverIds.size,
     totalDrivers,
     typeCounts,
+    tierCounts,
   }
 
   return {
@@ -422,6 +617,36 @@ export function HighlightProvider({ children }) {
       throw err
     }
   }, [selection.selectedIds, selection.excludedIds, saveConfig])
+
+  // ── Server-side reprocessing (v2 pipeline) ────────────────────────────────
+  const [serverScoring, setServerScoring] = useState(false)
+  const [serverScoredEvents, setServerScoredEvents] = useState(null)
+  const [serverMetrics, setServerMetrics] = useState(null)
+
+  const reprocessHighlights = useCallback(async (projectId, opts = {}) => {
+    try {
+      setServerScoring(true)
+      const result = await apiPost(`/projects/${projectId}/highlights/reprocess`, {
+        weights,
+        constraints: {
+          target_duration: targetDuration || 300,
+          min_severity: minSeverity,
+          pip_threshold: opts.pipThreshold || 7.0,
+          max_driver_exposure: opts.maxDriverExposure || 0.25,
+        },
+      })
+      if (result.scored_events) {
+        setServerScoredEvents(result.scored_events)
+        setServerMetrics(result.metrics || null)
+      }
+      return result
+    } catch (err) {
+      console.error('[Highlights] Server reprocess error:', err)
+      throw err
+    } finally {
+      setServerScoring(false)
+    }
+  }, [weights, targetDuration, minSeverity])
 
   // ── Load drivers ───────────────────────────────────────────────────────
   const loadDrivers = useCallback(async (projectId) => {
@@ -674,6 +899,12 @@ export function HighlightProvider({ children }) {
     loadDrivers,
     autoBalance,
     jumpToEvent,
+    reprocessHighlights,
+
+    // v2 scoring state
+    serverScoring,
+    serverScoredEvents,
+    serverMetrics,
 
     // A/B compare
     abMode,
@@ -708,6 +939,8 @@ export function HighlightProvider({ children }) {
     overrides, toggleOverride, setOverrideValue,
     selection, filteredEvents,
     loadConfig, saveConfig, applyHighlights, loadDrivers, autoBalance, jumpToEvent,
+    reprocessHighlights,
+    serverScoring, serverScoredEvents, serverMetrics,
     abMode, activeConfig, startABCompare, stopABCompare, switchABConfig,
     presets, loadPresets, savePreset, loadPreset, deletePreset,
     sortColumn, sortDirection, handleSort,

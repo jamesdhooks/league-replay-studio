@@ -575,7 +575,10 @@ CREATE TABLE race_ticks (
     session_state   INTEGER NOT NULL,   -- 0=Invalid..4=Racing,5=Checkered,6=CoolDown
     race_laps       INTEGER,            -- ir['RaceLaps'] — leader's current lap
     cam_car_idx     INTEGER,            -- ir['CamCarIdx'] — which car iRacing's auto-director is watching
-    flags           INTEGER DEFAULT 0   -- ir['SessionFlags'] bitfield — yellow, green, checkered, etc.
+    flags           INTEGER DEFAULT 0,  -- ir['SessionFlags'] bitfield — yellow, green, checkered, etc.
+    flag_yellow     INTEGER DEFAULT 0,   -- Parsed yellow flag bit
+    flag_red        INTEGER DEFAULT 0,   -- Parsed red flag bit
+    flag_checkered  INTEGER DEFAULT 0    -- Parsed checkered flag bit
 );
 
 CREATE INDEX idx_tick_time  ON race_ticks(session_time);
@@ -592,7 +595,11 @@ CREATE TABLE car_states (
     lap_pct     REAL    NOT NULL,      -- ir['CarIdxLapDistPct'][car_idx] — 0.0-1.0 track %
     surface     INTEGER NOT NULL,      -- ir['CarIdxTrackSurface'][car_idx] — enum (see below)
     est_time    REAL,                  -- ir['CarIdxEstTime'][car_idx] — est. time to cross S/F
-    best_lap_time REAL DEFAULT -1      -- ir['CarIdxBestLapTime'][car_idx] — personal best (-1 = none)
+    best_lap_time REAL DEFAULT -1,      -- ir['CarIdxBestLapTime'][car_idx] — personal best (-1 = none)
+    speed_ms        REAL    DEFAULT NULL,     -- Derived per-car speed (m/s) from lap_pct rate of change
+    f2_time         REAL    DEFAULT NULL,     -- CarIdxF2Time — more accurate gap timing
+    last_lap_time   REAL    DEFAULT -1.0,     -- CarIdxLastLapTime — for lap regression detection
+    steer_angle     REAL    DEFAULT NULL      -- CarIdxSteer — for spin detection
 );
 
 -- Composite indexes tuned for the actual query patterns:
@@ -1069,6 +1076,10 @@ class TelemetryWriter:
         Args:
             snapshot: The dict emitted by IRacingBridge._emit_telemetry()
         """
+        # v2 additions: Also captures speed_ms (derived from lap_pct
+        # rate of change × track_length), f2_time, last_lap_time,
+        # steer_angle, and parsed flag bits (flag_yellow, flag_red,
+        # flag_checkered) for enhanced event detection and scoring.
         cur = self.db.execute(
             """INSERT INTO race_ticks 
                (session_time, replay_frame, session_state, race_laps, cam_car_idx, flags)
@@ -1231,6 +1242,11 @@ class BattleDetector:
                 open_battles[pair]['end_frame'] = replay_frame
 
         return events
+# Extended in v2: After the adjacent-pair SQL query runs, a Python
+# post-processing step builds a graph of qualifying pairs and finds
+# connected components (N-car chains). A 4-car train produces a single
+# battle event with chain_length in metadata. The narrative bonus formula
+# log(chain_length + 1) * 0.5 now has accurate input.
 ```
 
 #### Full Detector List
@@ -2798,7 +2814,23 @@ The highlight editing suite is the **primary differentiator** of League Replay S
 
 ```python
 class HighlightEditor:
-    """The highlight editing suite backend logic."""
+    """The highlight editing suite backend logic.
+    
+    Uses the multi-pass scoring pipeline (scoring_v3):
+      Stage 1: Base score by event type
+      Stage 2: Position importance multiplier  
+      Stage 3: Position change multiplier
+      Stage 4: Consequence weighting (speed_ms, positions lost, race impact)
+      Stage 5: Narrative bonus (chain length, recency)
+      Stage 6: Exposure adjustment (driver screen-time balance)
+      Stage 7: User weight override
+      Stage 8: Tier classification (S/A/B/C)
+    
+    Plus multi-pass timeline allocation:
+      Pass 1: Must-have events (mandatory types + Tier S)
+      Pass 2: Bucket fill (intro/early/mid/late)
+      Pass 3: Smoothing (repetition, spacing, exposure rebalance)
+    """
     
     async def reprocess(
         self,
@@ -2807,53 +2839,67 @@ class HighlightEditor:
         min_severity: int,
         target_duration_seconds: int,
         manual_overrides: List[ManualOverride],
+        constraints: Dict = None,
+        llm_enabled: bool = False,
     ) -> HighlightResult:
-        """Reprocess event selection with updated parameters.
+        """Reprocess event selection with the v2 multi-pass pipeline.
         Returns instantly from cached telemetry data."""
         
-        # 1. Score all events with current weights
-        scored_events = []
-        for event in project.race_events:
-            weight = rule_weights.get(event.event_type, 50)
-            score = event.severity * (weight / 100)
-            scored_events.append(ScoredEvent(event, score))
+        from scoring_engine import generate_highlights
         
-        # 2. Apply manual overrides (force include/exclude)
-        for override in manual_overrides:
-            event = find_event(scored_events, override.event_id)
-            if override.force_include:
-                event.force_included = True
-            elif override.force_exclude:
-                event.force_excluded = True
-        
-        # 3. Select events to fit target duration
-        # Mandatory events first (first lap, last lap)
-        # Then by score descending until target duration reached
-        selected = self._select_to_fit(
-            scored_events, target_duration_seconds
-        )
-        
-        # 4. Compute metrics
-        metrics = HighlightMetrics(
-            total_duration=sum(e.duration for e in selected),
+        # Run the full 8-stage scoring pipeline with multi-pass allocation
+        result = generate_highlights(
+            events=project.race_events,
             target_duration=target_duration_seconds,
-            event_counts=Counter(e.event_type for e in selected),
-            coverage_percent=self._compute_coverage(selected, project),
-            balance_score=self._compute_balance(selected, project),
-            pacing_score=self._compute_pacing(selected),
-            driver_coverage=self._compute_driver_coverage(selected, project),
+            weights=rule_weights,
+            constraints=constraints or {},
+            overrides={o.event_id: o.action for o in manual_overrides},
+            race_info={
+                'duration': project.race_duration,
+                'num_drivers': project.num_drivers,
+            },
         )
         
-        # 5. Generate EDL for the highlight reel
-        edl = self._generate_edl(selected)
+        # Optional LLM editorial refinement
+        if llm_enabled:
+            result = await self._apply_llm_editorial(result)
+        
+        # Build Video Composition Script (replaces EDL)
+        script = result['script']
         
         return HighlightResult(
-            selected_events=selected,
-            all_events=scored_events,
-            metrics=metrics,
-            edl=edl,
+            selected_events=result['scored_events'],
+            all_events=result['scored_events'],
+            metrics=result['metrics'],
+            script=script,  # Video Composition Script (replaces EDL)
         )
 ```
+
+### 7.8.1 LLM Editorial Layer (New in v2)
+
+The LLM editorial layer operates after the deterministic scoring pipeline has produced a candidate timeline. It does not replace the algorithmic selection — it refines the narrative, adds segment notes, and can swap events within a tier without changing the overall structure.
+
+**LLM Permitted Actions:**
+- Add a `notes` field to any segment (shown in UI and written to segment in output script)
+- Swap two events of equal tier within the same bucket if it improves narrative continuity
+- Suggest a `transition_type` between two adjacent segments (`cut`, `fade`, `crossfade`, `whip`, `zoom`)
+- Flag a segment as `narrative_anchor` if it is pivotal to the race story
+
+**Not permitted:** Changing event inclusion/exclusion, overriding tier classification, modifying timestamps, or adjusting scores. These remain deterministic.
+
+### 7.8.2 Video Composition Script (New in v2)
+
+The Video Composition Script replaces the EDL (Edit Decision List) as the declarative render contract. It is a fully validated JSON document containing:
+- `meta` — title, source_race_id, algorithm_version, llm metadata
+- `timeline` — ordered segments: event, pip, transition, broll
+- `render` — resolution, codec, frame_rate, bitrate, output_format
+- `metadata` — event selection statistics, driver exposure, validation status
+
+Segment types in the timeline:
+- **event** — A single race event clip with camera config and padding
+- **pip** — Picture-in-picture: two simultaneous views composited
+- **transition** — cut/fade/crossfade/whip/zoom between clips
+- **broll** — Gap filler from track-side cameras (inserted for gaps ≥ 8s)
 
 ### 7.9 Settings System
 

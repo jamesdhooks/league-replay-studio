@@ -237,7 +237,9 @@ Tailwind CSS dark-first design system — color tokens, typography scale, spacin
 **Spec:** `007-replay-analysis-engine`
 **Dependencies:** feature-2, feature-3
 
-Core race event detection: incidents, battles, overtakes, pit stops, fastest laps, leader changes, first/last laps. Auto-generated severity scores (0–10), frame-accurate timestamps. Scans replay at 16× speed. Streams results to frontend via WebSocket and persists to SQLite.
+Core race event detection: incidents, battles, overtakes, pit stops, fastest laps, leader changes, first/last laps, crashes, spinouts, contacts, close calls, pace laps. Auto-generated severity scores (0–10), frame-accurate timestamps. Scans replay at 16× speed. Streams results to frontend via WebSocket and persists to SQLite.
+
+**v2 Enhancement (highlight_plan_v2):** Extended telemetry capture (speed_ms, f2_time, last_lap_time, steer_angle, parsed flag bits). BattleDetector extended with N-car chain detection via union-find graph. Speed-based severity for IncidentDetector and CrashDetector. 14 total detectors.
 
 **Acceptance Criteria**
 - [x] Analysis connects to iRacing and scans the replay at 16× speed
@@ -285,6 +287,8 @@ Canvas-based multi-track timeline: Camera, Events, Overlays, Cuts, Audio tracks.
 
 **The crown-jewel differentiator.** Interactive rule weight tuning, event selection table with Reason column, manual override system, live metrics dashboard (duration, coverage %, balance, pacing, driver coverage), A/B compare mode, named config save/load.
 
+**v2 Enhancement (highlight_plan_v2):** Multi-pass scoring pipeline replaces simple severity × weight formula. 8-stage scoring (base → position → position change → consequence → narrative → exposure → user weight → tier). Tier classification (S/A/B/C) with bucket-based timeline allocation. N-car battle chain detection. Speed-based severity for incidents/crashes. Optional LLM editorial layer for narrative refinement. Video Composition Script replaces EDL.
+
 **Acceptance Criteria**
 - [x] Interactive sliders for each event type priority (0–100) with real-time reprocessing on change
 - [x] Event selection table shows all events with Score, Severity, Duration, Type, Reason columns
@@ -299,6 +303,14 @@ Canvas-based multi-track timeline: Camera, Events, Overlays, Cuts, Audio tracks.
 - [x] A/B compare mode saves two configurations and toggles between them
 - [x] Highlight timeline preview shows the condensed highlight reel with event segments
 - [x] Clicking an event in the table jumps the timeline playhead to that moment
+- [x] Multi-pass scoring pipeline with 8-stage formula and tier classification (S/A/B/C)
+- [x] Bucket-based timeline allocation (intro/early/mid/late) with per-bucket budgets
+- [x] N-car battle chain detection with chain_length in metadata
+- [x] Speed-based severity calculation for incidents and crashes
+- [x] Tier badges visible in event table and timeline
+- [x] Tier distribution shown in metrics dashboard
+- [x] LLM toggle for optional narrative refinement (notes, transitions, anchors)
+- [x] Video Composition Script generation (replaces EDL)
 
 ---
 

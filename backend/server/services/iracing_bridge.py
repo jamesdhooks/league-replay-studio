@@ -251,6 +251,7 @@ class IRacingBridge:
             laps       = list(self._ir["CarIdxLap"]           or [])
             class_pos  = list(self._ir["CarIdxClassPosition"] or [])
             best_laps  = list(self._ir["CarIdxBestLapTime"]   or [])
+            speeds     = list(self._ir["CarIdxSpeed"]         or [])
 
             NOT_IN_WORLD = -1
             car_states: list[dict] = []
@@ -265,7 +266,11 @@ class IRacingBridge:
                         "surface":        surfaces[i]  if i < len(surfaces)  else 0,
                         "est_time":       est_times[i] if i < len(est_times) else 0.0,
                         "best_lap_time":  best_laps[i] if i < len(best_laps) else -1.0,
+                        "speed_ms":       speeds[i]    if i < len(speeds)    else None,
                     })
+
+            # Include track_length from session data for speed derivation fallback
+            track_length = self._session_data.get("track_length", 0.0)
 
             return {
                 "session_time":  self._ir["SessionTime"]    or 0.0,
@@ -276,6 +281,7 @@ class IRacingBridge:
                 "cam_car_idx":   self._ir["CamCarIdx"]      or 0,
                 "cam_group_num": self._ir["CamGroupNumber"] or 0,
                 "flags":         self._ir["SessionFlags"]   or 0,
+                "track_length":  track_length,
                 "car_states":    car_states,
             }
         except Exception as exc:
@@ -374,6 +380,18 @@ class IRacingBridge:
                 weekend_info.get("TrackDisplayName", "") or
                 weekend_info.get("TrackName", "")
             )
+            # Extract track length (iRacing provides e.g. "3.61 km")
+            track_length_str = weekend_info.get("TrackLength", "")
+            track_length_m = 0.0
+            if track_length_str:
+                try:
+                    # Parse "X.XX km" or "X.XX mi" format
+                    parts = str(track_length_str).strip().split()
+                    val = float(parts[0])
+                    unit = parts[1].lower() if len(parts) > 1 else "km"
+                    track_length_m = val * 1609.34 if "mi" in unit else val * 1000.0
+                except (ValueError, IndexError):
+                    track_length_m = 0.0
             session_type = ""
             sessions = session_info.get("Sessions", [])
             race_session_num = None
@@ -394,6 +412,7 @@ class IRacingBridge:
 
             self._session_data = {
                 "track_name": track_name,
+                "track_length": track_length_m,
                 "session_type": session_type,
                 "avg_lap_time": avg_lap_time,
                 "drivers": drivers,
@@ -470,6 +489,7 @@ class IRacingBridge:
         laps        = list(ir["CarIdxLap"] or [])
         class_pos   = list(ir["CarIdxClassPosition"] or [])
         best_laps   = list(ir["CarIdxBestLapTime"] or [])
+        speeds      = list(ir["CarIdxSpeed"] or [])
 
         # Build per-car state list — only active cars (position > 0 and in world)
         NOT_IN_WORLD = -1
@@ -486,6 +506,7 @@ class IRacingBridge:
                         "surface":        surfaces[i] if i < len(surfaces) else 0,
                         "est_time":       est_times[i] if i < len(est_times) else 0.0,
                         "best_lap_time":  best_laps[i] if i < len(best_laps) else -1.0,
+                        "speed_ms":       speeds[i]    if i < len(speeds)    else None,
                     }
                 )
 
@@ -498,6 +519,7 @@ class IRacingBridge:
                 "race_laps":     ir["RaceLaps"] or 0,
                 "cam_car_idx":   ir["CamCarIdx"] or 0,
                 "flags":         ir["SessionFlags"] or 0,
+                "track_length":  self._session_data.get("track_length", 0.0),
                 "car_states":    car_states,
             },
         }
