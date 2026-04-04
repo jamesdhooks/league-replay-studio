@@ -13,23 +13,113 @@
 <body>
   <div class="overlay">
 
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {# INTRO — Dramatic centered title card                                   #}
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {% if frame.section is defined and frame.section == 'intro' %}
+
+    <div class="absolute inset-0 flex items-end justify-start pb-16 pl-14">
+      {# Accent bar #}
+      <div class="w-1 h-24 rounded-full mr-5"
+           style="background: linear-gradient(180deg, transparent, #3B82F6, transparent);"></div>
+      <div>
+        {% if frame.series_name %}
+        <div class="text-gray-400 text-xs uppercase tracking-[0.4em] mb-2"
+             style="text-shadow: 0 1px 8px rgba(0,0,0,0.8);">
+          {{ frame.series_name }}
+        </div>
+        {% endif %}
+        {% if frame.track_name %}
+        <div class="text-white font-black text-4xl tracking-wide uppercase"
+             style="text-shadow: 0 4px 24px rgba(0,0,0,0.9);">
+          {{ frame.track_name }}
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {# QUALIFYING RESULTS — Grid position lower-third                         #}
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {% elif frame.section is defined and frame.section == 'qualifying_results' %}
+
+    {% if frame.driver_name is defined %}
+    <div class="absolute bottom-12 left-12 flex items-end">
+      <div class="w-1 h-20 rounded-full mr-4"
+           style="background: {{ frame.team_color | default('#3B82F6') }};"></div>
+      <div>
+        <div class="text-gray-400 text-xs uppercase tracking-[0.3em] mb-1"
+             style="text-shadow: 0 1px 8px rgba(0,0,0,0.8);">
+          Starting Grid
+        </div>
+        <div class="text-5xl font-black text-white mb-1"
+             style="text-shadow: 0 2px 20px rgba(0,0,0,0.8);">
+          P{{ frame.position | default(1) }}
+        </div>
+        <div class="text-2xl font-bold text-white tracking-wide"
+             style="text-shadow: 0 2px 10px rgba(0,0,0,0.6);">
+          {{ frame.driver_name | default('Driver Name') }}
+        </div>
+        <div class="text-sm text-gray-300 mt-1 tracking-wider uppercase"
+             style="text-shadow: 0 1px 8px rgba(0,0,0,0.6);">
+          {{ frame.car_name | default('Car') }}
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {# RACE RESULTS — Final result lower-third                                #}
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {% elif frame.section is defined and frame.section == 'race_results' %}
+
+    {% if frame.driver_name is defined %}
+    <div class="absolute bottom-12 left-12 flex items-end">
+      <div class="w-1 h-20 rounded-full mr-4"
+           style="background: {{ frame.team_color | default('#3B82F6') }};"></div>
+      <div>
+        <div class="text-gray-400 text-xs uppercase tracking-[0.3em] mb-1"
+             style="text-shadow: 0 1px 8px rgba(0,0,0,0.8);">
+          Race Result
+        </div>
+        <div class="text-5xl font-black text-white mb-1"
+             style="text-shadow: 0 2px 20px rgba(0,0,0,0.8);">
+          {% if frame.position == 1 %}WINNER
+          {% else %}P{{ frame.position | default('—') }}{% endif %}
+        </div>
+        <div class="text-2xl font-bold text-white tracking-wide"
+             style="text-shadow: 0 2px 10px rgba(0,0,0,0.6);">
+          {{ frame.driver_name | default('Driver Name') }}
+        </div>
+        {% if frame.best_lap_time is defined %}
+        <div class="text-sm text-gray-300 mt-1 font-mono tracking-wider"
+             style="text-shadow: 0 1px 8px rgba(0,0,0,0.6);">
+          Best {{ frame.best_lap_time }}
+        </div>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {# RACE (default) — Cinematic lower-third driver card                     #}
+  {# ════════════════════════════════════════════════════════════════════════ #}
+  {% else %}
+
     {# ── Cinematic: Lower-third driver card ────────────────────────────── #}
     {% if frame.driver_name is defined %}
     <div class="absolute bottom-12 left-12 flex items-end">
-      {# Accent bar #}
       <div class="w-1 h-20 rounded-full mr-4"
            style="background: {{ frame.team_color | default('#3B82F6') }};"></div>
-
       <div>
-        {# Position #}
-        <div class="text-5xl font-black text-white mb-1" style="text-shadow: 0 2px 20px rgba(0,0,0,0.8);">
+        <div class="text-5xl font-black text-white mb-1"
+             style="text-shadow: 0 2px 20px rgba(0,0,0,0.8);">
           P{{ frame.position | default(1) }}
         </div>
-        {# Driver name #}
-        <div class="text-2xl font-bold text-white tracking-wide" style="text-shadow: 0 2px 10px rgba(0,0,0,0.6);">
+        <div class="text-2xl font-bold text-white tracking-wide"
+             style="text-shadow: 0 2px 10px rgba(0,0,0,0.6);">
           {{ frame.driver_name | default('Driver Name') }}
         </div>
-        {# Subtitle #}
         <div class="text-sm text-gray-300 mt-1 tracking-wider uppercase"
              style="text-shadow: 0 1px 8px rgba(0,0,0,0.6);">
           {{ frame.car_name | default('Car') }}
@@ -70,6 +160,8 @@
       </div>
     </div>
     {% endif %}
+
+  {% endif %}
 
   </div>
 </body>

@@ -101,6 +101,29 @@ class FrameDataRequest(BaseModel):
     track_name: str = ""
 
 
+class CompositeRequest(BaseModel):
+    """Request body for overlay compositing."""
+    clip_path: str
+    template_id: str
+    output_path: str
+    session_time: float = 0.0
+    section: str = "race"
+    focused_car_idx: Optional[int] = None
+    series_name: str = ""
+    track_name: str = ""
+    frame_data: Optional[dict[str, Any]] = None  # provide directly to skip telemetry lookup
+
+
+class BatchCompositeRequest(BaseModel):
+    """Request body for batch compositing all clips from a script capture."""
+    clips: list[dict[str, Any]]
+    output_dir: str
+    project_id: int
+    series_name: str = ""
+    track_name: str = ""
+    focused_car_idx: Optional[int] = None
+
+
 # ── Status ──────────────────────────────────────────────────────────────────
 
 @router.get("/status")
@@ -375,3 +398,111 @@ async def build_frame_data_endpoint(project_id: int, body: FrameDataRequest):
     except Exception as exc:
         logger.error("[Overlay API] Frame data build failed: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to build frame data")
+
+
+# ── Overlay compositing ──────────────────────────────────────────────────────
+
+@router.post("/composite")
+async def composite_overlay(body: CompositeRequest):
+    """Render an overlay frame and composite it over a captured video clip.
+
+    Renders a single static overlay PNG (using the Playwright engine) at the
+    given ``session_time`` / ``section`` context and burns it over the clip
+    with FFmpeg ``overlay=0:0``.
+
+    The overlay engine must be initialised (call ``POST /init``) before this
+    endpoint can be used.
+
+    Args:
+        clip_path:    Absolute path to the source .mp4 clip.
+        template_id:  Overlay template ID to render.
+        output_path:  Destination path for the composited .mp4.
+        session_time: Replay time in seconds (used for telemetry look-up when
+                      ``frame_data`` is not provided).
+        section:      Video section context.
+        focused_car_idx: iRacing hero driver index.
+        series_name:  Series label.
+        track_name:   Track label.
+        frame_data:   If provided, skips telemetry look-up and uses this dict
+                      directly.
+    """
+    from server.utils.overlay_engine import overlay_engine
+    from server.utils.overlay_compositor import overlay_compositor
+
+    if not overlay_engine.initialized:
+        raise HTTPException(
+            status_code=400,
+            detail="Overlay engine not initialised — call POST /api/overlay/init first",
+        )
+
+    try:
+        result = await overlay_compositor.render_and_composite(
+            clip_path=body.clip_path,
+            template_id=body.template_id,
+            output_path=body.output_path,
+            overlay_engine=overlay_engine,
+            frame_data=body.frame_data,
+            session_time=body.session_time,
+            section=body.section,
+            focused_car_idx=body.focused_car_idx,
+            series_name=body.series_name,
+            track_name=body.track_name,
+        )
+        if result is None:
+            raise HTTPException(status_code=500, detail="Compositing failed")
+        return {"success": True, "output_path": result}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("[Overlay API] Composite error: %s", exc)
+        raise HTTPException(status_code=500, detail="Compositing failed")
+
+
+@router.post("/composite/batch/{project_id}")
+async def composite_batch(project_id: int, body: BatchCompositeRequest):
+    """Composite overlays over all clips from a script capture result.
+
+    Takes the ``clips`` list returned by ``GET /capture/script-capture/status``
+    and renders + composites each clip using its assigned ``overlay_template_id``
+    (or ``"broadcast"`` as default).  Results include a ``composited_path`` on
+    each clip dict.
+
+    The overlay engine must be initialised before calling this endpoint.
+    """
+    from server.services.project_service import project_service
+    from server.utils.overlay_engine import overlay_engine
+    from server.utils.overlay_compositor import overlay_compositor
+
+    if not overlay_engine.initialized:
+        raise HTTPException(
+            status_code=400,
+            detail="Overlay engine not initialised — call POST /api/overlay/init first",
+        )
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project.get("project_dir", "")
+    track_name = body.track_name or project.get("track_name", "")
+
+    try:
+        composited_clips = await overlay_compositor.composite_script_clips(
+            clips=body.clips,
+            overlay_engine=overlay_engine,
+            output_dir=body.output_dir,
+            project_dir=project_dir or None,
+            series_name=body.series_name,
+            track_name=track_name,
+            focused_car_idx=body.focused_car_idx,
+        )
+        successful = sum(1 for c in composited_clips if c.get("composited_path"))
+        return {
+            "success": True,
+            "clips": composited_clips,
+            "composited_count": successful,
+            "total_clips": len(composited_clips),
+        }
+    except Exception as exc:
+        logger.error("[Overlay API] Batch composite error: %s", exc)
+        raise HTTPException(status_code=500, detail="Batch compositing failed")

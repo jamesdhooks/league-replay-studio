@@ -99,6 +99,17 @@ TV_CAM_PREFERENCES: dict[str, list[str]] = {
     "gap_filler": ["TV Static", "TV1", "Scenic"],
 }
 
+# Default overlay template ID to apply per section.
+# These match the built-in template IDs in overlay_service.py.
+# Can be overridden via section_config[section]["overlay_template_id"].
+DEFAULT_SECTION_TEMPLATES: dict[str, str] = {
+    "intro": "cinematic",
+    "qualifying_results": "broadcast",
+    "race": "broadcast",
+    "race_results": "broadcast",
+    "gap_filler": "minimal",
+}
+
 # Default clip-start padding (seconds) — trimmed after capture
 DEFAULT_CLIP_PADDING = 0.5
 
@@ -550,11 +561,16 @@ def generate_video_script(
     for section_name in VIDEO_SECTIONS:
         if section_name == "race":
             # Inject the race event timeline segments
+            race_template = section_config.get("race", {}).get(
+                "overlay_template_id",
+                DEFAULT_SECTION_TEMPLATES.get("race", "broadcast"),
+            )
             for seg in race_timeline:
                 script.append({
                     **seg,
                     "section": "race",
                     "clip_padding": clip_padding,
+                    "overlay_template_id": seg.get("overlay_template_id") or race_template,
                 })
             continue
 
@@ -566,6 +582,10 @@ def generate_video_script(
             TV_CAM_PREFERENCES.get(section_name, ["TV Static", "TV1"]),
         )
         camera_group = cfg.get("camera_group")  # User-selected override
+        overlay_template_id = cfg.get(
+            "overlay_template_id",
+            DEFAULT_SECTION_TEMPLATES.get(section_name, "broadcast"),
+        )
 
         # Choose a replay time to capture this B-roll from
         if section_name == "intro":
@@ -596,6 +616,7 @@ def generate_video_script(
             "purpose": section_name,
             "clip_padding": clip_padding,
             "editable": True,
+            "overlay_template_id": overlay_template_id,
         })
 
     # ── Sections summary for frontend ───────────────────────────────────────
