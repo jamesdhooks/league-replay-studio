@@ -355,7 +355,7 @@ Unlimited undo/redo across timeline, event inspector, and highlight suite. Visib
 
 ---
 
-## Phase 3 — Video Pipeline `📋 planned`
+## Phase 3 — Video Pipeline `✅ completed`
 
 > Build the end-to-end video production pipeline — OBS/ShadowPlay capture, GPU-accelerated FFmpeg encoding, tiered preview system, and export presets.
 
@@ -419,7 +419,7 @@ Auto-detect OBS Studio, NVIDIA ShadowPlay, AMD ReLive. Configurable hotkey mappi
 
 ---
 
-### Feature 13 — GPU-Accelerated Encoding Engine `MUST` `✅ done`
+### Feature 13 — GPU-Accelerated Encoding Engine `MUST` `✅ completed`
 **Spec:** `011-gpu-accelerated-encoding-engine`
 **Dependencies:** feature-7, feature-9
 
@@ -440,7 +440,7 @@ FFmpeg pipeline with NVENC/AMF/QSV hardware acceleration (CPU fallback). EDL →
 
 ---
 
-### Feature 14 — Video Preview System `MUST` `✅ done`
+### Feature 14 — Video Preview System `MUST` `✅ completed`
 **Spec:** `012-video-preview-system`
 **Dependencies:** feature-8, feature-12
 
@@ -461,7 +461,7 @@ Tiered preview: (1) keyframe index ~5 s; (2) sprite sheet thumbnails ~30–60 s;
 
 ---
 
-### Feature 15 — Export Presets & Encoding Dashboard `SHOULD` `✅ done`
+### Feature 15 — Export Presets & Encoding Dashboard `SHOULD` `✅ completed`
 **Dependencies:** feature-13
 
 Export preset CRUD UI and encoding dashboard: real-time FPS/percentage/ETA/file-size/GPU-utilisation metrics, auto-shutdown option, completed-exports file browser with play/reveal/copy/upload actions.
@@ -476,7 +476,7 @@ Export preset CRUD UI and encoding dashboard: real-time FPS/percentage/ETA/file-
 
 ---
 
-## Phase 4 — Overlays & Integration `📋 planned`
+## Phase 4 — Overlays & Integration `✅ completed`
 
 > HTML/Tailwind overlay templates via headless Chromium, in-app overlay editor, YouTube channel integration, and one-click automated pipeline.
 
@@ -487,7 +487,7 @@ Export preset CRUD UI and encoding dashboard: real-time FPS/percentage/ETA/file-
 
 ---
 
-### Feature 16 — HTML/Tailwind Overlay Template Engine `SHOULD` `✅ done`
+### Feature 16 — HTML/Tailwind Overlay Template Engine `SHOULD` `✅ completed`
 **Dependencies:** feature-13, feature-14
 
 Playwright headless Chromium + Jinja2 rendering. `render_frame()` ~5–15 ms/frame, `batch_render_for_export()`. Built-in template library: Broadcast, Minimal, Classic, Cinematic, Blank. Resolution-aware (1080p / 1440p / 4K). Per-project overrides.
@@ -511,7 +511,7 @@ Playwright headless Chromium + Jinja2 rendering. `render_frame()` ~5–15 ms/fra
 
 ---
 
-### Feature 17 — In-App Overlay Editor `SHOULD` `✅ done`
+### Feature 17 — In-App Overlay Editor `SHOULD` `✅ completed`
 **Dependencies:** feature-16
 
 Split-pane Monaco editor (HTML/CSS, Tailwind IntelliSense) + live preview. Data context inspector, visual no-code controls (element picker, drag-reposition, resize handles), animation picker generating CSS keyframe animations.
@@ -534,7 +534,7 @@ Split-pane Monaco editor (HTML/CSS, Tailwind IntelliSense) + live preview. Data 
 
 ---
 
-### Feature 18 — YouTube Channel Integration `SHOULD` `✅ done`
+### Feature 18 — YouTube Channel Integration `SHOULD` `✅ completed`
 **Dependencies:** feature-13, feature-3
 
 YouTube Data API v3. OAuth2 flow, channel status, Jinja2 description templates (`{{track_name}}`, `{{drivers}}`), resumable upload with retry, video browser with project association, quota monitoring.
@@ -553,7 +553,7 @@ YouTube Data API v3. OAuth2 flow, channel status, Jinja2 description templates (
 
 ---
 
-### Feature 19 — One-Click Automated Pipeline `SHOULD` `✅ done`
+### Feature 19 — One-Click Automated Pipeline `SHOULD` `✅ completed`
 **Dependencies:** feature-7, feature-9, feature-12, feature-13, feature-18
 
 `PipelineEngine` sequencing: Analysis → Editing → Capture → Export → Upload. Pause/resume/cancel/retry per step. Pipeline presets CRUD. Failure recovery from failed step (not from scratch). Persistent state in SQLite. CLI support.
@@ -577,12 +577,12 @@ YouTube Data API v3. OAuth2 flow, channel status, Jinja2 description templates (
 
 ### Milestones
 - [x] **M5.1** App is scriptable from the command line *(feature 20)*
-- [ ] **M5.2** Distributable installer is available *(features 21, 22, 23)* — Feature 21 ✅
+- [ ] **M5.2** Distributable installer is available *(features 22, 23)* — F22+F23 pending
 - [ ] **M5.3** Application is production-quality *(features 24, 25)*
 
 ---
 
-### Feature 20 — CLI / Headless Mode `COULD` `✅ done`
+### Feature 20 — CLI / Headless Mode `COULD` `✅ completed`
 **Dependencies:** feature-7, feature-9, feature-13
 
 `lrs.bat` CLI: `--project`, `--highlights`, `--full-race`, `--preset`, `--output`, `--analyse-only`, `--full-pipeline`, `--upload`, `--gpu`, `--verbose/-v`, `--quiet/-q`. Bypasses FastAPI/pywebview entirely. Exit codes: 0=success, 1=project error, 2=iRacing not running, 3=encoding failed.
@@ -600,7 +600,7 @@ YouTube Data API v3. OAuth2 flow, channel status, Jinja2 description templates (
 
 ---
 
-### Feature 21 — First-Run Setup Wizard `COULD` `✅ done`
+### Feature 21 — First-Run Setup Wizard `COULD` `✅ completed`
 **Dependencies:** feature-4, feature-12
 
 Guided first-run: detect iRacing dir, discover OBS/ShadowPlay, configure + validate hotkeys, select GPU, set working directory, optionally connect YouTube. Re-launchable from Settings → Setup Wizard.
@@ -782,4 +782,4 @@ When implementing a feature, follow this checklist:
 5. **Update the feature status** — change from `📋 planned` / `🔍 under_review` to `🔄 in progress` then `✅ completed`
 6. **Update milestone status** — mark the milestone complete when all its features are done
 
-**Current next task:** Start at the top of Phase 1 with **Feature 1 — Application Shell & Desktop Window**.
+**Current next task:** Start at Phase 5 with **Feature 22 — PyInstaller Distribution & Bundling**.

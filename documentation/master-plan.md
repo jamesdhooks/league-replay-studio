@@ -1957,11 +1957,14 @@ src/
 │   │   └── CameraTimeline.jsx     # Camera assignment timeline
 │   ├── overlays/
 │   │   ├── OverlayEditor.jsx      # Split-pane Monaco HTML editor + live preview
-│   │   ├── OverlayPreview.jsx     # Live overlay preview composited on video
-│   │   ├── OverlayTemplateList.jsx # Template browser (built-in + custom)
-│   │   ├── OverlayPropertyPanel.jsx # No-code visual controls (position, font, colour)
-│   │   ├── OverlayDataInspector.jsx # Template variable browser with live sample data
-│   │   └── OverlayElement.jsx     # Draggable/resizable overlay element in preview
+│   │   ├── OverlayPanel.jsx       # Template library browser + preset section launcher
+│   │   ├── EditorPreview.jsx      # Live overlay preview composited on video
+│   │   ├── DataContextInspector.jsx # Template variable browser with live sample data
+│   │   ├── AnimationPicker.jsx    # CSS keyframe animation generator
+│   │   ├── PresetDesigner.jsx     # Full preset design suite — section tabs, element list, live preview
+│   │   ├── ElementEditor.jsx      # Per-element editor: position %, z-index, Jinja2 template + guide
+│   │   ├── VariableEditor.jsx     # CSS custom property editor with color picker
+│   │   └── AssetManager.jsx       # Image asset upload/management with copy-URL
 │   ├── export/
 │   │   ├── ExportPanel.jsx        # Export settings and controls
 │   │   ├── ExportPresets.jsx      # Preset manager
@@ -1998,13 +2001,22 @@ src/
 │       ├── Tooltip.jsx            # Tooltip component
 │       └── ProgressBar.jsx        # Progress bar component
 ├── context/
-│   ├── ProjectContext.jsx         # Current project state + step workflow
-│   ├── TimelineContext.jsx        # Timeline state (zoom, position, selection)
+│   ├── AnalysisContext.jsx        # Analysis state, event feed, analysis log
+│   ├── CaptureContext.jsx         # Capture orchestration state
+│   ├── EncodingContext.jsx        # Encoding engine state + export presets
+│   ├── HighlightContext.jsx       # Highlight scoring, weights, overrides, metrics
 │   ├── IRacingContext.jsx         # iRacing connection state
-│   ├── SettingsContext.jsx        # Application settings
+│   ├── ModalContext.jsx           # Global modal dialog system
+│   ├── OverlayContext.jsx         # Template engine state + CRUD
+│   ├── PresetContext.jsx          # Overlay preset state — per-section elements, variables, assets
 │   ├── PipelineContext.jsx        # Pipeline execution state (running, paused, step statuses)
-│   ├── YouTubeContext.jsx         # YouTube auth state + channel info
-│   └── ToastContext.jsx           # Toast notification state
+│   ├── PreviewContext.jsx         # Tiered video preview state
+│   ├── ProjectContext.jsx         # Current project state + step workflow
+│   ├── SettingsContext.jsx        # Application settings
+│   ├── TimelineContext.jsx        # Timeline state (zoom, position, selection)
+│   ├── ToastContext.jsx           # Toast notification state
+│   ├── UndoRedoContext.jsx        # Undo/redo history
+│   └── YouTubeContext.jsx         # YouTube auth state + channel info
 ├── hooks/
 │   ├── useProject.js              # Project operations + step navigation
 │   ├── useTimeline.js             # Timeline interaction
@@ -2147,7 +2159,7 @@ GET     /api/track-cameras                     # List all track configs
 GET     /api/track-cameras/{track}             # Get config for track
 PUT     /api/track-cameras/{track}             # Update track camera config
 
-# Overlay Templates
+# Overlay Templates (legacy — project-scoped)
 GET     /api/projects/{id}/overlays/templates       # List available templates (built-in + custom)
 GET     /api/projects/{id}/overlays/templates/{tid} # Get template HTML source
 PUT     /api/projects/{id}/overlays/templates/{tid} # Update template HTML/config
@@ -2155,7 +2167,31 @@ POST    /api/projects/{id}/overlays/templates       # Create new template (or du
 DELETE  /api/projects/{id}/overlays/templates/{tid} # Delete custom template
 POST    /api/projects/{id}/overlays/render-frame    # Render single overlay frame → PNG (for preview)
 GET     /api/projects/{id}/overlays/data-context    # Get available template variables with sample data
-PUT     /api/projects/{id}/overlays/active           # Set which template is active for this project
+PUT     /api/projects/{id}/overlays/active          # Set which template is active for this project
+POST    /api/overlay/preset/render-preview          # Render preset elements for live design suite preview
+POST    /api/overlay/intro-video/composite/{id}     # Composite uploaded intro video onto intro clip
+POST    /api/composite/{project_id}                 # Composite overlay onto a single clip
+POST    /api/composite/batch/{project_id}           # Batch composite overlays onto all script clips
+
+# Overlay Presets (global — not per-project)
+GET     /api/presets                                        # List all presets
+POST    /api/presets                                        # Create new preset
+GET     /api/presets/{id}                                   # Get preset details + elements
+PUT     /api/presets/{id}                                   # Update preset metadata / variables
+DELETE  /api/presets/{id}                                   # Delete preset
+POST    /api/presets/{id}/duplicate                         # Duplicate a preset
+POST    /api/presets/{id}/export                            # Export preset as JSON
+POST    /api/presets/import                                 # Import preset from JSON
+POST    /api/presets/{id}/sections/{section}/elements       # Add element to section
+PUT     /api/presets/{id}/sections/{section}/elements/{eid} # Update element
+DELETE  /api/presets/{id}/sections/{section}/elements/{eid} # Remove element
+POST    /api/presets/{id}/assets                            # Upload image asset (global, not per-project)
+GET     /api/presets/{id}/assets                            # List preset assets
+GET     /api/presets/{id}/assets/{filename}                 # Serve asset file
+DELETE  /api/presets/{id}/assets/{filename}                 # Delete asset
+POST    /api/presets/{id}/intro-video                       # Upload intro video for intro section
+DELETE  /api/presets/{id}/intro-video                       # Remove intro video
+POST    /api/presets/{id}/render-preview                    # Render live preview PNG for design suite
 
 # Edit Decision List
 GET     /api/projects/{id}/edl                 # Get edit decision list
@@ -3865,7 +3901,7 @@ Each step has specific failure recovery strategies:
 
 ### Phase 7 — Overlay Template Engine (Weeks 31-36)
 
-**Goal**: HTML/Tailwind overlay system with in-app editor, live preview, and template library.
+**Goal**: HTML/Tailwind overlay system with in-app editor, live preview, preset/element design suite, and template library.
 
 | Task | Description |
 |------|-------------|
@@ -3883,6 +3919,16 @@ Each step has specific failure recovery strategies:
 | 7.12 | Export integration: batch pre-render to PNG sequence, FFmpeg overlay filter |
 | 7.13 | Resolution-aware rendering: templates adapt to 1080p, 1440p, 4K output |
 | 7.14 | Per-project template overrides: customise without modifying originals |
+| 7.15 | `preset_service.py`: global preset CRUD — per-section element lists, CSS variables, assets, intro video |
+| 7.16 | `element_renderer.py`: `compose_preset_html()` — assemble per-section elements into one HTML doc with CSS %-based positioning and `:root` custom variables |
+| 7.17 | `api_preset.py`: 18 REST endpoints under `/api/presets` — presets, elements, assets, intro video, render-preview |
+| 7.18 | `OverlayCompositor.render_preset_and_composite()`: preset-based video clip compositing |
+| 7.19 | `OverlayCompositor.composite_intro_video()`: FFmpeg alpha-blend uploaded intro video onto intro section clip |
+| 7.20 | `PresetContext.jsx`: React context with full preset lifecycle (CRUD, element ops, asset upload, intro video) |
+| 7.21 | `PresetDesigner.jsx`: Full design suite — section tabs, element list, live preview canvas, property editor sidebar |
+| 7.22 | `ElementEditor.jsx`: Per-element editor with Jinja2 syntax guide, position/size %, z-index |
+| 7.23 | `VariableEditor.jsx`: CSS custom property editor with color picker |
+| 7.24 | `AssetManager.jsx`: Image asset upload/management with copy-URL-to-clipboard |
 
 ### Phase 8 — Polish & Distribution (Weeks 35-38)
 
@@ -3958,49 +4004,47 @@ league-replay-studio/
 │   │   │   └── edl.py               # Edit decision list models
 │   │   ├── services/
 │   │   │   ├── iracing_bridge.py    # pyirsdk wrapper + connection management
-│   │   │   ├── replay_analyser.py   # Replay analysis orchestrator
-│   │   │   ├── telemetry_writer.py  # Normalised telemetry → race_ticks + car_states
-│   │   │   ├── detectors/
-│   │   │   │   ├── incident.py
-│   │   │   │   ├── battle.py
-│   │   │   │   ├── overtake.py
-│   │   │   │   ├── pit_stop.py
-│   │   │   │   ├── fastest_lap.py
-│   │   │   │   ├── first_last_lap.py
-│   │   │   │   └── restart.py
-│   │   │   ├── camera_director.py   # Intelligent camera direction
-│   │   │   ├── highlight_editor.py  # Highlight editing suite (rule tuning, reprocessing, metrics)
-│   │   │   ├── encoding_engine.py   # FFmpeg GPU encoding
-│   │   │   ├── video_preview.py     # Tiered preview server (sprites, proxy, source)
-│   │   │   ├── asset_pipeline.py    # Background generation: keyframe index, sprites, proxy, audio
-│   │   │   ├── overlay_renderer.py  # HTML/Tailwind → PNG rendering via Playwright headless Chromium
-│   │   │   ├── project_manager.py   # Project CRUD + SQLite + step workflow
-│   │   │   ├── capture_service.py   # OBS/ShadowPlay capture orchestration
+│   │   │   ├── replay_analysis.py   # Replay analysis orchestrator + telemetry writer
+│   │   │   ├── detectors.py         # All 13 race event detectors (flat module)
+│   │   │   ├── analysis_db.py       # SQLite schema: race_ticks, car_states, events
+│   │   │   ├── scoring_engine.py    # 7-stage highlight scoring + video section structure
+│   │   │   ├── encoding_service.py  # FFmpeg GPU encoding + export presets
+│   │   │   ├── preview_service.py   # Tiered preview server (sprites, proxy, source)
+│   │   │   ├── overlay_service.py   # HTML/Tailwind → PNG rendering via Playwright headless Chromium
+│   │   │   ├── preset_service.py    # Global overlay preset CRUD (per-section elements, CSS vars, assets, intro video)
+│   │   │   ├── capture_service.py   # OBS/ShadowPlay + internal capture orchestration
+│   │   │   ├── project_service.py   # Project CRUD + SQLite + step workflow
 │   │   │   ├── youtube_service.py   # YouTube Data API v3: OAuth, upload, video listing
-│   │   │   ├── pipeline_engine.py   # Automated pipeline: sequential step execution, pause/resume/retry
+│   │   │   ├── pipeline_service.py  # Automated pipeline: sequential step execution, pause/resume/retry
 │   │   │   └── settings_service.py  # Settings management
 │   │   ├── routes/
 │   │   │   ├── api_projects.py      # /api/projects/* (includes step workflow)
 │   │   │   ├── api_iracing.py       # /api/iracing/*
-│   │   │   ├── api_analysis.py      # /api/projects/{id}/analyse
-│   │   │   ├── api_events.py        # /api/projects/{id}/events/*
-│   │   │   ├── api_cameras.py       # /api/projects/{id}/cameras/*
-│   │   │   ├── api_overlays.py      # /api/projects/{id}/overlays/*
-│   │   │   ├── api_edl.py           # /api/projects/{id}/edl/*
-│   │   │   ├── api_highlights.py    # /api/projects/{id}/highlights/* (editing suite)
-│   │   │   ├── api_export.py        # /api/projects/{id}/export/*
+│   │   │   ├── api_analysis.py      # /api/projects/{id}/analyse + highlights
+│   │   │   ├── api_capture.py       # /api/capture/* (OBS/ShadowPlay + internal capture control)
+│   │   │   ├── api_encoding.py      # /api/projects/{id}/export/*
+│   │   │   ├── api_overlay.py       # /api/overlay/* (template engine, composite endpoints)
+│   │   │   ├── api_preset.py        # /api/presets/* (global preset CRUD — elements, assets, intro video)
 │   │   │   ├── api_preview.py       # /api/projects/{id}/preview/*
-│   │   │   ├── api_capture.py       # /api/capture/* (OBS/ShadowPlay control)
-│   │   │   ├── api_youtube.py       # /api/youtube/* + /api/projects/{id}/upload/*
 │   │   │   ├── api_pipeline.py      # /api/pipeline/* + /api/projects/{id}/pipeline/*
+│   │   │   ├── api_youtube.py       # /api/youtube/* + /api/projects/{id}/upload/*
 │   │   │   ├── api_settings.py      # /api/settings (includes YouTube settings)
 │   │   │   ├── api_system.py        # /api/system/*
-│   │   │   └── api_track_cameras.py # /api/track-cameras/*
+│   │   │   └── api_wizard.py        # /api/wizard/* (first-run setup wizard)
 │   │   └── utils/
-│   │       ├── gpu_detect.py        # GPU detection (NVENC/AMF/QSV)
-│   │       ├── ffmpeg.py            # FFmpeg command builder
+│   │       ├── gpu_detection.py     # GPU detection (NVENC/AMF/QSV)
+│   │       ├── ffmpeg_builder.py    # FFmpeg command builder
 │   │       ├── obs_integration.py   # OBS/ShadowPlay hotkey automation & process detection
-│   │       ├── capture_validator.py # Post-capture file validation
+│   │       ├── capture_engine.py    # Internal 3-tier capture engine (native DXGI / dxcam / PrintWindow)
+│   │       ├── native_capture_bridge.py  # Named-pipe IPC + shared-memory frame transport to C++ service
+│   │       ├── window_capture.py    # PrintWindow GDI fallback + WGC client-area crop
+│   │       ├── overlay_engine.py    # Playwright browser context lifecycle + render_frame() / render_raw_html()
+│   │       ├── overlay_compositor.py # FFmpeg overlay compositing — composite_clip(), render_and_composite(), composite_intro_video()
+│   │       ├── element_renderer.py  # compose_preset_html() — assemble preset elements into one HTML doc
+│   │       ├── frame_data_builder.py # build_frame_data() — telemetry → overlay context dict
+│   │       ├── script_capture.py    # ScriptCaptureEngine: pause→seek→camera→record→trim→compile per segment
+│   │       ├── preview_utils.py     # Keyframe indexer, sprite sheet generator, proxy encoder helpers
+│   │       ├── youtube_client.py    # Low-level YouTube Data API v3 wrapper (resumable upload, quota)
 │   │       └── logging_config.py    # Structured logging setup
 │   ├── data/                        # Default data directory
 │   │   └── projects/                # Project storage
@@ -4020,6 +4064,22 @@ league-replay-studio/
 │       ├── index.css
 │       ├── components/              # (see section 5.2)
 │       ├── context/
+│       │   ├── AnalysisContext.jsx    # Analysis state, event feed, log loading
+│       │   ├── CaptureContext.jsx     # Capture orchestration state
+│       │   ├── EncodingContext.jsx    # Encoding engine state + export presets
+│       │   ├── HighlightContext.jsx   # Highlight scoring, weights, overrides, metrics
+│       │   ├── IRacingContext.jsx     # iRacing connection + session data
+│       │   ├── ModalContext.jsx       # Global modal dialog system
+│       │   ├── OverlayContext.jsx     # Template engine state + CRUD
+│       │   ├── PresetContext.jsx      # Overlay preset state — per-section elements, variables, assets
+│       │   ├── PipelineContext.jsx    # One-click pipeline state
+│       │   ├── PreviewContext.jsx     # Tiered video preview state
+│       │   ├── ProjectContext.jsx     # Project library + step workflow
+│       │   ├── SettingsContext.jsx    # App settings
+│       │   ├── TimelineContext.jsx    # NLE timeline state
+│       │   ├── ToastContext.jsx       # Toast notification system
+│       │   ├── UndoRedoContext.jsx    # Undo/redo history
+│       │   └── YouTubeContext.jsx     # YouTube OAuth + upload state
 │       ├── hooks/
 │       ├── services/
 │       └── utils/
@@ -4230,7 +4290,7 @@ League Replay Studio follows [Semantic Versioning](https://semver.org/) and [Kee
 ---
 
 *Document created: 2026-03-31*
-*Version: 2.0 (Final planning phase)*
+*Version: 2.1 (Post-implementation update — overlay preset system, element renderer, preset design suite)*
 *Author: League Replay Studio Team*
 
-> This document was iteratively developed through 6 revision cycles (v1.0–v1.6) covering legacy analysis, telemetry deep-dives, schema normalisation, overlay engine redesign, YouTube integration, step-based workflows, and automated pipeline design. All revisions have been consolidated into this final v2.0 for agent handoff.
+> This document was iteratively developed through 7 revision cycles (v1.0–v2.1) covering legacy analysis, telemetry deep-dives, schema normalisation, overlay engine redesign, YouTube integration, step-based workflows, automated pipeline design, and the full overlay preset/element system. All revisions have been consolidated into this v2.1 for agent handoff.
