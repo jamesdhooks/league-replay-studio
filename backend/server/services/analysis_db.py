@@ -179,8 +179,8 @@ def init_analysis_db(project_dir: str) -> None:
             if col not in cs_cols:
                 try:
                     conn.execute(f"ALTER TABLE car_states ADD COLUMN {col} {ddl}")
-                except sqlite3.OperationalError:
-                    pass
+                except sqlite3.OperationalError as exc:
+                    logger.debug("car_states migration skip %s: %s", col, exc)
 
         # Migration: add new race_ticks columns if missing
         rt_cols = [r[1] for r in conn.execute("PRAGMA table_info(race_ticks)").fetchall()]
@@ -192,8 +192,8 @@ def init_analysis_db(project_dir: str) -> None:
             if col not in rt_cols:
                 try:
                     conn.execute(f"ALTER TABLE race_ticks ADD COLUMN {col} {ddl}")
-                except sqlite3.OperationalError:
-                    pass
+                except sqlite3.OperationalError as exc:
+                    logger.debug("race_ticks migration skip %s: %s", col, exc)
 
         conn.commit()
         logger.info("[AnalysisDB] Initialised project database at %s", project_dir)
