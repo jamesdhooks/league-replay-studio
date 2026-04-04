@@ -629,3 +629,68 @@ async def render_preset_preview(body: dict[str, Any]):
 
     result = await overlay_engine.render_raw_html(html_content, frame_data)
     return result
+
+
+@router.post("/intro-video/composite/{project_id}")
+async def composite_intro_video(project_id: int, body: dict[str, Any]):
+    """Composite an intro video over the intro section clip.
+
+    Body:
+        clip_filename: str      — Base intro clip (basename in captures/)
+        output_filename: str    — Output filename (basename in composited/)
+        preset_id: str          — Preset ID to get intro video from
+        opacity: float          — Overlay opacity (0-1, default 0.85)
+    """
+    import os
+    from pathlib import Path as _Path
+
+    from server.services.project_service import project_service
+    from server.services.preset_service import preset_service
+    from server.utils.overlay_compositor import overlay_compositor
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project.get("project_dir", "")
+    if not project_dir:
+        raise HTTPException(status_code=400, detail="Project has no directory")
+
+    preset_id = body.get("preset_id")
+    if not preset_id:
+        raise HTTPException(status_code=400, detail="preset_id required")
+
+    preset = preset_service.get_preset(preset_id)
+    if not preset:
+        raise HTTPException(status_code=404, detail="Preset not found")
+
+    intro_video_path = preset.get("intro_video_path")
+    if not intro_video_path:
+        raise HTTPException(status_code=400, detail="Preset has no intro video")
+
+    clip_basename = os.path.basename(body.get("clip_filename", ""))
+    output_basename = os.path.basename(body.get("output_filename", ""))
+    if not clip_basename or not output_basename:
+        raise HTTPException(
+            status_code=400,
+            detail="clip_filename and output_filename required",
+        )
+
+    clip_path = str(_Path(project_dir) / "captures" / clip_basename)
+    output_path = str(_Path(project_dir) / "composited" / output_basename)
+
+    opacity = float(body.get("opacity", 0.85))
+
+    result = overlay_compositor.composite_intro_video(
+        base_clip_path=clip_path,
+        intro_video_path=intro_video_path,
+        output_path=output_path,
+        opacity=opacity,
+    )
+
+    if result is None:
+        raise HTTPException(
+            status_code=500, detail="Intro video compositing failed"
+        )
+
+    return {"success": True, "output_path": result}

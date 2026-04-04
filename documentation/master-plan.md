@@ -2672,6 +2672,82 @@ This separates the rendering concern (Playwright/HTML → PNG) from the encoding
 | **In-app editing** | Custom property panels per overlay type | Monaco editor + live preview — edit anything |
 | **Maintenance** | Every new overlay = new Python code | Every new overlay = new HTML file |
 
+#### 7.6.8 Overlay Preset & Element System
+
+The overlay system supports a **preset-based, per-section element architecture** that gives users full control over overlay design for each video section.
+
+##### Preset Structure
+
+A preset bundles:
+- **Per-section element lists**: Each of the four sections (intro, qualifying_results, race, race_results) has its own list of overlay elements.
+- **Custom CSS variables**: User-defined CSS custom properties (colors, fonts) applied to all templates.
+- **Global assets**: Uploaded images/logos stored alongside the preset (not per-project).
+- **Intro video**: Optional video file overlaid on the intro section.
+
+```json
+{
+  "id": "broadcast_preset",
+  "name": "Broadcast",
+  "sections": {
+    "intro": [{ "id": "title_card", "template": "...", "position": {"x": 15, "y": 30, "w": 70, "h": 40} }],
+    "race": [
+      { "id": "timing_tower", "template": "...", "position": {"x": 1, "y": 8, "w": 18, "h": 50} },
+      { "id": "focused_driver", "template": "...", "position": {"x": 3, "y": 78, "w": 30, "h": 18} },
+      { "id": "lap_counter", "template": "...", "position": {"x": 85, "y": 2, "w": 13, "h": 10} }
+    ]
+  },
+  "variables": {
+    "--color-primary": { "value": "#ffffff", "type": "color" },
+    "--color-accent": { "value": "#3B82F6", "type": "color" },
+    "--font-primary": { "value": "'Inter', sans-serif", "type": "font" }
+  }
+}
+```
+
+##### Element Architecture
+
+Each element has:
+- **Template**: Jinja2 HTML with `{{ frame.* }}` data bindings and `{{ pos.x/y/w/h }}` position placeholders.
+- **Position**: Percentage-based (x%, y%, w%, h%) — resolution-independent.
+- **Z-index**: Stacking order.
+- **Visibility**: Can be toggled per-element.
+
+Elements are composed into a single HTML document by `element_renderer.compose_preset_html()`, rendered via Playwright, and composited onto video clips via FFmpeg.
+
+##### Resolution Independence
+
+All positioning uses CSS percentages:
+- `left: X%`, `top: Y%`, `width: W%`, `height: H%`
+- Font sizes use `clamp()` for responsive scaling
+- CSS custom properties applied via `:root` declarations
+
+##### API
+
+```
+GET    /api/presets                                    # List presets
+POST   /api/presets                                    # Create preset
+PUT    /api/presets/{id}                               # Update preset
+DELETE /api/presets/{id}                               # Delete preset
+POST   /api/presets/{id}/sections/{section}/elements   # Add element
+PUT    /api/presets/{id}/sections/{section}/elements/{eid}  # Update element
+DELETE /api/presets/{id}/sections/{section}/elements/{eid}  # Remove element
+POST   /api/presets/{id}/assets                        # Upload image asset
+GET    /api/presets/{id}/assets/{filename}              # Serve asset
+POST   /api/presets/{id}/intro-video                   # Upload intro video
+POST   /api/presets/{id}/render-preview                # Render live preview
+```
+
+##### Frontend Design Suite
+
+The Preset Designer (`PresetDesigner.jsx`) provides:
+- **Section tabs**: Switch between intro/qualifying/race/results with element counts.
+- **Element list**: Add, remove, reorder, toggle visibility for each section.
+- **Property editor**: Edit element name, position (%), z-index, and Jinja2 HTML template.
+- **Template guide**: Inline documentation of available variables (`{{ frame.driver_name }}`, loops, conditionals).
+- **Variable editor**: Color picker and text input for CSS custom properties.
+- **Asset manager**: Upload/delete images with copy-URL for template references.
+- **Live preview**: Real-time rendering of the current section's elements via Playwright.
+
 ### 7.7 Export System
 
 **Export Presets:**

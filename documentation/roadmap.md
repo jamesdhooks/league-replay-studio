@@ -502,6 +502,12 @@ Playwright headless Chromium + Jinja2 rendering. `render_frame()` ~5–15 ms/fra
 - [x] Overlay compositing works in both preview and export pipelines
 - [x] Per-project template overrides don't modify the original template files
 - [x] Templates can be imported, exported, duplicated with version tracking
+- [x] Per-section overlay element system with preset management
+- [x] Resolution-independent CSS percentage-based positioning
+- [x] Custom CSS variables (--color-primary, --font-primary, etc.)
+- [x] Global asset management (image upload/serve per preset)
+- [x] Intro video upload and compositing for intro section
+- [x] Element-based Jinja2 template rendering pipeline
 
 ---
 
@@ -519,6 +525,12 @@ Split-pane Monaco editor (HTML/CSS, Tailwind IntelliSense) + live preview. Data 
 - [x] Animation picker generates CSS keyframe animations for overlay transitions
 - [x] Preview updates within 200 ms of code change (debounced live reload)
 - [x] Save button persists changes; revert restores to last saved state
+- [x] Preset Design Suite with per-section element list
+- [x] Element property editor (name, position %, z-index, template HTML)
+- [x] CSS variable editor with color picker
+- [x] Asset manager with upload/delete/copy URL
+- [x] Live preview rendering with section switching
+- [x] Template syntax guide with Jinja2 variable reference
 
 ---
 

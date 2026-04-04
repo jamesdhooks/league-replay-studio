@@ -404,6 +404,99 @@ class OverlayCompositor:
             except OSError:
                 pass
 
+    def composite_intro_video(
+        self,
+        base_clip_path: str,
+        intro_video_path: str,
+        output_path: str,
+        opacity: float = 0.85,
+        crf: int = 18,
+        preset: str = "fast",
+        timeout: int = 300,
+    ) -> Optional[str]:
+        """Composite an uploaded intro video over the intro section clip.
+
+        The intro video is scaled to match the base clip's dimensions and
+        overlaid with configurable opacity.  If the intro video is shorter
+        than the base clip, the overlay ends when the intro video ends.
+        If longer, it is trimmed to match the base clip's duration.
+
+        Args:
+            base_clip_path:   Path to the captured intro replay clip.
+            intro_video_path: Path to the user-uploaded intro video.
+            output_path:      Destination path for the composited output.
+            opacity:          Overlay opacity (0.0–1.0, default 0.85).
+            crf:              H.264 quality factor (lower = better).
+            preset:           FFmpeg encoding preset.
+            timeout:          Maximum FFmpeg runtime in seconds.
+
+        Returns:
+            ``output_path`` on success, ``None`` on failure.
+        """
+        ffmpeg = _find_ffmpeg()
+        if not ffmpeg:
+            logger.error("[OverlayCompositor] FFmpeg not found")
+            return None
+
+        try:
+            safe_base = _safe_video_path(base_clip_path)
+            safe_intro = _safe_video_path(intro_video_path)
+            safe_output = _safe_output_path(output_path)
+        except ValueError as exc:
+            logger.error("[OverlayCompositor] Invalid path: %s", exc)
+            return None
+
+        if not Path(safe_base).is_file():
+            logger.error("[OverlayCompositor] Base clip not found: %s", safe_base)
+            return None
+        if not Path(safe_intro).is_file():
+            logger.error("[OverlayCompositor] Intro video not found: %s", safe_intro)
+            return None
+
+        # Scale the intro video, apply transparency, and overlay.
+        # 'shortest=1' ensures the overlay ends when the shorter input ends.
+        alpha = max(0.0, min(1.0, opacity))
+        filter_complex = (
+            "[1:v]scale=iw:ih,format=yuva420p,"
+            f"colorchannelmixer=aa={alpha}[intro];"
+            "[0:v][intro]overlay=0:0:shortest=1[out]"
+        )
+
+        cmd = [
+            ffmpeg, "-hide_banner", "-loglevel", "warning", "-y",
+            "-i", safe_base,
+            "-i", safe_intro,
+            "-filter_complex", filter_complex,
+            "-map", "[out]",
+            "-map", "0:a?",
+            "-codec:a", "copy",
+            "-codec:v", "libx264",
+            "-preset", preset,
+            "-crf", str(crf),
+            safe_output,
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout,
+            )
+            if result.returncode != 0:
+                logger.error(
+                    "[OverlayCompositor] Intro video composite failed (rc=%d): %s",
+                    result.returncode,
+                    result.stderr[:500],
+                )
+                return None
+        except subprocess.TimeoutExpired:
+            logger.error("[OverlayCompositor] Intro video composite timed out")
+            return None
+        except Exception as exc:
+            logger.error("[OverlayCompositor] Intro video error: %s", exc)
+            return None
+
+        logger.info("[OverlayCompositor] Intro video composited → %s", safe_output)
+        return safe_output
+
     async def composite_script_clips(
         self,
         clips: list[dict],
