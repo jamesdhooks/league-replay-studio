@@ -1,0 +1,31 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+src = ["backend"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort (import sorting)
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "S",    # flake8-bandit (security)
+    "LOG",  # flake8-logging
+]
+ignore = [
+    "E501",   # line too long — handled by formatter
+    "S101",   # assert usage — acceptable in non-production code
+    "S603",   # subprocess call — acceptable for FFmpeg invocation
+    "S607",   # partial executable path — acceptable for FFmpeg
+    "B008",   # function call in default arg — used by FastAPI Depends()
+]
+
+[tool.ruff.lint.per-file-ignores]
+"backend/server/routes/*" = ["B008"]   # FastAPI Depends() pattern
+"tests/*" = ["S101"]                    # asserts OK in tests
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

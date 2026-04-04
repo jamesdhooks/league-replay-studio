@@ -459,7 +459,7 @@ class CaptureService:
             try:
                 self._broadcast_fn(message)
             except Exception:
-                pass
+                    logger.debug("Suppressed exception in cleanup", exc_info=True)
 
 
 # ── Module-level singleton ──────────────────────────────────────────────────

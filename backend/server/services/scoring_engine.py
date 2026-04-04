@@ -18,6 +18,15 @@ Plus multi-pass timeline allocation:
   Pass 2: Bucket fill (intro/early/mid/late)
   Pass 3: Smoothing (repetition, spacing, exposure rebalance)
   Gap handling: B-roll insertion for gaps ≥ 8s
+
+⚠️  SYNC NOTE: Stages 1–5 + 7–8 and the shared constants (BASE_SCORES,
+MANDATORY_TYPES, TIER thresholds, BUCKET_BOUNDARIES, REFERENCE_SPEED_MS)
+are mirrored in the frontend at:
+    frontend/src/utils/highlight-scoring.js
+
+The frontend omits Stage 6 (exposure adjustment) because it requires
+cross-event accumulator state.  The server-side reprocess endpoint is
+authoritative.  Keep both files in sync when changing scoring logic.
 """
 
 from __future__ import annotations

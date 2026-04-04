@@ -336,7 +336,7 @@ class ScriptCaptureEngine:
                 iracing_bridge.cam_switch_position(0, int(explicit_group))
                 return
             except Exception:
-                pass
+                    logger.debug("Suppressed exception in cleanup", exc_info=True)
 
         # For B-roll / TV cam segments, walk the preference list
         cam_prefs = segment.get("camera_preferences", [])
@@ -400,7 +400,7 @@ class ScriptCaptureEngine:
             try:
                 self._progress_cb(data)
             except Exception:
-                pass
+                    logger.debug("Suppressed exception in cleanup", exc_info=True)
 
 
 def _interruptible_sleep(seconds: float, cancelled_fn: Callable[[], bool]) -> None:

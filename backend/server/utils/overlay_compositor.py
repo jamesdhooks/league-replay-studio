@@ -546,7 +546,7 @@ class OverlayCompositor:
                 try:
                     progress_callback(i, len(clips), clip_id)
                 except Exception:
-                    pass
+                        logger.debug("Suppressed exception in cleanup", exc_info=True)
 
             if not clip_path:
                 logger.warning("[OverlayCompositor] Skipping clip with no path at index %d", i)
