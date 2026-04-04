@@ -1,11 +1,14 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useOverlay } from '../../context/OverlayContext'
+import { usePreset } from '../../context/PresetContext'
 import { useToast } from '../../context/ToastContext'
 import OverlayEditor from './OverlayEditor'
+import PresetDesigner from './PresetDesigner'
 import {
   Layers, Plus, Copy, Trash2, Download, Upload,
   Monitor, Film, Palette, Eye, ChevronRight, Settings,
   Play, Square, Loader2, Check, AlertCircle, Code,
+  Settings2,
 } from 'lucide-react'
 
 /**
@@ -22,6 +25,7 @@ export default function OverlayPanel() {
     createTemplate, deleteTemplate, duplicateTemplate, exportTemplate,
     setResolution,
   } = useOverlay()
+  const { presets, fetchPresets: fetchPresetsCtx } = usePreset()
   const { addToast } = useToast()
 
   const [resolution, setLocalResolution] = useState('1080p')
@@ -30,11 +34,16 @@ export default function OverlayPanel() {
   const [newTemplateDesc, setNewTemplateDesc] = useState('')
   const [filter, setFilter] = useState('all') // 'all' | 'builtin' | 'custom'
   const [editingTemplateId, setEditingTemplateId] = useState(null)
+  const [designerPresetId, setDesignerPresetId] = useState(null)
 
-  // ── Load templates on mount ──────────────────────────────────────────────
+  // ── Load templates and presets on mount ──────────────────────────────────
   useEffect(() => {
     fetchTemplates()
   }, [fetchTemplates])
+
+  useEffect(() => {
+    fetchPresetsCtx()
+  }, [fetchPresetsCtx])
 
   // ── Filtered templates ───────────────────────────────────────────────────
   const filteredTemplates = templates.filter(t => {
@@ -145,6 +154,16 @@ export default function OverlayPanel() {
       <OverlayEditor
         templateId={editingTemplateId}
         onClose={() => setEditingTemplateId(null)}
+      />
+    )
+  }
+
+  // ── If designing a preset, show the designer ──────────────────────────────
+  if (designerPresetId) {
+    return (
+      <PresetDesigner
+        presetId={designerPresetId}
+        onClose={() => setDesignerPresetId(null)}
       />
     )
   }
@@ -287,6 +306,40 @@ export default function OverlayPanel() {
 
       {/* ── Template grid ───────────────────────────────────────────────── */}
       <div className="flex-1 overflow-y-auto p-4">
+        {/* ── Preset Design Suite ────────────────────────────────────────── */}
+        {presets.length > 0 && (
+          <div className="mb-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Settings2 className="w-4 h-4 text-purple-400" />
+              <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider">Preset Design Suite</h3>
+            </div>
+            <div className="space-y-1.5">
+              {presets.map(preset => (
+                <div
+                  key={preset.id}
+                  className="group flex items-center justify-between px-3 py-2 rounded-lg border border-border hover:border-purple-500/40 bg-bg-secondary/30 hover:bg-purple-500/5 transition-all"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Layers className="w-4 h-4 text-purple-400 flex-shrink-0" />
+                    <span className="text-sm text-text-primary truncate">{preset.name}</span>
+                    {preset.is_builtin && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-secondary text-text-tertiary uppercase tracking-wider flex-shrink-0">
+                        Built-in
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => setDesignerPresetId(preset.id)}
+                    className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-purple-600 hover:bg-purple-500 text-white opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                  >
+                    <Settings2 className="w-3 h-3" /> Edit
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 gap-3">
           {filteredTemplates.map(template => (
             <div

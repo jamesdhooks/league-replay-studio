@@ -233,7 +233,7 @@ class NativeCaptureBridge:
         try:
             self._send_command({"cmd": "stop"})
         except Exception:
-            pass
+                logger.debug("Suppressed exception in cleanup", exc_info=True)
 
         self._close_pipe()
         self._close_shm()
@@ -249,7 +249,7 @@ class NativeCaptureBridge:
                     self._proc.kill()
                     logger.warning("[NativeCapture] Process %d force-killed", pid)
                 except Exception:
-                    pass
+                        logger.debug("Suppressed exception in cleanup", exc_info=True)
             self._proc = None
 
         logger.info("[NativeCapture] Service stopped")
@@ -271,7 +271,7 @@ class NativeCaptureBridge:
                 if line:
                     logger.debug("[NativeCapture/stdout] %s", line)
         except Exception:
-            pass
+                logger.debug("Suppressed exception in cleanup", exc_info=True)
         logger.debug("[NativeCapture] stdout drainer exited")
 
     def _drain_stderr(self) -> None:
@@ -289,7 +289,7 @@ class NativeCaptureBridge:
                 if line:
                     logger.warning("[NativeCapture/stderr] %s", line)
         except Exception:
-            pass
+                logger.debug("Suppressed exception in cleanup", exc_info=True)
         logger.debug("[NativeCapture] stderr drainer exited")
 
     # ── Frame reading ──────────────────────────────────────────────────────
@@ -681,7 +681,7 @@ class NativeCaptureBridge:
                 ctypes.windll.kernel32.CloseHandle(self._pipe_handle)  # type: ignore[attr-defined]
                 logger.debug("[NativeCapture] pipe handle closed")
             except Exception:
-                pass
+                    logger.debug("Suppressed exception in cleanup", exc_info=True)
             self._pipe_handle = None
 
 

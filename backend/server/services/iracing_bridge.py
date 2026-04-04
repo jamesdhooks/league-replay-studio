@@ -351,11 +351,11 @@ class IRacingBridge:
         try:
             self._ir.shutdown()
         except Exception:
-            pass
+                logger.debug("Suppressed exception in cleanup", exc_info=True)
         try:
             self._ir = irsdk.IRSDK()
         except Exception:
-            pass
+                logger.debug("Suppressed exception in cleanup", exc_info=True)
         self._push_update({"event": "iracing:disconnected", "data": {}})
 
     def _handle_session_info(self) -> None:

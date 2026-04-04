@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { useTimeline } from '../../context/TimelineContext'
 import { formatTime } from '../../utils/time'
 import {
@@ -12,7 +13,7 @@ import {
  * Shows: zoom controls, playback/shuttle controls, timecode display,
  * in/out point buttons, playback rate indicator.
  */
-export default function TimelineToolbar() {
+export default memo(function TimelineToolbar() {
   const {
     pixelsPerSecond, zoomIn, zoomOut, zoomToFit,
     playheadTime, isPlaying, setIsPlaying, playbackRate,
@@ -142,7 +143,7 @@ export default function TimelineToolbar() {
       </div>
     </div>
   )
-}
+})
 
 /**
  * Tiny toolbar button with hover/active states.

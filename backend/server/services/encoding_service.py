@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -661,7 +662,7 @@ class EncodingService:
             try:
                 self._broadcast_fn(message)
             except Exception:
-                pass
+                    logger.debug("Suppressed exception in cleanup", exc_info=True)
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -676,9 +677,6 @@ def _format_bytes(size: int) -> str:
         return f"{size / 1e3:.0f} KB"
     return f"{size} B"
 
-
-# Need os import for makedirs in submit_job
-import os
 
 # ── Module-level singleton ──────────────────────────────────────────────────
 

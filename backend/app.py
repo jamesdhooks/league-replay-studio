@@ -50,9 +50,11 @@ from server.routes.api_capture import router as capture_router
 from server.routes.api_encoding import router as encoding_router
 from server.routes.api_preview import router as preview_router
 from server.routes.api_overlay import router as overlay_router
+from server.routes.api_preset import router as preset_router
 from server.routes.api_youtube import router as youtube_router
 from server.routes.api_pipeline import router as pipeline_router
 from server.routes.api_wizard import router as wizard_router
+from server.routes.api_llm import router as llm_router
 
 # Services
 from server.services.iracing_bridge import bridge as iracing_bridge
@@ -88,7 +90,7 @@ class ConnectionManager:
             try:
                 await connection.send_json(message)
             except Exception:
-                pass
+                logger.warning("[WebSocket] Failed to broadcast to a client")
 
 
 ws_manager = ConnectionManager()
@@ -178,6 +180,15 @@ async def lifespan(app: FastAPI):
 
     pipeline_service.set_broadcast_fn(_broadcast_pipeline)
 
+    # ── Register LLM skills ─────────────────────────────────────────────────
+    from server.services.llm_skills import register_default_skills
+    register_default_skills()
+    logger.info("[App] LLM skills registered")
+
+    # ── Background update check ──────────────────────────────────────────────
+    from server.services.update_service import update_service
+    asyncio.create_task(update_service.startup_check(delay=10.0))
+
     logger.info("[App] Startup complete — v%s", __version__)
     yield
 
@@ -211,9 +222,11 @@ app.include_router(capture_router)
 app.include_router(encoding_router)
 app.include_router(preview_router)
 app.include_router(overlay_router)
+app.include_router(preset_router)
 app.include_router(youtube_router)
 app.include_router(pipeline_router)
 app.include_router(wizard_router)
+app.include_router(llm_router)
 
 
 # ── WebSocket endpoint ──────────────────────────────────────────────────────

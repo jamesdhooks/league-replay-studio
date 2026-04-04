@@ -1,5 +1,6 @@
-import { useRef, useEffect, useCallback, useState } from 'react'
+import { useRef, useEffect, useCallback, useState, useContext } from 'react'
 import { useTimeline, TRACKS, TRACK_HEADER_WIDTH, EVENT_COLORS } from '../../context/TimelineContext'
+import { HighlightContext } from '../../context/HighlightContext'
 
 /** Height of the time ruler at top */
 const RULER_HEIGHT = 24
@@ -9,6 +10,21 @@ const TRACK_GAP = 1
 const DRAG_THRESHOLD = 3
 /** Edge grab zone for resizing events (pixels) */
 const EDGE_ZONE = 6
+
+/** Section colors matching HighlightTimeline */
+const SECTION_COLORS = {
+  intro: '#8b5cf6',
+  qualifying_results: '#06b6d4',
+  race_results: '#f59e0b',
+}
+
+/** Section labels */
+const SECTION_LABELS = {
+  intro: 'INTRO',
+  qualifying_results: 'QUAL',
+  race: 'RACE',
+  race_results: 'RESULTS',
+}
 
 /**
  * TimelineCanvas — HTML5 Canvas-based multi-track timeline renderer.
@@ -41,6 +57,9 @@ export default function TimelineCanvas() {
     inPoint, outPoint,
     openContextMenu, updateEvent, activeProjectId,
   } = useTimeline()
+
+  // Video script sections (may be null if not generated yet)
+  const videoScript = useVideoScript()
 
   // ── Interaction state (refs to avoid re-renders during drag) ───────────
   const dragRef = useRef({
@@ -305,6 +324,78 @@ export default function TimelineCanvas() {
       }
     }
 
+    // ── Section markers (from video script) ──
+    if (videoScript && videoScript.length > 0) {
+      // Group by section to find boundaries
+      const sectionBounds = {}
+      for (const seg of videoScript) {
+        const section = seg.section || 'race'
+        if (section === 'race') continue  // race events are already shown as event blocks
+        const s = seg.start_time_seconds || 0
+        const e = seg.end_time_seconds || 0
+        if (!sectionBounds[section]) {
+          sectionBounds[section] = { start: s, end: e }
+        } else {
+          sectionBounds[section].start = Math.min(sectionBounds[section].start, s)
+          sectionBounds[section].end = Math.max(sectionBounds[section].end, e)
+        }
+      }
+
+      for (const [section, bounds] of Object.entries(sectionBounds)) {
+        const sx = timeToX(bounds.start)
+        const ex = timeToX(bounds.end)
+        const sw = Math.max(2, ex - sx)
+
+        // Skip off-screen sections
+        if (ex < TRACK_HEADER_WIDTH || sx > canvasWidth) continue
+
+        const clampSx = Math.max(TRACK_HEADER_WIDTH, sx)
+        const clampW = Math.min(ex, canvasWidth) - clampSx
+        if (clampW <= 0) continue
+
+        const color = SECTION_COLORS[section] || '#666'
+
+        // Draw section background band across all tracks
+        ctx.fillStyle = color
+        ctx.globalAlpha = 0.08
+        ctx.fillRect(clampSx, RULER_HEIGHT, clampW, canvasHeight - RULER_HEIGHT)
+        ctx.globalAlpha = 1.0
+
+        // Draw section boundary lines
+        ctx.strokeStyle = color
+        ctx.lineWidth = 1
+        ctx.setLineDash([3, 3])
+        if (sx >= TRACK_HEADER_WIDTH && sx <= canvasWidth) {
+          ctx.beginPath()
+          ctx.moveTo(sx, RULER_HEIGHT)
+          ctx.lineTo(sx, canvasHeight)
+          ctx.stroke()
+        }
+        if (ex >= TRACK_HEADER_WIDTH && ex <= canvasWidth) {
+          ctx.beginPath()
+          ctx.moveTo(ex, RULER_HEIGHT)
+          ctx.lineTo(ex, canvasHeight)
+          ctx.stroke()
+        }
+        ctx.setLineDash([])
+
+        // Section label on the ruler
+        if (clampW > 30) {
+          ctx.fillStyle = color
+          ctx.globalAlpha = 0.9
+          ctx.font = 'bold 8px Inter, system-ui, sans-serif'
+          ctx.textAlign = 'center'
+          ctx.textBaseline = 'top'
+          ctx.fillText(
+            SECTION_LABELS[section] || section.toUpperCase(),
+            clampSx + clampW / 2,
+            RULER_HEIGHT + 2
+          )
+          ctx.globalAlpha = 1.0
+        }
+      }
+    }
+
     // ── In/Out point markers ──
     if (inPoint !== null) {
       const ix = timeToX(inPoint)
@@ -368,7 +459,7 @@ export default function TimelineCanvas() {
   }, [
     canvasWidth, canvasHeight, pixelsPerSecond, scrollLeft, raceDuration,
     events, playheadTime, selectedEventId, inPoint, outPoint,
-    timeToX, getTrackLayout,
+    timeToX, getTrackLayout, videoScript,
   ])
 
   // ── Render on state change ────────────────────────────────────────────
@@ -569,4 +660,13 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r)
   ctx.arcTo(x, y, x + w, y, r)
   ctx.closePath()
+}
+
+/**
+ * Hook to safely read videoScript from HighlightContext.
+ * Returns null if HighlightProvider is not mounted above us.
+ */
+function useVideoScript() {
+  const ctx = useContext(HighlightContext)
+  return ctx?.videoScript || null
 }

@@ -23,11 +23,15 @@ Endpoints:
   POST   /overrides/{project_id}/{template_id}  — Save per-project override
   GET    /overrides/{project_id}/{template_id}   — Get per-project override
   DELETE /overrides/{project_id}/{template_id}  — Delete per-project override
+  POST   /frame-data/{project_id} — Build frame_data from project telemetry
+  POST   /editor/preview        — Live editor preview
+  GET    /editor/context/{id}   — Template variable documentation
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -87,6 +91,46 @@ class EditorPreviewRequest(BaseModel):
     template_id: str
     html_content: str
     frame_data: dict[str, Any] = {}
+
+
+class FrameDataRequest(BaseModel):
+    """Request body for building frame_data from project telemetry."""
+    session_time: float
+    section: str = "race"
+    focused_car_idx: Optional[int] = None
+    series_name: str = ""
+    track_name: str = ""
+
+
+class CompositeRequest(BaseModel):
+    """Request body for overlay compositing.
+
+    Paths are constructed server-side from ``project_dir`` + filenames to
+    prevent path-injection vulnerabilities.  Only the basename is accepted
+    for each file parameter.
+    """
+    clip_filename: str          # basename of the clip inside project_dir/captures/
+    output_filename: str        # basename for the output inside project_dir/composited/
+    template_id: str
+    session_time: float = 0.0
+    section: str = "race"
+    focused_car_idx: Optional[int] = None
+    series_name: str = ""
+    track_name: str = ""
+    frame_data: Optional[dict[str, Any]] = None  # supply directly to skip telemetry lookup
+
+
+class BatchCompositeRequest(BaseModel):
+    """Request body for batch compositing all clips from a script capture.
+
+    Accepts clip IDs and metadata instead of raw file paths.  Paths are
+    constructed server-side from ``project_dir/captures/{clip_id}.*``.
+    """
+    clips: list[dict[str, Any]]     # each must have 'id', 'section', 'start_time_seconds', 'overlay_template_id'
+    output_subdir: str = "composited"  # subdirectory name under project_dir (basename only)
+    series_name: str = ""
+    track_name: str = ""
+    focused_car_idx: Optional[int] = None
 
 
 # ── Status ──────────────────────────────────────────────────────────────────
@@ -308,3 +352,345 @@ async def get_template_context(template_id: str):
     if context is None:
         raise HTTPException(status_code=404, detail="Template not found")
     return context
+
+
+# ── Frame data from telemetry ────────────────────────────────────────────────
+
+@router.post("/frame-data/{project_id}")
+async def build_frame_data_endpoint(project_id: int, body: FrameDataRequest):
+    """Build a frame_data dict from the project's telemetry database.
+
+    Queries the analysis database for the car state nearest to
+    ``session_time`` and returns a complete frame context dict that can be
+    passed directly to the ``/render`` endpoint or used for batch rendering.
+
+    This is the bridge between the raw telemetry stored during the analysis
+    pass and the overlay rendering system — it converts recorded car positions,
+    lap counts, and flag states into the ``frame.*`` variables that overlay
+    templates consume.
+
+    Args:
+        project_id:    Project to load telemetry from.
+        session_time:  Target replay time in seconds.
+        section:       Video section context (``intro``, ``qualifying_results``,
+                       ``race``, or ``race_results``).
+        focused_car_idx: iRacing car index of the hero driver. Defaults to the
+                         camera car stored in the telemetry snapshot.
+        series_name:   Racing series label (not in DB; use project metadata).
+        track_name:    Track name label (not in DB; use project metadata).
+    """
+    from server.services.project_service import project_service
+    from server.utils.frame_data_builder import build_frame_data
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project.get("project_dir", "")
+    if not project_dir:
+        raise HTTPException(status_code=400, detail="Project has no directory configured")
+
+    # Allow caller to override series/track; fall back to project metadata
+    series_name = body.series_name or ""
+    track_name = body.track_name or project.get("track_name", "")
+
+    try:
+        frame_data = build_frame_data(
+            project_dir=project_dir,
+            session_time=body.session_time,
+            section=body.section,
+            focused_car_idx=body.focused_car_idx,
+            series_name=series_name,
+            track_name=track_name,
+        )
+        return {"frame_data": frame_data, "project_id": project_id}
+    except Exception as exc:
+        logger.error("[Overlay API] Frame data build failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to build frame data")
+
+
+# ── Overlay compositing ──────────────────────────────────────────────────────
+
+@router.post("/composite/{project_id}")
+async def composite_overlay(project_id: int, body: CompositeRequest):
+    """Render an overlay frame and composite it over a captured video clip.
+
+    Renders a single static overlay PNG (using the Playwright engine) at the
+    given ``session_time`` / ``section`` context and burns it over the clip
+    with FFmpeg ``overlay=0:0``.
+
+    Paths are constructed server-side from the project directory:
+      - clip is read from  ``{project_dir}/captures/{clip_filename}``
+      - output is written to ``{project_dir}/composited/{output_filename}``
+
+    The overlay engine must be initialised (call ``POST /init``) before this
+    endpoint can be used.
+
+    Args:
+        project_id:       Project whose captures directory holds the clip.
+        clip_filename:    Basename of the source .mp4 clip.
+        output_filename:  Basename for the composited output .mp4.
+        template_id:      Overlay template ID to render.
+        session_time:     Replay time in seconds for telemetry look-up.
+        section:          Video section context.
+        focused_car_idx:  iRacing hero driver index.
+        series_name:      Series label.
+        track_name:       Track label.
+        frame_data:       If provided, skips telemetry look-up.
+    """
+    import os
+    from pathlib import Path as _Path
+
+    from server.services.project_service import project_service
+    from server.utils.overlay_engine import overlay_engine
+    from server.utils.overlay_compositor import overlay_compositor
+
+    if not overlay_engine.initialized:
+        raise HTTPException(
+            status_code=400,
+            detail="Overlay engine not initialised — call POST /api/overlay/init first",
+        )
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project.get("project_dir", "")
+    if not project_dir:
+        raise HTTPException(status_code=400, detail="Project has no directory configured")
+
+    # Build paths entirely from server-controlled project_dir + validated basename
+    clip_basename = os.path.basename(body.clip_filename)
+    output_basename = os.path.basename(body.output_filename)
+    clip_path = str(_Path(project_dir) / "captures" / clip_basename)
+    output_path = str(_Path(project_dir) / "composited" / output_basename)
+
+    track_name = body.track_name or project.get("track_name", "")
+
+    try:
+        result = await overlay_compositor.render_and_composite(
+            clip_path=clip_path,
+            template_id=body.template_id,
+            output_path=output_path,
+            overlay_engine=overlay_engine,
+            frame_data=body.frame_data,
+            project_dir=project_dir,
+            session_time=body.session_time,
+            section=body.section,
+            focused_car_idx=body.focused_car_idx,
+            series_name=body.series_name,
+            track_name=track_name,
+        )
+        if result is None:
+            raise HTTPException(status_code=500, detail="Compositing failed")
+        return {"success": True, "output_path": result}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("[Overlay API] Composite error: %s", exc)
+        raise HTTPException(status_code=500, detail="Compositing failed")
+
+
+@router.post("/composite/batch/{project_id}")
+async def composite_batch(project_id: int, body: BatchCompositeRequest):
+    """Composite overlays over all clips from a script capture result.
+
+    Takes clip metadata (IDs, sections, timestamps) and resolves file paths
+    entirely server-side from ``{project_dir}/captures/``.  User input never
+    controls file paths directly, preventing path-injection attacks.
+
+    Output files are written to ``{project_dir}/{output_subdir}/``.
+
+    The overlay engine must be initialised before calling this endpoint.
+    """
+    import os
+    from pathlib import Path as _Path
+
+    from server.services.project_service import project_service
+    from server.utils.overlay_engine import overlay_engine
+    from server.utils.overlay_compositor import overlay_compositor
+
+    if not overlay_engine.initialized:
+        raise HTTPException(
+            status_code=400,
+            detail="Overlay engine not initialised — call POST /api/overlay/init first",
+        )
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project.get("project_dir", "")
+    if not project_dir:
+        raise HTTPException(status_code=400, detail="Project has no directory configured")
+
+    track_name = body.track_name or project.get("track_name", "")
+
+    # Reconstruct paths from project_dir + sanitised clip IDs (server-controlled)
+    captures_dir = _Path(project_dir) / "captures"
+    output_subdir = os.path.basename(body.output_subdir or "composited")
+    output_dir = str(_Path(project_dir) / output_subdir)
+
+    # Build clip dicts with server-constructed paths (user provides only metadata)
+    resolved_clips: list[dict] = []
+    for clip in body.clips:
+        clip_id = str(clip.get("id", ""))
+        # Find the capture file for this clip ID in the captures directory
+        # Look for any video file whose stem matches the sanitised clip ID
+        safe_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", clip_id)[:64]
+        clip_path: Optional[str] = None
+        for ext in (".mp4", ".mov", ".mkv"):
+            candidate = captures_dir / f"{safe_id}{ext}"
+            if candidate.is_file():
+                clip_path = str(candidate)
+                break
+        resolved_clips.append({
+            **clip,
+            "path": clip_path,  # server-constructed path (or None if not found)
+        })
+
+    try:
+        composited_clips = await overlay_compositor.composite_script_clips(
+            clips=resolved_clips,
+            overlay_engine=overlay_engine,
+            output_dir=output_dir,
+            project_dir=project_dir,
+            series_name=body.series_name,
+            track_name=track_name,
+            focused_car_idx=body.focused_car_idx,
+        )
+        successful = sum(1 for c in composited_clips if c.get("composited_path"))
+        return {
+            "success": True,
+            "clips": composited_clips,
+            "composited_count": successful,
+            "total_clips": len(composited_clips),
+        }
+    except Exception as exc:
+        logger.error("[Overlay API] Batch composite error: %s", exc)
+        raise HTTPException(status_code=500, detail="Batch compositing failed")
+
+
+# ── Preset-based rendering ──────────────────────────────────────────────────
+
+@router.post("/preset/render-preview")
+async def render_preset_preview(body: dict[str, Any]):
+    """Render a preset's elements for live preview in the design suite.
+
+    Composes all visible elements for the requested section using
+    percentage-based positioning and CSS custom variables.
+
+    Body:
+        preset_id: str           — Preset to render
+        section: str             — Video section (intro, race, etc.)
+        frame_data: dict | None  — Custom frame data (uses sample if None)
+        element_id: str | None   — Only render a specific element
+        variables: dict | None   — Override preset variables
+    """
+    from server.services.preset_service import preset_service
+    from server.services.overlay_service import SAMPLE_FRAME_DATA
+    from server.utils.overlay_engine import overlay_engine
+    from server.utils.element_renderer import compose_preset_html
+
+    preset_id = body.get("preset_id")
+    if not preset_id:
+        raise HTTPException(status_code=400, detail="preset_id is required")
+
+    preset = preset_service.get_preset(preset_id)
+    if not preset:
+        raise HTTPException(status_code=404, detail="Preset not found")
+
+    section = body.get("section", "race")
+    frame_data = body.get("frame_data") or dict(SAMPLE_FRAME_DATA)
+    frame_data["section"] = section
+    element_id = body.get("element_id")
+
+    # Allow variable overrides
+    if body.get("variables"):
+        import copy
+        preset = copy.deepcopy(preset)
+        preset["variables"] = body["variables"]
+
+    resolution = overlay_engine.resolution
+
+    html_content = compose_preset_html(
+        preset=preset,
+        section=section,
+        frame_data=frame_data,
+        resolution=resolution,
+        element_filter=element_id,
+    )
+
+    # Render via the engine
+    if not overlay_engine.initialized:
+        init_result = await overlay_service.initialize()
+        if not init_result.get("success"):
+            return init_result
+
+    result = await overlay_engine.render_raw_html(html_content, frame_data)
+    return result
+
+
+@router.post("/intro-video/composite/{project_id}")
+async def composite_intro_video(project_id: int, body: dict[str, Any]):
+    """Composite an intro video over the intro section clip.
+
+    Body:
+        clip_filename: str      — Base intro clip (basename in captures/)
+        output_filename: str    — Output filename (basename in composited/)
+        preset_id: str          — Preset ID to get intro video from
+        opacity: float          — Overlay opacity (0-1, default 0.85)
+    """
+    import os
+    from pathlib import Path as _Path
+
+    from server.services.project_service import project_service
+    from server.services.preset_service import preset_service
+    from server.utils.overlay_compositor import overlay_compositor
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project.get("project_dir", "")
+    if not project_dir:
+        raise HTTPException(status_code=400, detail="Project has no directory")
+
+    preset_id = body.get("preset_id")
+    if not preset_id:
+        raise HTTPException(status_code=400, detail="preset_id required")
+
+    preset = preset_service.get_preset(preset_id)
+    if not preset:
+        raise HTTPException(status_code=404, detail="Preset not found")
+
+    intro_video_path = preset.get("intro_video_path")
+    if not intro_video_path:
+        raise HTTPException(status_code=400, detail="Preset has no intro video")
+
+    clip_basename = os.path.basename(body.get("clip_filename", ""))
+    output_basename = os.path.basename(body.get("output_filename", ""))
+    if not clip_basename or not output_basename:
+        raise HTTPException(
+            status_code=400,
+            detail="clip_filename and output_filename required",
+        )
+
+    clip_path = str(_Path(project_dir) / "captures" / clip_basename)
+    output_path = str(_Path(project_dir) / "composited" / output_basename)
+
+    opacity = float(body.get("opacity", 0.85))
+
+    result = overlay_compositor.composite_intro_video(
+        base_clip_path=clip_path,
+        intro_video_path=intro_video_path,
+        output_path=output_path,
+        opacity=opacity,
+    )
+
+    if result is None:
+        raise HTTPException(
+            status_code=500, detail="Intro video compositing failed"
+        )
+
+    return {"success": True, "output_path": result}

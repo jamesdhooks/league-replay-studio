@@ -77,6 +77,12 @@ class EventType:
     CAPTURE_VALIDATED      = "capture:validated"
     CAPTURE_ERROR          = "capture:error"
 
+    # Script-based capture
+    CAPTURE_SCRIPT_STARTED   = "capture:script_started"
+    CAPTURE_SCRIPT_PROGRESS  = "capture:script_progress"
+    CAPTURE_SCRIPT_COMPLETED = "capture:script_completed"
+    CAPTURE_SCRIPT_ERROR     = "capture:script_error"
+
     # Preview
     PREVIEW_PROGRESS       = "preview:progress"
     PREVIEW_TIER_READY     = "preview:tier_ready"

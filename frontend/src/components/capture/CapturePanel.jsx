@@ -8,6 +8,7 @@ import {
   AlertTriangle, Monitor, Keyboard, FolderOpen, Clock,
   HardDrive, Zap, RefreshCw, FileVideo,
 } from 'lucide-react'
+import ClipsPanel from './ClipsPanel'
 
 /**
  * CapturePanel — Video capture orchestration UI.
@@ -184,6 +185,10 @@ export default function CapturePanel({ projectId }) {
             </div>
           </div>
         )}
+
+        {/* ── Script Capture Clips ──────────────────────────────────── */}
+        <ClipsPanel projectId={projectId} />
+
         <Section icon={Monitor} title="Capture Software">
           <div className="space-y-2">
             {software.length > 0 ? (

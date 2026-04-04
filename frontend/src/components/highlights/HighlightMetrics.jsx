@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { useHighlight, tierColor } from '../../context/HighlightContext'
 import { useTimeline } from '../../context/TimelineContext'
 import { Clock, BarChart3, Activity, Users, Target } from 'lucide-react'
@@ -8,7 +9,7 @@ import { Clock, BarChart3, Activity, Users, Target } from 'lucide-react'
  * Shows: duration, event count, coverage %, balance score, pacing score, driver coverage.
  * Updates within 100ms of any parameter change (computed in HighlightContext).
  */
-export default function HighlightMetrics() {
+export default memo(function HighlightMetrics() {
   const { metrics, targetDuration } = useHighlight()
   const { raceDuration } = useTimeline()
 
@@ -98,7 +99,7 @@ export default function HighlightMetrics() {
       )}
     </div>
   )
-}
+})
 
 
 /** Single metric row with icon, label, value */

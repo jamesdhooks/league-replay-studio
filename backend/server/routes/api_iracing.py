@@ -113,7 +113,7 @@ def _stop_hls_session_locked() -> None:
         try:
             capture_engine.stop_h264_feed(gen_token)
         except Exception:
-            pass
+            logger.debug("Suppressed exception in cleanup", exc_info=True)
 
     proc = _hls_session.get("proc")
     if proc is not None:
@@ -121,14 +121,14 @@ def _stop_hls_session_locked() -> None:
             proc.kill()
             proc.wait(timeout=2)
         except Exception:
-            pass
+            logger.debug("Suppressed exception in cleanup", exc_info=True)
 
     tmpdir = _hls_session.get("tmpdir")
     if tmpdir and pathlib.Path(tmpdir).exists():
         try:
             shutil.rmtree(tmpdir, ignore_errors=True)
         except Exception:
-            pass
+            logger.debug("Suppressed exception in cleanup", exc_info=True)
 
     _hls_session.update({
         "tmpdir": None, "proc": None, "feed_thread": None,
@@ -219,7 +219,7 @@ def _start_hls_session_locked(ffmpeg: str, fps: int, crf: int, max_width: int) -
                 if line:
                     logger.error("[HLS FFmpeg] %s", line)
         except Exception:
-            pass
+            logger.debug("Suppressed exception in cleanup", exc_info=True)
 
     threading.Thread(target=_drain_ffmpeg_stderr, daemon=True).start()
 
@@ -274,7 +274,7 @@ def _start_hls_session_locked(ffmpeg: str, fps: int, crf: int, max_width: int) -
             try:
                 proc.stdin.close()
             except Exception:
-                pass
+                logger.debug("Suppressed exception in cleanup", exc_info=True)
 
     feed_thread = threading.Thread(target=_feed_stdin, daemon=True)
     feed_thread.start()
@@ -815,7 +815,7 @@ async def iracing_stream_h264(
             try:
                 proc.stdin.close()
             except Exception:
-                pass
+                logger.debug("Suppressed exception in cleanup", exc_info=True)
 
     feed_thread = _threading.Thread(target=_feed_stdin, daemon=True)
     feed_thread.start()
@@ -835,7 +835,7 @@ async def iracing_stream_h264(
             try:
                 proc.kill()
             except Exception:
-                pass
+                logger.debug("Suppressed exception in cleanup", exc_info=True)
             await loop.run_in_executor(None, proc.wait)
 
     return StreamingResponse(

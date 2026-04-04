@@ -299,7 +299,7 @@ class CaptureEngine:
             if pref and isinstance(pref, str):
                 self._backend_pref = pref
         except Exception:
-            pass  # keep default
+                logger.debug("Suppressed exception in cleanup", exc_info=True)  # keep default
 
         self._fps = max(1, min(fps, 60))
         self._quality = max(10, min(quality, 100))
@@ -681,7 +681,7 @@ class CaptureEngine:
                 if proc.stdin and not proc.stdin.closed:
                     proc.stdin.close()
         except Exception:
-            pass
+                logger.debug("Suppressed exception in cleanup", exc_info=True)
         try:
             proc.wait(timeout=30)  # allow time for encoder to flush
         except Exception:
@@ -782,7 +782,7 @@ class CaptureEngine:
                             try:
                                 bridge_status = self._native_bridge.status() if self._native_bridge else None
                             except Exception:
-                                pass
+                                    logger.debug("Suppressed exception in cleanup", exc_info=True)
                             is_alive = (
                                 self._native_bridge is not None
                                 and getattr(self._native_bridge, '_proc', None) is not None
@@ -1170,7 +1170,7 @@ class CaptureEngine:
             try:
                 bridge.stop()
             except Exception:
-                pass
+                    logger.debug("Suppressed exception in cleanup", exc_info=True)
         self._native_bridge = None
         self._native_hwnd = None
         self._native_wgc_ok = None
@@ -1255,11 +1255,11 @@ class CaptureEngine:
                 if self._dxcam_started:
                     self._dxcam_camera.stop()
             except Exception:
-                pass
+                    logger.debug("Suppressed exception in cleanup", exc_info=True)
             try:
                 del self._dxcam_camera
             except Exception:
-                pass
+                    logger.debug("Suppressed exception in cleanup", exc_info=True)
         self._dxcam_camera = None
         self._dxcam_started = False
         self._dxcam_region = None
@@ -1377,7 +1377,7 @@ class CaptureEngine:
             if self._pw_hwnd_dc and self._pw_hwnd:
                 user32.ReleaseDC(self._pw_hwnd, self._pw_hwnd_dc)
         except Exception:
-            pass
+                logger.debug("Suppressed exception in cleanup", exc_info=True)
         self._pw_hwnd_dc = self._pw_mem_dc = self._pw_bitmap = None
         self._pw_np_buf = None
         self._pw_gdi_w = self._pw_gdi_h = 0

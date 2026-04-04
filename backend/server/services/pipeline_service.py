@@ -1024,16 +1024,14 @@ class PipelineService:
     def _execute_capture(self) -> None:
         """Execute the capture step.
 
-        Orchestrates a full-race capture:
-          1. Read analysis results (race start frame, events) from DB
-          2. Rewind replay to race start frame
-          3. Start recording via capture_service
-          4. Play replay at 1× speed
-          5. Monitor for race end (checkered + cooldown)
-          6. Stop recording
+        Two capture modes:
+          A. **Script-based** (preferred) — Uses the Video Composition Script
+             to capture individual clips for each segment (intro, qualifying,
+             race events, results), then compiles them.
+          B. **Legacy full-race** — Captures the entire race in one pass.
 
-        Matches the reference CaptureRace.cs pattern of using analysis
-        data to drive the replay during capture.
+        The script-based mode is used when generate_video_script results
+        are available from the editing step.
         """
         from server.services.capture_service import capture_service
         from server.services.iracing_bridge import bridge as iracing_bridge
@@ -1063,7 +1061,15 @@ class PipelineService:
         if not iracing_bridge.is_connected:
             raise RuntimeError("iRacing is not connected — cannot capture")
 
-        # ── Read analysis results ───────────────────────────────────────────
+        # ── Try script-based capture first ──────────────────────────────────
+        video_script = config.get("video_script")
+        if video_script and isinstance(video_script, list) and len(video_script) > 0:
+            self._execute_script_capture(
+                iracing_bridge, project_id, project, video_script, config
+            )
+            return
+
+        # ── Legacy full-race capture (fallback) ─────────────────────────────
         project_dir = project.get("project_dir", "") if project else ""
         race_start_frame = 0
 
@@ -1177,6 +1183,82 @@ class PipelineService:
             "message": "Capture complete",
         })
         logger.info("[Pipeline] Capture step completed")
+
+    def _execute_script_capture(
+        self,
+        iracing_bridge: Any,
+        project_id: int,
+        project: dict,
+        video_script: list[dict],
+        config: dict,
+    ) -> None:
+        """Execute script-based capture for a Video Composition Script.
+
+        For each segment: pause → seek → set camera → record → trim → save.
+        Then compile all clips into a single video.
+        """
+        from server.utils.script_capture import ScriptCaptureEngine
+        from server.utils.capture_engine import CaptureEngine
+
+        project_dir = project.get("project_dir", "")
+        clips_dir = str(Path(project_dir) / "clips")
+        clip_padding = config.get("clip_padding", 0.5)
+
+        self._update_step_progress(StepName.CAPTURE, 5.0, {
+            "message": "Starting script-based capture...",
+            "mode": "script",
+        })
+
+        cameras = getattr(iracing_bridge, "cameras", []) or []
+
+        capture_engine = CaptureEngine()
+        if not capture_engine.is_running:
+            capture_engine.start(fps=30, quality=80, max_width=1920)
+
+        def progress_cb(data: dict) -> None:
+            pct = 10.0
+            seg_idx = data.get("segment_index", 0)
+            seg_total = data.get("segment_total", 1)
+            if seg_total > 0:
+                pct = 10.0 + (seg_idx / seg_total) * 80.0
+            self._update_step_progress(StepName.CAPTURE, pct, data)
+
+        try:
+            engine = ScriptCaptureEngine(
+                output_dir=clips_dir,
+                clip_padding=clip_padding,
+                progress_callback=progress_cb,
+            )
+
+            clips = engine.capture_script(
+                script=video_script,
+                iracing_bridge=iracing_bridge,
+                capture_engine=capture_engine,
+                available_cameras=cameras,
+            )
+
+            if not clips:
+                raise RuntimeError("No clips were captured")
+
+            self._update_step_progress(StepName.CAPTURE, 92.0, {
+                "message": "Compiling clips...",
+            })
+
+            output_path = str(Path(project_dir) / "highlight_compiled.mp4")
+            compiled = engine.compile_clips(output_path)
+
+            if compiled:
+                logger.info("[Pipeline] Script capture compiled → %s", compiled)
+            else:
+                logger.warning("[Pipeline] Clip compilation failed")
+
+            self._update_step_progress(StepName.CAPTURE, 100.0, {
+                "message": "Script capture complete",
+                "clips": len(clips),
+                "compiled_path": compiled,
+            })
+        finally:
+            capture_engine.stop()
 
     def _execute_analysis(self) -> None:
         """Execute the analysis step."""

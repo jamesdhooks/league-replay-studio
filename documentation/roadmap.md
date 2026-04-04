@@ -311,6 +311,12 @@ Canvas-based multi-track timeline: Camera, Events, Overlays, Cuts, Audio tracks.
 - [x] Tier distribution shown in metrics dashboard
 - [x] LLM toggle for optional narrative refinement (notes, transitions, anchors)
 - [x] Video Composition Script generation (replaces EDL)
+- [x] Four-section video structure: intro → qualifying results → race → race results
+- [x] B-roll camera selection from iRacing TV cams for non-race sections (configurable per section)
+- [x] Script-based capture engine: per-segment pause → seek → camera → record → trim → compile
+- [x] Section markers visible on NLE timeline canvas (dashed boundaries + labels)
+- [x] Inline section editor for duration/camera/start time of non-race sections
+- [x] Configurable clip-start padding (trimmed post-capture)
 
 ---
 
@@ -349,7 +355,7 @@ Unlimited undo/redo across timeline, event inspector, and highlight suite. Visib
 
 ---
 
-## Phase 3 — Video Pipeline `📋 planned`
+## Phase 3 — Video Pipeline `✅ completed`
 
 > Build the end-to-end video production pipeline — OBS/ShadowPlay capture, GPU-accelerated FFmpeg encoding, tiered preview system, and export presets.
 
@@ -413,7 +419,7 @@ Auto-detect OBS Studio, NVIDIA ShadowPlay, AMD ReLive. Configurable hotkey mappi
 
 ---
 
-### Feature 13 — GPU-Accelerated Encoding Engine `MUST` `✅ done`
+### Feature 13 — GPU-Accelerated Encoding Engine `MUST` `✅ completed`
 **Spec:** `011-gpu-accelerated-encoding-engine`
 **Dependencies:** feature-7, feature-9
 
@@ -434,7 +440,7 @@ FFmpeg pipeline with NVENC/AMF/QSV hardware acceleration (CPU fallback). EDL →
 
 ---
 
-### Feature 14 — Video Preview System `MUST` `✅ done`
+### Feature 14 — Video Preview System `MUST` `✅ completed`
 **Spec:** `012-video-preview-system`
 **Dependencies:** feature-8, feature-12
 
@@ -455,7 +461,7 @@ Tiered preview: (1) keyframe index ~5 s; (2) sprite sheet thumbnails ~30–60 s;
 
 ---
 
-### Feature 15 — Export Presets & Encoding Dashboard `SHOULD` `✅ done`
+### Feature 15 — Export Presets & Encoding Dashboard `SHOULD` `✅ completed`
 **Dependencies:** feature-13
 
 Export preset CRUD UI and encoding dashboard: real-time FPS/percentage/ETA/file-size/GPU-utilisation metrics, auto-shutdown option, completed-exports file browser with play/reveal/copy/upload actions.
@@ -470,7 +476,7 @@ Export preset CRUD UI and encoding dashboard: real-time FPS/percentage/ETA/file-
 
 ---
 
-## Phase 4 — Overlays & Integration `📋 planned`
+## Phase 4 — Overlays & Integration `✅ completed`
 
 > HTML/Tailwind overlay templates via headless Chromium, in-app overlay editor, YouTube channel integration, and one-click automated pipeline.
 
@@ -481,7 +487,7 @@ Export preset CRUD UI and encoding dashboard: real-time FPS/percentage/ETA/file-
 
 ---
 
-### Feature 16 — HTML/Tailwind Overlay Template Engine `SHOULD` `✅ done`
+### Feature 16 — HTML/Tailwind Overlay Template Engine `SHOULD` `✅ completed`
 **Dependencies:** feature-13, feature-14
 
 Playwright headless Chromium + Jinja2 rendering. `render_frame()` ~5–15 ms/frame, `batch_render_for_export()`. Built-in template library: Broadcast, Minimal, Classic, Cinematic, Blank. Resolution-aware (1080p / 1440p / 4K). Per-project overrides.
@@ -496,10 +502,16 @@ Playwright headless Chromium + Jinja2 rendering. `render_frame()` ~5–15 ms/fra
 - [x] Overlay compositing works in both preview and export pipelines
 - [x] Per-project template overrides don't modify the original template files
 - [x] Templates can be imported, exported, duplicated with version tracking
+- [x] Per-section overlay element system with preset management
+- [x] Resolution-independent CSS percentage-based positioning
+- [x] Custom CSS variables (--color-primary, --font-primary, etc.)
+- [x] Global asset management (image upload/serve per preset)
+- [x] Intro video upload and compositing for intro section
+- [x] Element-based Jinja2 template rendering pipeline
 
 ---
 
-### Feature 17 — In-App Overlay Editor `SHOULD` `✅ done`
+### Feature 17 — In-App Overlay Editor `SHOULD` `✅ completed`
 **Dependencies:** feature-16
 
 Split-pane Monaco editor (HTML/CSS, Tailwind IntelliSense) + live preview. Data context inspector, visual no-code controls (element picker, drag-reposition, resize handles), animation picker generating CSS keyframe animations.
@@ -513,10 +525,16 @@ Split-pane Monaco editor (HTML/CSS, Tailwind IntelliSense) + live preview. Data 
 - [x] Animation picker generates CSS keyframe animations for overlay transitions
 - [x] Preview updates within 200 ms of code change (debounced live reload)
 - [x] Save button persists changes; revert restores to last saved state
+- [x] Preset Design Suite with per-section element list
+- [x] Element property editor (name, position %, z-index, template HTML)
+- [x] CSS variable editor with color picker
+- [x] Asset manager with upload/delete/copy URL
+- [x] Live preview rendering with section switching
+- [x] Template syntax guide with Jinja2 variable reference
 
 ---
 
-### Feature 18 — YouTube Channel Integration `SHOULD` `✅ done`
+### Feature 18 — YouTube Channel Integration `SHOULD` `✅ completed`
 **Dependencies:** feature-13, feature-3
 
 YouTube Data API v3. OAuth2 flow, channel status, Jinja2 description templates (`{{track_name}}`, `{{drivers}}`), resumable upload with retry, video browser with project association, quota monitoring.
@@ -535,7 +553,7 @@ YouTube Data API v3. OAuth2 flow, channel status, Jinja2 description templates (
 
 ---
 
-### Feature 19 — One-Click Automated Pipeline `SHOULD` `✅ done`
+### Feature 19 — One-Click Automated Pipeline `SHOULD` `✅ completed`
 **Dependencies:** feature-7, feature-9, feature-12, feature-13, feature-18
 
 `PipelineEngine` sequencing: Analysis → Editing → Capture → Export → Upload. Pause/resume/cancel/retry per step. Pipeline presets CRUD. Failure recovery from failed step (not from scratch). Persistent state in SQLite. CLI support.
@@ -553,18 +571,57 @@ YouTube Data API v3. OAuth2 flow, channel status, Jinja2 description templates (
 
 ---
 
+## Phase 4b — AI / LLM Integration `✅ completed`
+
+> Multi-provider LLM service with skill-based architecture, editorial highlight refinement, natural language overlay design, and element pagination.
+
+### Milestones
+- [x] **M4b.1** LLM service with multi-provider support *(feature 26)*
+- [x] **M4b.2** AI-powered overlay element design via natural language *(feature 26)*
+- [x] **M4b.3** Element pagination for list-based overlays *(feature 26)*
+
+---
+
+### Feature 26 — LLM Integration Layer `SHOULD` `✅ completed`
+**Dependencies:** feature-4, feature-16, feature-17
+
+Multi-provider LLM service (OpenAI, Anthropic, Google, custom) with skill-based architecture. Skills: editorial highlight refinement, overlay element generation via natural language, overlay element augmentation. Backend constructs system prompts with full template variable documentation, CSS variable system, positioning rules, and 6 reference element examples. Element pagination for list-based overlays (results tables, standings). Settings UI with provider dropdown, masked API key, model selection, temperature control.
+
+**Acceptance Criteria**
+- [x] `llm_service.py` supports OpenAI, Anthropic, Google, and custom (OpenAI-compatible) providers via raw httpx calls
+- [x] Skill-based architecture: each skill owns system prompt, output schema, and validation
+- [x] `EditorialSkill` refines highlight timelines (notes, transitions, narrative anchors, same-tier swaps)
+- [x] `OverlayDesignSkill` generates overlay elements from natural language with full variable reference and 6 reference examples
+- [x] `OverlayAugmentSkill` modifies existing elements while preserving identity
+- [x] Backend constructs all system prompts — users provide simple natural-language requests
+- [x] LLM settings in config: `llm_enabled`, `llm_provider`, `llm_api_key`, `llm_model`, `llm_custom_endpoint`, `llm_temperature`
+- [x] Settings validators for all LLM config values
+- [x] Element pagination support: `pagination` config with `items_per_page` and `cycle_duration_seconds`
+- [x] Template variables: `page_start`, `page_end`, `page_index`, `total_pages` for paginated rendering
+- [x] `api_llm.py` with 6 endpoints: status, skills, execute, editorial, overlay/generate, overlay/augment
+- [x] AI/LLM settings category in SettingsPanel with provider dropdown, masked API key, model selector, temperature slider
+- [x] `LLMContext.jsx` with `generateElement()`, `augmentElement()`, `runEditorial()`, `isAvailable()`
+- [x] AI prompt bar in PresetDesigner with create/augment mode toggle and section-aware placeholders
+- [x] LLMProvider wired into App.jsx provider tree
+- [x] Skills registered on app startup via `register_default_skills()`
+- [x] Adding new skills requires only a new LLMSkill subclass — no boilerplate
+- [x] Master plan updated with Section 7.14 (LLM Integration Layer)
+- [x] Roadmap updated with Feature 26
+
+---
+
 ## Phase 5 — Polish & Distribution `📋 planned`
 
 > CLI/headless mode, PyInstaller `.exe` bundle, first-run wizard, auto-update, comprehensive error handling, configurable keyboard shortcuts.
 
 ### Milestones
 - [x] **M5.1** App is scriptable from the command line *(feature 20)*
-- [ ] **M5.2** Distributable installer is available *(features 21, 22, 23)* — Feature 21 ✅
+- [ ] **M5.2** Distributable installer is available *(features 22, 23)* — F22+F23 pending
 - [ ] **M5.3** Application is production-quality *(features 24, 25)*
 
 ---
 
-### Feature 20 — CLI / Headless Mode `COULD` `✅ done`
+### Feature 20 — CLI / Headless Mode `COULD` `✅ completed`
 **Dependencies:** feature-7, feature-9, feature-13
 
 `lrs.bat` CLI: `--project`, `--highlights`, `--full-race`, `--preset`, `--output`, `--analyse-only`, `--full-pipeline`, `--upload`, `--gpu`, `--verbose/-v`, `--quiet/-q`. Bypasses FastAPI/pywebview entirely. Exit codes: 0=success, 1=project error, 2=iRacing not running, 3=encoding failed.
@@ -582,7 +639,7 @@ YouTube Data API v3. OAuth2 flow, channel status, Jinja2 description templates (
 
 ---
 
-### Feature 21 — First-Run Setup Wizard `COULD` `✅ done`
+### Feature 21 — First-Run Setup Wizard `COULD` `✅ completed`
 **Dependencies:** feature-4, feature-12
 
 Guided first-run: detect iRacing dir, discover OBS/ShadowPlay, configure + validate hotkeys, select GPU, set working directory, optionally connect YouTube. Re-launchable from Settings → Setup Wizard.
@@ -666,13 +723,13 @@ Default bindings: Space (play/pause), J/K/L (shuttle), I/O (in/out), Ctrl+Z/Y (u
 > Post-v1.0 platform extensions. These features are documented for completeness but will not be scheduled until v1.0 ships.
 
 ### Milestones
-- [ ] **M6.1** Team radio enhances race videos *(feature 26)*
+- [ ] **M6.1** Team radio enhances race videos *(feature 32)*
 - [ ] **M6.2** Advanced broadcast features *(features 27, 28, 29, 31)*
 - [ ] **M6.3** Community ecosystem *(feature 30)*
 
 ---
 
-### Feature 26 — Discord Voice Chat Overlay `WONT` `⏸`
+### Feature 32 — Discord Voice Chat Overlay `WONT` `⏸`
 **Dependencies:** feature-16, feature-13
 
 Craig bot per-speaker `.flac` import, Discord-to-iRacing driver mapping, manual sync point, per-speaker volume controls, visual microphone indicator, game audio ducking, FFmpeg multi-stream audio export.
@@ -727,7 +784,8 @@ feature-1 (App Shell)
 │   │   │   │   │   ├── feature-15 (Export Dashboard)
 │   │   │   │   │   ├── feature-16 (Overlay Engine)
 │   │   │   │   │   │   ├── feature-17 (Overlay Editor)
-│   │   │   │   │   │   ├── feature-26 (Discord Overlay) [future]
+│   │   │   │   │   │   │   └── feature-26 (LLM Integration) ✅
+│   │   │   │   │   │   ├── feature-32 (Discord Overlay) [future]
 │   │   │   │   │   │   ├── feature-27 (Telemetry Overlays) [future]
 │   │   │   │   │   │   ├── feature-28 (Multi-Class) [future]
 │   │   │   │   │   │   └── feature-29 (AI Commentary) [future]
@@ -744,6 +802,7 @@ feature-1 (App Shell)
 ├── feature-4 (Settings)
 │   └── feature-21 (Setup Wizard)
 │   └── feature-25 (Keyboard Shortcuts)
+│   └── feature-26 (LLM Integration) ✅
 ├── feature-5 (WebSocket)
 └── feature-6 (Design System)
         └── feature-22 (PyInstaller)
@@ -764,4 +823,4 @@ When implementing a feature, follow this checklist:
 5. **Update the feature status** — change from `📋 planned` / `🔍 under_review` to `🔄 in progress` then `✅ completed`
 6. **Update milestone status** — mark the milestone complete when all its features are done
 
-**Current next task:** Start at the top of Phase 1 with **Feature 1 — Application Shell & Desktop Window**.
+**Current next task:** Start at Phase 5 with **Feature 22 — PyInstaller Distribution & Bundling**. Phase 4b (LLM Integration) is complete.

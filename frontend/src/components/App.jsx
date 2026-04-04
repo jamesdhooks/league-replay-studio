@@ -13,9 +13,14 @@ import { HighlightProvider } from '../context/HighlightContext'
 import { EncodingProvider } from '../context/EncodingContext'
 import { PreviewProvider } from '../context/PreviewContext'
 import { OverlayProvider } from '../context/OverlayContext'
+import { PresetProvider } from '../context/PresetContext'
+import { LLMProvider } from '../context/LLMContext'
 import { YouTubeProvider } from '../context/YouTubeContext'
 import { PipelineProvider } from '../context/PipelineContext'
 import { wsClient } from '../services/websocket'
+import ErrorBoundary from './ui/ErrorBoundary'
+import ComposeProviders from './ui/ComposeProviders'
+import KeyboardShortcutsHelp from './ui/KeyboardShortcutsHelp'
 import AppShell from './layout/AppShell'
 import SetupWizard from './wizard/SetupWizard'
 
@@ -71,8 +76,35 @@ function WizardController() {
 }
 
 /**
+ * Ordered provider stack — flattened via ComposeProviders.
+ * Order matters: later providers can consume earlier ones.
+ * ErrorBoundary entries protect groups of providers from cascading failures.
+ */
+const PROVIDER_STACK = [
+  [ToastProvider],
+  [ModalProvider],
+  [SettingsProvider],
+  [IRacingProvider],
+  [ProjectProvider],
+  [ErrorBoundary, { name: 'Analysis' }],
+  [AnalysisProvider],
+  [CaptureProvider],
+  [EncodingProvider],
+  [PreviewProvider],
+  [OverlayProvider],
+  [PresetProvider],
+  [LLMProvider],
+  [YouTubeProvider],
+  [PipelineProvider],
+  [UndoRedoProvider],
+  [TimelineProvider],
+  [ErrorBoundary, { name: 'Highlights' }],
+  [HighlightProvider],
+]
+
+/**
  * Root application component.
- * Wraps all providers and renders the layout shell.
+ * Uses ComposeProviders to flatten the 18-level provider tree.
  */
 function App() {
   // Start the WebSocket connection when the app mounts
@@ -82,38 +114,13 @@ function App() {
   }, [])
 
   return (
-    <ToastProvider>
-      <ModalProvider>
-        <SettingsProvider>
-          <IRacingProvider>
-            <ProjectProvider>
-              <AnalysisProvider>
-                <CaptureProvider>
-                  <EncodingProvider>
-                    <PreviewProvider>
-                      <OverlayProvider>
-                        <YouTubeProvider>
-                          <PipelineProvider>
-                            <UndoRedoProvider>
-                            <TimelineProvider>
-                              <HighlightProvider>
-                                <AppShell />
-                                <WizardController />
-                              </HighlightProvider>
-                            </TimelineProvider>
-                            </UndoRedoProvider>
-                          </PipelineProvider>
-                        </YouTubeProvider>
-                      </OverlayProvider>
-                    </PreviewProvider>
-                  </EncodingProvider>
-                </CaptureProvider>
-              </AnalysisProvider>
-            </ProjectProvider>
-          </IRacingProvider>
-        </SettingsProvider>
-      </ModalProvider>
-    </ToastProvider>
+    <ComposeProviders providers={PROVIDER_STACK}>
+      <ErrorBoundary name="App">
+        <AppShell />
+        <KeyboardShortcutsHelp />
+      </ErrorBoundary>
+      <WizardController />
+    </ComposeProviders>
   )
 }
 

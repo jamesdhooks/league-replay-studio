@@ -19,5 +19,16 @@ export default defineConfig({
   build: {
     outDir: '../backend/static',
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          // Split heavy vendor dependencies into separate chunks
+          'vendor-react': ['react', 'react-dom'],
+          'vendor-monaco': ['@monaco-editor/react'],
+          'vendor-motion': ['framer-motion'],
+          'vendor-icons': ['lucide-react'],
+        },
+      },
+    },
   },
 })
