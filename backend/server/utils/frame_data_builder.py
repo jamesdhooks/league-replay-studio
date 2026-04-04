@@ -209,7 +209,6 @@ def build_frame_data(
                     if gap_secs < _GAP_PRECISION_THRESHOLD
                     else f"+{gap_secs:.1f}"
                 )
-                )
             else:
                 entry["gap"] = "---"
 
