@@ -140,6 +140,10 @@ def compose_preset_html(
     Returns:
         Complete HTML document string.
     """
+    logger.debug(
+        "[ElementRenderer] compose_preset_html: section=%s, preset=%s, page=%d",
+        section, preset.get("id", "?"), page_index,
+    )
     if resolution is None:
         resolution = {"width": 1920, "height": 1080}
 

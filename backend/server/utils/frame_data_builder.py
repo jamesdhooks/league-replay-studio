@@ -116,6 +116,10 @@ def build_frame_data(
         All keys from ``SAMPLE_FRAME_DATA`` are present; values may be
         ``None`` when the underlying telemetry is absent.
     """
+    logger.debug(
+        "[FrameDataBuilder] building frame: session_time=%.2f, section=%s, car_idx=%s",
+        session_time, section, focused_car_idx,
+    )
     try:
         conn = get_project_db(project_dir)
     except Exception as exc:

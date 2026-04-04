@@ -44,7 +44,7 @@
 | 1 | **Syntax error**: Extra `)` on line 212 prevents module import — overlay rendering crashes | `backend/server/utils/frame_data_builder.py:212` | ✅ FIXED |
 | 2 | **Import at bottom**: `import os` at line 681 instead of top — style issue + fragile | `backend/server/services/encoding_service.py:681` | ✅ FIXED |
 | 3 | **No error boundaries**: Any context crash takes down entire app | `frontend/src/components/` | ✅ FIXED |
-| 4 | **Silent WebSocket broadcast failure**: `except Exception: pass` drops errors | `backend/app.py:92` | ⬜ TODO |
+| 4 | **Silent WebSocket broadcast failure**: `except Exception: pass` drops errors | `backend/app.py:92` | ✅ FIXED |
 
 ### 🟡 HIGH PRIORITY (Tier 2) — Required for production quality
 
@@ -52,10 +52,10 @@
 |---|-------|---------|--------|
 | 5 | **Zero logging in scoring_engine.py**: No debug visibility into 8-stage pipeline | `backend/server/services/scoring_engine.py` | ✅ FIXED |
 | 6 | **Zero logging in llm_skills.py**: No debug info if skill validation fails | `backend/server/services/llm_skills.py` | ✅ FIXED |
-| 7 | **Minimal logging in frame_data_builder.py & element_renderer.py** | `backend/server/utils/` | ⬜ TODO |
-| 8 | **API client has no retry/timeout**: Single attempt, no timeout, no interceptors | `frontend/src/services/api.js` | ⬜ TODO |
+| 7 | **Minimal logging in frame_data_builder.py & element_renderer.py** | `backend/server/utils/` | ✅ FIXED |
+| 8 | **API client has no retry/timeout**: Single attempt, no timeout, no interceptors | `frontend/src/services/api.js` | ✅ FIXED |
 | 9 | **No React.memo**: 0 memoized components, useCallback wasted without memo | `frontend/src/components/` | ⬜ TODO |
-| 10 | **Bundle too large (964 KB)**: No code splitting, all loaded in single chunk | `frontend/vite.config.js` | ⬜ TODO |
+| 10 | **Bundle too large (964 KB)**: No code splitting, all loaded in single chunk | `frontend/vite.config.js` | ✅ FIXED |
 
 ### 🟢 POLISH (Tier 3) — Production polish
 

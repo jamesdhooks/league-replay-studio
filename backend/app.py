@@ -90,7 +90,7 @@ class ConnectionManager:
             try:
                 await connection.send_json(message)
             except Exception:
-                pass
+                logger.warning("[WebSocket] Failed to broadcast to a client")
 
 
 ws_manager = ConnectionManager()
