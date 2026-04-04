@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, memo } from 'react'
 import Hls from 'hls.js'
 import { useAnalysis } from '../../context/AnalysisContext'
 import { useProject } from '../../context/ProjectContext'
@@ -235,7 +235,7 @@ function HlsStreamPlayer({ src, className, onLoad, onError }) {
  *  - Particle event cards overlaid on the TV
  *  - Clicking events seeks the replay; separate expand button for details
  */
-export default function AnalysisPanel() {
+export default memo(function AnalysisPanel() {
   const {
     isAnalyzing, progress, events, eventSummary, error,
     analysisLog, discoveredEvents,
@@ -1606,7 +1606,7 @@ export default function AnalysisPanel() {
       </div>
     </div>
   )
-}
+})
 
 
 /**
