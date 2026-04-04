@@ -2989,7 +2989,7 @@ class HighlightEditor:
 
 ### 7.8.1 LLM Editorial Layer (New in v2)
 
-The LLM editorial layer operates after the deterministic scoring pipeline has produced a candidate timeline. It does not replace the algorithmic selection — it refines the narrative, adds segment notes, and can swap events within a tier without changing the overall structure.
+The LLM editorial layer operates after the deterministic scoring pipeline has produced a candidate timeline. It does not replace the algorithmic selection — it refines the narrative, adds segment notes, and can swap events within a tier without changing the overall structure. Implemented as the `EditorialSkill` in `llm_skills.py`, registered with the `LLMService` (see Section 7.14).
 
 **LLM Permitted Actions:**
 - Add a `notes` field to any segment (shown in UI and written to segment in output script)
@@ -2998,6 +2998,8 @@ The LLM editorial layer operates after the deterministic scoring pipeline has pr
 - Flag a segment as `narrative_anchor` if it is pivotal to the race story
 
 **Not permitted:** Changing event inclusion/exclusion, overriding tier classification, modifying timestamps, or adjusting scores. These remain deterministic.
+
+**API:** `POST /api/llm/editorial` — accepts timeline, scored events, metrics, race info, and user prompt. Returns modifications array. See Section 7.14.3 for full details.
 
 ### 7.8.2 Video Composition Script (New in v2)
 
@@ -3767,6 +3769,178 @@ Each step has specific failure recovery strategies:
 
 ---
 
+### 7.14 LLM Integration Layer
+
+The LLM integration layer provides AI-powered capabilities across the application through a **skill-based architecture** with multi-provider support. The backend owns all system prompts and context injection — users provide simple natural-language requests and receive results that plug directly into application data structures.
+
+#### 7.14.1 Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                        LLM Service                           │
+│                                                              │
+│  ┌──────────┐    ┌──────────────┐    ┌───────────────────┐  │
+│  │ Settings  │◀──│  LLMService  │──▸ │  Provider Layer   │  │
+│  │ (config)  │   │  (router)    │    │  (httpx calls)    │  │
+│  └──────────┘    └──────┬───────┘    └──────┬────────────┘  │
+│                         │                    │               │
+│           ┌─────────────┼────────────┐      │               │
+│           │             │            │      ▼               │
+│     ┌─────▼────┐  ┌─────▼────┐ ┌─────▼────┐                │
+│     │Editorial │  │ Overlay  │ │ Overlay  │  ···future···   │
+│     │  Skill   │  │ Design   │ │ Augment  │                 │
+│     │          │  │  Skill   │ │  Skill   │                 │
+│     └──────────┘  └──────────┘ └──────────┘                 │
+│                                                              │
+│  Each skill:                                                 │
+│   • Builds its own system prompt with full context           │
+│   • Defines expected JSON output schema                      │
+│   • Validates + parses LLM responses                         │
+│   • User only supplies a plain-text prompt                   │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Key design principles:**
+- **Backend owns prompts**: The backend constructs rich system prompts for each context with full template variable documentation, example elements, positioning rules, and output format requirements. Users only need to write simple requests.
+- **Skill isolation**: Each AI capability is encapsulated as an `LLMSkill` subclass with its own prompt, schema, and validation — adding new capabilities requires only a new skill class.
+- **No vendor SDKs**: All provider communication uses raw `httpx` HTTP calls for minimal dependency footprint.
+- **Hot-swappable config**: Provider/model/key changes take effect immediately (config read at call time).
+
+#### 7.14.2 Multi-Provider Support
+
+| Provider | Models | API Format |
+|----------|--------|------------|
+| **OpenAI** | GPT-4o, GPT-4o-mini, GPT-4 Turbo | Chat Completions API |
+| **Anthropic** | Claude 3.5 Sonnet, Claude 3 Haiku | Messages API |
+| **Google** | Gemini 1.5 Pro, Gemini 1.5 Flash | generateContent API |
+| **Custom** | Any model via OpenAI-compatible API | Chat Completions (compatible) |
+| **None** | — | LLM features disabled |
+
+**Settings** (stored in `config.json` via settings_service):
+- `llm_enabled` (bool) — master toggle
+- `llm_provider` — "openai" | "anthropic" | "google" | "custom" | "none"
+- `llm_api_key` — provider API key (stored locally, never transmitted)
+- `llm_model` — model identifier (provider-specific)
+- `llm_custom_endpoint` — base URL for custom providers
+- `llm_temperature` — 0.0–1.0 (default 0.3)
+
+**Resilience:**
+- 3-attempt retry with exponential backoff on provider errors
+- 60-second HTTP timeout per request
+- Structured error types: `LLMProviderError`, `LLMConfigError`, `LLMSkillError`, `LLMNotAvailableError`
+
+#### 7.14.3 Skill: Editorial Refinement
+
+Operates on completed highlight timelines to refine narrative flow. The LLM acts as a professional motorsport broadcast editor.
+
+**Permitted actions:**
+- Add `notes` to any segment (shown in UI, included in script output)
+- Swap two events of equal tier within the same timeline bucket
+- Suggest `transition_type` between adjacent segments (cut/fade/crossfade/whip/zoom)
+- Flag segments as `narrative_anchor` (pivotal to race story)
+
+**NOT permitted:** Change inclusion/exclusion, override tier classification, modify timestamps, adjust scores.
+
+**Context injected into system prompt:**
+- Full scored timeline with event types, tiers, positions
+- All scored events with scores and metadata
+- Highlight metrics (duration, coverage, driver exposure)
+- Race metadata (track, series, driver count, duration)
+
+#### 7.14.4 Skill: Overlay Element Design
+
+Generates complete overlay elements from natural language descriptions. The system prompt contains:
+
+1. **Full template variable reference** — every `{{ frame.* }}`, `{{ pos.* }}`, and `{{ vars.* }}` variable with types and descriptions
+2. **Positioning rules** — CSS percentage-based layout, `clamp()` font sizing, CSS variable usage
+3. **Pagination system** — `page_start`, `page_end`, `page_index`, `total_pages` for list-based elements
+4. **6 reference element examples** — real working templates from built-in presets:
+   - Title Card (intro)
+   - Starting Grid (qualifying_results)
+   - Timing Tower (race)
+   - Focused Driver Card (race)
+   - Battle Indicator (race)
+   - Final Results Board (race_results)
+5. **Section awareness** — which data is most relevant per video section
+6. **Output validation** — position 0–100%, z_index 0–100, valid element ID, non-empty template, only documented variables
+
+**Context injected:**
+- Target section (intro/qualifying_results/race/race_results)
+- Existing elements in that section (to avoid overlap)
+- Current preset CSS variables
+- Available asset URLs
+
+#### 7.14.5 Skill: Overlay Element Augmentation
+
+Modifies existing elements while preserving identity. System prompt includes the current element's template, position, and properties alongside all design documentation. Supports commands like:
+- "Make the timing tower show team colors"
+- "Add gap bars to the leaderboard"
+- "Show more drivers and paginate the results"
+- "Make the fonts larger and change the background to semi-transparent blue"
+
+#### 7.14.6 Element Pagination System
+
+Overlay elements that display lists (standings, results, grids) support automatic pagination:
+
+```json
+{
+  "pagination": {
+    "enabled": true,
+    "items_per_page": 10,
+    "cycle_duration_seconds": 5
+  }
+}
+```
+
+**Template variables provided:**
+- `page_start` — 0-based start index for current page
+- `page_end` — exclusive end index for current page
+- `page_index` — current page number (0-based)
+- `total_pages` — total number of pages
+
+**Template usage:**
+```html
+{% for entry in frame.standings[page_start:page_end] %}
+  <div>{{ entry.position }} {{ entry.driver_name }}</div>
+{% endfor %}
+<div>Page {{ page_index + 1 }} / {{ total_pages }}</div>
+```
+
+During overlay rendering for export, the render engine cycles through pages based on `cycle_duration_seconds`, producing different renders at different timestamps within a section.
+
+#### 7.14.7 API Endpoints
+
+```
+GET    /api/llm/status                    # Provider availability + registered skills
+GET    /api/llm/skills                    # List skill metadata
+POST   /api/llm/execute                   # Execute any skill by ID
+POST   /api/llm/editorial                 # Shortcut: editorial skill
+POST   /api/llm/overlay/generate          # Shortcut: generate new overlay element
+POST   /api/llm/overlay/augment           # Shortcut: augment existing element
+```
+
+#### 7.14.8 Frontend Integration
+
+- **Settings Panel** — AI/LLM category with provider dropdown, API key (masked), model selector, temperature slider
+- **LLMContext** — React context providing `generateElement()`, `augmentElement()`, `runEditorial()`, `isAvailable()`
+- **PresetDesigner** — AI prompt bar with create/augment mode toggle, section-aware placeholders, generation progress indicator
+- **LLMProvider** in App.jsx provider tree (inside PresetProvider, outside YouTubeProvider)
+
+#### 7.14.9 Adding New Skills
+
+To add a new LLM capability:
+
+1. Create a class extending `LLMSkill` in `llm_skills.py`
+2. Implement `build_system_prompt(context)` — construct the full prompt with context
+3. Implement `get_response_schema()` — define expected JSON output
+4. Implement `validate_output(output)` — verify response integrity
+5. Register in `register_default_skills()` — `llm_service.register_skill(MySkill())`
+6. Optionally add a shortcut endpoint in `api_llm.py`
+
+No additional boilerplate is needed — the service handles provider routing, retry, parsing, and error handling.
+
+---
+
 ## 8. Development Phases
 
 ### Phase 1 — Foundation (Weeks 1-4)
@@ -3929,6 +4103,14 @@ Each step has specific failure recovery strategies:
 | 7.22 | `ElementEditor.jsx`: Per-element editor with Jinja2 syntax guide, position/size %, z-index |
 | 7.23 | `VariableEditor.jsx`: CSS custom property editor with color picker |
 | 7.24 | `AssetManager.jsx`: Image asset upload/management with copy-URL-to-clipboard |
+| 7.25 | `llm_service.py`: Multi-provider LLM service with skill-based architecture (OpenAI, Anthropic, Google, custom) |
+| 7.26 | `llm_skills.py`: EditorialSkill (highlight refinement), OverlayDesignSkill (element generation), OverlayAugmentSkill (element modification) |
+| 7.27 | `api_llm.py`: 6 REST endpoints — status, skills, execute, editorial, overlay/generate, overlay/augment |
+| 7.28 | LLM settings: `llm_enabled`, `llm_provider`, `llm_api_key`, `llm_model`, `llm_custom_endpoint`, `llm_temperature` with validators |
+| 7.29 | Element pagination: `page_start`/`page_end`/`page_index`/`total_pages` template variables, `pagination` element config |
+| 7.30 | `LLMContext.jsx`: React context with generateElement, augmentElement, runEditorial, isAvailable |
+| 7.31 | AI Settings UI: Provider dropdown, masked API key, model selector, temperature slider in SettingsPanel |
+| 7.32 | AI prompt bar in PresetDesigner: create/augment mode toggle, section-aware placeholders, LLM generation
 
 ### Phase 8 — Polish & Distribution (Weeks 35-38)
 
@@ -4016,7 +4198,9 @@ league-replay-studio/
 │   │   │   ├── project_service.py   # Project CRUD + SQLite + step workflow
 │   │   │   ├── youtube_service.py   # YouTube Data API v3: OAuth, upload, video listing
 │   │   │   ├── pipeline_service.py  # Automated pipeline: sequential step execution, pause/resume/retry
-│   │   │   └── settings_service.py  # Settings management
+│   │   │   ├── settings_service.py  # Settings management
+│   │   │   ├── llm_service.py       # LLM integration: multi-provider service, skill registry, httpx calls
+│   │   │   └── llm_skills.py        # LLM skills: EditorialSkill, OverlayDesignSkill, OverlayAugmentSkill
 │   │   ├── routes/
 │   │   │   ├── api_projects.py      # /api/projects/* (includes step workflow)
 │   │   │   ├── api_iracing.py       # /api/iracing/*
@@ -4030,7 +4214,8 @@ league-replay-studio/
 │   │   │   ├── api_youtube.py       # /api/youtube/* + /api/projects/{id}/upload/*
 │   │   │   ├── api_settings.py      # /api/settings (includes YouTube settings)
 │   │   │   ├── api_system.py        # /api/system/*
-│   │   │   └── api_wizard.py        # /api/wizard/* (first-run setup wizard)
+│   │   │   ├── api_wizard.py        # /api/wizard/* (first-run setup wizard)
+│   │   │   └── api_llm.py           # /api/llm/* (LLM skill execution, status, generate/augment)
 │   │   └── utils/
 │   │       ├── gpu_detection.py     # GPU detection (NVENC/AMF/QSV)
 │   │       ├── ffmpeg_builder.py    # FFmpeg command builder
@@ -4040,7 +4225,7 @@ league-replay-studio/
 │   │       ├── window_capture.py    # PrintWindow GDI fallback + WGC client-area crop
 │   │       ├── overlay_engine.py    # Playwright browser context lifecycle + render_frame() / render_raw_html()
 │   │       ├── overlay_compositor.py # FFmpeg overlay compositing — composite_clip(), render_and_composite(), composite_intro_video()
-│   │       ├── element_renderer.py  # compose_preset_html() — assemble preset elements into one HTML doc
+│   │       ├── element_renderer.py  # compose_preset_html() — assemble preset elements into one HTML doc (with pagination support)
 │   │       ├── frame_data_builder.py # build_frame_data() — telemetry → overlay context dict
 │   │       ├── script_capture.py    # ScriptCaptureEngine: pause→seek→camera→record→trim→compile per segment
 │   │       ├── preview_utils.py     # Keyframe indexer, sprite sheet generator, proxy encoder helpers
@@ -4072,6 +4257,7 @@ league-replay-studio/
 │       │   ├── ModalContext.jsx       # Global modal dialog system
 │       │   ├── OverlayContext.jsx     # Template engine state + CRUD
 │       │   ├── PresetContext.jsx      # Overlay preset state — per-section elements, variables, assets
+│       │   ├── LLMContext.jsx         # LLM integration state — AI provider status, skill execution
 │       │   ├── PipelineContext.jsx    # One-click pipeline state
 │       │   ├── PreviewContext.jsx     # Tiered video preview state
 │       │   ├── ProjectContext.jsx     # Project library + step workflow
