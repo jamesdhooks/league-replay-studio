@@ -569,3 +569,63 @@ async def composite_batch(project_id: int, body: BatchCompositeRequest):
     except Exception as exc:
         logger.error("[Overlay API] Batch composite error: %s", exc)
         raise HTTPException(status_code=500, detail="Batch compositing failed")
+
+
+# ── Preset-based rendering ──────────────────────────────────────────────────
+
+@router.post("/preset/render-preview")
+async def render_preset_preview(body: dict[str, Any]):
+    """Render a preset's elements for live preview in the design suite.
+
+    Composes all visible elements for the requested section using
+    percentage-based positioning and CSS custom variables.
+
+    Body:
+        preset_id: str           — Preset to render
+        section: str             — Video section (intro, race, etc.)
+        frame_data: dict | None  — Custom frame data (uses sample if None)
+        element_id: str | None   — Only render a specific element
+        variables: dict | None   — Override preset variables
+    """
+    from server.services.preset_service import preset_service
+    from server.services.overlay_service import SAMPLE_FRAME_DATA
+    from server.utils.overlay_engine import overlay_engine
+    from server.utils.element_renderer import compose_preset_html
+
+    preset_id = body.get("preset_id")
+    if not preset_id:
+        raise HTTPException(status_code=400, detail="preset_id is required")
+
+    preset = preset_service.get_preset(preset_id)
+    if not preset:
+        raise HTTPException(status_code=404, detail="Preset not found")
+
+    section = body.get("section", "race")
+    frame_data = body.get("frame_data") or dict(SAMPLE_FRAME_DATA)
+    frame_data["section"] = section
+    element_id = body.get("element_id")
+
+    # Allow variable overrides
+    if body.get("variables"):
+        import copy
+        preset = copy.deepcopy(preset)
+        preset["variables"] = body["variables"]
+
+    resolution = overlay_engine.resolution
+
+    html_content = compose_preset_html(
+        preset=preset,
+        section=section,
+        frame_data=frame_data,
+        resolution=resolution,
+        element_filter=element_id,
+    )
+
+    # Render via the engine
+    if not overlay_engine.initialized:
+        init_result = await overlay_service.initialize()
+        if not init_result.get("success"):
+            return init_result
+
+    result = await overlay_engine.render_raw_html(html_content, frame_data)
+    return result

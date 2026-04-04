@@ -307,6 +307,103 @@ class OverlayCompositor:
             except OSError:
                 pass
 
+    async def render_preset_and_composite(
+        self,
+        clip_path: str,
+        preset_id: str,
+        section: str,
+        output_path: str,
+        overlay_engine: Any,
+        frame_data: Optional[dict[str, Any]] = None,
+        project_dir: Optional[str] = None,
+        session_time: float = 0.0,
+        focused_car_idx: Optional[int] = None,
+        series_name: str = "",
+        track_name: str = "",
+        temp_dir: Optional[str] = None,
+    ) -> Optional[str]:
+        """Render a preset's elements and composite over a video clip.
+
+        Similar to ``render_and_composite`` but uses the preset's per-section
+        element configuration instead of a single monolithic template.
+
+        Args:
+            clip_path:        Path to the source .mp4 clip.
+            preset_id:        Preset ID to use for element configuration.
+            section:          Video section (intro, race, etc.)
+            output_path:      Where to save the composited .mp4.
+            overlay_engine:   An initialised OverlayEngine instance.
+            frame_data:       Pre-built frame_data dict (optional).
+            project_dir:      Project directory for telemetry lookup.
+            session_time:     Replay time in seconds.
+            focused_car_idx:  iRacing car index of the hero driver.
+            series_name:      Racing series label.
+            track_name:       Track name label.
+            temp_dir:         Directory for temp PNG files.
+
+        Returns:
+            ``output_path`` on success, ``None`` on failure.
+        """
+        from server.services.preset_service import preset_service
+        from server.utils.element_renderer import compose_preset_html
+
+        # 1. Get the preset
+        preset = preset_service.get_preset(preset_id)
+        if not preset:
+            logger.error("[OverlayCompositor] Preset not found: %s", preset_id)
+            return None
+
+        # 2. Build frame_data if not provided
+        if frame_data is None:
+            if not project_dir:
+                logger.error("[OverlayCompositor] Either frame_data or project_dir required")
+                return None
+            from server.utils.frame_data_builder import build_frame_data
+            frame_data = build_frame_data(
+                project_dir=project_dir,
+                session_time=session_time,
+                section=section,
+                focused_car_idx=focused_car_idx,
+                series_name=series_name,
+                track_name=track_name,
+            )
+
+        # 3. Compose the preset's elements into a single HTML document
+        resolution = overlay_engine.resolution
+        html_content = compose_preset_html(
+            preset=preset,
+            section=section,
+            frame_data=frame_data,
+            resolution=resolution,
+        )
+
+        # 4. Render HTML to PNG via overlay engine
+        use_temp = temp_dir is None
+        tmp_dir_obj = tempfile.mkdtemp() if use_temp else None
+        png_dir = Path(tmp_dir_obj or temp_dir).resolve()  # lgtm[py/path-injection]
+        clip_stem = Path(clip_path).stem[:64]  # lgtm[py/path-injection]
+        png_path = str(png_dir / f"preset_overlay_{clip_stem}.png")
+
+        try:
+            render_result = await overlay_engine.render_raw_html(
+                html_content, frame_data, output_path=png_path
+            )
+
+            resolved_png = Path(png_path).resolve()  # lgtm[py/path-injection]
+            if not render_result.get("success") or not resolved_png.is_file():
+                logger.error("[OverlayCompositor] Preset render failed for %s", preset_id)
+                return None
+
+            return self.composite_clip(clip_path, str(resolved_png), output_path)
+
+        finally:
+            try:
+                Path(png_path).resolve().unlink(missing_ok=True)
+                if use_temp and tmp_dir_obj:
+                    Path(tmp_dir_obj).resolve().rmdir()
+            except OSError:
+                pass
+
     async def composite_script_clips(
         self,
         clips: list[dict],
@@ -380,18 +477,34 @@ class OverlayCompositor:
             safe_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", str(clip_id))[:64]
             composited_path = str(output_path_obj / f"{safe_id}_overlaid.mp4")
 
-            result_path = await self.render_and_composite(
-                clip_path=safe_clip,
-                template_id=template_id,
-                output_path=composited_path,
-                overlay_engine=overlay_engine,
-                project_dir=project_dir,
-                session_time=session_time,
-                section=section,
-                focused_car_idx=focused_car_idx,
-                series_name=series_name,
-                track_name=track_name,
-            )
+            # Check if this clip has a preset_id for element-based rendering
+            clip_preset_id = clip.get("preset_id")
+            if clip_preset_id:
+                result_path = await self.render_preset_and_composite(
+                    clip_path=safe_clip,
+                    preset_id=clip_preset_id,
+                    section=section,
+                    output_path=composited_path,
+                    overlay_engine=overlay_engine,
+                    project_dir=project_dir,
+                    session_time=session_time,
+                    focused_car_idx=focused_car_idx,
+                    series_name=series_name,
+                    track_name=track_name,
+                )
+            else:
+                result_path = await self.render_and_composite(
+                    clip_path=safe_clip,
+                    template_id=template_id,
+                    output_path=composited_path,
+                    overlay_engine=overlay_engine,
+                    project_dir=project_dir,
+                    session_time=session_time,
+                    section=section,
+                    focused_car_idx=focused_car_idx,
+                    series_name=series_name,
+                    track_name=track_name,
+                )
 
             results.append({**clip, "composited_path": result_path})
 
