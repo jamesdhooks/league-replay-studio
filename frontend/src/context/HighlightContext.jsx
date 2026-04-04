@@ -4,7 +4,7 @@ import { useAnalysis } from './AnalysisContext'
 import { useTimeline } from './TimelineContext'
 import { useUndoRedo } from './UndoRedoContext'
 
-const HighlightContext = createContext(null)
+export const HighlightContext = createContext(null)
 
 /** Default weights for each event type (0–100 priority) */
 const DEFAULT_WEIGHTS = {
@@ -623,6 +623,12 @@ export function HighlightProvider({ children }) {
   const [serverScoredEvents, setServerScoredEvents] = useState(null)
   const [serverMetrics, setServerMetrics] = useState(null)
 
+  // ── Video Script state ─────────────────────────────────────────────────
+  const [videoScript, setVideoScript] = useState(null)    // Full script segment array
+  const [videoSections, setVideoSections] = useState([])  // Section summaries
+  const [sectionConfig, setSectionConfig] = useState({})  // Per-section overrides
+  const [clipPadding, setClipPadding] = useState(0.5)     // Seconds of pre-roll
+
   const reprocessHighlights = useCallback(async (projectId, opts = {}) => {
     try {
       setServerScoring(true)
@@ -647,6 +653,44 @@ export function HighlightProvider({ children }) {
       setServerScoring(false)
     }
   }, [weights, targetDuration, minSeverity])
+
+  const generateVideoScript = useCallback(async (projectId, opts = {}) => {
+    try {
+      setServerScoring(true)
+      const result = await apiPost(`/projects/${projectId}/highlights/video-script`, {
+        weights,
+        constraints: {
+          target_duration: targetDuration || 300,
+          min_severity: minSeverity,
+          pip_threshold: opts.pipThreshold || 7.0,
+          max_driver_exposure: opts.maxDriverExposure || 0.25,
+        },
+        section_config: sectionConfig,
+        clip_padding: clipPadding,
+      })
+      if (result.script) {
+        setVideoScript(result.script)
+        setVideoSections(result.sections || [])
+      }
+      if (result.scored_events) {
+        setServerScoredEvents(result.scored_events)
+        setServerMetrics(result.metrics || null)
+      }
+      return result
+    } catch (err) {
+      console.error('[Highlights] Video script generation error:', err)
+      throw err
+    } finally {
+      setServerScoring(false)
+    }
+  }, [weights, targetDuration, minSeverity, sectionConfig, clipPadding])
+
+  const updateSectionConfig = useCallback((sectionName, updates) => {
+    setSectionConfig(prev => ({
+      ...prev,
+      [sectionName]: { ...(prev[sectionName] || {}), ...updates },
+    }))
+  }, [])
 
   // ── Load drivers ───────────────────────────────────────────────────────
   const loadDrivers = useCallback(async (projectId) => {
@@ -906,6 +950,15 @@ export function HighlightProvider({ children }) {
     serverScoredEvents,
     serverMetrics,
 
+    // Video Script
+    videoScript,
+    videoSections,
+    sectionConfig,
+    clipPadding,
+    setClipPadding,
+    generateVideoScript,
+    updateSectionConfig,
+
     // A/B compare
     abMode,
     activeConfig,
@@ -939,8 +992,9 @@ export function HighlightProvider({ children }) {
     overrides, toggleOverride, setOverrideValue,
     selection, filteredEvents,
     loadConfig, saveConfig, applyHighlights, loadDrivers, autoBalance, jumpToEvent,
-    reprocessHighlights,
+    reprocessHighlights, generateVideoScript, updateSectionConfig,
     serverScoring, serverScoredEvents, serverMetrics,
+    videoScript, videoSections, sectionConfig, clipPadding,
     abMode, activeConfig, startABCompare, stopABCompare, switchABConfig,
     presets, loadPresets, savePreset, loadPreset, deletePreset,
     sortColumn, sortDirection, handleSort,
