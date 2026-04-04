@@ -13,6 +13,9 @@ import {
   Youtube,
   Wand2,
   FolderOpen,
+  Sparkles,
+  Eye,
+  EyeOff,
 } from 'lucide-react'
 import { useSettings } from '../../context/SettingsContext'
 import { useToast } from '../../context/ToastContext'
@@ -27,6 +30,7 @@ const CATEGORIES = [
   { id: 'general', label: 'General', icon: Settings },
   { id: 'camera', label: 'Camera Defaults', icon: Film },
   { id: 'encoding', label: 'Encoding', icon: Cpu },
+  { id: 'ai', label: 'AI / LLM', icon: Sparkles },
   { id: 'youtube', label: 'YouTube', icon: Youtube },
   { id: 'hotkeys', label: 'Hotkeys', icon: Keyboard },
   { id: 'pipeline', label: 'Pipeline', icon: Monitor },
@@ -165,6 +169,9 @@ function SettingsPanel({ onClose }) {
           )}
           {activeCategory === 'encoding' && (
             <EncodingSettings value={currentValue} onChange={setField} />
+          )}
+          {activeCategory === 'ai' && (
+            <AISettings value={currentValue} onChange={setField} />
           )}
           {activeCategory === 'youtube' && (
             <YouTubeSettings value={currentValue} onChange={setField} />
@@ -418,6 +425,151 @@ function HotkeySettings({ value, onChange }) {
           onChange={(v) => onChange('capture_hotkey_stop', v)}
         />
       </SettingGroup>
+    </div>
+  )
+}
+
+// ── AI / LLM Settings ────────────────────────────────────────────────────────
+
+const LLM_PROVIDERS = [
+  { value: 'none', label: 'Disabled' },
+  { value: 'openai', label: 'OpenAI (GPT-4o, GPT-4o-mini)' },
+  { value: 'anthropic', label: 'Anthropic (Claude 3.5 Sonnet, Haiku)' },
+  { value: 'google', label: 'Google (Gemini 1.5 Pro, Flash)' },
+  { value: 'custom', label: 'Custom (OpenAI-compatible endpoint)' },
+]
+
+const LLM_MODEL_SUGGESTIONS = {
+  openai: [
+    { value: 'gpt-4o', label: 'GPT-4o (recommended)' },
+    { value: 'gpt-4o-mini', label: 'GPT-4o Mini (faster, cheaper)' },
+    { value: 'gpt-4-turbo', label: 'GPT-4 Turbo' },
+  ],
+  anthropic: [
+    { value: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4 (recommended)' },
+    { value: 'claude-3-5-haiku-20241022', label: 'Claude 3.5 Haiku (faster, cheaper)' },
+  ],
+  google: [
+    { value: 'gemini-1.5-pro', label: 'Gemini 1.5 Pro (recommended)' },
+    { value: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash (faster, cheaper)' },
+  ],
+  custom: [],
+  none: [],
+}
+
+function AISettings({ value, onChange }) {
+  const provider = value('llm_provider') || 'none'
+  const isEnabled = provider !== 'none'
+  const modelSuggestions = LLM_MODEL_SUGGESTIONS[provider] || []
+  const [showKey, setShowKey] = useState(false)
+
+  const handleProviderChange = (newProvider) => {
+    onChange('llm_provider', newProvider)
+    onChange('llm_enabled', newProvider !== 'none')
+    // Set default model for the selected provider
+    const defaults = LLM_MODEL_SUGGESTIONS[newProvider] || []
+    if (defaults.length > 0) {
+      onChange('llm_model', defaults[0].value)
+    }
+  }
+
+  return (
+    <div className="space-y-6 max-w-xl">
+      <SectionHeader
+        title="AI / LLM"
+        description="Configure AI-powered features: editorial highlight refinement, natural language overlay design, and more."
+      />
+
+      <SettingGroup label="AI Provider" description="Select your preferred AI provider. An API key is required.">
+        <Select
+          value={provider}
+          onChange={handleProviderChange}
+          options={LLM_PROVIDERS}
+        />
+      </SettingGroup>
+
+      {isEnabled && (
+        <>
+          <SettingGroup label="API Key" description="Your API key for the selected provider. Keys are stored locally and never shared.">
+            <div className="flex gap-2">
+              <input
+                type={showKey ? 'text' : 'password'}
+                value={value('llm_api_key') || ''}
+                onChange={(e) => onChange('llm_api_key', e.target.value)}
+                placeholder="sk-..."
+                autoComplete="off"
+                className="flex-1 px-3 py-2 text-sm bg-bg-primary border border-border rounded-lg
+                           text-text-primary placeholder:text-text-disabled
+                           focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent
+                           transition-colors font-mono"
+              />
+              <button
+                type="button"
+                onClick={() => setShowKey(!showKey)}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-bg-primary
+                           text-text-secondary hover:text-text-primary hover:bg-surface-hover text-sm transition-colors"
+                title={showKey ? 'Hide API key' : 'Show API key'}
+              >
+                {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+          </SettingGroup>
+
+          <SettingGroup label="Model" description="AI model to use. Larger models are more capable but slower and more expensive.">
+            {modelSuggestions.length > 0 ? (
+              <Select
+                value={value('llm_model') || ''}
+                onChange={(v) => onChange('llm_model', v)}
+                options={modelSuggestions}
+              />
+            ) : (
+              <TextInput
+                value={value('llm_model') || ''}
+                onChange={(v) => onChange('llm_model', v)}
+                placeholder="Enter model name"
+              />
+            )}
+          </SettingGroup>
+
+          {provider === 'custom' && (
+            <SettingGroup label="Custom API Endpoint" description="OpenAI-compatible API base URL (e.g. http://localhost:11434/v1).">
+              <TextInput
+                value={value('llm_custom_endpoint') || ''}
+                onChange={(v) => onChange('llm_custom_endpoint', v)}
+                placeholder="http://localhost:11434/v1"
+              />
+            </SettingGroup>
+          )}
+
+          <SettingGroup label="Temperature" description="Controls creativity vs. determinism. Lower = more consistent, higher = more creative.">
+            <div className="flex items-center gap-3">
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={Math.round((value('llm_temperature') || 0.3) * 100)}
+                onChange={(e) => onChange('llm_temperature', parseInt(e.target.value, 10) / 100)}
+                className="flex-1 accent-accent"
+              />
+              <span className="text-sm font-mono text-text-secondary w-10 text-right">
+                {(value('llm_temperature') || 0.3).toFixed(2)}
+              </span>
+            </div>
+          </SettingGroup>
+
+          <SectionSubHeader title="AI Capabilities" />
+          <div className="space-y-2 text-sm text-text-secondary">
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-accent" />
+              <span><strong>Overlay Design</strong> — Generate and modify overlay elements with natural language</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-accent" />
+              <span><strong>Editorial</strong> — AI-refined narrative flow, transitions, and notes for highlights</span>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   )
 }

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { usePreset } from '../../context/PresetContext'
 import { useOverlay } from '../../context/OverlayContext'
+import { useLLM } from '../../context/LLMContext'
 import { useToast } from '../../context/ToastContext'
 import ElementEditor from './ElementEditor'
 import VariableEditor from './VariableEditor'
@@ -9,7 +10,7 @@ import {
   Layers, Plus, Trash2, Upload,
   ArrowLeft, Eye, EyeOff, Monitor,
   Palette, Image, Film, GripVertical, RefreshCw,
-  Loader2, Box, BarChart3,
+  Loader2, Box, BarChart3, Sparkles, Send, Wand2,
 } from 'lucide-react'
 
 const SECTION_ICONS = {
@@ -32,6 +33,7 @@ export default function PresetDesigner({ presetId, onClose }) {
     uploadIntroVideo, deleteIntroVideo,
   } = usePreset()
   const { initEngine, engineStatus } = useOverlay()
+  const { isAvailable, generateElement, augmentElement, loading: llmLoading } = useLLM()
   const { addToast } = useToast()
 
   const [selectedElementId, setSelectedElementId] = useState(null)
@@ -39,6 +41,9 @@ export default function PresetDesigner({ presetId, onClose }) {
   const [previewLoading, setPreviewLoading] = useState(false)
   const [showVariables, setShowVariables] = useState(false)
   const [showAssets, setShowAssets] = useState(false)
+  const [showAIPrompt, setShowAIPrompt] = useState(false)
+  const [aiPrompt, setAiPrompt] = useState('')
+  const [aiMode, setAiMode] = useState('create') // 'create' or 'augment'
   const previewTimeoutRef = useRef(null)
 
   // Select the preset on mount
@@ -138,6 +143,43 @@ export default function PresetDesigner({ presetId, onClose }) {
     addToast('Intro video removed', 'success')
   }, [selectedPreset, deleteIntroVideo, addToast])
 
+  // ── AI element generation / augmentation ─────────────────────────────
+  const handleAISubmit = useCallback(async () => {
+    if (!selectedPreset || !aiPrompt.trim()) return
+
+    if (aiMode === 'augment' && selectedElement) {
+      const result = await augmentElement(
+        aiPrompt.trim(),
+        activeSection,
+        selectedPreset.id,
+        selectedElement.id,
+      )
+      if (result?.element) {
+        await handleElementUpdate(selectedElement.id, result.element)
+        addToast(result.explanation || 'Element updated by AI', 'success')
+        setAiPrompt('')
+        handleRefreshPreview()
+      }
+    } else {
+      const result = await generateElement(
+        aiPrompt.trim(),
+        activeSection,
+        selectedPreset.id,
+        sectionElements,
+      )
+      if (result?.element) {
+        const addResult = await addElement(selectedPreset.id, activeSection, result.element)
+        if (addResult.success) {
+          setSelectedElementId(addResult.element?.id || result.element.id)
+          addToast(result.explanation || 'Element created by AI', 'success')
+          setAiPrompt('')
+          handleRefreshPreview()
+        }
+      }
+    }
+  }, [selectedPreset, aiPrompt, aiMode, selectedElement, activeSection, sectionElements,
+      generateElement, augmentElement, addElement, handleElementUpdate, addToast, handleRefreshPreview])
+
   if (!selectedPreset) {
     return (
       <div className="flex items-center justify-center h-full text-text-tertiary">
@@ -174,6 +216,14 @@ export default function PresetDesigner({ presetId, onClose }) {
           >
             <Palette className="w-4 h-4" />
           </button>
+          {isAvailable() && (
+            <button onClick={() => setShowAIPrompt(!showAIPrompt)}
+              className={`p-1 rounded text-text-tertiary hover:text-text-primary ${showAIPrompt ? 'bg-purple-600/20 text-purple-400' : 'hover:bg-bg-secondary'}`}
+              title="AI Element Designer"
+            >
+              <Sparkles className="w-4 h-4" />
+            </button>
+          )}
           {!engineStatus?.engine_initialized && (
             <button onClick={() => initEngine()} className="text-xs px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white">
               Init Engine
@@ -354,6 +404,77 @@ export default function PresetDesigner({ presetId, onClose }) {
           isBuiltin={selectedPreset.is_builtin}
           onClose={() => setShowAssets(false)}
         />
+      )}
+
+      {/* ── AI Prompt Panel ────────────────────────────────────────────── */}
+      {showAIPrompt && isAvailable() && (
+        <div className="border-t border-border bg-bg-secondary px-4 py-3">
+          <div className="flex items-center gap-2 mb-2">
+            <Sparkles className="w-4 h-4 text-purple-400" />
+            <span className="text-xs font-semibold text-text-primary">AI Element Designer</span>
+            <div className="flex items-center gap-1 ml-auto">
+              <button
+                onClick={() => setAiMode('create')}
+                className={`text-[10px] px-2 py-0.5 rounded ${
+                  aiMode === 'create'
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-bg-primary text-text-tertiary hover:text-text-secondary border border-border'
+                }`}
+              >
+                <Plus className="w-3 h-3 inline mr-0.5" />
+                Create New
+              </button>
+              <button
+                onClick={() => setAiMode('augment')}
+                disabled={!selectedElement}
+                className={`text-[10px] px-2 py-0.5 rounded ${
+                  aiMode === 'augment'
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-bg-primary text-text-tertiary hover:text-text-secondary border border-border'
+                } disabled:opacity-30 disabled:cursor-not-allowed`}
+                title={!selectedElement ? 'Select an element to modify' : 'Modify selected element'}
+              >
+                <Wand2 className="w-3 h-3 inline mr-0.5" />
+                Modify Selected
+              </button>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={aiPrompt}
+              onChange={(e) => setAiPrompt(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleAISubmit()}
+              placeholder={
+                aiMode === 'create'
+                  ? `Describe a new element for the ${activeSection} section...`
+                  : selectedElement
+                    ? `Describe changes to "${selectedElement.name}"...`
+                    : 'Select an element first'
+              }
+              disabled={llmLoading || (aiMode === 'augment' && !selectedElement)}
+              className="flex-1 px-3 py-2 text-sm bg-bg-primary border border-border rounded-lg
+                         text-text-primary placeholder:text-text-disabled
+                         focus:outline-none focus:ring-2 focus:ring-purple-500/40 focus:border-purple-500
+                         transition-colors disabled:opacity-50"
+            />
+            <button
+              onClick={handleAISubmit}
+              disabled={llmLoading || !aiPrompt.trim() || (aiMode === 'augment' && !selectedElement)}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-purple-600 hover:bg-purple-500
+                         text-white text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {llmLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+              {llmLoading ? 'Generating...' : 'Generate'}
+            </button>
+          </div>
+          <p className="text-[10px] text-text-tertiary mt-1.5">
+            {aiMode === 'create'
+              ? 'Describe the element you want. The AI knows all available template variables and will create properly formatted Jinja2/HTML.'
+              : 'Describe changes to make. The AI will preserve the element identity and modify its template, position, or styling.'
+            }
+          </p>
+        </div>
       )}
     </div>
   )

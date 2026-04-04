@@ -14,6 +14,7 @@ import { EncodingProvider } from '../context/EncodingContext'
 import { PreviewProvider } from '../context/PreviewContext'
 import { OverlayProvider } from '../context/OverlayContext'
 import { PresetProvider } from '../context/PresetContext'
+import { LLMProvider } from '../context/LLMContext'
 import { YouTubeProvider } from '../context/YouTubeContext'
 import { PipelineProvider } from '../context/PipelineContext'
 import { wsClient } from '../services/websocket'
@@ -94,6 +95,7 @@ function App() {
                     <PreviewProvider>
                       <OverlayProvider>
                         <PresetProvider>
+                        <LLMProvider>
                         <YouTubeProvider>
                           <PipelineProvider>
                             <UndoRedoProvider>
@@ -106,6 +108,7 @@ function App() {
                             </UndoRedoProvider>
                           </PipelineProvider>
                         </YouTubeProvider>
+                        </LLMProvider>
                         </PresetProvider>
                       </OverlayProvider>
                     </PreviewProvider>
