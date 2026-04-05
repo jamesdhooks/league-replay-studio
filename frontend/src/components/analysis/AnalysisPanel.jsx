@@ -11,11 +11,12 @@ import {
   XCircle, Terminal, ChevronRight, ChevronDown, ChevronUp, Camera, Video, Monitor,
   SkipBack, SkipForward, Rewind, FastForward, List, Trash2, Settings,
   Eye, EyeOff, Users, RefreshCw, Flame, RotateCcw, CircleDot, ShieldAlert, WifiOff, AlertCircle, Minus, Plus,
-  Folder, SlidersHorizontal, Info, CarFront,
+  Folder, SlidersHorizontal, Info, CarFront, BookOpen,
 } from 'lucide-react'
 import ProjectFileBrowser from '../projects/ProjectFileBrowser'
 import ResizableSidebar from '../layout/ResizableSidebar'
 import Tooltip from '../ui/Tooltip'
+import RaceStory from '../race-story/RaceStory'
 
 /**
  * Event type display configuration — icons, labels, and colors.
@@ -1020,6 +1021,16 @@ export default memo(function AnalysisPanel() {
               label: 'Files',
               icon: Folder,
               content: <ProjectFileBrowser projectId={activeProject.id} />,
+            },
+            {
+              id: 'story',
+              label: 'Race Story',
+              icon: BookOpen,
+              content: (
+                <div className="p-3 overflow-y-auto h-full">
+                  <RaceStory projectId={activeProject.id} />
+                </div>
+              ),
             },
           ]}
         />

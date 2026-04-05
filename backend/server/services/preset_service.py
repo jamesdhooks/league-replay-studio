@@ -220,6 +220,36 @@ DEFAULT_ELEMENTS: dict[str, list[dict[str, Any]]] = {
             "z_index": 10,
             "visible": True,
         },
+        {
+            "id": "race_story",
+            "name": "Race Story",
+            "template": """{% if frame.race_story %}
+<div style="position:absolute; left:{{pos.x}}%; top:{{pos.y}}%; width:{{pos.w}}%; height:{{pos.h}}%;
+  font-family: var(--font-primary, 'Inter', sans-serif); color: var(--color-primary, #ffffff);">
+  <div style="font-size: clamp(0.7rem, 1.1vw, 1.1rem); font-weight:700; text-transform:uppercase;
+    letter-spacing:0.15em; margin-bottom:0.4em; text-shadow: 0 2px 8px rgba(0,0,0,0.8);
+    color: var(--color-accent, #3B82F6);">
+    &#x1F4D6; Race Story
+  </div>
+  <div style="font-size: clamp(0.45rem, 0.7vw, 0.7rem); line-height:1.5; opacity:0.9;
+    padding:0.5em 0; border-left:3px solid var(--color-accent, #3B82F6); padding-left:0.6em;
+    margin-bottom:0.6em;">
+    {{ frame.race_story.summary }}
+  </div>
+  {% for story in frame.race_story.sub_stories %}
+  <div style="display:flex; align-items:flex-start; gap:0.4em; padding:0.25em 0.4em;
+    margin-bottom:2px; border-radius:4px; background:rgba(0,0,0,0.5);
+    font-size: clamp(0.4rem, 0.65vw, 0.65rem);">
+    <span style="font-weight:700; flex-shrink:0;">{{ story.headline }}</span>
+    <span style="opacity:0.7;">{{ story.description }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}""",
+            "position": {"x": 55, "y": 10, "w": 40, "h": 80},
+            "z_index": 11,
+            "visible": False,
+        },
     ],
 }
 
