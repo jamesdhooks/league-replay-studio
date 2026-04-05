@@ -567,32 +567,90 @@ Every recompute increments the timeline version. The Video Composition Script ca
 
 ## 7. User Interface
 
-The UI design (MPD:1823–1868, MPD:2564–2715) is extended rather than replaced. The layout remains: controls top, histogram left, result timeline right, source timeline bottom. The following additions are made.
+The editing step is centred on a **histogram-based event organizer** — a two-panel view that maps every detected event into a visual grid of Time (vertical, top→bottom) × Importance (horizontal, low→high score buckets 1–10).
 
-### 7.1 Layout Overview
+### 7.1 Core Concept
 
-| Panel | Status | Changes |
+- **Time flows top to bottom** (race start → finish).
+- **Score flows left to right** (low → high, 10 columns).
+- Each event is placed into a column based on its score bucket, and positioned vertically by its time in the race.
+
+### 7.2 Layout Overview
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  CONFIG BAR (presets, A/B compare, apply)                       │
+├────────┬──────────────────────────────────────────┬──────────────┤
+│        │  WEIGHT SLIDERS │    SCORE HISTOGRAM     │   RESULT     │
+│ SIDE-  │  + METRICS      │ Cols 1│2│3│…│9│10      │   TIMELINE   │
+│ BAR    │  (w-72 left)    │ ↓ time flows down      │  (selected   │
+│        │                 │  event tiles in buckets │   events in  │
+│ Events │                 │  color = type           │   sequence)  │
+│ Inspec │                 │  opacity = inclusion    │              │
+│ History│                 │  click = inspect        │  [E1]→[E5]→  │
+│ Files  │                 │  right-click = override │  [PIP(E7)]→  │
+│        │                 │                         │  [B-roll]→   │
+├────────┴─────────────────┴─────────────────────────┴──────────────┤
+│  PREVIEW PANEL                                                   │
+├──────────────────────────────────────────────────────────────────┤
+│  NLE TIMELINE (full race, zoomable)                              │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+| Panel | Status | Notes |
 |---|---|---|
-| Top Controls (weight sliders, target duration, reprocess) | ✅ Keep | Add LLM Enable toggle, llm_model display |
-| Left — Histogram View (event blocks by score bucket) | ✅ Keep | Add tier colour coding (S/A/B/C), chain size annotation |
-| Right — Result Timeline (ordered segments) | ✅ Keep | Add transition type badges, broll segments, LLM notes overlay |
-| Bottom — Source Timeline (full race, zoomable) | ✅ Keep | No changes |
-| Event Detail Panel | ✅ Keep | Add score breakdown, LLM note, competing events |
-| Debug Panel | ✅ Keep | Add LLM action log, prompt hash display |
-| Live Metrics Dashboard | ✅ Keep | No changes — metrics formula unchanged |
+| Top Controls (weight sliders, target duration, reprocess) | ✅ Implemented | LLM Enable toggle, llm_model display |
+| Left — Score Histogram (event tiles by score bucket, 10 columns) | ✅ Implemented | Tier colour coding (S/A/B/C), narrative-anchor stars, PIP stripes |
+| Right — Result Timeline (vertical list of selected segments) | ✅ Implemented | Transition type badges, B-roll segments, LLM notes overlay |
+| Bottom — Source Timeline (full race, zoomable) | ✅ Implemented | No changes |
+| Event Detail Panel (sidebar Inspector tab) | ✅ Implemented | Score breakdown bars, LLM note, involved drivers |
+| Live Metrics Dashboard | ✅ Implemented | Duration, event count, coverage %, balance/pacing scores |
 
-### 7.2 Result Timeline — Extended Segment Rendering
+### 7.3 Histogram Behaviour
 
-The result timeline renders four visual segment types:
+- **Columns** = score buckets (1–10). Score is mapped from 0-100 range: `bucket = ceil(score / 10)`.
+- **Rightmost columns** = highest scoring events.
+- Each event is rendered as a **tile**:
+  - Vertical position = time in race (top = race start, bottom = finish)
+  - Column = score bucket
+  - Height = proportional to event duration (with min-height)
+- **Visual encoding:**
+  - Color = event type (incident=red, battle=orange, overtake=blue, etc.)
+  - Opacity: full=selected (highlight), 50%=full-video, 20%=excluded
+  - Border: thick white = selected/hovered, thin = default
+  - Small metadata labels (3-letter type abbreviation)
+  - ★ star overlay for narrative-anchor events
+  - Diagonal-stripe for PIP segments
 
-- **Event segments** — coloured by event type (crash = red, battle = orange, overtake = green, etc.)
-- **PIP segments** — split-view icon, primary colour with secondary stripe
-- **Transition segments** — thin bar between adjacent clips, labelled with transition type (CUT / FADE / WHIP / etc.)
-- **B-roll segments** — grey hatched bar, labelled GAP FILLER
+### 7.4 Result Timeline
 
-LLM-added notes appear as a tooltip on hover. If a segment is flagged as `narrative_anchor` by the LLM, it receives a star icon overlay.
+The result timeline is a **vertical list** (scrollable) of selected events in chronological order:
 
-### 7.3 Manual Overrides
+- **Event segments** — coloured strip + type label + duration + tier badge + score
+- **PIP segments** — split-view icon, primary colour with Layers icon
+- **Transition segments** — thin entry labelled with transition type (CUT / FADE / WHIP / etc.)
+- **B-roll segments** — grey hatched strip, labelled B-ROLL
+
+LLM-added notes appear as a tooltip on hover. Narrative-anchor segments show a ★ star.
+
+### 7.5 Interactions
+
+| Action | Behaviour |
+|---|---|
+| **Hover tile** | Highlights event in histogram AND result timeline simultaneously |
+| **Click tile** | Opens Event Inspector in sidebar, seeks playhead to event start |
+| **Right-click tile** | Cycles override: auto → highlight → full-video → exclude → auto |
+| **Click result segment** | Same as clicking the histogram tile |
+
+### 7.6 Manual Overrides
+
+Users can:
+- **Force include/exclude** via right-click override cycling
+- **Adjust padding** via the Inspector panel
+- **Move between score buckets** by editing the event's score
+- **Assign/remove PIP** via the Inspector or context menu
+
+All changes update both the histogram and result timeline immediately.
 
 | Override Action | Applied Before or After LLM? |
 |---|---|
@@ -602,7 +660,7 @@ LLM-added notes appear as a tooltip on hover. If a segment is flagged as `narrat
 | `adjust_padding` | After — directly edits capture block in script; bypasses LLM |
 | `set_pip` | After — directly edits segment type in script; bypasses LLM |
 
-### 7.4 UI State Model — Extended
+### 7.7 UI State Model — Extended
 
 ```json
 {
@@ -615,6 +673,13 @@ LLM-added notes appear as a tooltip on hover. If a segment is flagged as `narrat
   "show_broll": true
 }
 ```
+
+### 7.8 Key Insight
+
+This UI is a visual map of **Time (vertical) vs Importance (horizontal)**. It lets users:
+- See the race structure instantly
+- Understand algorithm decisions at a glance
+- Edit highlights intuitively via direct manipulation
 
 ---
 
