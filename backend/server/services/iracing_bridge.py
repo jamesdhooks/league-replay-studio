@@ -45,6 +45,16 @@ POLL_HZ = 60
 RECONNECT_INTERVAL = 2.0          # seconds between connection attempts
 TELEMETRY_INTERVAL = 1.0 / POLL_HZ  # ~16.7 ms
 
+# iRacing SessionFlags bitfield masks (from irsdk constants)
+FLAG_CHECKERED     = 0x00000001
+FLAG_YELLOW        = 0x00000008
+FLAG_RED           = 0x00000010
+FLAG_CAUTION       = 0x00004000
+FLAG_CAUTION_WAVING = 0x00008000
+FLAG_YELLOW_WAVING = 0x00000100
+# Combined masks for derived boolean columns
+_FLAG_YELLOW_MASK  = FLAG_YELLOW | FLAG_YELLOW_WAVING | FLAG_CAUTION | FLAG_CAUTION_WAVING
+
 
 class IRacingBridge:
     """
@@ -252,6 +262,8 @@ class IRacingBridge:
             class_pos  = list(self._ir["CarIdxClassPosition"] or [])
             best_laps  = list(self._ir["CarIdxBestLapTime"]   or [])
             speeds     = list(self._ir["CarIdxSpeed"]         or [])
+            f2_times   = list(self._ir["CarIdxF2Time"]        or [])
+            last_laps  = list(self._ir["CarIdxLastLapTime"]   or [])
 
             NOT_IN_WORLD = -1
             car_states: list[dict] = []
@@ -267,22 +279,29 @@ class IRacingBridge:
                         "est_time":       est_times[i] if i < len(est_times) else 0.0,
                         "best_lap_time":  best_laps[i] if i < len(best_laps) else -1.0,
                         "speed_ms":       speeds[i]    if i < len(speeds)    else None,
+                        "f2_time":        f2_times[i]  if i < len(f2_times)  else None,
+                        "last_lap_time":  last_laps[i] if i < len(last_laps) else -1.0,
                     })
 
             # Include track_length from session data for speed derivation fallback
             track_length = self._session_data.get("track_length", 0.0)
 
+            # Parse SessionFlags bitfield into per-flag booleans
+            raw_flags = self._ir["SessionFlags"] or 0
             return {
-                "session_time":  self._ir["SessionTime"]    or 0.0,
-                "session_state": self._ir["SessionState"]   or 0,
-                "session_num":   self._ir["SessionNum"]     if self._ir["SessionNum"] is not None else 0,
-                "replay_frame":  self._ir["ReplayFrameNum"] or 0,
-                "race_laps":     self._ir["RaceLaps"]       or 0,
-                "cam_car_idx":   self._ir["CamCarIdx"]      or 0,
-                "cam_group_num": self._ir["CamGroupNumber"] or 0,
-                "flags":         self._ir["SessionFlags"]   or 0,
-                "track_length":  track_length,
-                "car_states":    car_states,
+                "session_time":   self._ir["SessionTime"]    or 0.0,
+                "session_state":  self._ir["SessionState"]   or 0,
+                "session_num":    self._ir["SessionNum"]     if self._ir["SessionNum"] is not None else 0,
+                "replay_frame":   self._ir["ReplayFrameNum"] or 0,
+                "race_laps":      self._ir["RaceLaps"]       or 0,
+                "cam_car_idx":    self._ir["CamCarIdx"]      or 0,
+                "cam_group_num":  self._ir["CamGroupNumber"] or 0,
+                "flags":          raw_flags,
+                "flag_yellow":    int(bool(raw_flags & _FLAG_YELLOW_MASK)),
+                "flag_red":       int(bool(raw_flags & FLAG_RED)),
+                "flag_checkered": int(bool(raw_flags & FLAG_CHECKERED)),
+                "track_length":   track_length,
+                "car_states":     car_states,
             }
         except Exception as exc:
             logger.debug("[IRacingBridge] capture_snapshot error: %s", exc)
@@ -482,14 +501,19 @@ class IRacingBridge:
         """Build and push a telemetry snapshot to connected clients."""
         ir = self._ir
 
-        positions   = list(ir["CarIdxPosition"] or [])
-        lap_pcts    = list(ir["CarIdxLapDistPct"] or [])
-        surfaces    = list(ir["CarIdxTrackSurface"] or [])
-        est_times   = list(ir["CarIdxEstTime"] or [])
-        laps        = list(ir["CarIdxLap"] or [])
-        class_pos   = list(ir["CarIdxClassPosition"] or [])
-        best_laps   = list(ir["CarIdxBestLapTime"] or [])
-        speeds      = list(ir["CarIdxSpeed"] or [])
+        positions   = list(ir["CarIdxPosition"]      or [])
+        lap_pcts    = list(ir["CarIdxLapDistPct"]     or [])
+        surfaces    = list(ir["CarIdxTrackSurface"]   or [])
+        est_times   = list(ir["CarIdxEstTime"]        or [])
+        laps        = list(ir["CarIdxLap"]            or [])
+        class_pos   = list(ir["CarIdxClassPosition"]  or [])
+        best_laps   = list(ir["CarIdxBestLapTime"]    or [])
+        speeds      = list(ir["CarIdxSpeed"]          or [])
+        # CarIdxF2Time: iRacing's broadcast delta-to-leader (seconds) — more
+        # accurate for battle gap calculation than lap_pct × avg_lap_time.
+        f2_times    = list(ir["CarIdxF2Time"]         or [])
+        # CarIdxLastLapTime: last completed lap time per car (-1 = none yet).
+        last_laps   = list(ir["CarIdxLastLapTime"]    or [])
 
         # Build per-car state list — only active cars (position > 0 and in world)
         NOT_IN_WORLD = -1
@@ -507,20 +531,27 @@ class IRacingBridge:
                         "est_time":       est_times[i] if i < len(est_times) else 0.0,
                         "best_lap_time":  best_laps[i] if i < len(best_laps) else -1.0,
                         "speed_ms":       speeds[i]    if i < len(speeds)    else None,
+                        "f2_time":        f2_times[i]  if i < len(f2_times)  else None,
+                        "last_lap_time":  last_laps[i] if i < len(last_laps) else -1.0,
                     }
                 )
 
+        # Parse SessionFlags bitfield into per-flag booleans
+        raw_flags = ir["SessionFlags"] or 0
         snapshot = {
             "event": "iracing:telemetry",
             "data": {
-                "session_time":  ir["SessionTime"] or 0.0,
-                "session_state": ir["SessionState"] or 0,
-                "replay_frame":  ir["ReplayFrameNum"] or 0,
-                "race_laps":     ir["RaceLaps"] or 0,
-                "cam_car_idx":   ir["CamCarIdx"] or 0,
-                "flags":         ir["SessionFlags"] or 0,
-                "track_length":  self._session_data.get("track_length", 0.0),
-                "car_states":    car_states,
+                "session_time":    ir["SessionTime"] or 0.0,
+                "session_state":   ir["SessionState"] or 0,
+                "replay_frame":    ir["ReplayFrameNum"] or 0,
+                "race_laps":       ir["RaceLaps"] or 0,
+                "cam_car_idx":     ir["CamCarIdx"] or 0,
+                "flags":           raw_flags,
+                "flag_yellow":     int(bool(raw_flags & _FLAG_YELLOW_MASK)),
+                "flag_red":        int(bool(raw_flags & FLAG_RED)),
+                "flag_checkered":  int(bool(raw_flags & FLAG_CHECKERED)),
+                "track_length":    self._session_data.get("track_length", 0.0),
+                "car_states":      car_states,
             },
         }
         self._push_update(snapshot)

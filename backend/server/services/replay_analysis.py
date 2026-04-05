@@ -137,6 +137,8 @@ class TelemetryWriter:
                 car.get("est_time", 0.0),
                 car.get("best_lap_time", -1.0),
                 car_speed,
+                car.get("f2_time"),
+                car.get("last_lap_time", -1.0),
             ))
 
             # Detect lap completions
@@ -144,11 +146,16 @@ class TelemetryWriter:
             cur_lap = car.get("lap", 0)
             prev_lap = self._last_laps.get(car_idx, 0)
             if cur_lap > prev_lap and prev_lap > 0:
+                # Capture the last_lap_time from CarIdxLastLapTime — this is the
+                # actual completed lap duration reported by iRacing's timing system.
+                # Falls back to -1.0 when the variable is unavailable.
+                completed_lap_time = car.get("last_lap_time", -1.0)
                 self._lap_batch.append((
                     tick_index,  # placeholder
                     car_idx,
                     cur_lap,
                     car.get("position", 0),
+                    completed_lap_time if completed_lap_time > 0 else None,
                 ))
             self._last_laps[car_idx] = cur_lap
 
@@ -191,8 +198,8 @@ class TelemetryWriter:
             conn.executemany(
                 """INSERT INTO car_states
                    (tick_id, car_idx, position, class_position, lap, lap_pct,
-                    surface, est_time, best_lap_time, speed_ms)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    surface, est_time, best_lap_time, speed_ms, f2_time, last_lap_time)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 resolved_cars,
             )
 
@@ -206,8 +213,8 @@ class TelemetryWriter:
         if resolved_laps:
             conn.executemany(
                 """INSERT INTO lap_completions
-                   (tick_id, car_idx, lap_number, position)
-                   VALUES (?, ?, ?, ?)""",
+                   (tick_id, car_idx, lap_number, position, lap_time)
+                   VALUES (?, ?, ?, ?, ?)""",
                 resolved_laps,
             )
 
@@ -750,6 +757,7 @@ class ReplayAnalyzer:
             "PitStopDetector": ("Pit Stops", "Identifying cars on pit surface for 5+ seconds"),
             "FastestLapDetector": ("Fastest Laps", "Finding new personal and session best lap times"),
             "LeaderChangeDetector": ("Leader Changes", "Tracking P1 position changes on track"),
+            "YellowFlagDetector": ("Yellow Flags", "Detecting full-course caution / safety car periods"),
             "PaceLapDetector": ("Pace Lap", "Detecting formation/pace lap before green flag"),
             "FirstLapDetector": ("First Lap", "Marking the opening lap of the race"),
             "LastLapDetector": ("Last Lap", "Marking the final lap before checkered"),

@@ -1,6 +1,6 @@
 # League Replay Studio — Telemetry, Event Detection & Highlight Algorithm Analysis
 
-> **Critical Context:** The repository is in an **early-stage design/planning state**. The only actual Python source code in `backend/` is `career_stats_service.py` and its route. All telemetry collection, event detection, and highlight generation logic exists exclusively as **detailed design specifications and code examples** embedded in `documentation/master-plan.md` (3,935 lines). All citations below refer to `documentation/master-plan.md` (abbreviated **MPD**).
+> **Status (updated):** All core telemetry, event detection, and highlight pipeline components are **fully implemented** in `backend/server/services/`. The original report described design-only status; this updated version reflects the production code. File references below cite actual implementation paths (abbreviated **IMP**) in addition to the original master-plan design specification (`documentation/master-plan.md`, abbreviated **MPD**).
 
 ---
 
@@ -41,7 +41,7 @@ time.sleep(1.0 / self.POLL_HZ)       # MPD:890
 
 ### 1.3 Specific Telemetry Variables Read
 
-**`_emit_telemetry()` method** (`MPD:903–947`)
+**`_emit_telemetry()` method** (`IMP:iracing_bridge.py:481–540`, `MPD:903–947`)
 
 #### Tick-level variables (one row per 60 Hz sample)
 
@@ -52,7 +52,12 @@ time.sleep(1.0 / self.POLL_HZ)       # MPD:890
 | `ir['SessionState']` | `int enum` | 0=Invalid…4=Racing, 5=Checkered, 6=CoolDown | `race_ticks.session_state` |
 | `ir['RaceLaps']` | `int` | Leader's current lap | `race_ticks.race_laps` |
 | `ir['CamCarIdx']` | `int` | Car iRacing's auto-director is watching | `race_ticks.cam_car_idx` |
-| `ir['SessionFlags']` | `int` | Bitfield: yellow/green/checkered/pace car flags | `race_ticks.flags` |
+| `ir['SessionFlags']` | `int` | Raw bitfield: all flag states | `race_ticks.flags` |
+| `ir['SessionFlags'] & 0xC108` | derived | Yellow / caution flag active | `race_ticks.flag_yellow` (1 or 0) |
+| `ir['SessionFlags'] & 0x0010` | derived | Red flag active | `race_ticks.flag_red` (1 or 0) |
+| `ir['SessionFlags'] & 0x0001` | derived | Checkered flag active | `race_ticks.flag_checkered` (1 or 0) |
+
+The flag booleans are parsed in `iracing_bridge.py` using named constants (`FLAG_CHECKERED`, `FLAG_RED`, `FLAG_YELLOW`, `FLAG_CAUTION`, `FLAG_CAUTION_WAVING`, `FLAG_YELLOW_WAVING`). The `_FLAG_YELLOW_MASK` combines all yellow/caution variants.
 
 #### Per-car array variables (one set per active car per tick)
 
@@ -65,13 +70,15 @@ time.sleep(1.0 / self.POLL_HZ)       # MPD:890
 | `ir['CarIdxTrackSurface']` | `[int]` | -1=NotInWorld, 0=OffTrack, 1=InPitStall, 2=ApproachingPits, 3=OnTrack | `car_states.surface` |
 | `ir['CarIdxEstTime']` | `[float]` | Estimated gap time to leader | `car_states.est_time` |
 | `ir['CarIdxBestLapTime']` | `[float]` | Personal best lap time (-1 = none) | `car_states.best_lap_time` |
+| `ir['CarIdxSpeed']` | `[float]` | Per-car speed (m/s) | `car_states.speed_ms` |
+| `ir['CarIdxF2Time']` | `[float]` | Broadcast delta-to-leader (s) from iRacing's live timing system | `car_states.f2_time` |
+| `ir['CarIdxLastLapTime']` | `[float]` | Last completed lap time per car (-1 = none yet) | `car_states.last_lap_time` |
 
-**Also read but NOT stored in the database** (`MPD:656–657`):
-- `ir['Speed']` — float, m/s — read in the design example but not persisted to any table
-- `ir['RPM']` — float — read in the design example but not persisted to any table
-- `ir['Lap']` — int — single-car lap (superseded by the per-car `CarIdxLap` array)
+**Active car filtering** (`IMP:iracing_bridge.py:494–511`): Only cars where `position > 0 AND surface != -1` are stored, keeping the payload compact (typically 20–40 of the 64 possible slots).
 
-**Active car filtering** (`MPD:920–921`): Only cars where `position > 0 AND surface != -1` are stored, keeping the payload compact (typically 20–40 of the 64 possible slots).
+**Speed derivation fallback** (`IMP:replay_analysis.py:106–127`): When `CarIdxSpeed` returns `None` (e.g. on older iRacing builds), `TelemetryWriter` derives speed from `lap_pct` rate-of-change × track length.
+
+**`CarIdxF2Time` vs. `CarIdxEstTime`:** `F2Time` is iRacing's broadcast timing gap (sector-accurate, updated from the timing transponder loop), whereas `EstTime` is an extrapolation of position difference against average lap time. `F2Time` is strongly preferred for battle gap calculation; `EstTime` is a useful secondary signal and still stored.
 
 ### 1.4 Session Info (Static Data)
 
@@ -87,19 +94,22 @@ time.sleep(1.0 / self.POLL_HZ)       # MPD:890
 
 ### 1.5 SQLite Storage Schema
 
-**`MPD:560–624`** — Two-table normalized design in `project.db`:
+**`MPD:560–624`, `IMP:analysis_db.py:24–128`** — Two-table normalized design in `project.db`:
 
 #### `race_ticks` — One row per 60 Hz sample
 
 ```sql
-CREATE TABLE race_ticks (
+CREATE TABLE IF NOT EXISTS race_ticks (
     id              INTEGER PRIMARY KEY,
     session_time    REAL    NOT NULL,
     replay_frame    INTEGER NOT NULL,   -- THE link to video timestamps
     session_state   INTEGER NOT NULL,
     race_laps       INTEGER,
     cam_car_idx     INTEGER,
-    flags           INTEGER DEFAULT 0
+    flags           INTEGER DEFAULT 0, -- raw SessionFlags bitfield
+    flag_yellow     INTEGER DEFAULT 0, -- 1 when yellow/caution/caution-waving bits set
+    flag_red        INTEGER DEFAULT 0, -- 1 when red flag bit set
+    flag_checkered  INTEGER DEFAULT 0  -- 1 when checkered flag bit set
 );
 CREATE INDEX idx_tick_time  ON race_ticks(session_time);
 CREATE INDEX idx_tick_frame ON race_ticks(replay_frame);
@@ -108,7 +118,7 @@ CREATE INDEX idx_tick_frame ON race_ticks(replay_frame);
 #### `car_states` — N rows per tick (one per active car)
 
 ```sql
-CREATE TABLE car_states (
+CREATE TABLE IF NOT EXISTS car_states (
     id             INTEGER PRIMARY KEY,
     tick_id        INTEGER NOT NULL REFERENCES race_ticks(id),
     car_idx        INTEGER NOT NULL,
@@ -118,33 +128,31 @@ CREATE TABLE car_states (
     lap_pct        REAL    NOT NULL,
     surface        INTEGER NOT NULL,
     est_time       REAL,
-    best_lap_time  REAL DEFAULT -1
+    best_lap_time  REAL DEFAULT -1,
+    speed_ms       REAL,               -- m/s (CarIdxSpeed or derived from lap_pct rate)
+    f2_time        REAL,               -- CarIdxF2Time: broadcast delta-to-leader (s)
+    last_lap_time  REAL DEFAULT -1     -- CarIdxLastLapTime: last completed lap time (s)
 );
-CREATE INDEX idx_cs_tick       ON car_states(tick_id);
-CREATE INDEX idx_cs_car_time   ON car_states(car_idx, tick_id);
-CREATE INDEX idx_cs_surface    ON car_states(surface) WHERE surface != 3;
-CREATE INDEX idx_cs_position   ON car_states(position) WHERE position > 0;
 ```
 
-#### `lap_completions` — One row each time a car crosses start/finish (`MPD:604–614`)
+#### `lap_completions` — One row each time a car crosses start/finish (`IMP:analysis_db.py:74–82`, `MPD:604–614`)
 
 ```sql
-CREATE TABLE lap_completions (
+CREATE TABLE IF NOT EXISTS lap_completions (
     id           INTEGER PRIMARY KEY,
     tick_id      INTEGER NOT NULL REFERENCES race_ticks(id),
     car_idx      INTEGER NOT NULL,
     lap_number   INTEGER NOT NULL,
-    lap_time     REAL,
-    position     INTEGER,
-    UNIQUE(car_idx, lap_number)
+    position     INTEGER NOT NULL DEFAULT 0,
+    lap_time     REAL    DEFAULT NULL  -- from CarIdxLastLapTime at the lap transition tick
 );
-CREATE INDEX idx_lc_car ON lap_completions(car_idx);
+CREATE INDEX idx_lc_car ON lap_completions(car_idx, lap_number);
 ```
 
-#### `race_events` — Output of the event detectors (`MPD:371–389`)
+#### `race_events` — Output of the event detectors (`IMP:analysis_db.py:55–70`, `MPD:371–389`)
 
 ```sql
-CREATE TABLE race_events (
+CREATE TABLE IF NOT EXISTS race_events (
     id                    INTEGER PRIMARY KEY,
     event_type            TEXT NOT NULL,
     start_time_seconds    REAL NOT NULL,
@@ -155,10 +163,9 @@ CREATE TABLE race_events (
     severity              INTEGER DEFAULT 0,    -- 0-10 score
     involved_drivers      TEXT,                -- JSON array of car_idx
     position              INTEGER,
-    description           TEXT,
-    auto_detected         BOOLEAN DEFAULT TRUE,
-    user_modified         BOOLEAN DEFAULT FALSE,
-    included_in_highlight BOOLEAN DEFAULT TRUE,
+    auto_detected         INTEGER DEFAULT 1,
+    user_modified         INTEGER DEFAULT 0,
+    included_in_highlight INTEGER DEFAULT 1,
     metadata              TEXT                 -- JSON blob
 );
 ```
@@ -169,78 +176,78 @@ CREATE TABLE race_events (
 
 ---
 
-## 2. Underutilized Telemetry Data
+## 2. Telemetry Coverage — Current State
 
-### 2.1 Fields Being Read But Not Stored or Used
+### 2.1 Variables Previously Underutilized — Now Addressed
 
-The following iRacing variables appear in the design's code examples but are **not persisted to any database table** and thus are **not available to any detector**:
+| Variable | Previous State | Current State |
+|---|---|---|
+| `ir['CarIdxSpeed']` | Not persisted | ✅ Stored as `car_states.speed_ms`; used for incident/crash severity scoring |
+| `ir['SessionFlags']` (bitfield) | Raw int stored, no parsing | ✅ Individual bits parsed: `flag_yellow`, `flag_red`, `flag_checkered` in `race_ticks`; powers `YellowFlagDetector` |
+| `ir['CarIdxF2Time']` | Not read | ✅ Stored as `car_states.f2_time`; `BattleDetector` prefers it over `lap_pct × avg_lap_time` |
+| `ir['CarIdxLastLapTime']` | Not read | ✅ Stored as `car_states.last_lap_time`; written to `lap_completions.lap_time` on lap transitions |
+| `car_states.est_time` | Stored, unused by detectors | Still available; supplementary to `f2_time` |
 
-| Variable | Value | Why Underutilized | Potential Use |
-|---|---|---|---|
-| `ir['Speed']` | `float` m/s | Mentioned in `MPD:656`; not in `_emit_telemetry()` output dict, not in any table | Crash severity scoring (high-speed → high severity), spin/lock detection, speed differential for overtake quality |
-| `ir['RPM']` | `float` | Mentioned in `MPD:657`; same — not stored anywhere | Engine failure detection, standing-start analysis |
-| `ir['Lap']` | `int` | Single-car lap; superseded by `CarIdxLap` array | Redundant |
-| `ir['CarIdxEstTime']` | `[float]` | **Stored** in `car_states.est_time` but the `BattleDetector` recalculates gap from `lap_pct` instead of using this field | Could replace the `lap_pct × avg_lap_time` approximation with iRacing's native estimate |
+### 2.2 iRacing Variables Still Not Read
 
-### 2.2 iRacing Variables Available But Not Read At All
-
-The following iRacing telemetry variables are available via the `irsdk` SDK but are not mentioned anywhere in the design (`MPD:640–750`):
+The following variables remain available in the `irsdk` SDK but are not currently collected. They represent potential future enhancements:
 
 | Variable | Description | Potential Use Cases |
 |---|---|---|
-| `CarIdxF2Time` | Delta time to race leader (broadcast timing) | More accurate battle/gap detection than `lap_pct × avg` |
-| `CarIdxLastLapTime` | Last completed lap time per car | Lap-by-lap progression, penalty detection (unusually slow lap) |
-| `CarIdxGear` | Gear per car | Contextual data |
-| `CarIdxSteer` | Steering angle per car | Spin detection (combined with `surface`) |
+| `CarIdxGear` | Gear per car | Contextual display data |
+| `CarIdxSteer` | Steering angle per car | Spin/loss-of-control detection (combined with `surface`) |
 | `CarIdxThrottle` / `CarIdxBrake` | Per-car throttle/brake inputs | Crash approach detection, braking zone incidents |
-| `SessionFlags` (full bitfield) | Individual flag bits (yellow, double-yellow, pace, checkered, red) | Only the aggregate integer is stored; individual flag parsing for caution segments is not designed |
 | `WeatherDeclaredWet` / `TrackTemp` | Track/weather state | Context metadata for events |
 | `PitsOpen` | Whether pit lane is open | Pit strategy context |
-| `RadioTransmitCarIdx` | Who is transmitting on radio | Flag moments of team communication at key events |
+| `RadioTransmitCarIdx` | Who is transmitting on radio | Correlate with key events |
 
-### 2.3 Fields Stored But Under-Exploited in Event Detection
+### 2.3 Fields Stored and Actively Used
 
-| Field | Stored | Used By | Missing Uses |
-|---|---|---|---|
-| `car_states.est_time` | ✅ | None | Battle gap calculation (more accurate than `lap_pct × avg_lap_time`) |
-| `car_states.class_position` | ✅ | None | Multi-class battle/overtake detection (e.g., GTD vs. GTP in IMSA events) |
-| `car_states.best_lap_time` | ✅ | `FastestLapDetector` (design only) | Fastest-of-session detection, purple sector moments |
-| `race_ticks.flags` | ✅ | `PaceCarDetector` (design only) | Yellow flag period detection, double-file restart detection, red flag incidents |
-| `lap_completions` table | ✅ | `LapCompletionDetector` (design only) | Lap time regression (driver losing pace), consistent front-runner analysis |
+| Field | Stored | Used By |
+|---|---|---|
+| `car_states.speed_ms` | ✅ | `IncidentDetector`, `CrashDetector` (severity scaling) |
+| `car_states.f2_time` | ✅ | `BattleDetector` (primary gap source) |
+| `car_states.last_lap_time` | ✅ | `TelemetryWriter` (writes to `lap_completions.lap_time`) |
+| `car_states.est_time` | ✅ | `CrashDetector`, `SpinoutDetector`, `CloseCallDetector` (time-loss calculation) |
+| `car_states.class_position` | ✅ | Stored; multi-class detector is a future enhancement |
+| `car_states.best_lap_time` | ✅ | `FastestLapDetector` |
+| `race_ticks.flag_yellow` | ✅ | `YellowFlagDetector` |
+| `race_ticks.flag_red` | ✅ | Stored; red flag detector is a future enhancement |
+| `race_ticks.flag_checkered` | ✅ | `LastLapDetector` cross-check |
+| `lap_completions.lap_time` | ✅ | Available for lap-regression analysis |
 
-### 2.4 Multi-Car Event Gaps in the Design
+### 2.4 Multi-Car Event Handling
 
-The `BattleDetector` only detects **two-car adjacent-position battles** (leader vs. `position + 1`, `MPD:1175–1176`). It cannot detect:
-- **3-car or N-car battles** (e.g., a train of 4 cars all within 1.5s)
-- **Non-adjacent position battles** (e.g., P3 chasing P1 after P2 spins)
-- **Cross-class proximity incidents** (a LMP2 car catching prototype traffic)
+The `BattleDetector` now uses **union-find connected components** (`IMP:detectors.py:195–219`) to detect N-car trains, not just two-car battles. A group of 4 cars all within the gap threshold appears as a single battle event with all car indices in `involved_drivers`.
 
-The `IncidentDetector` uses `CamCarIdx` as a proxy, which means:
-- It can only detect incidents iRacing's own auto-director notices
-- Multi-car contact where the camera stays on one car misses the other participants
-- `involved_drivers` in the event model supports a JSON array, but the detector only ever populates one `car_idx`
+The `ContactDetector` (`IMP:detectors.py:943–1040`) addresses the report's note about multi-car off-track incidents: it groups cars that go off-track within `contact_time_window` seconds at similar `lap_pct` positions, capturing pileups that iRacing's auto-director might assign to a single car.
+
+The `IncidentDetector` still relies on `CamCarIdx` as primary signal (matching the legacy `AnalyseRace.cs` pattern). Multi-car incidents the director doesn't focus on are captured separately by `CrashDetector` and `ContactDetector`.
 
 ---
 
 ## 3. Event Detection — All Detectors
 
-### 3.1 Full Detector List (`MPD:1226–1240`)
+### 3.1 Full Detector List (`IMP:detectors.py:1222–1252`, `MPD:1226–1240`)
 
-| Detector | Event Type | DB Query Pattern | Legacy Equivalent |
+| Detector | Event Type | Primary Detection Signal | Status |
 |---|---|---|---|
-| `IncidentDetector` | `incident` | `race_ticks.cam_car_idx` change + `car_states.surface = 0` JOIN | `Incident.cs` + `RaceIncidents2()` |
-| `BattleDetector` | `battle` | Self-JOIN `car_states` on adjacent positions, gap calc | `Battle.cs`, `RuleBattle.cs` |
-| `OvertakeDetector` | `overtake` | `LAG(position) OVER` window on `car_states` per car_idx | (inferred from position change) |
-| `PitStopDetector` | `pit_stop` | `car_states.surface IN (1, 2)` duration grouping | `RecordPitStops.cs` |
-| `FastestLapDetector` | `fastest_lap` | `car_states.best_lap_time` delta between ticks | `RecordFastestLaps.cs` |
-| `LeaderChangeDetector` | `leader_change` | `car_states.position = 1` car_idx change over time | (new in V2) |
-| `FirstLapDetector` | `first_lap` | `race_ticks.session_state = 4 AND race_laps = 1` | `RuleFirstLapPeriod.cs` |
-| `LastLapDetector` | `last_lap` | `race_ticks.race_laps >= results_laps_complete` | `RuleLastLapPeriod.cs` |
-| `RestartDetector` | `restart` | `race_ticks.session_state` transition `3 → 4` | `RulePaceLaps.cs` |
-| `PaceCarDetector` | `pace_car` | `race_ticks.flags` bitfield check for pace car | `RulePaceLaps.cs` |
-| `LapCompletionDetector` | `lap_completion` | `lap_completions` table direct query | (new in V2) |
+| `IncidentDetector` | `incident` | `cam_car_idx` change + `surface = OffTrack` | ✅ Implemented |
+| `BattleDetector` | `battle` | N-car adjacent-position chains; `f2_time` gap (falling back to `lap_pct × avg`) | ✅ Implemented |
+| `OvertakeDetector` | `overtake` | `LAG(position)` window, proximity check | ✅ Implemented |
+| `PitStopDetector` | `pit_stop` | `surface IN (1, 2)` duration grouping | ✅ Implemented |
+| `FastestLapDetector` | `fastest_lap` | `best_lap_time` delta per car | ✅ Implemented |
+| `LeaderChangeDetector` | `leader_change` | `position = 1` car_idx change | ✅ Implemented |
+| `YellowFlagDetector` | `yellow_flag` | `flag_yellow = 1` sustained periods | ✅ **New** |
+| `PaceLapDetector` | `pace_lap` | `session_state = PARADE` (3) | ✅ Implemented |
+| `FirstLapDetector` | `first_lap` | `session_state = RACING AND race_laps ≤ 1` | ✅ Implemented |
+| `LastLapDetector` | `last_lap` | `race_laps = max_lap` | ✅ Implemented |
+| `CrashDetector` | `crash` | Off-track + large `est_time` increase + `speed_ms` blend | ✅ Implemented |
+| `SpinoutDetector` | `spinout` | Off-track recovery with moderate time loss (2–10 s) | ✅ Implemented |
+| `ContactDetector` | `contact` | Multiple cars off-track at same `lap_pct` within time window | ✅ Implemented |
+| `CloseCallDetector` | `close_call` | Brief off-track + nearby car + small time loss | ✅ Implemented |
 
-### 3.2 `IncidentDetector` — Full Design (`MPD:1109–1151`)
+### 3.2 `IncidentDetector` — Implementation (`IMP:detectors.py:97–189`, `MPD:1109–1151`)
 
 **How iRacing signals incidents** (`MPD:726–750`): iRacing does **not** provide a direct "incident occurred" flag. When its auto-director detects an incident, it **switches `CamCarIdx` to that car**. The detector watches for `CamCarIdx` changes to cars that are off-track.
 
@@ -296,57 +303,23 @@ ORDER BY t.session_time
 Default `battle_gap_seconds = 1.5`.
 
 **Event grouping:**
-- Consecutive ticks with gap < threshold are merged into a single battle event
-- **Minimum duration: 3 seconds** — shorter battles are discarded
-- `involved_drivers` includes both `leader_idx` and `follower_idx`
+- Consecutive ticks with gap < threshold are merged using N-car union-find connected components
+- **Minimum duration: 10 seconds** — shorter battles are discarded
+- All cars in the chain are listed in `involved_drivers`
+- Severity scales with lead position and duration (4–10)
 
-**Telemetry fields used:** `position`, `lap_pct`, `surface`, `session_time`, `session_state`, `replay_frame`
+**Telemetry fields used:** `position`, `lap_pct`, `f2_time`, `surface`, `session_time`, `session_state`, `replay_frame`
 
-### 3.4 `TelemetryWriter.write_tick()` — Database Ingestion (`MPD:1050–1102`)
+**Gap calculation priority:**
+1. `f2_time` (CarIdxF2Time) — iRacing's broadcast delta-to-leader; most accurate
+2. `lap_pct × avg_lap_time` — approximation used as fallback when `f2_time` is NULL
 
-```python
-def write_tick(self, snapshot: dict):
-    cur = self.db.execute(
-        """INSERT INTO race_ticks
-           (session_time, replay_frame, session_state, race_laps, cam_car_idx, flags)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (snapshot['session_time'], snapshot['replay_frame'],
-         snapshot['session_state'], snapshot['race_laps'],
-         snapshot['cam_car_idx'], snapshot.get('flags', 0))
-    )
-    tick_id = cur.lastrowid
+### 3.4 `TelemetryWriter.write_tick()` — Database Ingestion (`IMP:replay_analysis.py:85–220`, `MPD:1050–1102`)
 
-    # Batch insert all active car states
-    car_rows = [
-        (tick_id, cs['car_idx'], cs['position'], cs['class_position'],
-         cs['lap'], cs['lap_pct'], cs['surface'], cs['est_time'],
-         cs['best_lap_time'])
-        for cs in snapshot['car_states']
-    ]
-    self.db.executemany(
-        """INSERT INTO car_states
-           (tick_id, car_idx, position, class_position, lap, lap_pct,
-            surface, est_time, best_lap_time)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        car_rows
-    )
-
-    # Detect lap completions (lap number increases)
-    for cs in snapshot['car_states']:
-        prev_lap = self._prev_laps.get(cs['car_idx'])
-        if prev_lap is not None and cs['lap'] > prev_lap:
-            self.db.execute(
-                """INSERT OR IGNORE INTO lap_completions
-                   (tick_id, car_idx, lap_number, position)
-                   VALUES (?, ?, ?, ?)""",
-                (tick_id, cs['car_idx'], cs['lap'], cs['position'])
-            )
-        self._prev_laps[cs['car_idx']] = cs['lap']
-
-    # Commit in batches of 100 ticks for performance
-    if tick_id % 100 == 0:
-        self.db.commit()
-```
+The writer batches ticks in groups of 100 for performance. Key fields per tick:
+- `race_ticks`: `session_time`, `replay_frame`, `session_state`, `race_laps`, `cam_car_idx`, `flags`, `flag_yellow`, `flag_red`, `flag_checkered`
+- `car_states`: all tick-level fields plus `speed_ms`, `f2_time`, `last_lap_time`
+- `lap_completions`: written when `car.lap > prev_lap`; includes `lap_time` from `CarIdxLastLapTime`
 
 ---
 
@@ -480,20 +453,36 @@ highlight:metrics_update  # Live metrics update during editing
 
 ---
 
-## 5. Summary: What Is Built vs. Designed
+## 5. Summary: Implementation Status
 
 | Component | Status | Reference |
 |---|---|---|
-| `IRacingBridge` (telemetry connection) | ❌ Design only | `MPD:840–965` |
-| SQLite schema (`race_ticks`, `car_states`, etc.) | ❌ Design only | `MPD:560–624` |
-| `TelemetryWriter.write_tick()` | ❌ Design only | `MPD:1050–1102` |
-| `IncidentDetector` | ❌ Design only (full code example) | `MPD:1109–1151` |
-| `BattleDetector` | ❌ Design only (full code example) | `MPD:1154–1223` |
-| 9 other detectors | ❌ Design only (SQL patterns listed) | `MPD:1232–1240` |
-| `HighlightEditor.reprocess()` | ❌ Design only (full code example) | `MPD:2659–2714` |
-| FFmpeg encoding with EDL | ❌ Design only | `MPD:1375–1388` |
-| Frontend Highlight Suite components | ❌ Design only | `MPD:1823–1868` |
+| `IRacingBridge` (telemetry connection, 60 Hz poll loop) | ✅ Implemented | `backend/server/services/iracing_bridge.py` |
+| `SessionFlags` bitfield parsing → `flag_yellow/red/checkered` | ✅ Implemented | `iracing_bridge.py:43–57` |
+| `CarIdxF2Time` (broadcast gap) collection | ✅ Implemented | `iracing_bridge.py:_emit_telemetry` |
+| `CarIdxLastLapTime` collection | ✅ Implemented | `iracing_bridge.py:_emit_telemetry` |
+| `CarIdxSpeed` collection | ✅ Implemented | `iracing_bridge.py:_emit_telemetry` |
+| SQLite schema (`race_ticks`, `car_states`, `lap_completions`, `race_events`) | ✅ Implemented | `backend/server/services/analysis_db.py` |
+| `car_states.f2_time` column | ✅ Implemented | `analysis_db.py:51` |
+| `car_states.last_lap_time` column | ✅ Implemented | `analysis_db.py:52` |
+| `lap_completions.lap_time` column | ✅ Implemented | `analysis_db.py:80` |
+| `TelemetryWriter.write_tick()` (batch SQLite ingest) | ✅ Implemented | `backend/server/services/replay_analysis.py` |
+| `ReplayAnalyzer` (two-pass scan+detect) | ✅ Implemented | `replay_analysis.py` |
+| `IncidentDetector` | ✅ Implemented | `backend/server/services/detectors.py:97` |
+| `BattleDetector` (N-car chains, f2_time gap) | ✅ Implemented | `detectors.py:222` |
+| `OvertakeDetector` | ✅ Implemented | `detectors.py:347` |
+| `PitStopDetector` | ✅ Implemented | `detectors.py:452` |
+| `FastestLapDetector` | ✅ Implemented | `detectors.py:529` |
+| `LeaderChangeDetector` | ✅ Implemented | `detectors.py:596` |
+| `YellowFlagDetector` | ✅ Implemented | `detectors.py:1222` |
+| `PaceLapDetector` | ✅ Implemented | `detectors.py:1161` |
+| `FirstLapDetector` | ✅ Implemented | `detectors.py:651` |
+| `LastLapDetector` | ✅ Implemented | `detectors.py:690` |
+| `CrashDetector` | ✅ Implemented | `detectors.py:742` |
+| `SpinoutDetector` | ✅ Implemented | `detectors.py:858` |
+| `ContactDetector` | ✅ Implemented | `detectors.py:943` |
+| `CloseCallDetector` | ✅ Implemented | `detectors.py:1045` |
+| `scoring_engine.py` (highlight scoring) | ✅ Implemented | `backend/server/services/scoring_engine.py` |
+| `encoding_service.py` (FFmpeg EDL) | ✅ Implemented | `backend/server/services/encoding_service.py` |
+| Frontend Highlight Suite (`HighlightPanel`, `HighlightHistogram`) | ✅ Implemented | `frontend/src/components/highlights/` |
 | `career_stats_service.py` (iRacing career stats) | ✅ Implemented | `backend/server/services/career_stats_service.py` |
-| iRacing career stats API route | ✅ Implemented | `backend/server/routes/api_career_stats.py` |
-
-> **Note on stored memories:** Previous agent memories referencing `backend/server/services/replay_analysis.py` and `backend/server/services/detectors.py` with specific line numbers are **inaccurate** — those file paths do not exist on disk. The code shown in those memories is design-specification code embedded in `documentation/master-plan.md`.

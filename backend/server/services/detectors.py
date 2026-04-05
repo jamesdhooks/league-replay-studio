@@ -49,6 +49,7 @@ EVENT_SPINOUT     = "spinout"
 EVENT_CONTACT     = "contact"
 EVENT_CLOSE_CALL  = "close_call"
 EVENT_PACE_LAP    = "pace_lap"
+EVENT_YELLOW_FLAG = "yellow_flag"
 
 # iRacing surface constants
 SURFACE_OFF_TRACK = 0
@@ -225,6 +226,12 @@ class BattleDetector(BaseDetector):
     A battle exists when two cars in adjacent positions maintain a gap
     below the threshold for a minimum duration.
 
+    Gap calculation priority:
+      1. CarIdxF2Time (f2_time) — iRacing's broadcast delta-to-leader, most
+         accurate since it accounts for intermediate sector times.
+      2. lap_pct × avg_lap_time — approximation used as fallback when f2_time
+         is unavailable (e.g. older recordings or mid-race scan artefacts).
+
     Uses MIN(ABS(diff), 1-ABS(diff)) on lap_pct to handle wrapping
     at the start/finish line — without this fix, two cars 0.5s apart
     at the S/F line would calculate as ~lap_time apart (catastrophic
@@ -239,15 +246,19 @@ class BattleDetector(BaseDetector):
         gap_threshold = session_info.get("battle_gap_threshold", 0.5)
         avg_lap_time = session_info.get("avg_lap_time", 90.0) or 90.0
 
-        # Find adjacent-position car pairs that are close together.
-        # The MIN(...) expression handles the start/finish wrapping case
-        # where leader_pct ≈ 0.01 and follower_pct ≈ 0.99 (or vice-versa).
+        # Use CarIdxF2Time (f2_time) for gap when available — it is the
+        # broadcast timing delta that iRacing continuously recomputes from
+        # intermediate sector data.  When it is NULL (older recordings or
+        # cars that have not yet received a timing update) we fall back to
+        # the lap_pct approximation so no events are silently dropped.
         rows = db.execute("""
             SELECT t.session_time, t.replay_frame,
                    leader.car_idx AS leader_idx, leader.position AS leader_pos,
                    follower.car_idx AS follower_idx,
                    leader.lap, leader.lap_pct AS leader_pct,
-                   follower.lap_pct AS follower_pct
+                   follower.lap_pct AS follower_pct,
+                   leader.f2_time AS leader_f2,
+                   follower.f2_time AS follower_f2
             FROM car_states leader
             JOIN car_states follower ON follower.tick_id = leader.tick_id
                 AND follower.position = leader.position + 1
@@ -256,14 +267,23 @@ class BattleDetector(BaseDetector):
               AND leader.surface = ?
               AND follower.surface = ?
               AND leader.position > 0
-              AND MIN(
-                  ABS(leader.lap_pct - follower.lap_pct),
-                  1.0 - ABS(leader.lap_pct - follower.lap_pct)
-              ) * ? < ?
+              AND (
+                  -- Prefer f2_time gap when both cars have it
+                  (leader.f2_time IS NOT NULL AND follower.f2_time IS NOT NULL
+                   AND ABS(follower.f2_time - leader.f2_time) < ?)
+                  OR
+                  -- Fall back to lap_pct approximation
+                  (leader.f2_time IS NULL OR follower.f2_time IS NULL)
+                  AND MIN(
+                      ABS(leader.lap_pct - follower.lap_pct),
+                      1.0 - ABS(leader.lap_pct - follower.lap_pct)
+                  ) * ? < ?
+              )
             ORDER BY t.session_time
         """, (
             SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
             SURFACE_ON_TRACK, SURFACE_ON_TRACK,
+            gap_threshold,
             avg_lap_time, gap_threshold,
         )).fetchall()
 
@@ -1199,6 +1219,78 @@ class PaceLapDetector(BaseDetector):
         return events
 
 
+# ── Yellow Flag Detector ──────────────────────────────────────────────────────
+
+class YellowFlagDetector(BaseDetector):
+    """Detect yellow-flag (full-course caution) periods.
+
+    Uses the ``flag_yellow`` column in ``race_ticks`` which is set to 1 when
+    any of the following iRacing SessionFlags bits are active:
+      - yellow (0x0008)
+      - yellowWaving (0x0100)
+      - caution (0x4000)
+      - cautionWaving (0x8000)
+
+    Consecutive yellow-flag ticks within MERGE_GAP seconds are merged into a
+    single event.  Short blips (< MIN_DURATION) are discarded to avoid false
+    positives from transient flag state changes.
+
+    Yellow-flag periods are meaningful highlight anchors: they mark when the
+    safety car is deployed, pit strategy windows open, and the field bunches up
+    before a restart — all high-drama moments.
+    """
+
+    event_type = EVENT_YELLOW_FLAG
+    MIN_DURATION = 5.0   # seconds — discard transient flag glitches
+    MERGE_GAP = 3.0      # merge yellow periods within this gap
+
+    def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
+        rows = db.execute("""
+            SELECT t.session_time, t.replay_frame, t.race_laps
+            FROM race_ticks t
+            WHERE t.flag_yellow = 1
+              AND t.session_state IN (?, ?)
+            ORDER BY t.session_time
+        """, (SESSION_STATE_RACING, SESSION_STATE_CHECKERED)).fetchall()
+
+        if not rows:
+            logger.info("[Detector:YellowFlag] No yellow flag periods found")
+            return []
+
+        # Group consecutive yellow-flag ticks into caution periods
+        periods: list[dict] = []
+        for row in rows:
+            time_s = row["session_time"]
+            frame = row["replay_frame"]
+            lap = row["race_laps"]
+
+            if periods and time_s - periods[-1]["end_time"] <= self.MERGE_GAP:
+                periods[-1]["end_time"] = time_s
+                periods[-1]["end_frame"] = frame
+            else:
+                periods.append({
+                    "event_type": self.event_type,
+                    "start_time": time_s,
+                    "end_time": time_s,
+                    "start_frame": frame,
+                    "end_frame": frame,
+                    "lap_number": lap,
+                    "severity": 6,
+                    "involved_drivers": [],
+                    "position": None,
+                    "metadata": {"description": "Full-course yellow / caution period"},
+                })
+
+        # Discard very short flags (transient state changes / glitches)
+        periods = [
+            p for p in periods
+            if p["end_time"] - p["start_time"] >= self.MIN_DURATION
+        ]
+
+        logger.info("[Detector:YellowFlag] Found %d yellow flag periods", len(periods))
+        return periods
+
+
 # ── Detector registry ────────────────────────────────────────────────────────
 
 ALL_DETECTORS: list[BaseDetector] = [
@@ -1208,6 +1300,7 @@ ALL_DETECTORS: list[BaseDetector] = [
     PitStopDetector(),
     FastestLapDetector(),
     LeaderChangeDetector(),
+    YellowFlagDetector(),
     PaceLapDetector(),
     FirstLapDetector(),
     LastLapDetector(),

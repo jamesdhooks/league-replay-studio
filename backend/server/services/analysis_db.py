@@ -48,7 +48,9 @@ CREATE TABLE IF NOT EXISTS car_states (
     surface         INTEGER NOT NULL DEFAULT 0,
     est_time        REAL    NOT NULL DEFAULT 0.0,
     best_lap_time   REAL    NOT NULL DEFAULT -1.0,
-    speed_ms        REAL    DEFAULT NULL
+    speed_ms        REAL    DEFAULT NULL,
+    f2_time         REAL    DEFAULT NULL,
+    last_lap_time   REAL    NOT NULL DEFAULT -1.0
 );
 
 -- Detected race events
@@ -75,7 +77,8 @@ CREATE TABLE IF NOT EXISTS lap_completions (
     tick_id         INTEGER NOT NULL REFERENCES race_ticks(id),
     car_idx         INTEGER NOT NULL,
     lap_number      INTEGER NOT NULL,
-    position        INTEGER NOT NULL DEFAULT 0
+    position        INTEGER NOT NULL DEFAULT 0,
+    lap_time        REAL    DEFAULT NULL
 );
 
 -- Driver info (from session data)
@@ -156,11 +159,16 @@ def init_analysis_db(project_dir: str) -> None:
 
         # Migration: add speed_ms column to car_states if missing (older DBs)
         cs_cols = [r[1] for r in conn.execute("PRAGMA table_info(car_states)").fetchall()]
-        if "speed_ms" not in cs_cols:
-            try:
-                conn.execute("ALTER TABLE car_states ADD COLUMN speed_ms REAL DEFAULT NULL")
-            except sqlite3.OperationalError as exc:
-                logger.debug("car_states migration skip speed_ms: %s", exc)
+        for col, ddl in [
+            ("speed_ms",      "REAL DEFAULT NULL"),
+            ("f2_time",       "REAL DEFAULT NULL"),
+            ("last_lap_time", "REAL NOT NULL DEFAULT -1.0"),
+        ]:
+            if col not in cs_cols:
+                try:
+                    conn.execute(f"ALTER TABLE car_states ADD COLUMN {col} {ddl}")
+                except sqlite3.OperationalError as exc:
+                    logger.debug("car_states migration skip %s: %s", col, exc)
 
         # Migration: add new race_ticks columns if missing
         rt_cols = [r[1] for r in conn.execute("PRAGMA table_info(race_ticks)").fetchall()]
@@ -174,6 +182,14 @@ def init_analysis_db(project_dir: str) -> None:
                     conn.execute(f"ALTER TABLE race_ticks ADD COLUMN {col} {ddl}")
                 except sqlite3.OperationalError as exc:
                     logger.debug("race_ticks migration skip %s: %s", col, exc)
+
+        # Migration: add lap_time column to lap_completions if missing
+        lc_cols = [r[1] for r in conn.execute("PRAGMA table_info(lap_completions)").fetchall()]
+        if "lap_time" not in lc_cols:
+            try:
+                conn.execute("ALTER TABLE lap_completions ADD COLUMN lap_time REAL DEFAULT NULL")
+            except sqlite3.OperationalError as exc:
+                logger.debug("lap_completions migration skip lap_time: %s", exc)
 
         conn.commit()
         logger.info("[AnalysisDB] Initialised project database at %s", project_dir)
@@ -344,6 +360,7 @@ _DEFAULT_WEIGHTS = {
     "pit_stop": 20,
     "fastest_lap": 50,
     "leader_change": 90,
+    "yellow_flag": 55,
     "first_lap": 100,
     "last_lap": 100,
 }
