@@ -303,6 +303,14 @@ Canvas-based multi-track timeline: Camera, Events, Overlays, Cuts, Audio tracks.
 - [x] A/B compare mode saves two configurations and toggles between them
 - [x] Highlight timeline preview shows the condensed highlight reel with event segments
 - [x] Clicking an event in the table jumps the timeline playhead to that moment
+- [x] Score Histogram: 10 score-bucket columns (1–10), time flows top→bottom, events as colour-coded tiles
+- [x] Each histogram tile positioned vertically by race time, height proportional to duration
+- [x] Tile opacity encodes inclusion state: full = selected, 50 % = full-video, 20 % = excluded
+- [x] Result Timeline panel shows selected events in chronological sequence with tier badge, duration, and score
+- [x] Result Timeline renders PIP, transition (CUT/FADE/WHIP), and B-roll segment types
+- [x] Hovering a histogram tile highlights the same event in the Result Timeline and vice versa
+- [x] Clicking a histogram tile seeks the playhead and opens the Event Inspector
+- [x] Right-clicking a tile cycles the override state: auto → highlight → full-video → exclude
 - [x] Multi-pass scoring pipeline with 8-stage formula and tier classification (S/A/B/C)
 - [x] Bucket-based timeline allocation (intro/early/mid/late) with per-bucket budgets
 - [x] N-car battle chain detection with chain_length in metadata

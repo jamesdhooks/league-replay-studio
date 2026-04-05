@@ -109,6 +109,12 @@ export default function HighlightTimeline() {
           <span className="flex items-center gap-1 text-xxs text-text-disabled">
             <span className="inline-block w-2 h-2 rounded-sm bg-text-disabled opacity-20" /> Excluded
           </span>
+          <span className="flex items-center gap-1 text-xxs text-text-disabled">
+            <span className="inline-block w-2 h-2 rounded-sm bg-zinc-500/40 border border-zinc-400/30" style={{ backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 1px, rgba(255,255,255,0.1) 1px, rgba(255,255,255,0.1) 2px)' }} /> B-roll
+          </span>
+          <span className="flex items-center gap-1 text-xxs text-text-disabled">
+            <span className="inline-block w-2 h-2 rounded-sm bg-white/20 border border-white/10" /> Trans
+          </span>
           {/* Section legend */}
           {sectionRegions.length > 0 && (
             <>
@@ -216,19 +222,72 @@ export default function HighlightTimeline() {
           const left = (evt.start_time_seconds / totalDuration) * 100
           const width = Math.max(0.2, ((evt.end_time_seconds - evt.start_time_seconds) / totalDuration) * 100)
           const color = EVENT_COLORS[evt.event_type] || '#666'
+          const isPip = evt.segment_type === 'pip'
+          const llmNote = evt.llm_note
+          const isAnchor = !!evt.narrative_anchor
 
           return (
             <div
               key={`hl-${evt.id}`}
-              className="absolute top-0 bottom-0 rounded-sm ring-1 ring-white/20"
+              className="absolute top-0 bottom-0 rounded-sm ring-1 ring-white/20 overflow-hidden"
               style={{
                 left: `${left}%`,
                 width: `${width}%`,
                 backgroundColor: color,
                 opacity: 0.85,
               }}
-              title={`✓ ${evt.event_type} [${evt.tier || '?'}] (score ${evt.score})`}
-            />
+              title={[
+                `✓ ${evt.event_type} [${evt.tier || '?'}] (score ${evt.score})`,
+                llmNote ? `💬 ${llmNote}` : null,
+                isAnchor ? '⚓ narrative anchor' : null,
+              ].filter(Boolean).join('\n')}
+            >
+              {/* PIP indicator stripe */}
+              {isPip && (
+                <div
+                  className="absolute right-0 top-0 bottom-0 w-1/3 opacity-50"
+                  style={{ backgroundColor: '#000', backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 2px, rgba(255,255,255,0.3) 2px, rgba(255,255,255,0.3) 4px)' }}
+                />
+              )}
+              {/* Narrative anchor star */}
+              {isAnchor && width > 1.5 && (
+                <span className="absolute top-0.5 left-0.5 text-white/80 leading-none" style={{ fontSize: '7px' }}>★</span>
+              )}
+            </div>
+          )
+        })}
+
+        {/* Script-level segments: transitions + B-roll from videoScript */}
+        {videoScript && videoScript.filter(seg => seg.type === 'transition' || seg.type === 'broll').map((seg, i) => {
+          const start = seg.start_time_seconds ?? 0
+          const end = seg.end_time_seconds ?? start
+          const left = (start / totalDuration) * 100
+          const width = Math.max(0.3, ((end - start) / totalDuration) * 100)
+          const isBroll = seg.type === 'broll'
+
+          return (
+            <div
+              key={`seg-${i}`}
+              className={`absolute top-1/4 bottom-1/4 rounded-sm flex items-center justify-center overflow-hidden ${
+                isBroll
+                  ? 'bg-zinc-500/50 border border-zinc-400/30'
+                  : 'bg-white/20 border border-white/10'
+              }`}
+              style={{
+                left: `${left}%`,
+                width: `${width}%`,
+                backgroundImage: isBroll
+                  ? 'repeating-linear-gradient(45deg, transparent, transparent 3px, rgba(255,255,255,0.08) 3px, rgba(255,255,255,0.08) 6px)'
+                  : undefined,
+              }}
+              title={isBroll ? `B-roll gap filler (${Math.round(end - start)}s)` : `Transition: ${seg.transition_type || 'CUT'}`}
+            >
+              {width > 2 && (
+                <span className="text-white/60 font-mono uppercase truncate px-0.5" style={{ fontSize: '7px' }}>
+                  {isBroll ? 'GAP' : (seg.transition_type || 'CUT')}
+                </span>
+              )}
+            </div>
           )
         })}
 

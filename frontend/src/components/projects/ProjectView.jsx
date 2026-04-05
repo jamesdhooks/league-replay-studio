@@ -4,6 +4,7 @@ import { useProject } from '../../context/ProjectContext'
 import { useAnalysis } from '../../context/AnalysisContext'
 import AnalysisPanel from '../analysis/AnalysisPanel'
 import HighlightPanel from '../highlights/HighlightPanel'
+import OverlayPanel from '../overlay/OverlayPanel'
 import CapturePanel from '../capture/CapturePanel'
 import EncodingPanel from '../encoding/EncodingPanel'
 import StepGate from '../common/StepGate'
@@ -47,6 +48,10 @@ function ProjectView({ project, isLoading }) {
       case 'editing':
         if (!hasAnalysis) return <StepGate currentStep="editing" requiredStep="analysis" />
         return <HighlightPanel projectId={project.id} />
+
+      case 'overlay':
+        if (!hasAnalysis) return <StepGate currentStep="overlay" requiredStep="analysis" />
+        return <OverlayPanel />
 
       case 'capture':
         if (!hasAnalysis) return <StepGate currentStep="capture" requiredStep="analysis" />

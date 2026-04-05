@@ -5,7 +5,7 @@ import { useUndoRedo } from '../../context/UndoRedoContext'
 import HighlightWeightSliders from './HighlightWeightSliders'
 import HighlightEventTable from './HighlightEventTable'
 import HighlightMetrics from './HighlightMetrics'
-import HighlightTimeline from './HighlightTimeline'
+import HighlightHistogram from './HighlightHistogram'
 import HighlightConfigBar from './HighlightConfigBar'
 import EventInspectorPanel from '../inspector/EventInspectorPanel'
 import EditHistoryPanel from '../history/EditHistoryPanel'
@@ -97,13 +97,10 @@ export default function HighlightPanel({ projectId }) {
               <HighlightMetrics />
             </div>
 
-            {/* Event table + highlight timeline */}
+            {/* Histogram-based event organizer */}
             <div className="flex-1 flex flex-col min-w-0">
               <div className="flex-1 min-h-0 overflow-hidden">
-                <HighlightEventTable />
-              </div>
-              <div className="h-16 shrink-0 border-t border-border">
-                <HighlightTimeline />
+                <HighlightHistogram />
               </div>
             </div>
           </div>

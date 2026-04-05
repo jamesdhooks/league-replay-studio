@@ -1,7 +1,7 @@
 import { ChevronLeft } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext'
 
-const STEP_ORDER = ['analysis', 'editing', 'capture', 'export', 'upload']
+const STEP_ORDER = ['analysis', 'editing', 'overlay', 'capture', 'export', 'upload']
 
 const STEP_INFO = {
   analysis: {
@@ -15,6 +15,12 @@ const STEP_INFO = {
     description: 'Configure your highlight reel and timeline before capture.',
     cta: 'Go to Editing',
     target: 'editing',
+  },
+  overlay: {
+    title: 'Analysis Required',
+    description: 'Run replay analysis before designing overlay templates.',
+    cta: 'Go to Analysis',
+    target: 'analysis',
   },
   capture: {
     title: 'Capture Required',

@@ -26,7 +26,7 @@ from server.services.db import get_connection, init_db, row_to_dict
 logger = logging.getLogger(__name__)
 
 # Valid workflow steps in order
-WORKFLOW_STEPS = ["analysis", "editing", "capture", "export", "upload"]
+WORKFLOW_STEPS = ["analysis", "editing", "overlay", "capture", "export", "upload"]
 
 # Standard project sub-directories created for every new project
 PROJECT_SUBDIRS = [

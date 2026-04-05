@@ -1982,10 +1982,12 @@ src/
 │   │   └── PipelineStepCard.jsx   # Individual pipeline step status card
 │   ├── highlights/
 │   │   ├── HighlightSuite.jsx     # Main highlight editing suite container
+│   │   ├── HighlightPanel.jsx     # Top-level editing panel (config bar + sidebar + histogram + timeline)
+│   │   ├── HighlightHistogram.jsx # Histogram-based event organizer (score columns × time rows)
 │   │   ├── RuleWeightPanel.jsx    # Interactive rule weight sliders
 │   │   ├── EventSelectionTable.jsx # Sortable/filterable event inclusion table
 │   │   ├── HighlightMetrics.jsx   # Live metrics dashboard (duration, coverage, balance)
-│   │   ├── HighlightTimeline.jsx  # Condensed highlight reel timeline preview
+│   │   ├── HighlightTimeline.jsx  # Legacy condensed timeline (superseded by HighlightHistogram)
 │   │   └── ConfigComparison.jsx   # A/B compare mode for different weight configs
 │   ├── settings/
 │   │   ├── SettingsPanel.jsx      # Global settings
@@ -2832,58 +2834,45 @@ The Preset Designer (`PresetDesigner.jsx`) provides:
 
 The highlight editing suite is the **primary differentiator** of League Replay Studio. Rather than a black-box algorithm that produces a fixed highlight reel, LRS exposes the entire event selection pipeline as an interactive, tuneable, real-time editing environment.
 
-**Core Concept:** The user can see exactly why each event was selected, adjust the algorithm's weights and thresholds on the fly, make manual overrides, and watch the highlight reel update in real-time with live-updating metrics.
+**Core Concept:** The UI is a visual map of **Time (vertical) × Importance (horizontal)** — a histogram-based event organizer that lets you see the race structure instantly, understand algorithm decisions at a glance, and edit highlights intuitively via direct manipulation.
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                    HIGHLIGHT EDITING SUITE                              │
-├────────────────────────────────────────────────────────────────────────┤
-│                                                                        │
-│  ┌──────────────────────────┐  ┌────────────────────────────────────┐ │
-│  │  RULE WEIGHT TUNING      │  │  LIVE METRICS DASHBOARD            │ │
-│  │                          │  │                                    │ │
-│  │  Incidents   ████████░░  │  │  Total Duration:  5:23 / 5:00 ⚠️  │ │
-│  │  Battles     ██████░░░░  │  │  Events Included: 14 / 38         │ │
-│  │  Overtakes   █████░░░░░  │  │  Coverage:        62% of race     │ │
-│  │  First Lap   ██████████  │  │                                    │ │
-│  │  Last Lap    ██████████  │  │  By Type:                          │ │
-│  │  Pit Stops   ██░░░░░░░░  │  │  ├── Incidents:  4  (1:12)        │ │
-│  │  Leader      ████░░░░░░  │  │  ├── Battles:    5  (2:45)        │ │
-│  │  Fastest Lap ███░░░░░░░  │  │  ├── Overtakes:  2  (0:34)        │ │
-│  │  Preferred   ██████░░░░  │  │  ├── First Lap:  1  (0:28)        │ │
-│  │                          │  │  ├── Last Lap:   1  (0:24)        │ │
-│  │  Min Severity: ████░░ 4  │  │  └── Other:      1  (0:00)        │ │
-│  │  Target Duration: 5:00   │  │                                    │ │
-│  │                          │  │  Balance Score:   ★★★★☆            │ │
-│  │  [Reprocess Now]         │  │  Pacing Score:    ★★★★★            │ │
-│  │  [Auto-Balance]          │  │  Driver Coverage:  78%             │ │
-│  └──────────────────────────┘  └────────────────────────────────────┘ │
-│                                                                        │
-│  ┌──────────────────────────────────────────────────────────────────┐ │
-│  │  EVENT SELECTION TABLE                                     [⊞] │ │
-│  │                                                                  │ │
-│  │  ☑ │ Type     │ Lap │ Severity │ Duration │ Score │ Reason      │ │
-│  │  ──┼──────────┼─────┼──────────┼──────────┼───────┼──────────── │ │
-│  │  ☑ │ 🟢 Start  │  1  │  10/10   │  0:28    │  100  │ Mandatory   │ │
-│  │  ☑ │ 🔴 Crash  │  3  │   8/10   │  0:18    │   87  │ High sev.   │ │
-│  │  ☑ │ ⚔️ Battle │  5  │   7/10   │  0:42    │   76  │ P3/P4 close │ │
-│  │  ☐ │ 🏁 Pit    │  8  │   3/10   │  0:15    │   32  │ Below cutoff│ │
-│  │  ☑ │ ⚔️ Battle │ 11  │   9/10   │  0:55    │   91  │ Lead change │ │
-│  │  ☐ │ 🟡 Spin   │ 14  │   4/10   │  0:12    │   38  │ Below cutoff│ │
-│  │  ☑ │ 🏆 Finish │ 22  │  10/10   │  0:24    │  100  │ Mandatory   │ │
-│  │  ...                                                             │ │
-│  │                                                                  │ │
-│  │  [Select All] [Deselect All] [Invert] [Sort by: Score ▾]       │ │
-│  └──────────────────────────────────────────────────────────────────┘ │
-│                                                                        │
-│  ┌──────────────────────────────────────────────────────────────────┐ │
-│  │  HIGHLIGHT TIMELINE PREVIEW                                      │ │
-│  │  ║▓START▓║░░░║▓CRASH▓║░░░║▓▓BATTLE▓▓║░░║▓▓BATTLE▓▓║░░║▓FIN▓║  │ │
-│  │  0:00   0:28        1:15     1:57        3:34       4:52  5:23  │ │
-│  │  ◁ ▷ ⏸ ⏮ ⏭                               [Preview Highlight]  │ │
-│  └──────────────────────────────────────────────────────────────────┘ │
-└────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  CONFIG BAR  [Presets ▾]  [A/B]                    [Apply to Timeline →]    │
+├────────┬──────────────────┬────────────────────────────────┬─────────────────┤
+│        │  HIGHLIGHT       │   SCORE HISTOGRAM              │  RESULT         │
+│ EVENTS │  TUNING          │                                │  TIMELINE       │
+│ Inspec │                  │  1 │ 2 │ 3 │ 4 │ 5 │…│ 9 │10  │                 │
+│ History│  Incidents  ───  │    │   │   │   │   │ │[S]│    │  [First Lap]    │
+│ Files  │  Battles    ──   │[C] │   │   │   │   │ │   │    │  1:35 · S · 20  │
+│        │  Overtakes  ─── │    │[C]│   │   │   │ │   │    │  ──────────────  │
+│        │  Pit Stops  ─   │    │   │[C]│   │   │ │   │    │  [Battles]      │
+│        │  ...            │    │   │   │[C]│   │ │   │    │  28s · C · 2.2  │
+│        │  Min Sev: 3     │    │   │   │   │[C]│ │   │    │  ──────────────  │
+│        │  Target: 420s   │    │   │   │   │   │ │   │[S] │  [Last Lap]     │
+│        │                  │                                │  1:32 · S · 28  │
+│        │  METRICS         │  ← Low score  High score →    │                 │
+│        │  11 clips · 7:30 │  Columns = score buckets 1–10 │                 │
+│        │  Coverage: 62%   │  Time flows ↓                 │                 │
+├────────┴──────────────────┴────────────────────────────────┴─────────────────┤
+│  PREVIEW                                                                     │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  NLE TIMELINE  (Camera · Events tracks, full race, zoomable)                │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Score Histogram (Left Panel):**
+- 10 columns (score buckets 1–10, low→high left→right)
+- Time flows top→bottom (race start → finish) on the vertical axis
+- Each event is a colour-coded tile: vertical position = race time, column = score bucket, height ∝ duration
+- Tile opacity encodes inclusion state: full opacity = selected, 50 % = full-video, 20 % = excluded
+- Tier S/A/B/C badges, narrative-anchor stars (★), PIP diagonal stripes
+- Time gutter with lap/minute markers; column headers labelled 1–10
+
+**Result Timeline (Right Panel):**
+- Vertical list of selected events in chronological order
+- Each entry shows: colour strip, event type, duration, tier badge, score, and segment type (event / PIP / B-roll / transition)
+- Updated immediately on any parameter change or manual override
 
 **Rule Weight Tuning:**
 - Interactive sliders for each event type's priority weight (0–100)
@@ -3035,7 +3024,7 @@ Each section carries:
 - `clip_padding` — Seconds of pre-roll before each clip (trimmed post-capture)
 - `editable` — Whether the user can adjust timing/camera in the frontend
 
-The `generate_video_script()` function in `scoring_engine.py` wraps `generate_highlights()` with intro, qualifying, and results B-roll sections. The frontend shows these as color-coded regions on both the HighlightTimeline and the NLE TimelineCanvas.
+The `generate_video_script()` function in `scoring_engine.py` wraps `generate_highlights()` with intro, qualifying, and results B-roll sections. The frontend shows these as color-coded regions in both the **Score Histogram** result timeline and the NLE TimelineCanvas.
 
 ### 7.8.4 Script-Based Capture Engine
 
