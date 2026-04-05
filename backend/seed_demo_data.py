@@ -48,7 +48,7 @@ TRACK_NAME = "Silverstone Circuit"
 SERIES_NAME = "iRacing GT3 Challenge"
 SESSION_TYPE = "race"
 TOTAL_LAPS = 15
-RACE_DURATION_S = 2700.0   # 45 min
+RACE_DURATION_SECONDS = 2700.0   # 45 min
 TICKS_PER_SECOND = 1       # ~1 telemetry sample / s for demo (real: 50 Hz)
 REPLAY_FPS = 60
 NUM_DRIVERS = 20
@@ -97,9 +97,9 @@ def _t_to_frame(t: float) -> int:
 
 
 def _format_lap(t: float) -> str:
-    m = int(t) // 60
-    s = t % 60
-    return f"{m}:{s:06.3f}"
+    minutes = int(t) // 60
+    seconds = t % 60
+    return f"{minutes}:{seconds:06.3f}"
 
 
 def _build_race_positions(session_time: float) -> dict[int, dict]:
@@ -191,10 +191,10 @@ def seed_telemetry(project_dir: str) -> dict[float, dict]:
         lap_logged: dict[int, set] = {i: set() for i in range(NUM_DRIVERS)}
         tick_cache: dict[float, dict] = {}
 
-        while t <= RACE_DURATION_S + 1:
-            cur_lap = int(t / (RACE_DURATION_S / TOTAL_LAPS))
+        while t <= RACE_DURATION_SECONDS + 1:
+            cur_lap = int(t / (RACE_DURATION_SECONDS / TOTAL_LAPS))
             session_state = 4 if t > 5 else 3  # parade → racing
-            checkered = 1 if t >= RACE_DURATION_S else 0
+            checkered = 1 if t >= RACE_DURATION_SECONDS else 0
             cam_car_idx = random.choice([0, 1, 2, 3])
 
             tick_cur = conn.execute(
@@ -243,7 +243,7 @@ def seed_telemetry(project_dir: str) -> dict[float, dict]:
             (
                 datetime.now(timezone.utc).isoformat(),
                 datetime.now(timezone.utc).isoformat(),
-                int(RACE_DURATION_S),
+                int(RACE_DURATION_SECONDS),
                 8.4,
             ),
         )
@@ -254,13 +254,14 @@ def seed_telemetry(project_dir: str) -> dict[float, dict]:
                 ("track_name", TRACK_NAME),
                 ("session_type", "race"),
                 ("total_laps", str(TOTAL_LAPS)),
-                ("race_duration", str(RACE_DURATION_S)),
+                ("race_duration", str(RACE_DURATION_SECONDS)),
                 ("num_drivers", str(NUM_DRIVERS)),
                 ("scan_speed", "16x"),
             ],
         )
         conn.commit()
-        print(f"  Inserted {int(RACE_DURATION_S)} telemetry ticks for {NUM_DRIVERS} drivers")
+        tick_count = int(RACE_DURATION_SECONDS * TICKS_PER_SECOND) + 1
+        print(f"  Inserted {tick_count} telemetry ticks for {NUM_DRIVERS} drivers")
         return tick_cache
     finally:
         conn.close()
@@ -641,7 +642,7 @@ def build_highlight_script(project_dir: str, events: list[dict]) -> dict:
             "series_name": SERIES_NAME,
             "session_type": SESSION_TYPE,
             "total_laps": TOTAL_LAPS,
-            "race_duration_seconds": RACE_DURATION_S,
+            "race_duration_seconds": RACE_DURATION_SECONDS,
             "num_drivers": NUM_DRIVERS,
         },
         "summary": {
