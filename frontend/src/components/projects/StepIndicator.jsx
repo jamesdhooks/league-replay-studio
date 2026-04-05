@@ -4,6 +4,7 @@ import {
   Scissors,
   Download,
   Upload,
+  Layers,
   Check,
   Circle,
   Lock,
@@ -17,6 +18,7 @@ const STEP_ICONS = {
   capture: Film,
   analysis: BarChart3,
   editing: Scissors,
+  overlay: Layers,
   export: Download,
   upload: Upload,
 }

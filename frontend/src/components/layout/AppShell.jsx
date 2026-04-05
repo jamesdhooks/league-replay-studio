@@ -107,6 +107,7 @@ function AppShell() {
   const stepReadiness = {
     analysis: true,
     editing: hasAnalysis,
+    overlay: hasAnalysis,
     capture: hasAnalysis,
     export: true,
     upload: true,

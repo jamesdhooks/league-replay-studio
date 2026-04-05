@@ -7,7 +7,7 @@ import { formatTimePrecise } from '../../utils/time'
 import {
   Info, X, Save, RotateCcw, Scissors, Trash2,
   ChevronDown, Users, Clock, Star, Camera, Zap,
-  ToggleLeft, ToggleRight,
+  ToggleLeft, ToggleRight, BarChart2,
 } from 'lucide-react'
 
 /** All event types available for the dropdown */
@@ -344,6 +344,34 @@ export default function EventInspectorPanel({ projectId }) {
                   </span>
                 </div>
               ))}
+            </div>
+          </Section>
+        )}
+
+        {/* ── Score Breakdown ───────────────────────────────────────────── */}
+        {selectedEvent.score_components && (
+          <Section icon={BarChart2} label={`Score Breakdown — ${selectedEvent.score ?? '?'} [${selectedEvent.tier ?? '?'}]`}>
+            <div className="space-y-1">
+              {Object.entries(selectedEvent.score_components).map(([key, val]) => {
+                const pct = Math.min(100, Math.max(0, Math.abs(val) * 10))
+                const isNegative = val < 0
+                return (
+                  <div key={key} className="space-y-0.5">
+                    <div className="flex items-center justify-between text-xxs">
+                      <span className="text-text-tertiary capitalize">{key.replace(/_/g, ' ')}</span>
+                      <span className={`font-mono ${isNegative ? 'text-danger' : 'text-text-primary'}`}>
+                        {isNegative ? '' : '×'}{val}
+                      </span>
+                    </div>
+                    <div className="h-1 bg-bg-primary rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full ${isNegative ? 'bg-danger' : 'bg-accent'}`}
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           </Section>
         )}

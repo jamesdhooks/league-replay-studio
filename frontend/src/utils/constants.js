@@ -9,6 +9,7 @@ export const APP_VERSION = '0.1.0'
 export const WORKFLOW_STEPS = [
   { id: 'analysis', label: 'Analysis', icon: 'bar-chart' },
   { id: 'editing', label: 'Editing', icon: 'scissors' },
+  { id: 'overlay', label: 'Overlay', icon: 'layers' },
   { id: 'capture', label: 'Capture', icon: 'video' },
   { id: 'export', label: 'Export', icon: 'download' },
   { id: 'upload', label: 'Upload', icon: 'upload' },
