@@ -53,7 +53,7 @@ FLAG_CAUTION       = 0x00004000
 FLAG_CAUTION_WAVING = 0x00008000
 FLAG_YELLOW_WAVING = 0x00000100
 # Combined masks for derived boolean columns
-_FLAG_YELLOW_MASK  = FLAG_YELLOW | FLAG_YELLOW_WAVING | FLAG_CAUTION | FLAG_CAUTION_WAVING
+FLAG_YELLOW_MASK   = FLAG_YELLOW | FLAG_YELLOW_WAVING | FLAG_CAUTION | FLAG_CAUTION_WAVING
 
 
 class IRacingBridge:
@@ -297,7 +297,7 @@ class IRacingBridge:
                 "cam_car_idx":    self._ir["CamCarIdx"]      or 0,
                 "cam_group_num":  self._ir["CamGroupNumber"] or 0,
                 "flags":          raw_flags,
-                "flag_yellow":    int(bool(raw_flags & _FLAG_YELLOW_MASK)),
+                "flag_yellow":    int(bool(raw_flags & FLAG_YELLOW_MASK)),
                 "flag_red":       int(bool(raw_flags & FLAG_RED)),
                 "flag_checkered": int(bool(raw_flags & FLAG_CHECKERED)),
                 "track_length":   track_length,
@@ -547,7 +547,7 @@ class IRacingBridge:
                 "race_laps":       ir["RaceLaps"] or 0,
                 "cam_car_idx":     ir["CamCarIdx"] or 0,
                 "flags":           raw_flags,
-                "flag_yellow":     int(bool(raw_flags & _FLAG_YELLOW_MASK)),
+                "flag_yellow":     int(bool(raw_flags & FLAG_YELLOW_MASK)),
                 "flag_red":        int(bool(raw_flags & FLAG_RED)),
                 "flag_checkered":  int(bool(raw_flags & FLAG_CHECKERED)),
                 "track_length":    self._session_data.get("track_length", 0.0),

@@ -57,7 +57,7 @@ time.sleep(1.0 / self.POLL_HZ)       # MPD:890
 | `ir['SessionFlags'] & 0x0010` | derived | Red flag active | `race_ticks.flag_red` (1 or 0) |
 | `ir['SessionFlags'] & 0x0001` | derived | Checkered flag active | `race_ticks.flag_checkered` (1 or 0) |
 
-The flag booleans are parsed in `iracing_bridge.py` using named constants (`FLAG_CHECKERED`, `FLAG_RED`, `FLAG_YELLOW`, `FLAG_CAUTION`, `FLAG_CAUTION_WAVING`, `FLAG_YELLOW_WAVING`). The `_FLAG_YELLOW_MASK` combines all yellow/caution variants.
+The flag booleans are parsed in `iracing_bridge.py` using named constants (`FLAG_CHECKERED`, `FLAG_RED`, `FLAG_YELLOW`, `FLAG_CAUTION`, `FLAG_CAUTION_WAVING`, `FLAG_YELLOW_WAVING`). The `FLAG_YELLOW_MASK` combines all yellow/caution variants.
 
 #### Per-car array variables (one set per active car per tick)
 

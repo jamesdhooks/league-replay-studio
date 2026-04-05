@@ -268,16 +268,24 @@ class BattleDetector(BaseDetector):
               AND follower.surface = ?
               AND leader.position > 0
               AND (
-                  -- Prefer f2_time gap when both cars have it
-                  (leader.f2_time IS NOT NULL AND follower.f2_time IS NOT NULL
-                   AND ABS(follower.f2_time - leader.f2_time) < ?)
+                  -- Prefer f2_time gap when both cars have it: use iRacing's
+                  -- broadcast delta which is sector-accurate and updated from
+                  -- the live timing transponder loop.
+                  (
+                      leader.f2_time IS NOT NULL
+                      AND follower.f2_time IS NOT NULL
+                      AND ABS(follower.f2_time - leader.f2_time) < ?
+                  )
                   OR
-                  -- Fall back to lap_pct approximation
-                  (leader.f2_time IS NULL OR follower.f2_time IS NULL)
-                  AND MIN(
-                      ABS(leader.lap_pct - follower.lap_pct),
-                      1.0 - ABS(leader.lap_pct - follower.lap_pct)
-                  ) * ? < ?
+                  -- Fall back to lap_pct approximation when f2_time is unavailable
+                  -- (older recordings or cars not yet assigned a timing delta).
+                  (
+                      (leader.f2_time IS NULL OR follower.f2_time IS NULL)
+                      AND MIN(
+                          ABS(leader.lap_pct - follower.lap_pct),
+                          1.0 - ABS(leader.lap_pct - follower.lap_pct)
+                      ) * ? < ?
+                  )
               )
             ORDER BY t.session_time
         """, (
