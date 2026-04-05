@@ -863,6 +863,222 @@ def _validate_element_fields(el: dict) -> tuple[bool, str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  Skill 4 — Race Story
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Icons the LLM can choose from for sub-stories.
+RACE_STORY_ICONS = [
+    "Trophy",           # Winner / podium achievement
+    "Flag",             # Race flag / leader change
+    "Flame",            # Hot streak / fast pace
+    "Zap",              # Sudden incident / crash
+    "Swords",           # Head-to-head battle
+    "ArrowUpDown",      # Overtake / position swap
+    "Timer",            # Pit-stop strategy / timing
+    "AlertTriangle",    # Incident / penalty
+    "TrendingUp",       # Gaining positions / comeback
+    "TrendingDown",     # Losing positions / drop
+    "Star",             # Fastest lap / standout performance
+    "Shield",           # Defensive driving
+    "Target",           # Consistent performance
+    "Rocket",           # Explosive start
+    "ThumbsDown",       # DNF / retirement
+    "RefreshCw",        # Recovery / spin
+    "Crown",            # Dominant drive
+    "Users",            # Multi-car incident
+]
+
+_RACE_STORY_SYSTEM_PROMPT = textwrap.dedent("""\
+You are a motorsport commentator and writer for an online sim-racing league.
+Your job is to analyse race data and produce an engaging, editorial-style
+write-up of the race results.
+
+## TASK
+
+Given the race data below, produce:
+1. A **summary** paragraph (the main race story) written in a casual but
+   knowledgeable league commentary style. It should read like a post-race
+   debrief you'd find on a sim-racing community Discord or forum.
+   Keep it between {min_summary_words} and {max_summary_words} words.
+
+2. A list of **sub_stories** — individual noteworthy moments, battles,
+   or storylines from the race. Each sub-story has:
+   - **icon**: One of the allowed icon names listed below.
+   - **headline**: A punchy headline (3-8 words).
+   - **description**: A brief explanation (10-20 words).
+
+   Produce between {min_sub_stories} and {max_sub_stories} sub-stories.
+   Pick the most interesting, dramatic, or entertaining moments.
+
+## ALLOWED ICONS
+{icon_list}
+
+## OUTPUT FORMAT (strict JSON)
+```json
+{{
+  "summary": "Main race story paragraph here...",
+  "sub_stories": [
+    {{
+      "icon": "IconName",
+      "headline": "Short Punchy Title",
+      "description": "Brief 10-20 word description of the moment."
+    }}
+  ]
+}}
+```
+
+## RACE DATA
+
+**Track:** {track_name}
+**Laps:** {total_laps}
+**Drivers:** {num_drivers}
+**Race Duration:** {race_duration}
+
+### Final Standings
+{standings_text}
+
+### Race Events
+{events_text}
+
+### Lap Data / Position Changes
+{lap_data_text}
+
+{custom_guidance}
+""")
+
+
+class RaceStorySkill(LLMSkill):
+    """Generate an editorial-style race story from race result data.
+
+    Produces a summary paragraph and a set of sub-stories highlighting
+    key moments, battles, and drama from the race.
+    """
+
+    skill_id = "race_story"
+    name = "Race Story"
+    description = (
+        "Generate an editorial race write-up with sub-stories "
+        "from race results, events, and lap data."
+    )
+
+    def build_system_prompt(self, context: dict) -> str:
+        """Build the system prompt injecting race data from *context*."""
+        from server.services.settings_service import settings_service
+
+        # Race story configuration from settings
+        min_summary = int(settings_service.get("race_story_min_summary_words", 60))
+        max_summary = int(settings_service.get("race_story_max_summary_words", 150))
+        min_sub = int(settings_service.get("race_story_min_sub_stories", 3))
+        max_sub = int(settings_service.get("race_story_max_sub_stories", 8))
+        custom_guidance = settings_service.get("race_story_custom_guidance", "") or ""
+
+        guidance_block = ""
+        if custom_guidance.strip():
+            guidance_block = f"\n## ADDITIONAL GUIDANCE\n{custom_guidance.strip()}\n"
+
+        # Format standings
+        standings = context.get("standings", [])
+        standings_lines = []
+        for entry in standings:
+            standings_lines.append(
+                f"P{entry.get('position', '?')}  "
+                f"{entry.get('driver_name', 'Unknown')}  "
+                f"(#{entry.get('car_number', '?')})  "
+                f"Gap: {entry.get('gap', '---')}"
+            )
+        standings_text = "\n".join(standings_lines) if standings_lines else "(no standings data)"
+
+        # Format events
+        events = context.get("events", [])
+        event_lines = []
+        for ev in events[:100]:  # Cap to avoid token overflow
+            drivers = ", ".join(ev.get("driver_names", []))
+            event_lines.append(
+                f"Lap {ev.get('lap_number', '?')} | "
+                f"{ev.get('event_type', 'unknown')} | "
+                f"Severity {ev.get('severity', 0)}/10 | "
+                f"Drivers: {drivers or 'N/A'}"
+            )
+        events_text = "\n".join(event_lines) if event_lines else "(no events data)"
+
+        # Format lap data (position changes per lap)
+        lap_data = context.get("lap_data", [])
+        lap_lines = []
+        for ld in lap_data[:60]:  # Cap laps
+            lap_lines.append(
+                f"Lap {ld.get('lap', '?')}: "
+                f"{ld.get('driver_name', 'Unknown')} "
+                f"P{ld.get('position', '?')}"
+            )
+        lap_data_text = "\n".join(lap_lines) if lap_lines else "(no lap data)"
+
+        icon_list = ", ".join(RACE_STORY_ICONS)
+
+        return _RACE_STORY_SYSTEM_PROMPT.format(
+            min_summary_words=min_summary,
+            max_summary_words=max_summary,
+            min_sub_stories=min_sub,
+            max_sub_stories=max_sub,
+            icon_list=icon_list,
+            track_name=context.get("track_name", "Unknown"),
+            total_laps=context.get("total_laps", 0),
+            num_drivers=context.get("num_drivers", 0),
+            race_duration=context.get("race_duration", "Unknown"),
+            standings_text=standings_text,
+            events_text=events_text,
+            lap_data_text=lap_data_text,
+            custom_guidance=guidance_block,
+        )
+
+    def get_response_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "sub_stories": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "icon": {"type": "string"},
+                            "headline": {"type": "string"},
+                            "description": {"type": "string"},
+                        },
+                        "required": ["icon", "headline", "description"],
+                    },
+                },
+            },
+            "required": ["summary", "sub_stories"],
+        }
+
+    def validate_output(self, output: dict) -> tuple[bool, str]:
+        if not isinstance(output.get("summary"), str) or not output["summary"].strip():
+            return False, "summary must be a non-empty string."
+
+        stories = output.get("sub_stories")
+        if not isinstance(stories, list) or len(stories) == 0:
+            return False, "sub_stories must be a non-empty array."
+
+        for i, story in enumerate(stories):
+            if not isinstance(story, dict):
+                return False, f"sub_stories[{i}] must be an object."
+            if not isinstance(story.get("icon"), str) or not story["icon"]:
+                return False, f"sub_stories[{i}].icon must be a non-empty string."
+            if story["icon"] not in RACE_STORY_ICONS:
+                # Be lenient — just log a warning but don't fail validation
+                logger.warning(
+                    "Race story icon '%s' not in allowed list, will use fallback",
+                    story["icon"],
+                )
+            if not isinstance(story.get("headline"), str) or not story["headline"]:
+                return False, f"sub_stories[{i}].headline must be a non-empty string."
+            if not isinstance(story.get("description"), str) or not story["description"]:
+                return False, f"sub_stories[{i}].description must be a non-empty string."
+
+        return True, ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  Registration
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -874,3 +1090,4 @@ def register_default_skills():
     llm_service.register_skill(EditorialSkill())
     llm_service.register_skill(OverlayDesignSkill())
     llm_service.register_skill(OverlayAugmentSkill())
+    llm_service.register_skill(RaceStorySkill())
