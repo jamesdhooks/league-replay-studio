@@ -360,7 +360,7 @@ export default function EventInspectorPanel({ projectId }) {
                     <div className="flex items-center justify-between text-xxs">
                       <span className="text-text-tertiary capitalize">{key.replace(/_/g, ' ')}</span>
                       <span className={`font-mono ${isNegative ? 'text-danger' : 'text-text-primary'}`}>
-                        {isNegative ? '' : '×'}{val}
+                        {isNegative ? '' : '+'}{val}
                       </span>
                     </div>
                     <div className="h-1 bg-bg-primary rounded-full overflow-hidden">

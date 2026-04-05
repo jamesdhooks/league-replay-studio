@@ -29,7 +29,7 @@ const BUCKET_LABELS = Array.from({ length: BUCKET_COUNT }, (_, i) => i + 1)
 function scoreToBucket(score) {
   if (score == null || score <= 0) return 0
   // Scores are typically 0-100; map to 1-10 buckets
-  const bucket = Math.ceil(score / 10) - 1
+  const bucket = Math.floor((score - 1) / 10)
   return Math.max(0, Math.min(BUCKET_COUNT - 1, bucket))
 }
 
