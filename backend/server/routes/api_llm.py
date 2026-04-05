@@ -45,6 +45,10 @@ from server.services.analysis_db import (
 from server.services.settings_service import settings_service
 from server.services.llm_skills import RACE_STORY_ICONS
 
+# Gaps narrower than this threshold show millisecond precision (+3.456);
+# wider gaps use decisecond precision (+72.1).
+_GAP_PRECISION_THRESHOLD = 60
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/llm", tags=["llm"])
@@ -278,7 +282,7 @@ def _build_race_story_context(project_dir: str, project: dict) -> dict:
                     gap = "Leader"
                 else:
                     gap_val = row["est_time"] - leader_est
-                    gap = f"+{gap_val:.3f}" if abs(gap_val) < 60 else f"+{gap_val:.1f}"
+                    gap = f"+{gap_val:.3f}" if abs(gap_val) < _GAP_PRECISION_THRESHOLD else f"+{gap_val:.1f}"
                 standings.append({
                     "position": row["position"],
                     "driver_name": row["user_name"] or f"Car #{row['car_number']}",
@@ -363,13 +367,13 @@ async def get_project_race_story(project_id: int):
 
 
 @router.post("/race-story/{project_id}")
-async def generate_project_race_story(project_id: int, body: RaceStoryRequest | None = None):
+async def generate_project_race_story(project_id: int, body: RaceStoryRequest = RaceStoryRequest()):
     """Generate a race story for a project.
 
     If a story already exists and ``force`` is false, returns the existing story
     (deduplication). Pass ``force=true`` to regenerate.
     """
-    force = body.force if body else False
+    force = body.force
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")

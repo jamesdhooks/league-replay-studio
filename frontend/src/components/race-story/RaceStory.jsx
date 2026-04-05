@@ -6,7 +6,7 @@
  * on mount via the LLM context, with deduplication (one per project).
  */
 
-import { useEffect, useCallback } from 'react'
+import { useEffect, useCallback, useRef } from 'react'
 import {
   Trophy,
   Flag,
@@ -112,9 +112,11 @@ export default function RaceStory({ projectId, compact = false }) {
     isAvailable,
   } = useLLM()
 
-  // Auto-fetch on mount — returns cached if exists, otherwise tries to generate
+  // Auto-fetch on mount — returns cached if exists
+  const fetchedRef = useRef(null)
   useEffect(() => {
-    if (projectId) {
+    if (projectId && fetchedRef.current !== projectId) {
+      fetchedRef.current = projectId
       fetchRaceStory(projectId)
     }
   }, [projectId, fetchRaceStory])

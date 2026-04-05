@@ -965,11 +965,23 @@ class RaceStorySkill(LLMSkill):
         """Build the system prompt injecting race data from *context*."""
         from server.services.settings_service import settings_service
 
-        # Race story configuration from settings
-        min_summary = int(settings_service.get("race_story_min_summary_words", 60))
-        max_summary = int(settings_service.get("race_story_max_summary_words", 150))
-        min_sub = int(settings_service.get("race_story_min_sub_stories", 3))
-        max_sub = int(settings_service.get("race_story_max_sub_stories", 8))
+        # Race story configuration from settings (with safe defaults)
+        try:
+            min_summary = int(settings_service.get("race_story_min_summary_words", 60))
+        except (ValueError, TypeError):
+            min_summary = 60
+        try:
+            max_summary = int(settings_service.get("race_story_max_summary_words", 150))
+        except (ValueError, TypeError):
+            max_summary = 150
+        try:
+            min_sub = int(settings_service.get("race_story_min_sub_stories", 3))
+        except (ValueError, TypeError):
+            min_sub = 3
+        try:
+            max_sub = int(settings_service.get("race_story_max_sub_stories", 8))
+        except (ValueError, TypeError):
+            max_sub = 8
         custom_guidance = settings_service.get("race_story_custom_guidance", "") or ""
 
         guidance_block = ""

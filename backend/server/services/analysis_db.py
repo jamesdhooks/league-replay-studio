@@ -501,6 +501,8 @@ def save_race_story(
 
     Only one race story is kept per project — previous rows are deleted.
     """
+    # Intentional: delete all rows to enforce one-story-per-project.
+    # Each per-project DB has its own race_stories table.
     conn.execute("DELETE FROM race_stories")
     conn.execute(
         """INSERT INTO race_stories (summary, sub_stories, model_used, prompt_hash)
