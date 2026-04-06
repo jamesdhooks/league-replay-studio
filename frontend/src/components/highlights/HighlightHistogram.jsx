@@ -25,11 +25,11 @@ import { Columns3, ArrowRight, Film, Scissors, Layers } from 'lucide-react'
 const BUCKET_COUNT = 10
 const BUCKET_LABELS = Array.from({ length: BUCKET_COUNT }, (_, i) => i + 1)
 
-/** Map a score (typically 0–100) to a bucket index 0–9 */
+/** Map a score (0–10 range) to a bucket index 0–9 */
 function scoreToBucket(score) {
   if (score == null || score <= 0) return 0
-  // Scores are typically 0-100; map to 1-10 buckets
-  const bucket = Math.floor((score - 1) / 10)
+  // Scores are 0–10; map directly to 10 buckets (0=<1, 1=1-2, ..., 9=9-10)
+  const bucket = Math.floor(score)
   return Math.max(0, Math.min(BUCKET_COUNT - 1, bucket))
 }
 

@@ -191,7 +191,7 @@ export default function HighlightTimeline() {
                 backgroundColor: color,
                 opacity: 0.12,
               }}
-              title={`✗ ${evt.event_type} [${evt.tier || '?'}] (score ${evt.score}) — ${evt.reason}`}
+              title={[`✗ ${evt.event_type} [${evt.tier || '?'}] (score ${evt.score}) — ${evt.reason}`, ...(evt.driver_names?.length ? [`Drivers: ${evt.driver_names.join(', ')}`] : [])].join('\n')}
             />
           )
         })}
@@ -212,7 +212,7 @@ export default function HighlightTimeline() {
                 backgroundColor: color,
                 opacity: 0.4,
               }}
-              title={`○ ${evt.event_type} [${evt.tier || '?'}] (score ${evt.score}) — full-video only`}
+              title={[`○ ${evt.event_type} [${evt.tier || '?'}] (score ${evt.score}) — full-video only`, ...(evt.driver_names?.length ? [`Drivers: ${evt.driver_names.join(', ')}`] : [])].join('\n')}
             />
           )
         })}
@@ -238,6 +238,7 @@ export default function HighlightTimeline() {
               }}
               title={[
                 `✓ ${evt.event_type} [${evt.tier || '?'}] (score ${evt.score})`,
+                evt.driver_names?.length ? `Drivers: ${evt.driver_names.join(', ')}` : null,
                 llmNote ? `💬 ${llmNote}` : null,
                 isAnchor ? '⚓ narrative anchor' : null,
               ].filter(Boolean).join('\n')}

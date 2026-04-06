@@ -169,12 +169,13 @@ def _run_redetect_sync(project_id: int, project_dir: str, session_info: dict) ->
         if not session_info.get("avg_lap_time"):
             session_info["avg_lap_time"] = ReplayAnalyzer._estimate_avg_lap_time(conn)
 
-        # Broadcast start
-        _on_progress("step_completed", {
+        # Broadcast start — matches pipeline:started handler in AnalysisContext,
+        # which clears the log.  phase:"detect" prevents isScanning from being set.
+        _on_progress("started", {
             "project_id": project_id,
-            "stage": "redetect_start",
+            "stage": "analysis",
+            "phase": "detect",
             "description": "Re-detecting events with tuned parameters...",
-            "progress_percent": 0,
         })
 
         total = 0
@@ -186,7 +187,7 @@ def _run_redetect_sync(project_id: int, project_dir: str, session_info: dict) ->
 
             _on_progress("step_completed", {
                 "project_id": project_id,
-                "stage": "redetect",
+                "stage": "analysis_detect",
                 "description": f"Detecting {detector_name}...",
                 "detector": detector_name,
                 "progress_percent": progress_pct,
@@ -218,11 +219,12 @@ def _run_redetect_sync(project_id: int, project_dir: str, session_info: dict) ->
             except Exception as exc:
                 logger.error("[Redetect] %s failed: %s", detector_name, exc)
 
-        _on_progress("step_completed", {
+        _on_progress("completed", {
             "project_id": project_id,
-            "stage": "redetect_complete",
+            "stage": "analysis",
+            "phase": "detect",
+            "events_detected": total,
             "description": f"Re-detection complete — {total} events found",
-            "progress_percent": 100,
         })
 
         return total
@@ -659,29 +661,51 @@ async def seek_to_event(project_id: int, body: SeekEventRequest):
             "actual_session_time": snap.get("session_time"),
         }
 
-    # 3. PAUSE FIRST.
-    #    iRacing silently ignores replay_set_play_position while playing.
-    logger.info("[Analysis API] seek-event: pausing replay before seek")
-    await loop.run_in_executor(None, iracing_bridge.set_replay_speed, 0)
-    await asyncio.sleep(0.15)
+    # 3. START PLAYING first — exit any "ended" state and get live telemetry.
+    #    After analysis, the replay parks at the very last frame in iRacing's
+    #    internal "ended" state.  From that state both replay_set_play_position
+    #    AND replay_search_session_time are silently ignored.
+    #    Setting speed=1 and waiting 0.4s gives the engine time to fully
+    #    disengage from ended state before we issue the seek.
+    await loop.run_in_executor(None, iracing_bridge.set_replay_speed, 1)
+    await asyncio.sleep(0.4)
 
-    # 4. Frame-based seek (primary) — falls back to session_time if frame=0
-    if frame > 0:
+    # Diagnostic: read position while running (ReplayFrameNum is 0/stale when paused).
+    diag = await loop.run_in_executor(None, _snapshot)
+    logger.info(
+        "[Analysis API] seek-event: current pos before seek — frame=%s  time=%.1f",
+        diag["actual_frame"], diag["actual_session_time"] or 0,
+    )
+
+    # 4. SEEK while still playing.
+    #    replay_search_session_time must be sent while the replay is in motion
+    #    (pausing first causes it to be silently ignored — confirmed via logs).
+    #    replay_set_play_position is the fallback for when no session number is
+    #    available; it requires a pause.
+    if race_session_num > 0:
+        time_ms = int(body.start_time_seconds * 1000)
+        logger.info(
+            "[Analysis API] seek-event: session-time seek → "
+            "session_num=%d  time_ms=%d  (frame=%d reference)",
+            race_session_num, time_ms, frame,
+        )
+        ok = await loop.run_in_executor(
+            None, iracing_bridge.replay_search_session_time, race_session_num, time_ms
+        )
+    elif frame > 0:
+        # Frame-based seek requires pause
         logger.info(
             "[Analysis API] seek-event: frame-based seek → frame=%d  (session_time=%.3f)",
             frame, session_time,
         )
+        await loop.run_in_executor(None, iracing_bridge.set_replay_speed, 0)
+        await asyncio.sleep(0.25)
         ok = await loop.run_in_executor(None, iracing_bridge.seek_to_frame, frame)
+        await asyncio.sleep(0.4)
+        await loop.run_in_executor(None, iracing_bridge.set_replay_speed, 1)
     else:
-        logger.warning(
-            "[Analysis API] seek-event: no replay_frame for session_time=%.3f — "
-            "using replay_search_session_time(session_num=%d, time_ms=%d)",
-            body.start_time_seconds, race_session_num, int(body.start_time_seconds * 1000),
-        )
-        time_ms = int(session_time * 1000)
-        ok = await loop.run_in_executor(
-            None, iracing_bridge.replay_search_session_time, race_session_num, time_ms
-        )
+        logger.error("[Analysis API] seek-event: no valid frame or session info — cannot seek")
+        raise HTTPException(status_code=500, detail="No frame or session info available for event seek")
 
     if not ok:
         logger.error(
@@ -691,43 +715,40 @@ async def seek_to_event(project_id: int, body: SeekEventRequest):
         )
         raise HTTPException(status_code=500, detail="iRacing seek command failed — is a replay loaded?")
 
-    # 5. Switch camera while still paused (cleaner cut).
+    # 5. Wait for seek to land while the replay runs.
+    #    The scan code uses 1.0s after replay_search_session_time; 0.8s is
+    #    sufficient here since we don't need a full session jump.
+    await asyncio.sleep(0.8)
+
+    # 6. Switch camera now that we've landed near the target.
     if body.car_idx is not None:
         logger.info("[Analysis API] seek-event: switching camera to car_idx=%d", body.car_idx)
         await loop.run_in_executor(None, iracing_bridge.cam_switch_car, body.car_idx, 0)
 
-    # 6. Resume playback.
-    #    IMPORTANT: ReplayFrameNum in telemetry is 0/stale while paused — iRacing
-    #    does not update shared-memory variables when the replay is frozen. We must
-    #    resume first, let at least one telemetry tick propagate, then verify.
-    await asyncio.sleep(0.1)
-    await loop.run_in_executor(None, iracing_bridge.set_replay_speed, 1)
-    await asyncio.sleep(0.35)
+    await asyncio.sleep(0.2)
 
-    # 7. Verify frame position now that the replay is running and telemetry is live.
-    TOL_FRAMES = 360   # 6 s at 60 Hz — generous; accounts for resume lag + seek imprecision
+    # 7. Verify — telemetry is live because the replay is running.
+    TOL_FRAMES = 360   # 6 s at 60 Hz — generous; accounts for seek imprecision
     verification = await loop.run_in_executor(None, _snapshot)
     actual_frame = verification["actual_frame"]
     actual_time  = verification["actual_session_time"]
 
     if actual_frame is None or actual_frame == 0:
-        # Telemetry unreadable — can't confirm, but don't fail. Treat as success.
         verified = True
         logger.info(
-            "[Analysis API] seek-event: telemetry unreadable after resume — "
-            "assuming seek ok (frame=%d)", frame,
+            "[Analysis API] seek-event: telemetry unreadable — assuming ok (target_frame=%d)", frame,
         )
     elif frame > 0 and abs(actual_frame - frame) > TOL_FRAMES:
         verified = False
         logger.warning(
-            "[Analysis API] seek-event: MISMATCH after resume — "
+            "[Analysis API] seek-event: MISMATCH — "
             "target_frame=%d  actual_frame=%d  actual_time=%.3f  drift=%d frames",
             frame, actual_frame, actual_time or 0, abs(actual_frame - frame),
         )
     else:
         verified = True
         logger.info(
-            "[Analysis API] seek-event: verified after resume — "
+            "[Analysis API] seek-event: verified — "
             "actual_frame=%d  actual_time=%.3f  drift=%d frames",
             actual_frame, actual_time or 0,
             abs((actual_frame or 0) - frame) if frame > 0 else 0,

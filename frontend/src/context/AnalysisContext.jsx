@@ -68,11 +68,15 @@ export function AnalysisProvider({ children }) {
       switch (eventName) {
         case 'pipeline:started':
           setIsAnalyzing(true)
-          setIsScanning(true)  // always start in scan phase
+          // Only enter scan phase for full analysis or scan-only; not for detect-only re-runs
+          if (data.phase !== 'detect') setIsScanning(true)
           setError(null)
-          setAnalysisLog([])
+          // Append a separator instead of clobbering the log
+          setAnalysisLog(prev => [
+            ...prev,
+            { id: ++logIdRef.current, level: 'info', ts: Date.now(), message: '── New analysis run ──', detail: '' },
+          ])
           setDiscoveredEvents([])
-          logIdRef.current = 0
           appendLog(data.description || 'Starting analysis...', data.detail)
           setProgress({
             percent: 0,
@@ -107,6 +111,8 @@ export function AnalysisProvider({ children }) {
           const isScanPhase = data.phase === 'scan'
           setIsAnalyzing(false)
           setIsScanning(false)
+          // Clear streaming events so the count badge reflects the DB (fetched below)
+          setDiscoveredEvents([])
           const completedMsg = isScanPhase
             ? data.description || `Telemetry collected — ${data.telemetry_rows ?? 0} samples`
             : data.description || `Analysis complete — ${data.events_detected ?? 0} events detected`
@@ -158,9 +164,7 @@ export function AnalysisProvider({ children }) {
     setError(null)
     setEvents([])
     setEventSummary(null)
-    setAnalysisLog([])
     setDiscoveredEvents([])
-    logIdRef.current = 0
     activeProjectRef.current = projectId
 
     try {
@@ -176,9 +180,7 @@ export function AnalysisProvider({ children }) {
   // ── Start rescan (telemetry collection only, Pass 1) ─────────────────────
   const startRescan = useCallback(async (projectId) => {
     setError(null)
-    setAnalysisLog([])
     setDiscoveredEvents([])
-    logIdRef.current = 0
     activeProjectRef.current = projectId
 
     try {

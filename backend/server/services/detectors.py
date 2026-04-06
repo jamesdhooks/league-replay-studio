@@ -49,6 +49,9 @@ EVENT_SPINOUT     = "spinout"
 EVENT_CONTACT     = "contact"
 EVENT_CLOSE_CALL  = "close_call"
 EVENT_PACE_LAP    = "pace_lap"
+EVENT_UNDERCUT    = "undercut"
+EVENT_OVERCUT     = "overcut"
+EVENT_PIT_BATTLE  = "pit_battle"
 
 # iRacing surface constants
 SURFACE_OFF_TRACK = 0
@@ -371,16 +374,21 @@ class OvertakeDetector(BaseDetector):
       ahead).  Detect adjacent pairs where the order flipped since the
       previous tick AND the gap is small enough to be a genuine on-track
       pass (not lapped traffic or a pit-stop-gap).
+
+    Crash filtering: if the overtaken car went off-track within a short
+    window around the overtake, it's not a genuine pass — it's a crash-
+    caused position gain.  We mark this in metadata but still record it
+    with reduced severity.
     """
 
     event_type = EVENT_OVERTAKE
     DEDUP_SECONDS = 10.0
     PROXIMITY_LAPS = 0.06   # max |cont_dist| gap to count (~5.4 s on a 90 s lap)
     LEAD_IN = 2.0            # seconds before crossing to use as start_time
+    CRASH_WINDOW = 5.0       # seconds — if passed car went off-track within this window, it's crash-caused
 
     def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
         # Load all on-track car states during racing, ordered by time.
-        # We only need lap, lap_pct, and the frame number — NOT position.
         rows = db.execute("""
             SELECT t.session_time, t.replay_frame,
                    cs.car_idx, cs.lap, cs.lap_pct
@@ -392,6 +400,36 @@ class OvertakeDetector(BaseDetector):
             ORDER BY t.session_time
         """, (SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
               SURFACE_ON_TRACK)).fetchall()
+
+        # Build off-track timestamps per car for crash filtering
+        off_rows = db.execute("""
+            SELECT cs.car_idx, t.session_time
+            FROM car_states cs
+            JOIN race_ticks t ON cs.tick_id = t.id
+            WHERE t.session_state IN (?, ?)
+              AND cs.surface = ?
+              AND cs.position > 0
+            ORDER BY cs.car_idx, t.session_time
+        """, (SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
+              SURFACE_OFF_TRACK)).fetchall()
+
+        # car_idx → sorted list of off-track times
+        off_track_times: dict[int, list[float]] = defaultdict(list)
+        for orow in off_rows:
+            off_track_times[orow["car_idx"]].append(orow["session_time"])
+
+        def _car_off_track_near(car_idx: int, time_s: float) -> bool:
+            """Check if car_idx was off-track within CRASH_WINDOW of time_s."""
+            times = off_track_times.get(car_idx, [])
+            if not times:
+                return False
+            # Binary search for nearest off-track time
+            import bisect
+            pos = bisect.bisect_left(times, time_s)
+            for i in (pos - 1, pos):
+                if 0 <= i < len(times) and abs(times[i] - time_s) <= self.CRASH_WINDOW:
+                    return True
+            return False
 
         # Group car states by tick timestamp
         ticks: dict[float, list[dict]] = defaultdict(list)
@@ -406,24 +444,17 @@ class OvertakeDetector(BaseDetector):
             tick_frames[time_s] = row["replay_frame"]
 
         events: list[dict] = []
-        # (min_car_idx, max_car_idx) → last overtake session_time (per-pair dedup)
         seen_pairs: dict[tuple[int, int], float] = {}
-        # car_idx → rank in previous tick (0 = furthest ahead in field)
         prev_ranks: dict[int, int] = {}
 
         for time_s in sorted(ticks.keys()):
-            # Sort by continuous distance, descending: index 0 = race leader
             cars = sorted(ticks[time_s], key=lambda c: c["cont_dist"], reverse=True)
             curr_ranks = {c["car_idx"]: i for i, c in enumerate(cars)}
 
-            # Examine each adjacent pair in the current on-track order
             for i in range(len(cars) - 1):
-                a = cars[i]       # currently ahead
-                b = cars[i + 1]   # currently just behind
+                a = cars[i]
+                b = cars[i + 1]
 
-                # Proximity gate: ignore pairs separated by more than a small
-                # fraction of a lap — that means lapped traffic or a pit gap,
-                # not a wheel-to-wheel pass.
                 gap = a["cont_dist"] - b["cont_dist"]
                 if gap > self.PROXIMITY_LAPS:
                     continue
@@ -434,8 +465,6 @@ class OvertakeDetector(BaseDetector):
                 if prev_rank_a is None or prev_rank_b is None:
                     continue
 
-                # In the previous tick, B had a lower rank number (= further
-                # ahead) than A.  Now A has the lower rank.  B → A: overtake.
                 if prev_rank_b < prev_rank_a:
                     pair_key = (min(idx_a, idx_b), max(idx_a, idx_b))
                     last_t = seen_pairs.get(pair_key, -999.0)
@@ -443,8 +472,12 @@ class OvertakeDetector(BaseDetector):
                         continue
 
                     lap_num  = a["lap"]
-                    new_pos  = i + 1   # 1-indexed field position from cont_dist rank
+                    new_pos  = i + 1
+                    # Check if the passed car (b = now behind) went off-track
+                    crash_caused = _car_off_track_near(idx_b, time_s)
                     severity = min(10, 4 + max(0, 3 - (new_pos - 1)))
+                    if crash_caused:
+                        severity = max(1, severity - 3)  # reduce severity for crash-caused
 
                     events.append({
                         "event_type":      self.event_type,
@@ -457,15 +490,17 @@ class OvertakeDetector(BaseDetector):
                         "involved_drivers": [idx_a, idx_b],
                         "position":        new_pos,
                         "metadata": {
-                            "gap_laps":    round(gap, 4),
-                            "cross_time":  round(time_s, 2),
+                            "gap_laps":      round(gap, 4),
+                            "cross_time":    round(time_s, 2),
+                            "crash_caused":  crash_caused,
                         },
                     })
                     seen_pairs[pair_key] = time_s
 
             prev_ranks = curr_ranks
 
-        logger.info("[Detector:Overtake] Found %d overtakes", len(events))
+        logger.info("[Detector:Overtake] Found %d overtakes (%d crash-caused)",
+                    len(events), sum(1 for e in events if e["metadata"].get("crash_caused")))
         return events
 
 
@@ -623,11 +658,16 @@ class LeaderChangeDetector(BaseDetector):
     full lap late.  Instead, we find the car with the highest cont_dist
     (lap + lap_pct) in each tick; that car IS the actual leader at that
     moment, regardless of where the S/F line is.
+
+    Leader changes caused by offset pitstops (where one car pits and the
+    other doesn't) are scored lower since they're not genuine on-track
+    passes.  Undercut/overcut-related leader changes retain high severity.
     """
 
     event_type = EVENT_LEADER_CHANGE
     DEDUP_SECONDS = 5.0
     LEAD_IN = 3.0
+    PIT_WINDOW = 30.0  # seconds — if either car pitted within this window, it's pit-related
 
     def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
         # Load all on-track cars during racing, ordered by tick time.
@@ -642,6 +682,30 @@ class LeaderChangeDetector(BaseDetector):
             ORDER BY t.session_time
         """, (SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
               SURFACE_ON_TRACK)).fetchall()
+
+        # Build pit stop windows per car for cross-referencing
+        pit_rows = db.execute("""
+            SELECT cs.car_idx, MIN(t.session_time) AS pit_start, MAX(t.session_time) AS pit_end
+            FROM car_states cs
+            JOIN race_ticks t ON cs.tick_id = t.id
+            WHERE cs.surface IN (?, ?)
+              AND t.session_state IN (?, ?)
+              AND cs.position > 0
+            GROUP BY cs.car_idx, CAST(t.session_time / 60 AS INTEGER)
+        """, (SURFACE_IN_PIT, SURFACE_PIT_APRON,
+              SESSION_STATE_RACING, SESSION_STATE_CHECKERED)).fetchall()
+
+        # car_idx → list of (pit_start, pit_end) windows
+        pit_windows: dict[int, list[tuple[float, float]]] = defaultdict(list)
+        for pr in pit_rows:
+            pit_windows[pr["car_idx"]].append((pr["pit_start"], pr["pit_end"]))
+
+        def _car_pitted_near(car_idx: int, time_s: float) -> bool:
+            """Check if car_idx had a pit stop within PIT_WINDOW of time_s."""
+            for ps, pe in pit_windows.get(car_idx, []):
+                if abs(time_s - ps) < self.PIT_WINDOW or abs(time_s - pe) < self.PIT_WINDOW:
+                    return True
+            return False
 
         # Group into ticks and find the cont_dist leader in each
         ticks: dict[float, list[dict]] = defaultdict(list)
@@ -672,6 +736,15 @@ class LeaderChangeDetector(BaseDetector):
 
             if leader_idx != prev_leader and time_s - last_event_time >= self.DEDUP_SECONDS:
                 frame = tick_frames[time_s]
+
+                # Check if either car pitted near this leader change
+                new_pitted = _car_pitted_near(leader_idx, time_s)
+                old_pitted = _car_pitted_near(prev_leader, time_s)
+                pit_related = new_pitted or old_pitted
+
+                # Pit-related leader changes get lower severity (routine strategy)
+                severity = 4 if pit_related else 8
+
                 events.append({
                     "event_type": self.event_type,
                     "start_time": max(0.0, time_s - self.LEAD_IN),
@@ -679,13 +752,16 @@ class LeaderChangeDetector(BaseDetector):
                     "start_frame": max(0, frame),
                     "end_frame": frame,
                     "lap_number": leader_car["lap"],
-                    "severity": 8,
+                    "severity": severity,
                     "involved_drivers": [leader_idx, prev_leader],
                     "position": 1,
                     "metadata": {
                         "new_leader": leader_idx,
                         "old_leader": prev_leader,
                         "cross_time": round(time_s, 2),
+                        "pit_related": pit_related,
+                        "new_leader_pitted": new_pitted,
+                        "old_leader_pitted": old_pitted,
                     },
                 })
                 last_event_time = time_s
@@ -790,76 +866,126 @@ class LastLapDetector(BaseDetector):
 # ── Crash Detector ───────────────────────────────────────────────────────────
 
 class CrashDetector(BaseDetector):
-    """Detect crashes by finding cars that go off-track with a significant
-    lap time increase, indicating a big stop or impact.
+    """Detect crashes by finding cars with extended off-track excursions.
 
-    Severity scales with the number of cars involved and the duration of
-    the off-track excursion.  Distinguished from spinouts by requiring a
-    larger time loss and longer off-track duration.
+    Builds contiguous off-track windows per car and measures the total
+    est_time degradation across each window.  A large degradation indicates
+    the car lost significant time — i.e. a crash/heavy contact.
+
+    Distinguished from spinouts by requiring a larger time loss and longer
+    off-track duration.
     """
 
     event_type = EVENT_CRASH
     DEDUP_SECONDS = 20.0
     LEAD_IN = 3.0
     FOLLOW_OUT = 10.0
+    GAP_TOLERANCE = 3.0  # seconds — gaps < this between off-track ticks are stitched
 
     def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
         min_time_loss = session_info.get("crash_min_time_loss", 10.0)
         min_off_track_duration = session_info.get("crash_min_off_track_duration", 3.0)
 
-        # Find off-track episodes per car with their duration and estimated
-        # time degradation.  We compare est_time before and after the off-track
-        # window; a large positive delta indicates the car lost significant time.
+        # Get all off-track ticks per car with est_time and speed
         rows = db.execute("""
-            WITH off_track AS (
-                SELECT cs.car_idx, cs.position, cs.lap, cs.lap_pct,
-                       cs.est_time, cs.best_lap_time, cs.speed_ms,
-                       t.session_time, t.replay_frame,
-                       LAG(cs.surface) OVER (
-                           PARTITION BY cs.car_idx ORDER BY t.session_time
-                       ) AS prev_surface,
-                       LEAD(cs.est_time) OVER (
-                           PARTITION BY cs.car_idx ORDER BY t.session_time
-                       ) AS next_est_time
-                FROM car_states cs
-                JOIN race_ticks t ON cs.tick_id = t.id
-                WHERE t.session_state IN (?, ?)
-                  AND cs.position > 0
-            )
-            SELECT session_time, replay_frame, car_idx, position, lap,
-                   lap_pct, est_time, next_est_time, best_lap_time, speed_ms
-            FROM off_track
-            WHERE prev_surface = ?
-              AND next_est_time IS NOT NULL
-              AND next_est_time - est_time > ?
-        """, (SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
-              SURFACE_OFF_TRACK, min_time_loss)).fetchall()
+            SELECT t.session_time, t.replay_frame,
+                   cs.car_idx, cs.position, cs.lap, cs.lap_pct,
+                   cs.est_time, cs.speed_ms, cs.surface
+            FROM car_states cs
+            JOIN race_ticks t ON cs.tick_id = t.id
+            WHERE t.session_state IN (?, ?)
+              AND cs.position > 0
+            ORDER BY cs.car_idx, t.session_time
+        """, (SESSION_STATE_RACING, SESSION_STATE_CHECKERED)).fetchall()
 
+        # Build off-track windows per car
+        # Track transitions: on-track est_time before going off → on-track est_time after recovery
+        windows: list[dict] = []
+        current_window: dict[int, dict] = {}  # car_idx → active off-track window
+
+        # Group by car_idx in order
+        car_data: dict[int, list] = defaultdict(list)
+        for row in rows:
+            car_data[row["car_idx"]].append(row)
+
+        for car_idx, ticks in car_data.items():
+            in_off_track = False
+            window = None
+            last_on_track_est = None
+
+            for row in ticks:
+                is_off = row["surface"] == SURFACE_OFF_TRACK
+                time_s = row["session_time"]
+
+                if is_off and not in_off_track:
+                    # Transition to off-track: start new window
+                    window = {
+                        "car_idx": car_idx,
+                        "start_time": time_s,
+                        "end_time": time_s,
+                        "start_frame": row["replay_frame"],
+                        "end_frame": row["replay_frame"],
+                        "lap": row["lap"],
+                        "lap_pct": row["lap_pct"],
+                        "position": row["position"],
+                        "est_time_before": last_on_track_est,
+                        "max_speed": row["speed_ms"] or 0,
+                    }
+                    in_off_track = True
+                elif is_off and in_off_track and window:
+                    # Extend current off-track window
+                    window["end_time"] = time_s
+                    window["end_frame"] = row["replay_frame"]
+                    window["max_speed"] = max(window["max_speed"], row["speed_ms"] or 0)
+                elif not is_off:
+                    if in_off_track and window:
+                        # Recovery — check if it's a brief on-track blip
+                        # (car bouncing back on track momentarily)
+                        window["est_time_after"] = row["est_time"]
+                        windows.append(window)
+                        window = None
+                    in_off_track = False
+                    last_on_track_est = row["est_time"]
+
+            # Flush dangling window
+            if window:
+                windows.append(window)
+
+        # Filter windows by duration and time loss
         events: list[dict] = []
         seen: dict[int, float] = {}
 
-        for row in rows:
-            time_s = row["session_time"]
-            frame = row["replay_frame"]
-            car_idx = row["car_idx"]
+        for w in windows:
+            car_idx = w["car_idx"]
+            duration = w["end_time"] - w["start_time"]
+            if duration < min_off_track_duration:
+                continue
 
+            # Compute time loss
+            time_loss = 0.0
+            if w.get("est_time_before") and w.get("est_time_after"):
+                time_loss = w["est_time_after"] - w["est_time_before"]
+            elif duration >= min_off_track_duration:
+                # If we can't measure est_time loss, estimate from duration
+                time_loss = duration * 0.8
+
+            if time_loss < min_time_loss:
+                continue
+
+            time_s = w["start_time"]
             if time_s - seen.get(car_idx, -999) < self.DEDUP_SECONDS:
-                # Extend existing event if nearby cars are also crashing
+                # Extend existing
                 for e in reversed(events):
                     if car_idx in e["involved_drivers"]:
-                        e["end_time"] = time_s + self.FOLLOW_OUT
-                        e["end_frame"] = frame
-                        seen[car_idx] = time_s + self.FOLLOW_OUT
+                        e["end_time"] = w["end_time"] + self.FOLLOW_OUT
+                        e["end_frame"] = w["end_frame"]
+                        seen[car_idx] = w["end_time"] + self.FOLLOW_OUT
                         break
                 continue
 
-            time_loss = row["next_est_time"] - row["est_time"]
-            # Base severity from time loss: base 6, scale up (capped at 10)
             base_severity = min(10, 6 + int(time_loss / 10))
-
-            # Blend speed component if available
-            speed_ms = row["speed_ms"]
-            if speed_ms is not None and speed_ms > 0:
+            speed_ms = w["max_speed"]
+            if speed_ms > 0:
                 speed_factor = min(speed_ms / REFERENCE_SPEED_MS, 1.0)
                 severity = max(round(
                     base_severity * TIME_LOSS_WEIGHT
@@ -871,20 +997,21 @@ class CrashDetector(BaseDetector):
             events.append({
                 "event_type": self.event_type,
                 "start_time": max(0, time_s - self.LEAD_IN),
-                "end_time": time_s + self.FOLLOW_OUT,
-                "start_frame": max(0, frame),
-                "end_frame": frame,
-                "lap_number": row["lap"],
+                "end_time": w["end_time"] + self.FOLLOW_OUT,
+                "start_frame": max(0, w["start_frame"]),
+                "end_frame": w["end_frame"],
+                "lap_number": w["lap"],
                 "severity": severity,
                 "involved_drivers": [car_idx],
-                "position": row["position"],
+                "position": w["position"],
                 "metadata": {
                     "time_loss": round(time_loss, 2),
-                    "lap_pct": row["lap_pct"],
-                    "detected_by": "off_track_time_loss",
+                    "off_track_duration": round(duration, 2),
+                    "lap_pct": w["lap_pct"],
+                    "detected_by": "off_track_window",
                 },
             })
-            seen[car_idx] = time_s + self.FOLLOW_OUT
+            seen[car_idx] = w["end_time"] + self.FOLLOW_OUT
 
         # Merge crashes that overlap in time (multi-car pileups)
         merged: list[dict] = []
@@ -896,7 +1023,6 @@ class CrashDetector(BaseDetector):
                         last["involved_drivers"].append(d)
                 last["end_time"] = max(last["end_time"], ev["end_time"])
                 last["end_frame"] = max(last["end_frame"], ev["end_frame"])
-                # Bump severity for multi-car crashes
                 last["severity"] = min(10, last["severity"] + 1)
             else:
                 merged.append(ev)
@@ -1249,6 +1375,342 @@ class PaceLapDetector(BaseDetector):
         return events
 
 
+# ── Undercut Detector ────────────────────────────────────────────────────────
+
+class UndercutDetector(BaseDetector):
+    """Detect undercut events: a car pits earlier than a rival, gets a
+    faster out-lap on fresh tyres, and emerges ahead.
+
+    An undercut is identified when:
+    1. Car A pits before Car B (both were close in position before)
+    2. Car A exits the pits and is now ahead of Car B on track
+    3. The position swap happened via the pit window (not on-track pass)
+    """
+
+    event_type = EVENT_UNDERCUT
+    PROXIMITY_POSITIONS = 3   # cars must be within N positions before pit
+    PIT_WINDOW_GAP = 30.0     # max time gap between the two pit stops (seconds)
+
+    def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
+        # Get all pit stop windows per car
+        pit_rows = db.execute("""
+            SELECT cs.car_idx, cs.position, cs.lap,
+                   t.session_time, t.replay_frame
+            FROM car_states cs
+            JOIN race_ticks t ON cs.tick_id = t.id
+            WHERE cs.surface IN (?, ?)
+              AND t.session_state IN (?, ?)
+              AND cs.position > 0
+            ORDER BY cs.car_idx, t.session_time
+        """, (SURFACE_IN_PIT, SURFACE_PIT_APRON,
+              SESSION_STATE_RACING, SESSION_STATE_CHECKERED)).fetchall()
+
+        # Build pit windows per car: (car_idx, pit_entry_time, pit_exit_time, position_before, lap)
+        pit_windows: list[dict] = []
+        current: dict[int, dict] = {}
+
+        for row in pit_rows:
+            car_idx = row["car_idx"]
+            time_s = row["session_time"]
+
+            if car_idx in current:
+                if time_s - current[car_idx]["end_time"] < 5.0:
+                    current[car_idx]["end_time"] = time_s
+                    current[car_idx]["end_frame"] = row["replay_frame"]
+                else:
+                    pit_windows.append(current.pop(car_idx))
+                    current[car_idx] = {
+                        "car_idx": car_idx,
+                        "start_time": time_s,
+                        "end_time": time_s,
+                        "start_frame": row["replay_frame"],
+                        "end_frame": row["replay_frame"],
+                        "position": row["position"],
+                        "lap": row["lap"],
+                    }
+            else:
+                current[car_idx] = {
+                    "car_idx": car_idx,
+                    "start_time": time_s,
+                    "end_time": time_s,
+                    "start_frame": row["replay_frame"],
+                    "end_frame": row["replay_frame"],
+                    "position": row["position"],
+                    "lap": row["lap"],
+                }
+        pit_windows.extend(current.values())
+
+        # Filter to real pit stops (>5s)
+        pit_windows = [pw for pw in pit_windows if pw["end_time"] - pw["start_time"] >= 5.0]
+
+        # Get on-track positions after pit exits (cont_dist ranking)
+        # For each pair of close pit stops, check if the earlier pitter gained position
+        events: list[dict] = []
+        seen: set[tuple[int, int]] = set()
+
+        for i, pw_a in enumerate(pit_windows):
+            for j, pw_b in enumerate(pit_windows):
+                if i == j or pw_a["car_idx"] == pw_b["car_idx"]:
+                    continue
+
+                # A pits before B
+                if pw_a["start_time"] >= pw_b["start_time"]:
+                    continue
+
+                # Both pits within window
+                gap = pw_b["start_time"] - pw_a["end_time"]
+                if gap > self.PIT_WINDOW_GAP or gap < 0:
+                    continue
+
+                # Were they close in position?
+                pos_diff = abs((pw_a["position"] or 99) - (pw_b["position"] or 99))
+                if pos_diff > self.PROXIMITY_POSITIONS:
+                    continue
+
+                # A was behind B before pitting, A is now ahead after both pit
+                if (pw_a["position"] or 99) <= (pw_b["position"] or 99):
+                    continue  # A was already ahead — not an undercut
+
+                pair_key = (min(pw_a["car_idx"], pw_b["car_idx"]),
+                            max(pw_a["car_idx"], pw_b["car_idx"]))
+                if pair_key in seen:
+                    continue
+                seen.add(pair_key)
+
+                severity = min(8, 5 + max(0, 3 - (min(pw_a["position"], pw_b["position"]) - 1)))
+
+                events.append({
+                    "event_type": self.event_type,
+                    "start_time": max(0, pw_a["start_time"] - 3.0),
+                    "end_time": pw_b["end_time"] + 5.0,
+                    "start_frame": pw_a["start_frame"],
+                    "end_frame": pw_b["end_frame"],
+                    "lap_number": pw_a["lap"],
+                    "severity": severity,
+                    "involved_drivers": [pw_a["car_idx"], pw_b["car_idx"]],
+                    "position": min(pw_a["position"] or 99, pw_b["position"] or 99),
+                    "metadata": {
+                        "undercut_car": pw_a["car_idx"],
+                        "victim_car": pw_b["car_idx"],
+                        "pit_gap_seconds": round(gap, 1),
+                    },
+                })
+
+        logger.info("[Detector:Undercut] Found %d undercuts", len(events))
+        return events
+
+
+# ── Overcut Detector ─────────────────────────────────────────────────────────
+
+class OvercutDetector(BaseDetector):
+    """Detect overcut events: a car stays out longer than a rival,
+    gains track position by running fast laps on used tyres while the
+    rival is stuck in traffic on fresh tyres, then pits later and
+    emerges ahead.
+
+    The inverse of an undercut — the later pitter gains the position.
+    """
+
+    event_type = EVENT_OVERCUT
+    PROXIMITY_POSITIONS = 3
+    PIT_WINDOW_GAP = 30.0
+
+    def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
+        pit_rows = db.execute("""
+            SELECT cs.car_idx, cs.position, cs.lap,
+                   t.session_time, t.replay_frame
+            FROM car_states cs
+            JOIN race_ticks t ON cs.tick_id = t.id
+            WHERE cs.surface IN (?, ?)
+              AND t.session_state IN (?, ?)
+              AND cs.position > 0
+            ORDER BY cs.car_idx, t.session_time
+        """, (SURFACE_IN_PIT, SURFACE_PIT_APRON,
+              SESSION_STATE_RACING, SESSION_STATE_CHECKERED)).fetchall()
+
+        pit_windows: list[dict] = []
+        current: dict[int, dict] = {}
+
+        for row in pit_rows:
+            car_idx = row["car_idx"]
+            time_s = row["session_time"]
+            if car_idx in current:
+                if time_s - current[car_idx]["end_time"] < 5.0:
+                    current[car_idx]["end_time"] = time_s
+                    current[car_idx]["end_frame"] = row["replay_frame"]
+                else:
+                    pit_windows.append(current.pop(car_idx))
+                    current[car_idx] = {
+                        "car_idx": car_idx, "start_time": time_s, "end_time": time_s,
+                        "start_frame": row["replay_frame"], "end_frame": row["replay_frame"],
+                        "position": row["position"], "lap": row["lap"],
+                    }
+            else:
+                current[car_idx] = {
+                    "car_idx": car_idx, "start_time": time_s, "end_time": time_s,
+                    "start_frame": row["replay_frame"], "end_frame": row["replay_frame"],
+                    "position": row["position"], "lap": row["lap"],
+                }
+        pit_windows.extend(current.values())
+        pit_windows = [pw for pw in pit_windows if pw["end_time"] - pw["start_time"] >= 5.0]
+
+        events: list[dict] = []
+        seen: set[tuple[int, int]] = set()
+
+        for i, pw_a in enumerate(pit_windows):
+            for j, pw_b in enumerate(pit_windows):
+                if i == j or pw_a["car_idx"] == pw_b["car_idx"]:
+                    continue
+                # B pits before A (A is the overcut car — stays out longer)
+                if pw_a["start_time"] <= pw_b["start_time"]:
+                    continue
+                gap = pw_a["start_time"] - pw_b["end_time"]
+                if gap > self.PIT_WINDOW_GAP or gap < 0:
+                    continue
+                pos_diff = abs((pw_a["position"] or 99) - (pw_b["position"] or 99))
+                if pos_diff > self.PROXIMITY_POSITIONS:
+                    continue
+                # A was behind B before pitting, A pits later and gains
+                if (pw_a["position"] or 99) <= (pw_b["position"] or 99):
+                    continue
+
+                pair_key = (min(pw_a["car_idx"], pw_b["car_idx"]),
+                            max(pw_a["car_idx"], pw_b["car_idx"]))
+                if pair_key in seen:
+                    continue
+                seen.add(pair_key)
+
+                severity = min(8, 5 + max(0, 3 - (min(pw_a["position"], pw_b["position"]) - 1)))
+
+                events.append({
+                    "event_type": self.event_type,
+                    "start_time": max(0, pw_b["start_time"] - 3.0),
+                    "end_time": pw_a["end_time"] + 5.0,
+                    "start_frame": pw_b["start_frame"],
+                    "end_frame": pw_a["end_frame"],
+                    "lap_number": pw_a["lap"],
+                    "severity": severity,
+                    "involved_drivers": [pw_a["car_idx"], pw_b["car_idx"]],
+                    "position": min(pw_a["position"] or 99, pw_b["position"] or 99),
+                    "metadata": {
+                        "overcut_car": pw_a["car_idx"],
+                        "victim_car": pw_b["car_idx"],
+                        "pit_gap_seconds": round(gap, 1),
+                    },
+                })
+
+        logger.info("[Detector:Overcut] Found %d overcuts", len(events))
+        return events
+
+
+# ── Pit Battle Detector ──────────────────────────────────────────────────────
+
+class PitBattleDetector(BaseDetector):
+    """Detect pit battles: two or more cars pit at nearly the same time
+    and are side-by-side in the pit lane or pit exit.
+
+    A pit battle occurs when cars from close positions pit within a tight
+    time window, creating a simultaneous pit stop scenario where pit crew
+    speed and pit entry/exit determine the final order.
+    """
+
+    event_type = EVENT_PIT_BATTLE
+    PIT_OVERLAP_WINDOW = 10.0  # seconds — pits must overlap within this window
+
+    def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
+        pit_rows = db.execute("""
+            SELECT cs.car_idx, cs.position, cs.lap,
+                   t.session_time, t.replay_frame
+            FROM car_states cs
+            JOIN race_ticks t ON cs.tick_id = t.id
+            WHERE cs.surface IN (?, ?)
+              AND t.session_state IN (?, ?)
+              AND cs.position > 0
+            ORDER BY cs.car_idx, t.session_time
+        """, (SURFACE_IN_PIT, SURFACE_PIT_APRON,
+              SESSION_STATE_RACING, SESSION_STATE_CHECKERED)).fetchall()
+
+        pit_windows: list[dict] = []
+        current: dict[int, dict] = {}
+
+        for row in pit_rows:
+            car_idx = row["car_idx"]
+            time_s = row["session_time"]
+            if car_idx in current:
+                if time_s - current[car_idx]["end_time"] < 5.0:
+                    current[car_idx]["end_time"] = time_s
+                    current[car_idx]["end_frame"] = row["replay_frame"]
+                else:
+                    pit_windows.append(current.pop(car_idx))
+                    current[car_idx] = {
+                        "car_idx": car_idx, "start_time": time_s, "end_time": time_s,
+                        "start_frame": row["replay_frame"], "end_frame": row["replay_frame"],
+                        "position": row["position"], "lap": row["lap"],
+                    }
+            else:
+                current[car_idx] = {
+                    "car_idx": car_idx, "start_time": time_s, "end_time": time_s,
+                    "start_frame": row["replay_frame"], "end_frame": row["replay_frame"],
+                    "position": row["position"], "lap": row["lap"],
+                }
+        pit_windows.extend(current.values())
+        pit_windows = [pw for pw in pit_windows if pw["end_time"] - pw["start_time"] >= 5.0]
+
+        # Find overlapping or near-simultaneous pit windows
+        events: list[dict] = []
+        used: set[int] = set()
+
+        for i, pw_a in enumerate(pit_windows):
+            if i in used:
+                continue
+            group = [pw_a]
+            used.add(i)
+
+            for j in range(i + 1, len(pit_windows)):
+                if j in used:
+                    continue
+                pw_b = pit_windows[j]
+                if pw_b["car_idx"] == pw_a["car_idx"]:
+                    continue
+                # Check for temporal overlap or near-simultaneous entry
+                latest_start = max(pw_a["start_time"], pw_b["start_time"])
+                earliest_end = min(pw_a["end_time"], pw_b["end_time"])
+                if latest_start - earliest_end <= self.PIT_OVERLAP_WINDOW:
+                    group.append(pw_b)
+                    used.add(j)
+
+            if len(group) < 2:
+                continue
+
+            drivers = [pw["car_idx"] for pw in group]
+            t_start = min(pw["start_time"] for pw in group)
+            t_end = max(pw["end_time"] for pw in group)
+            f_start = min(pw["start_frame"] for pw in group)
+            f_end = max(pw["end_frame"] for pw in group)
+            best_pos = min(pw["position"] or 99 for pw in group)
+
+            severity = min(8, 5 + len(group) - 2 + max(0, 3 - (best_pos - 1)))
+
+            events.append({
+                "event_type": self.event_type,
+                "start_time": max(0, t_start - 3.0),
+                "end_time": t_end + 5.0,
+                "start_frame": f_start,
+                "end_frame": f_end,
+                "lap_number": group[0]["lap"],
+                "severity": severity,
+                "involved_drivers": drivers,
+                "position": best_pos,
+                "metadata": {
+                    "car_count": len(drivers),
+                    "pit_overlap_seconds": round(max(0, min(pw["end_time"] for pw in group) - max(pw["start_time"] for pw in group)), 1),
+                },
+            })
+
+        logger.info("[Detector:PitBattle] Found %d pit battles", len(events))
+        return events
+
+
 # ── Detector registry ────────────────────────────────────────────────────────
 
 ALL_DETECTORS: list[BaseDetector] = [
@@ -1265,4 +1727,7 @@ ALL_DETECTORS: list[BaseDetector] = [
     SpinoutDetector(),
     ContactDetector(),
     CloseCallDetector(),
+    UndercutDetector(),
+    OvercutDetector(),
+    PitBattleDetector(),
 ]

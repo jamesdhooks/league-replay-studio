@@ -35,6 +35,9 @@ const EVENT_CONFIG = {
   spinout:       { icon: RotateCcw,        label: 'Spinout',        color: 'text-event-battle',    bg: 'bg-event-battle/10' },
   contact:       { icon: CircleDot,        label: 'Contact',        color: 'text-event-overtake',  bg: 'bg-event-overtake/10' },
   close_call:    { icon: ShieldAlert,      label: 'Close Call',     color: 'text-event-fastest',   bg: 'bg-event-fastest/10' },
+  undercut:      { icon: ArrowUpDown,      label: 'Undercut',       color: 'text-event-pit',       bg: 'bg-event-pit/10' },
+  overcut:       { icon: ArrowUpDown,      label: 'Overcut',        color: 'text-event-pit',       bg: 'bg-event-pit/10' },
+  pit_battle:    { icon: Fuel,             label: 'Pit Battle',     color: 'text-event-battle',    bg: 'bg-event-battle/10' },
 }
 
 /**
@@ -344,6 +347,9 @@ export default memo(function AnalysisPanel() {
   // Keep sidebar Tune sub-tab for the compact sidebar view
   const [showTuning, setShowTuning] = useState(false)
   const [isRedetecting, setIsRedetecting] = useState(false)
+  // Overlay position preference: 'bottom-center' | 'bottom-left' | 'bottom-right'
+  const [overlayPosition, setOverlayPosition] = useLocalStorage('lrs:analysis:overlayPosition', 'bottom-center')
+  const [showOverlayPositionMenu, setShowOverlayPositionMenu] = useState(false)
   // Stream key — changes to force <img> reload when quality settings change
   const [streamKey, setStreamKey] = useState(0)
   const [streamLoaded, setStreamLoaded] = useState(false)
@@ -854,7 +860,7 @@ export default memo(function AnalysisPanel() {
                           : 'text-text-tertiary border border-border-subtle hover:bg-bg-hover hover:text-text-secondary'}`}
           >
             <SlidersHorizontal size={12} />
-            Tuning
+            Detection Tuning
             <ChevronDown size={10} className={`transition-transform ${showTuningPanel ? 'rotate-180' : ''}`} />
           </button>
         </div>
@@ -879,7 +885,7 @@ export default memo(function AnalysisPanel() {
                 {isRedetecting ? 'Analyzing...' : 'Re-analyze with these settings'}
               </button>
               <span className="text-xxs text-text-disabled">
-                Tuning parameters are saved automatically and persist between sessions.
+                Detection parameters are saved automatically and persist between sessions.
               </span>
             </div>
           </div>
@@ -908,9 +914,29 @@ export default memo(function AnalysisPanel() {
               count: analysisLog.length,
               content: (
                 <div className="font-mono">
+                  {/* Progress bar shown at top of log while analysis is running */}
+                  {isAnalyzing && progress && (
+                    <div className="px-3 pt-2 pb-1.5 border-b border-border-subtle sticky top-0 bg-bg-secondary z-10">
+                      <div className="h-1 bg-bg-tertiary rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-accent/70 rounded-full transition-all duration-500"
+                          style={{ width: `${progress.percent ?? 0}%` }}
+                        />
+                      </div>
+                      <span className="text-xxs text-text-disabled mt-1 block truncate">
+                        {progress.message || 'Analyzing...'}
+                      </span>
+                    </div>
+                  )}
                   {analysisLog.length === 0 && !isAnalyzing && (
                     <div className="flex items-center justify-center py-8 text-text-disabled text-xs">
                       No log entries yet
+                    </div>
+                  )}
+                  {analysisLog.length === 0 && isAnalyzing && (
+                    <div className="flex items-center gap-2 px-3 py-4 text-text-disabled text-xxs">
+                      <Loader2 size={11} className="animate-spin shrink-0" />
+                      <span>Initializing...</span>
                     </div>
                   )}
                   {[...analysisLog].reverse().map(entry => (
@@ -930,6 +956,9 @@ export default memo(function AnalysisPanel() {
                         )}
                       </span>
                       <div className="flex-1 min-w-0">
+                        <span className="text-text-disabled font-mono mr-1.5">
+                          {new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                        </span>
                         <span className="text-text-secondary">{entry.message}</span>
                         {entry.detail && (
                           <span className="text-text-disabled ml-1">— {entry.detail}</span>
@@ -944,7 +973,7 @@ export default memo(function AnalysisPanel() {
               id: 'events',
               label: 'Events',
               icon: List,
-              count: discoveredEvents.length || eventSummary?.total_events || 0,
+              count: isAnalyzing ? null : (eventSummary?.total_events || events.length || 0),
               content: (
                 <div className="flex flex-col h-full">
                   {/* Sub-navigation: Events list ↔ Tuning params */}
@@ -962,7 +991,7 @@ export default memo(function AnalysisPanel() {
                         ${showTuning ? 'bg-accent/15 text-accent' : 'text-text-disabled hover:text-text-secondary'}`}
                     >
                       <SlidersHorizontal size={9} />
-                      Tune
+                      Detection
                     </button>
                     {showTuning && (
                       <button
@@ -984,6 +1013,30 @@ export default memo(function AnalysisPanel() {
                     /* ── Tuning form (compact sidebar view) ── */
                     <div className="flex-1 overflow-y-auto px-3 py-2 space-y-3">
                       <TuningPanel params={tuningParams} onChange={updateTuning} />
+                    </div>
+                  ) : isAnalyzing ? (
+                    /* ── Analysis pending state ── */
+                    <div className="flex-1 flex flex-col items-center justify-center gap-3 px-4 py-10">
+                      <Loader2 size={22} className="animate-spin text-text-disabled" />
+                      <span className="text-xs text-text-disabled text-center">
+                        {isScanning ? 'Collecting telemetry…' : 'Detecting events…'}
+                      </span>
+                      {!isScanning && progress != null && (
+                        <div className="w-full max-w-[160px]">
+                          <div className="h-1.5 bg-bg-tertiary rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-gradient-to-r from-gradient-from to-gradient-to
+                                         rounded-full transition-all duration-500"
+                              style={{ width: `${Math.max(0, Math.min(100, ((progress.percent ?? 85) - 85) / 12 * 100))}%` }}
+                            />
+                          </div>
+                          {progress.message && (
+                            <span className="text-xxs text-text-disabled mt-1.5 block text-center truncate">
+                              {progress.message}
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </div>
                   ) : (
                     /* ── Events list ── */
@@ -1026,7 +1079,7 @@ export default memo(function AnalysisPanel() {
                           { key: 'type',     label: 'Type' },
                           { key: 'driver',   label: 'Driver(s)' },
                           { key: 'time',     label: 'Time' },
-                          { key: 'severity', label: 'Sev' },
+                          { key: 'severity', label: 'Score' },
                         ].map(({ key, label }) => (
                           <button key={key} onClick={() => cycleSort(key)}
                             className="flex items-center gap-0.5 px-2 py-1.5 text-xxs font-semibold
@@ -1044,42 +1097,28 @@ export default memo(function AnalysisPanel() {
 
                       {/* Sorted event rows */}
                       {(() => {
-                        const rawList = isAnalyzing ? discoveredEvents : events
+                        const rawList = events
                         const sorted = [...rawList].sort((a, b) => {
                           const dir = eventSort.dir === 'asc' ? 1 : -1
                           switch (eventSort.col) {
-                            case 'type': {
-                              const ta = (isAnalyzing ? a.type : a.event_type) || ''
-                              const tb = (isAnalyzing ? b.type : b.event_type) || ''
-                              return dir * ta.localeCompare(tb)
-                            }
-                            case 'driver': {
-                              const da = (isAnalyzing ? a.driverNames?.[0] : a.driver_names?.[0]) || ''
-                              const db = (isAnalyzing ? b.driverNames?.[0] : b.driver_names?.[0]) || ''
-                              return dir * da.localeCompare(db)
-                            }
-                            case 'time': {
-                              const ta = (isAnalyzing ? a.startTime : a.start_time_seconds) || 0
-                              const tb = (isAnalyzing ? b.startTime : b.start_time_seconds) || 0
-                              return dir * (ta - tb)
-                            }
-                            case 'severity':
-                              return dir * ((a.severity || 0) - (b.severity || 0))
+                            case 'type':     return dir * ((a.event_type || '').localeCompare(b.event_type || ''))
+                            case 'driver':   return dir * ((a.driver_names?.[0] || '').localeCompare(b.driver_names?.[0] || ''))
+                            case 'time':     return dir * ((a.start_time_seconds || 0) - (b.start_time_seconds || 0))
+                            case 'severity': return dir * ((a.severity || 0) - (b.severity || 0))
                             default: return 0
                           }
                         })
                         return sorted.map((ev) => {
-                          const isDiscovered = isAnalyzing
-                          const type = isDiscovered ? ev.type : ev.event_type
+                          const type = ev.event_type
                           const cfg = EVENT_CONFIG[type] || {}
                           const Icon = cfg.icon || BarChart3
-                          const startSec = isDiscovered ? ev.startTime : ev.start_time_seconds
+                          const startSec = ev.start_time_seconds
                           const sev = ev.severity
                           const eventId = ev.id
                           const isExpanded = expandedEvent === `sidebar-${eventId}`
-                          const driverNames = isDiscovered ? (ev.driverNames || []) : (ev.driver_names || [])
+                          const driverNames = ev.driver_names || []
                           return (
-                            <div key={`${isDiscovered ? 'd' : 'e'}-${eventId}`}
+                            <div key={`e-${eventId}`}
                                  className="border-b border-border-subtle/30 animate-slide-right">
                               <div
                                 className={`grid grid-cols-[minmax(0,auto)_1fr_auto_auto]
@@ -1108,22 +1147,20 @@ export default memo(function AnalysisPanel() {
                                   <span className={`w-4 h-4 rounded-full flex items-center justify-center text-xxs font-bold ${severityColor(sev)}`}>
                                     {sev}
                                   </span>
-                                  {!isDiscovered && (
-                                    <button
-                                      onClick={(e) => {
-                                        e.stopPropagation()
-                                        setExpandedEvent(prev => prev === `sidebar-${eventId}` ? null : `sidebar-${eventId}`)
-                                      }}
-                                      className="w-4 h-4 flex items-center justify-center rounded hover:bg-surface-active
-                                                 text-text-disabled hover:text-text-secondary transition-colors shrink-0"
-                                    >
-                                      <ChevronDown size={10}
-                                        className={`transition-transform duration-150 ${isExpanded ? 'rotate-180' : ''}`} />
-                                    </button>
-                                  )}
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      setExpandedEvent(prev => prev === `sidebar-${eventId}` ? null : `sidebar-${eventId}`)
+                                    }}
+                                    className="w-4 h-4 flex items-center justify-center rounded hover:bg-surface-active
+                                               text-text-disabled hover:text-text-secondary transition-colors shrink-0"
+                                  >
+                                    <ChevronDown size={10}
+                                      className={`transition-transform duration-150 ${isExpanded ? 'rotate-180' : ''}`} />
+                                  </button>
                                 </div>
                               </div>
-                              {isExpanded && !isDiscovered && (
+                              {isExpanded && (
                                 <div className="px-3 pt-2 pb-2 bg-bg-secondary/50 border-t border-border-subtle animate-fade-in">
                                   <EventDetail event={ev} />
                                 </div>
@@ -1133,9 +1170,9 @@ export default memo(function AnalysisPanel() {
                         })
                       })()}
 
-                      {(isAnalyzing ? discoveredEvents : events).length === 0 && (
+                      {events.length === 0 && (
                         <div className="flex items-center justify-center py-8 text-text-disabled text-xs">
-                          {isAnalyzing ? 'Waiting for events...' : 'No events detected'}
+                          No events detected
                         </div>
                       )}
                       <div ref={eventsEndRef} />
@@ -1535,12 +1572,56 @@ export default memo(function AnalysisPanel() {
                 const end  = focusedEvent.end_time_seconds
                 const isLive    = t != null && t >= start - 3 && t <= end + 2
                 const isElapsed = t != null && t > end + 2
+
+                // Position classes based on overlay preference
+                const positionClasses = {
+                  'bottom-center': 'bottom-3 left-1/2 -translate-x-1/2',
+                  'bottom-left': 'bottom-3 left-3',
+                  'bottom-right': 'bottom-3 right-3',
+                }
+                const posClass = positionClasses[overlayPosition] || positionClasses['bottom-center']
+
                 return (
                   <div
-                    className="absolute bottom-0 left-0 right-0 z-20 pointer-events-auto"
+                    className={`absolute z-20 pointer-events-auto ${posClass}`}
                     onClick={e => e.stopPropagation()}
                   >
-                    <div className="bg-black/88 backdrop-blur-sm border-t border-white/10 px-3 pt-2 pb-2">
+                    <div className="bg-black/90 backdrop-blur-md rounded-xl border border-white/15
+                                    px-4 pt-2.5 pb-2.5 shadow-elevated min-w-[280px] max-w-[420px]">
+                      {/* Position dropdown (top-right corner) */}
+                      <div className="absolute top-1.5 right-1.5">
+                        <div className="relative">
+                          <button
+                            onClick={() => setShowOverlayPositionMenu(v => !v)}
+                            className="text-white/30 hover:text-white/60 transition-colors p-1 rounded"
+                            title="Change overlay position"
+                          >
+                            <Monitor size={10} />
+                          </button>
+                          {showOverlayPositionMenu && (
+                            <div className="absolute top-full right-0 mt-1 bg-black/95 border border-white/20
+                                            rounded-lg shadow-elevated py-1 min-w-[120px] z-30">
+                              {[
+                                { value: 'bottom-left', label: '↙ Bottom Left' },
+                                { value: 'bottom-center', label: '↓ Centered' },
+                                { value: 'bottom-right', label: '↘ Bottom Right' },
+                              ].map(opt => (
+                                <button
+                                  key={opt.value}
+                                  onClick={() => { setOverlayPosition(opt.value); setShowOverlayPositionMenu(false) }}
+                                  className={`w-full text-left px-3 py-1 text-xxs transition-colors
+                                    ${overlayPosition === opt.value
+                                      ? 'text-accent bg-accent/10'
+                                      : 'text-white/60 hover:text-white/90 hover:bg-white/5'}`}
+                                >
+                                  {opt.label}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
                       {/* Row 1: icon + label + status + dismiss */}
                       <div className="flex items-center gap-2 mb-1.5">
                         <EvIcon size={12} className={cfg.color || 'text-white/70'} />
@@ -1551,7 +1632,7 @@ export default memo(function AnalysisPanel() {
                           </span>
                         )}
                         {/* Status badge */}
-                        <div className="ml-auto flex items-center gap-1.5">
+                        <div className="ml-auto flex items-center gap-1.5 pr-6">
                           {isLive ? (
                             <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-full
                                             bg-success/20 border border-success/30 text-success text-xxs">
@@ -1572,7 +1653,7 @@ export default memo(function AnalysisPanel() {
                             </span>
                           )}
                           <button
-                            onClick={() => { setFocusedEvent(null); setAutoLoop(false) }}
+                            onClick={() => { setFocusedEvent(null); setAutoLoop(false); setShowOverlayPositionMenu(false) }}
                             className="text-white/40 hover:text-white/80 transition-colors p-0.5"
                             title="Dismiss"
                           >
@@ -1629,6 +1710,56 @@ export default memo(function AnalysisPanel() {
                           <span>Loop</span>
                         </button>
                       </div>
+                      {/* Row 3: mini timeline scrubber scoped to event */}
+                      {(() => {
+                        const evDuration = Math.max(1, end - start)
+                        const pad = Math.max(2, evDuration * 0.15) // 15% padding on each side
+                        const viewStart = Math.max(0, start - pad)
+                        const viewEnd = end + pad
+                        const viewDuration = viewEnd - viewStart
+                        const playheadPct = t != null ? Math.max(0, Math.min(100, ((t - viewStart) / viewDuration) * 100)) : 0
+                        const eventLeftPct = ((start - viewStart) / viewDuration) * 100
+                        const eventWidthPct = ((end - start) / viewDuration) * 100
+
+                        const handleScrub = (e) => {
+                          const rect = e.currentTarget.getBoundingClientRect()
+                          const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width))
+                          const targetTime = viewStart + (x / rect.width) * viewDuration
+                          seekToEvent({ ...focusedEvent, start_time_seconds: targetTime })
+                        }
+
+                        return (
+                          <div className="mt-2 pt-1.5 border-t border-white/10">
+                            <div className="flex items-center gap-2 mb-0.5">
+                              <span className="text-white/30 text-xxs font-mono">{formatTime(viewStart)}</span>
+                              <div className="flex-1" />
+                              <span className="text-white/30 text-xxs font-mono">{formatTime(viewEnd)}</span>
+                            </div>
+                            <div
+                              className="relative h-3 bg-white/5 rounded-full cursor-pointer overflow-hidden"
+                              onClick={handleScrub}
+                              title="Click to scrub within event"
+                            >
+                              {/* Event region highlight */}
+                              <div
+                                className="absolute top-0 bottom-0 rounded-sm"
+                                style={{
+                                  left: `${eventLeftPct}%`,
+                                  width: `${eventWidthPct}%`,
+                                  backgroundColor: cfg.color ? undefined : 'rgba(255,255,255,0.15)',
+                                }}
+                              >
+                                <div className={`w-full h-full rounded-sm opacity-20 ${cfg.bg || 'bg-white/15'}`} />
+                              </div>
+                              {/* Playhead */}
+                              <div
+                                className="absolute top-0 bottom-0 w-0.5 bg-accent z-10 rounded-full"
+                                style={{ left: `${playheadPct}%` }}
+                              />
+                            </div>
+                          </div>
+                        )
+                      })()}
                     </div>
                   </div>
                 )
@@ -1780,7 +1911,7 @@ export default memo(function AnalysisPanel() {
                             />
                           </div>
                           {/* Event markers */}
-                          {(isAnalyzing ? discoveredEvents : events).map((ev, i) => {
+                          {events.map((ev, i) => {
                             const time = ev.startTime ?? ev.start_time_seconds ?? 0
                             if (time <= 0) return null
                             const pct = toRacePct(time) * 100
@@ -1956,7 +2087,8 @@ function PhaseCard({
 }
 
 /**
- * TuningPanel — full detection tuning controls.
+ * TuningPanel — detection tuning controls for analysis phase.
+ * These parameters control how events are detected from telemetry data.
  * horizontal=true renders in a grid layout for the control bar panel.
  */
 function TuningPanel({ params, onChange, horizontal = false, className = '' }) {
@@ -2085,7 +2217,7 @@ function EventDetail({ event }) {
       <div className="grid grid-cols-2 gap-x-6 gap-y-2">
         <div className="space-y-1.5">
           <DetailRow label="Type" value={EVENT_CONFIG[event.event_type]?.label || event.event_type} />
-          <DetailRow label="Severity" value={`${event.severity} / 10`} />
+          <DetailRow label="Score" value={`${event.severity} / 10`} />
           <DetailRow label="Time" value={`${formatTime(event.start_time_seconds)} — ${formatTime(event.end_time_seconds)}`} />
           <DetailRow label="Duration" value={`${((event.end_time_seconds - event.start_time_seconds) || 0).toFixed(1)}s`} />
           {event.lap_number > 0 && (

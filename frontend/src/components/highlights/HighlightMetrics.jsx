@@ -2,6 +2,7 @@ import { memo } from 'react'
 import { useHighlight, tierColor } from '../../context/HighlightContext'
 import { useTimeline } from '../../context/TimelineContext'
 import { Clock, BarChart3, Activity, Users, Target } from 'lucide-react'
+import Tooltip from '../ui/Tooltip'
 
 /**
  * HighlightMetrics — Live metrics dashboard.
@@ -26,6 +27,7 @@ export default memo(function HighlightMetrics() {
       <MetricRow
         icon={Clock}
         label="Duration"
+        tooltip="Total duration of all selected highlight clips combined"
         value={formatDuration(metrics.duration)}
         suffix={targetDuration ? ` / ${formatDuration(targetDuration)}` : ''}
         warning={overTarget ? 'Over target' : underTarget ? 'Under target' : null}
@@ -36,6 +38,7 @@ export default memo(function HighlightMetrics() {
       <MetricRow
         icon={Target}
         label="Events"
+        tooltip="Number of events selected as highlights vs total detected events"
         value={`${metrics.eventCount} / ${metrics.totalEvents}`}
       />
 
@@ -43,6 +46,7 @@ export default memo(function HighlightMetrics() {
       <MetricRow
         icon={BarChart3}
         label="Coverage"
+        tooltip="Percentage of the race timeline covered by selected highlights"
         value={`${metrics.coveragePct}%`}
       />
 
@@ -50,6 +54,7 @@ export default memo(function HighlightMetrics() {
       <MetricBar
         icon={Activity}
         label="Balance"
+        tooltip="How evenly highlights are distributed across the race timeline (higher = more balanced)"
         value={metrics.balance}
         color={metrics.balance >= 60 ? 'bg-success' : metrics.balance >= 30 ? 'bg-warning' : 'bg-danger'}
       />
@@ -58,6 +63,7 @@ export default memo(function HighlightMetrics() {
       <MetricBar
         icon={Activity}
         label="Pacing"
+        tooltip="Variety and tempo of event types — higher means better pacing with mixed event types"
         value={metrics.pacing}
         color={metrics.pacing >= 60 ? 'bg-success' : metrics.pacing >= 30 ? 'bg-warning' : 'bg-danger'}
       />
@@ -66,6 +72,7 @@ export default memo(function HighlightMetrics() {
       <MetricRow
         icon={Users}
         label="Drivers"
+        tooltip="Number of unique drivers featured in highlights vs total drivers in the race"
         value={`${metrics.driverCount} / ${metrics.totalDrivers}`}
         suffix={` (${metrics.driverCoverage}%)`}
       />
@@ -102,12 +109,18 @@ export default memo(function HighlightMetrics() {
 })
 
 
-/** Single metric row with icon, label, value */
-function MetricRow({ icon: Icon, label, value, suffix, warning, warningColor }) {
+/** Single metric row with icon, label, value and optional tooltip */
+function MetricRow({ icon: Icon, label, value, suffix, warning, warningColor, tooltip }) {
+  const labelEl = (
+    <span className="text-xxs text-text-secondary flex-1 flex items-center gap-1">
+      {label}
+      {tooltip && <span className="text-text-disabled cursor-help">ⓘ</span>}
+    </span>
+  )
   return (
     <div className="flex items-center gap-2">
       <Icon className="w-3 h-3 text-text-tertiary shrink-0" />
-      <span className="text-xxs text-text-secondary flex-1">{label}</span>
+      {tooltip ? <Tooltip content={tooltip} position="top" delay={200}>{labelEl}</Tooltip> : labelEl}
       <span className="text-xxs text-text-primary font-mono">
         {value}
         {suffix && <span className="text-text-tertiary">{suffix}</span>}
@@ -120,13 +133,19 @@ function MetricRow({ icon: Icon, label, value, suffix, warning, warningColor }) 
 }
 
 
-/** Metric with a progress bar (0–100) */
-function MetricBar({ icon: Icon, label, value, color }) {
+/** Metric with a progress bar (0–100) and optional tooltip */
+function MetricBar({ icon: Icon, label, value, color, tooltip }) {
+  const labelEl = (
+    <span className="text-xxs text-text-secondary flex-1 flex items-center gap-1">
+      {label}
+      {tooltip && <span className="text-text-disabled cursor-help">ⓘ</span>}
+    </span>
+  )
   return (
     <div className="space-y-0.5">
       <div className="flex items-center gap-2">
         <Icon className="w-3 h-3 text-text-tertiary shrink-0" />
-        <span className="text-xxs text-text-secondary flex-1">{label}</span>
+        {tooltip ? <Tooltip content={tooltip} position="top" delay={200}>{labelEl}</Tooltip> : labelEl}
         <span className="text-xxs text-text-primary font-mono">{value}</span>
       </div>
       <div className="h-1 bg-bg-primary rounded-full overflow-hidden ml-5">

@@ -30,6 +30,13 @@ export const EVENT_COLORS = {
   leader_change: '#eab308',
   first_lap:     '#06b6d4',
   last_lap:      '#ec4899',
+  crash:         '#ef4444',
+  spinout:       '#f97316',
+  contact:       '#3b82f6',
+  close_call:    '#22c55e',
+  undercut:      '#8b5cf6',
+  overcut:       '#8b5cf6',
+  pit_battle:    '#f97316',
 }
 
 /**

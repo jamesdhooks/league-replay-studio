@@ -27,6 +27,9 @@ export const BASE_SCORES = {
   pit_stop: 0.5,
   contact: 1.2,
   close_call: 0.8,
+  undercut: 1.1,
+  overcut: 1.1,
+  pit_battle: 1.0,
 }
 
 /** Event types that are always included (mandatory) */
