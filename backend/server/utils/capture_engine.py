@@ -60,6 +60,7 @@ from __future__ import annotations
 import collections
 import ctypes
 import ctypes.wintypes
+import gc
 import logging
 import platform
 import signal
@@ -133,6 +134,36 @@ class _BITMAPINFOHEADER(ctypes.Structure):
         ("biClrUsed",       ctypes.wintypes.DWORD),
         ("biClrImportant",  ctypes.wintypes.DWORD),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Anti-Independent-Flip overlay  (forces DWM composition)
+# ---------------------------------------------------------------------------
+# When a DirectX game covers most of the screen (maximised or borderless
+# fullscreen), Windows 10/11 may enable "Independent Flip" — the game's
+# swap chain bypasses DWM composition and presents directly to the display.
+# DXGI Desktop Duplication (dxcam) then sees a black rectangle where the
+# game window is, because the composited desktop has no content for that
+# region.
+#
+# The standard workaround (used by OBS Studio and other capture tools) is
+# to create a tiny, nearly-transparent, click-through, always-on-top window
+# that overlaps the game.  This forces Windows to composite through DWM,
+# making the game content visible to DXGI capture.
+
+# Win32 window style constants
+_WS_EX_LAYERED     = 0x00080000
+_WS_EX_TRANSPARENT = 0x00000020
+_WS_EX_TOPMOST     = 0x00000008
+_WS_EX_TOOLWINDOW  = 0x00000080
+_WS_EX_NOACTIVATE  = 0x08000000
+_WS_POPUP          = 0x80000000
+_WS_VISIBLE        = 0x10000000
+_LWA_ALPHA         = 0x00000002
+_SWP_NOACTIVATE    = 0x0010
+_SWP_NOZORDER      = 0x0004
+_SWP_NOSIZE        = 0x0001
+_PM_REMOVE          = 0x0001
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +274,13 @@ class CaptureEngine:
         self._h264_queue: collections.deque = collections.deque(maxlen=4)
         self._h264_streaming: bool = False
         self._h264_gen: int = 0  # generation token — prevents stale stop from killing a newer stream
+
+        # Anti-Independent-Flip overlay (see module docstring above)
+        self._anti_flip_hwnd: Optional[int] = None
+        self._anti_flip_game_hwnd: Optional[int] = None  # game HWND we're tracking
+
+        # Black-frame detection (safety net for Independent Flip failures)
+        self._consecutive_black: int = 0
 
     # -- Properties ---------------------------------------------------------
 
@@ -378,6 +416,7 @@ class CaptureEngine:
         self._kill_recorder()
         self._cleanup_native()
         self._cleanup_dxcam()
+        self._destroy_anti_flip_overlay()
         self._release_pw_gdi()
         self._record_queue.clear()
         self._h264_streaming = False
@@ -712,9 +751,11 @@ class CaptureEngine:
         dxcam_dead  = False
         dxcam_started_at: float = 0.0
         dxcam_first_frame = False
+        dxcam_last_frame_at: float = 0.0  # for post-first-frame stall detection
         native_restart_count: int = 0
         MAX_NATIVE_RESTARTS: int = 3
         retry_native_at: float = 0.0  # monotonic time to retry native from PrintWindow
+        retry_dxcam_at: float = 0.0   # monotonic time to retry dxcam from PrintWindow
         native_hwnd_set_at: float = 0.0  # when HWND was last successfully sent to bridge
         native_last_status_log: float = 0.0  # throttle status() diagnostic polls
 
@@ -913,13 +954,15 @@ class CaptureEngine:
                         if not dxcam_first_frame:
                             logger.info("[CaptureEngine] dxcam: first frame received")
                             dxcam_first_frame = True
+                        dxcam_last_frame_at = time.monotonic()
                         dxcam_started_at = time.monotonic()
                     else:
                         if dxcam_started_at == 0.0:
                             dxcam_started_at = time.monotonic()
+                        now_dx = time.monotonic()
                         if (
                             not dxcam_first_frame
-                            and (time.monotonic() - dxcam_started_at) > 8.0
+                            and (now_dx - dxcam_started_at) > 8.0
                         ):
                             logger.warning(
                                 "[CaptureEngine] dxcam: no frame in 8 s, "
@@ -929,8 +972,26 @@ class CaptureEngine:
                             dxcam_dead = True
                             use_dxcam = False
                             self._active_backend = "printwindow"
+                            retry_dxcam_at = time.monotonic() + 15.0
                             if _native_available:
                                 retry_native_at = time.monotonic() + 30.0
+                        elif (
+                            dxcam_first_frame
+                            and dxcam_last_frame_at > 0
+                            and (now_dx - dxcam_last_frame_at) > 5.0
+                        ):
+                            # Post-first-frame stall: dxcam was producing
+                            # frames but stopped for 5 s (e.g. DXGI mode
+                            # change, resolution switch).  Recreate camera.
+                            logger.warning(
+                                "[CaptureEngine] dxcam: frame stall %.1fs "
+                                "— recreating camera",
+                                now_dx - dxcam_last_frame_at,
+                            )
+                            self._cleanup_dxcam()
+                            dxcam_first_frame = False
+                            dxcam_last_frame_at = 0.0
+                            dxcam_started_at = time.monotonic()
 
                 # ── Tier 3: PrintWindow (last resort) ─────────────────
                 else:
@@ -955,6 +1016,23 @@ class CaptureEngine:
                             self._active_backend = "native"
                         else:
                             retry_native_at = time.monotonic() + 30.0
+                    # Periodically retry dxcam (e.g. after DXGI mode transition)
+                    elif (
+                        _dxcam_available and dxcam_dead
+                        and retry_dxcam_at > 0
+                        and time.monotonic() >= retry_dxcam_at
+                    ):
+                        logger.info("[CaptureEngine] PrintWindow: retrying dxcam backend")
+                        self._cleanup_dxcam()
+                        dxcam_dead = False
+                        use_dxcam = True
+                        dxcam_first_frame = False
+                        dxcam_last_frame_at = 0.0
+                        dxcam_started_at = 0.0
+                        self._dxcam_create_fails = 0
+                        self._dxcam_create_next_try = 0.0
+                        retry_dxcam_at = 0.0
+                        self._active_backend = "dxcam"
                     frame = self._grab_printwindow()
 
             except Exception:
@@ -974,10 +1052,50 @@ class CaptureEngine:
                     dxcam_dead = True
                     use_dxcam = False
                     self._active_backend = "printwindow"
+                    retry_dxcam_at = time.monotonic() + 15.0
 
             if frame is not None:
                 h, w = frame.shape[:2]
                 self._src_w, self._src_h = w, h
+
+                # ── Black-frame detection ─────────────────────────────
+                # When Windows enables Independent Flip (game swap chain
+                # presented directly to the display, bypassing DWM), DXGI
+                # Desktop Duplication captures an all-black rectangle.
+                # PrintWindow can also return all-black for DirectX games.
+                # Detect this and avoid updating the stream — a frozen
+                # last-good-frame is far better UX than a black screen.
+                #
+                # We check only the middle row for speed: np.any() on one
+                # row (~5 KB) is nearly instant.  A real game frame will
+                # always have non-zero pixels in the middle.
+                if not np.any(frame[h // 2]):
+                    self._consecutive_black += 1
+                    if self._consecutive_black == 5:
+                        logger.warning(
+                            "[CaptureEngine] %s: 5 consecutive all-black "
+                            "frames detected — possible Independent Flip "
+                            "or DX capture failure. Stream will freeze on "
+                            "last good frame until capture recovers.",
+                            backend_used,
+                        )
+                    if self._consecutive_black >= 5:
+                        # Don't update _latest_jpeg — keep last good frame
+                        # Still update dimensions so H264/HLS can start
+                        self._out_w, self._out_h = w & ~1, h & ~1
+                        # Don't enqueue black frames for H264/recording
+                        frame = None
+                else:
+                    if self._consecutive_black >= 5:
+                        logger.info(
+                            "[CaptureEngine] %s: non-black frame received "
+                            "— capture recovered after %d black frames",
+                            backend_used, self._consecutive_black,
+                        )
+                    self._consecutive_black = 0
+
+            if frame is not None:
+                h, w = frame.shape[:2]
 
                 # ── Direct JPEG encode (replaces FFmpeg MJPEG pipe) ───
                 # Scale down if wider than max_width
@@ -1018,6 +1136,11 @@ class CaptureEngine:
                 if self._h264_streaming:
                     self._h264_queue.append(out_frame.copy())
 
+            # Pump Win32 messages for the anti-flip overlay (if active).
+            # Must be done on the same thread that created the window.
+            if _IS_WINDOWS and self._anti_flip_hwnd:
+                self._pump_overlay_messages()
+
             # Pacing: native/dxcam have their own timing; PrintWindow needs manual
             if backend_used == "printwindow":
                 elapsed = time.monotonic() - t0
@@ -1026,6 +1149,10 @@ class CaptureEngine:
             elif frame is None:
                 # native/dxcam: no new frame this tick -- brief yield
                 time.sleep(0.002)
+
+        # ── Cleanup at thread exit: destroy overlay on this thread ─────
+        # Win32 windows must be destroyed on the thread that created them.
+        self._destroy_anti_flip_overlay()
 
     # ======================================================================
     # Direct JPEG encoding  (replaces FFmpeg MJPEG subprocess pipeline)
@@ -1200,21 +1327,23 @@ class CaptureEngine:
                 rect["top"] + rect["height"],
             )
             # Region changed (e.g. window maximised, snapped, or moved) while
-            # the camera is already running.  dxcam locks the capture region at
-            # camera.start() time, so we must stop and restart with the new
-            # coordinates — otherwise we keep grabbing from the wrong position.
+            # the camera is already running.  A simple stop/start on the same
+            # camera object can leave the DXGI duplicator in a stale state.
+            # Do a full cleanup + recreate instead.
             if new_region != self._dxcam_region and self._dxcam_started:
                 logger.info(
-                    "[CaptureEngine] dxcam: region changed %s -> %s, restarting camera",
+                    "[CaptureEngine] dxcam: region changed %s -> %s, "
+                    "recreating camera",
                     self._dxcam_region, new_region,
                 )
-                try:
-                    self._dxcam_camera.stop()
-                except Exception:
-                    logger.debug("Suppressed exception in cleanup", exc_info=True)
-                self._dxcam_started = False
+                self._cleanup_dxcam()
+                # Brief delay for DXGI to release the output duplicator
+                time.sleep(0.3)
             self._dxcam_region = new_region
             self._pw_last_hwnd_check = now
+
+            # Ensure the anti-flip overlay tracks the game window
+            self._ensure_anti_flip_overlay(hwnd)
 
         try:
             if self._dxcam_camera is None:
@@ -1275,6 +1404,11 @@ class CaptureEngine:
                 del self._dxcam_camera
             except Exception:
                     logger.debug("Suppressed exception in cleanup", exc_info=True)
+            # Force garbage collection so the DXGI output duplicator is
+            # released before we try to create a new camera.  Without this,
+            # the old duplicator may still be held, causing the next
+            # _dxcam.create() to fail with DXGI_ERROR_NOT_CURRENTLY_AVAILABLE.
+            gc.collect()
         self._dxcam_camera = None
         self._dxcam_started = False
         self._dxcam_region = None
@@ -1396,6 +1530,104 @@ class CaptureEngine:
         self._pw_hwnd_dc = self._pw_mem_dc = self._pw_bitmap = None
         self._pw_np_buf = None
         self._pw_gdi_w = self._pw_gdi_h = 0
+
+    # ======================================================================
+    # Anti-Independent-Flip overlay
+    # ======================================================================
+    # When a DirectX game's swap chain presentation bypasses DWM composition
+    # (Independent Flip), DXGI Desktop Duplication returns black for the
+    # game's window area.  Placing a tiny, nearly-transparent, always-on-top
+    # window over the game forces DWM to composite — the same technique used
+    # by OBS Studio and similar tools.
+
+    def _ensure_anti_flip_overlay(self, game_hwnd: int) -> None:
+        """Create (or reposition) the anti-flip overlay over *game_hwnd*."""
+        if not _IS_WINDOWS:
+            return
+
+        try:
+            user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+
+            # Get the game window's screen position
+            rect = ctypes.wintypes.RECT()
+            user32.GetWindowRect(game_hwnd, ctypes.byref(rect))
+
+            if self._anti_flip_hwnd is not None:
+                # Overlay already exists — reposition if the game window moved
+                if game_hwnd == self._anti_flip_game_hwnd:
+                    user32.SetWindowPos(
+                        self._anti_flip_hwnd, None,
+                        rect.left, rect.top, 0, 0,
+                        _SWP_NOACTIVATE | _SWP_NOZORDER | _SWP_NOSIZE,
+                    )
+                    return
+                # Different game window — destroy old overlay first
+                self._destroy_anti_flip_overlay()
+
+            # Create a tiny transparent, click-through, topmost popup window.
+            # Uses the built-in "Static" window class (no registration needed).
+            ex_style = (
+                _WS_EX_LAYERED | _WS_EX_TRANSPARENT | _WS_EX_TOPMOST
+                | _WS_EX_TOOLWINDOW | _WS_EX_NOACTIVATE
+            )
+            hwnd = user32.CreateWindowExW(
+                ex_style,
+                "Static",       # built-in class — no custom class registration
+                "",             # no title
+                _WS_POPUP | _WS_VISIBLE,
+                rect.left, rect.top,
+                4, 4,           # 4×4 px — small but enough to prevent iflip
+                None, None,
+                ctypes.windll.kernel32.GetModuleHandleW(None),  # type: ignore[attr-defined]
+                None,
+            )
+            if hwnd:
+                # 1% opacity — invisible to the eye but blocks Independent Flip
+                user32.SetLayeredWindowAttributes(hwnd, 0, 1, _LWA_ALPHA)
+                self._anti_flip_hwnd = hwnd
+                self._anti_flip_game_hwnd = game_hwnd
+                logger.info(
+                    "[CaptureEngine] anti-flip overlay created at (%d,%d) "
+                    "to force DWM composition",
+                    rect.left, rect.top,
+                )
+            else:
+                logger.debug("[CaptureEngine] CreateWindowExW returned 0")
+        except Exception:
+            logger.debug(
+                "[CaptureEngine] anti-flip overlay creation failed",
+                exc_info=True,
+            )
+
+    def _destroy_anti_flip_overlay(self) -> None:
+        """Destroy the anti-flip overlay (best-effort, must be on creator thread)."""
+        hwnd = self._anti_flip_hwnd
+        if hwnd is not None and _IS_WINDOWS:
+            try:
+                user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+                user32.DestroyWindow(hwnd)
+            except Exception:
+                logger.debug("Suppressed exception in cleanup", exc_info=True)
+        self._anti_flip_hwnd = None
+        self._anti_flip_game_hwnd = None
+
+    @staticmethod
+    def _pump_overlay_messages() -> None:
+        """Dispatch any pending Win32 messages for the anti-flip overlay.
+
+        Must be called on the same thread that created the window (the
+        capture thread).  Non-blocking — returns immediately if no messages.
+        """
+        try:
+            user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+            msg = ctypes.wintypes.MSG()
+            while user32.PeekMessageW(
+                ctypes.byref(msg), None, 0, 0, _PM_REMOVE
+            ):
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+        except Exception:
+            pass  # best-effort
 
 
 # -- Singleton --------------------------------------------------------------
