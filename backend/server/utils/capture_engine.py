@@ -165,6 +165,11 @@ _SWP_NOZORDER      = 0x0004
 _SWP_NOSIZE        = 0x0001
 _PM_REMOVE          = 0x0001
 
+# Time to wait after releasing a DXGI output duplicator before creating a
+# new one.  Without this pause, the old handle may still be held by the OS,
+# causing the next create() call to fail.
+_DXGI_CLEANUP_DELAY = 0.3
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1066,10 +1071,15 @@ class CaptureEngine:
                 # Detect this and avoid updating the stream — a frozen
                 # last-good-frame is far better UX than a black screen.
                 #
-                # We check only the middle row for speed: np.any() on one
-                # row (~5 KB) is nearly instant.  A real game frame will
-                # always have non-zero pixels in the middle.
-                if not np.any(frame[h // 2]):
+                # Sample three rows (¼, ½, ¾ height) to reduce false
+                # positives from letterboxed cutscenes or UI overlays.
+                # np.any() on ~15 KB is nearly instant.
+                is_black = (
+                    not np.any(frame[h // 4])
+                    and not np.any(frame[h // 2])
+                    and not np.any(frame[3 * h // 4])
+                )
+                if is_black:
                     self._consecutive_black += 1
                     if self._consecutive_black == 5:
                         logger.warning(
@@ -1338,7 +1348,7 @@ class CaptureEngine:
                 )
                 self._cleanup_dxcam()
                 # Brief delay for DXGI to release the output duplicator
-                time.sleep(0.3)
+                time.sleep(_DXGI_CLEANUP_DELAY)
             self._dxcam_region = new_region
             self._pw_last_hwnd_check = now
 
