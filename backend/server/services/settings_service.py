@@ -160,6 +160,12 @@ def _validate_llm_temperature(value: Any) -> tuple[bool, str]:
     return True, ""
 
 
+def _validate_positive_int(value: Any) -> tuple[bool, str]:
+    if not isinstance(value, int) or value < 1:
+        return False, "value must be a positive integer"
+    return True, ""
+
+
 VALIDATORS: dict[str, Any] = {
     "theme": _validate_theme,
     "capture_software": _validate_capture_software,
@@ -183,6 +189,11 @@ VALIDATORS: dict[str, Any] = {
     "llm_model": _validate_string_or_empty,
     "llm_custom_endpoint": _validate_string_or_empty,
     "llm_temperature": _validate_llm_temperature,
+    "race_story_min_summary_words": _validate_positive_int,
+    "race_story_max_summary_words": _validate_positive_int,
+    "race_story_min_sub_stories": _validate_positive_int,
+    "race_story_max_sub_stories": _validate_positive_int,
+    "race_story_custom_guidance": _validate_string_or_empty,
 }
 
 

@@ -16,6 +16,7 @@ import {
   Sparkles,
   Eye,
   EyeOff,
+  BookOpen,
 } from 'lucide-react'
 import { useSettings } from '../../context/SettingsContext'
 import { useToast } from '../../context/ToastContext'
@@ -567,7 +568,95 @@ function AISettings({ value, onChange }) {
               <Sparkles className="w-4 h-4 text-accent" />
               <span><strong>Editorial</strong> — AI-refined narrative flow, transitions, and notes for highlights</span>
             </div>
+            <div className="flex items-center gap-2">
+              <BookOpen className="w-4 h-4 text-accent" />
+              <span><strong>Race Story</strong> — AI-generated editorial race write-ups with key moments</span>
+            </div>
           </div>
+
+          <SectionSubHeader title="Race Story Configuration" />
+
+          <SettingGroup label="Summary Length (words)" description="Min and max word count for the main race story paragraph.">
+            <div className="flex items-center gap-3">
+              <div className="flex-1">
+                <label className="text-[10px] uppercase text-text-disabled">Min</label>
+                <NumberInput
+                  value={value('race_story_min_summary_words') ?? 60}
+                  onChange={(v) => onChange('race_story_min_summary_words', v)}
+                  min={20}
+                  max={300}
+                />
+              </div>
+              <div className="flex-1">
+                <label className="text-[10px] uppercase text-text-disabled">Max</label>
+                <NumberInput
+                  value={value('race_story_max_summary_words') ?? 150}
+                  onChange={(v) => onChange('race_story_max_summary_words', v)}
+                  min={50}
+                  max={500}
+                />
+              </div>
+            </div>
+          </SettingGroup>
+
+          <SettingGroup label="Sub-Stories Count" description="Min and max number of sub-stories (key moments) to generate.">
+            <div className="flex items-center gap-3">
+              <div className="flex-1">
+                <label className="text-[10px] uppercase text-text-disabled">Min</label>
+                <NumberInput
+                  value={value('race_story_min_sub_stories') ?? 3}
+                  onChange={(v) => onChange('race_story_min_sub_stories', v)}
+                  min={1}
+                  max={20}
+                />
+              </div>
+              <div className="flex-1">
+                <label className="text-[10px] uppercase text-text-disabled">Max</label>
+                <NumberInput
+                  value={value('race_story_max_sub_stories') ?? 8}
+                  onChange={(v) => onChange('race_story_max_sub_stories', v)}
+                  min={1}
+                  max={20}
+                />
+              </div>
+            </div>
+          </SettingGroup>
+
+          <SettingGroup label="Custom Guidance" description="Additional instructions for the AI when generating race stories. Appended to the system prompt.">
+            <textarea
+              value={value('race_story_custom_guidance') || ''}
+              onChange={(e) => onChange('race_story_custom_guidance', e.target.value)}
+              placeholder="e.g. Focus on battles between the top 5 drivers. Use a humorous tone."
+              rows={3}
+              className="w-full px-3 py-2 text-sm bg-bg-primary border border-border rounded-lg
+                         text-text-primary placeholder:text-text-disabled
+                         focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent
+                         transition-colors resize-y"
+            />
+          </SettingGroup>
+
+          <SettingGroup label="System Prompt Preview" description="The fixed system prompt template used to generate race stories (read-only).">
+            <details className="text-xs">
+              <summary className="cursor-pointer text-text-tertiary hover:text-text-primary transition-colors py-1">
+                Show system prompt template
+              </summary>
+              <pre className="mt-2 p-3 bg-bg-primary border border-border rounded-lg text-text-secondary
+                              overflow-x-auto text-[11px] leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto">
+{`You are a motorsport commentator and writer for an online sim-racing league.
+Your job is to analyse race data and produce an engaging, editorial-style
+write-up of the race results.
+
+TASK: Generate a summary paragraph ({min} to {max} words) and {minSub} to {maxSub}
+sub-stories with icon, headline, and description.
+
+Available icons: Trophy, Flag, Flame, Zap, Swords, ArrowUpDown, Timer,
+AlertTriangle, TrendingUp, TrendingDown, Star, Shield, Target, Rocket,
+ThumbsDown, RefreshCw, Crown, Users
+
+The prompt includes: final standings, race events, and lap data.`}
+              </pre>
+            </details>
+          </SettingGroup>
         </>
       )}
     </div>

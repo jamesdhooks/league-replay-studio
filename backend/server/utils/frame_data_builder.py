@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from server.services.analysis_db import get_project_db
+from server.services.analysis_db import get_project_db, get_race_story
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +259,11 @@ def build_frame_data(
                 "car_name": focused_driver.get("car_class_name") or None,
                 "position": focused_state.get("position"),
             })
+
+        # ── 9. Include race story data when in race_results section ──────
+        if section == "race_results":
+            story = get_race_story(conn)
+            frame_data["race_story"] = story
 
         return frame_data
 

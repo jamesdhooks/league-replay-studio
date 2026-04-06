@@ -118,6 +118,16 @@ CREATE TABLE IF NOT EXISTS highlight_config (
     updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
+-- LLM-generated race story (one row per project, deduplicated)
+CREATE TABLE IF NOT EXISTS race_stories (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    summary         TEXT    NOT NULL DEFAULT '',
+    sub_stories     TEXT    NOT NULL DEFAULT '[]',
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    model_used      TEXT    NOT NULL DEFAULT '',
+    prompt_hash     TEXT    NOT NULL DEFAULT ''
+);
+
 -- ── Indexes ─────────────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_car_states_tick ON car_states(tick_id);
 CREATE INDEX IF NOT EXISTS idx_car_states_car  ON car_states(car_idx);
@@ -174,6 +184,22 @@ def init_analysis_db(project_dir: str) -> None:
                     conn.execute(f"ALTER TABLE race_ticks ADD COLUMN {col} {ddl}")
                 except sqlite3.OperationalError as exc:
                     logger.debug("race_ticks migration skip %s: %s", col, exc)
+
+        # Migration: create race_stories table if missing (older DBs)
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()]
+        if "race_stories" not in tables:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS race_stories (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    summary         TEXT    NOT NULL DEFAULT '',
+                    sub_stories     TEXT    NOT NULL DEFAULT '[]',
+                    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+                    model_used      TEXT    NOT NULL DEFAULT '',
+                    prompt_hash     TEXT    NOT NULL DEFAULT ''
+                );
+            """)
 
         conn.commit()
         logger.info("[AnalysisDB] Initialised project database at %s", project_dir)
@@ -444,3 +470,50 @@ def get_drivers(conn: sqlite3.Connection) -> list[dict]:
         "SELECT * FROM drivers WHERE is_spectator = 0 ORDER BY car_idx"
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Race story helpers ──────────────────────────────────────────────────────
+
+
+def get_race_story(conn: sqlite3.Connection) -> dict | None:
+    """Get the stored race story for this project, or None if not generated."""
+    row = conn.execute(
+        "SELECT * FROM race_stories ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    try:
+        d["sub_stories"] = json.loads(d.get("sub_stories", "[]"))
+    except (json.JSONDecodeError, TypeError):
+        d["sub_stories"] = []
+    return d
+
+
+def save_race_story(
+    conn: sqlite3.Connection,
+    summary: str,
+    sub_stories: list[dict],
+    model_used: str = "",
+    prompt_hash: str = "",
+) -> dict:
+    """Save (or replace) the race story for this project.
+
+    Only one race story is kept per project — previous rows are deleted.
+    """
+    # Intentional: delete all rows to enforce one-story-per-project.
+    # Each per-project DB has its own race_stories table.
+    conn.execute("DELETE FROM race_stories")
+    conn.execute(
+        """INSERT INTO race_stories (summary, sub_stories, model_used, prompt_hash)
+           VALUES (?, ?, ?, ?)""",
+        (summary, json.dumps(sub_stories), model_used, prompt_hash),
+    )
+    conn.commit()
+    return get_race_story(conn)  # type: ignore[return-value]
+
+
+def delete_race_story(conn: sqlite3.Connection) -> None:
+    """Delete any stored race story for this project."""
+    conn.execute("DELETE FROM race_stories")
+    conn.commit()

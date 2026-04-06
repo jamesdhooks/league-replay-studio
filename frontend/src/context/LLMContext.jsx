@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useCallback, useEffect, useMemo } from 'react'
-import { apiGet, apiPost } from '../services/api'
+import { apiGet, apiPost, apiDelete } from '../services/api'
 import { useToast } from './ToastContext'
 
 // ── Context ─────────────────────────────────────────────────────────────────
@@ -132,6 +132,52 @@ export function LLMProvider({ children }) {
     }
   }, [showSuccess, showError])
 
+  // ── Race Story ─────────────────────────────────────────────────────────
+
+  const [raceStory, setRaceStory] = useState(null)
+  const [raceStoryLoading, setRaceStoryLoading] = useState(false)
+
+  const fetchRaceStory = useCallback(async (projectId) => {
+    try {
+      const data = await apiGet(`/llm/race-story/${projectId}`)
+      setRaceStory(data.race_story)
+      return data.race_story
+    } catch {
+      setRaceStory(null)
+      return null
+    }
+  }, [])
+
+  const generateRaceStory = useCallback(async (projectId, force = false) => {
+    setRaceStoryLoading(true)
+    setError(null)
+    try {
+      const data = await apiPost(`/llm/race-story/${projectId}`, { force })
+      setRaceStory(data.race_story)
+      if (!data.cached) {
+        showSuccess('Race story generated')
+      }
+      return data
+    } catch (err) {
+      const msg = err.message || 'Race story generation failed'
+      setError(msg)
+      showError(msg)
+      return null
+    } finally {
+      setRaceStoryLoading(false)
+    }
+  }, [showSuccess, showError])
+
+  const deleteRaceStory = useCallback(async (projectId) => {
+    try {
+      await apiDelete(`/llm/race-story/${projectId}`)
+      setRaceStory(null)
+      showSuccess('Race story deleted')
+    } catch (err) {
+      showError(err.message || 'Failed to delete race story')
+    }
+  }, [showSuccess, showError])
+
   // ── Context value ───────────────────────────────────────────────────────
   const value = useMemo(() => ({
     status,
@@ -144,8 +190,15 @@ export function LLMProvider({ children }) {
     generateElement,
     augmentElement,
     runEditorial,
+    raceStory,
+    raceStoryLoading,
+    fetchRaceStory,
+    generateRaceStory,
+    deleteRaceStory,
   }), [status, loading, lastResult, error, fetchStatus, isAvailable,
-       executeSkill, generateElement, augmentElement, runEditorial])
+       executeSkill, generateElement, augmentElement, runEditorial,
+       raceStory, raceStoryLoading, fetchRaceStory, generateRaceStory,
+       deleteRaceStory])
 
   return (
     <LLMContext.Provider value={value}>
@@ -167,6 +220,11 @@ export function LLMProvider({ children }) {
  *   - ``augmentElement(prompt, section, presetId, elementId)``
  *   - ``runEditorial(prompt, timeline, scoredEvents, metrics, raceInfo)``
  *   - ``executeSkill(skillId, prompt, context)``
+ *   - ``raceStory`` — current race story object or null
+ *   - ``raceStoryLoading`` — true while generating a race story
+ *   - ``fetchRaceStory(projectId)`` — fetch stored race story
+ *   - ``generateRaceStory(projectId, force)`` — generate (or return cached) race story
+ *   - ``deleteRaceStory(projectId)`` — delete stored race story
  */
 export function useLLM() {
   const ctx = useContext(LLMContext)
