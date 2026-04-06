@@ -24,6 +24,13 @@ import platform
 import time
 from typing import Optional
 
+
+class _POINT(ctypes.Structure):  # noqa: N801
+    _fields_ = [
+        ("x", ctypes.wintypes.LONG),
+        ("y", ctypes.wintypes.LONG),
+    ]
+
 logger = logging.getLogger(__name__)
 
 _IS_WINDOWS = platform.system() == "Windows"
@@ -93,24 +100,69 @@ def list_visible_windows() -> list[dict]:
 
 
 def _get_window_rect(hwnd: int) -> Optional[dict]:
-    """Get bounding rect for a specific HWND."""
+    """Get the visible bounding rect for a specific HWND.
+
+    Uses ``DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)`` when available
+    (Windows 10+) to return the *actual* visible frame — this excludes the
+    invisible DWM border that Windows adds around maximised and snapped windows,
+    which causes ``GetWindowRect`` to report coordinates slightly outside the
+    monitor bounds (e.g. ``left=-8``).  If that would make ``dxcam``'s region
+    clip off the edge of the screen, capture would fail.
+
+    Falls back to ``GetClientRect`` + ``ClientToScreen`` if DWM is unavailable
+    (e.g. RDP sessions with DWM composition disabled).
+    """
     if not _IS_WINDOWS:
         return None
     try:
         user32 = ctypes.windll.user32  # type: ignore[attr-defined]
         if not user32.IsWindow(hwnd):
             return None
+
         rect = ctypes.wintypes.RECT()
-        user32.GetWindowRect(hwnd, ctypes.byref(rect))
-        w = rect.right - rect.left
-        h = rect.bottom - rect.top
+        got_rect = False
+
+        # ── Primary: DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS) ──────
+        # Returns the real visible bounds, which are narrower than GetWindowRect
+        # for maximised windows that extend ~8 px beyond the monitor edge.
+        try:
+            dwmapi = ctypes.windll.dwmapi  # type: ignore[attr-defined]
+            _DWMWA_EXTENDED_FRAME_BOUNDS = 9
+            hr = dwmapi.DwmGetWindowAttribute(
+                hwnd,
+                _DWMWA_EXTENDED_FRAME_BOUNDS,
+                ctypes.byref(rect),
+                ctypes.sizeof(rect),
+            )
+            got_rect = (hr == 0)  # S_OK == 0
+        except Exception:
+            logger.debug("DwmGetWindowAttribute failed, will use GetClientRect fallback", exc_info=True)
+        # GetClientRect gives the content-area dimensions (no title-bar / chrome);
+        # ClientToScreen maps the top-left corner to screen coordinates.
+        if not got_rect:
+            client_rect = ctypes.wintypes.RECT()
+            user32.GetClientRect(hwnd, ctypes.byref(client_rect))
+            pt = _POINT(0, 0)
+            user32.ClientToScreen(hwnd, ctypes.byref(pt))
+            rect.left = pt.x
+            rect.top = pt.y
+            rect.right = pt.x + client_rect.right
+            rect.bottom = pt.y + client_rect.bottom
+            got_rect = True
+
+        if not got_rect:
+            return None
+
+        # Clamp to on-screen coordinates — never pass negative or zero-area
+        # regions to dxcam / gdigrab.
+        left = max(0, rect.left)
+        top = max(0, rect.top)
+        right = max(left, rect.right)
+        bottom = max(top, rect.bottom)
+        w = right - left
+        h = bottom - top
         if w > 100 and h > 100:
-            return {
-                "left": max(0, rect.left),
-                "top": max(0, rect.top),
-                "width": w,
-                "height": h,
-            }
+            return {"left": left, "top": top, "width": w, "height": h}
         return None
     except Exception:
         return None
