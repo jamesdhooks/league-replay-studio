@@ -79,6 +79,7 @@ export function HighlightProvider({ children }) {
   const [minSeverity, setMinSeverity] = useState(0)
   const [overrides, setOverrides] = useState({})    // { eventId: 'include'|'exclude' }
   const [params, setParams] = useState({ ...DEFAULT_PARAMS })
+  const [replayMode, setReplayMode] = useState('highlights')  // 'highlights' | 'full'
 
   // ── A/B compare mode ────────────────────────────────────────────────────
   const [abMode, setAbMode] = useState(false)
@@ -109,8 +110,17 @@ export function HighlightProvider({ children }) {
 
   // ── Computed selection (memoised, <100ms) ───────────────────────────────
   const selection = useMemo(
-    () => computeHighlightSelection(events, weights, targetDuration, minSeverity, overrides, raceDuration, drivers, params),
-    [events, weights, targetDuration, minSeverity, overrides, raceDuration, drivers, params],
+    () => {
+      const result = computeHighlightSelection(events, weights, targetDuration, minSeverity, overrides, raceDuration, drivers, params)
+      if (replayMode === 'full') {
+        return {
+          ...result,
+          scoredEvents: result.scoredEvents.map(e => ({ ...e, inclusion: 'highlight' })),
+        }
+      }
+      return result
+    },
+    [replayMode, events, weights, targetDuration, minSeverity, overrides, raceDuration, drivers, params],
   )
 
   // ── Sorted & filtered event list ───────────────────────────────────────
@@ -513,6 +523,10 @@ export function HighlightProvider({ children }) {
     params,
     setParams,
 
+    // Replay mode
+    replayMode,
+    setReplayMode,
+
     // Overrides
     overrides,
     toggleOverride,
@@ -588,6 +602,7 @@ export function HighlightProvider({ children }) {
     sortColumn, sortDirection, handleSort,
     filterType, filterInclusion, filterSeverityRange,
     drivers,
+    replayMode, setReplayMode,
   ])
 
   return (

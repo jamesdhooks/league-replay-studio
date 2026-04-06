@@ -67,10 +67,10 @@ export default function HighlightWeightSliders() {
         </button>
       </div>
 
-      {/* Minimum severity threshold */}
+      {/* Minimum score threshold */}
       <div className="pt-2 border-t border-border-subtle space-y-1.5">
         <h4 className="text-xxs font-semibold text-text-tertiary uppercase tracking-wider">
-          Minimum Severity
+          Minimum Score
         </h4>
         <div className="flex items-center gap-2">
           <input
@@ -111,29 +111,19 @@ export default function HighlightWeightSliders() {
         </div>
       </div>
 
-      {/* Detection & Camera Tuning */}
+      {/* Direction & Camera Tuning */}
       <div className="pt-2 border-t border-border-subtle space-y-2">
         <div className="flex items-center gap-1.5">
           <SlidersHorizontal className="w-3 h-3 text-text-tertiary" />
           <h4 className="text-xxs font-semibold text-text-tertiary uppercase tracking-wider">
-            Detection Tuning
+            Direction Tuning
           </h4>
         </div>
-
-        {/* Battle gap threshold */}
-        <ParamSlider
-          label="Battle Gap"
-          tooltip="Max time gap (sec) between cars to be 'in battle'"
-          value={params.battleGap}
-          min={0.3} max={3.0} step={0.1}
-          format={v => `${v.toFixed(1)}s`}
-          onChange={v => setParams(p => ({ ...p, battleGap: v }))}
-        />
 
         {/* Battle sticky period */}
         <ParamSlider
           label="Battle Hold"
-          tooltip="Seconds to follow one battle before switching"
+          tooltip="Seconds to follow one battle before switching cameras"
           value={params.battleStickyPeriod}
           min={30} max={300} step={10}
           format={v => `${v}s`}
@@ -143,7 +133,7 @@ export default function HighlightWeightSliders() {
         {/* Camera sticky period */}
         <ParamSlider
           label="Camera Hold"
-          tooltip="Seconds to hold one camera angle before rotating"
+          tooltip="Seconds to hold one camera angle before rotating to another"
           value={params.cameraStickyPeriod}
           min={5} max={60} step={5}
           format={v => `${v}s`}
@@ -153,7 +143,7 @@ export default function HighlightWeightSliders() {
         {/* Overtake boost */}
         <ParamSlider
           label="Overtake Boost"
-          tooltip="Score multiplier for events involving position changes"
+          tooltip="Score multiplier applied to events involving a position change"
           value={params.overtakeBoost}
           min={1.0} max={3.0} step={0.1}
           format={v => `${v.toFixed(1)}×`}
@@ -162,8 +152,8 @@ export default function HighlightWeightSliders() {
 
         {/* Incident position cutoff */}
         <ParamSlider
-          label="Incident Pos Cut"
-          tooltip="Ignore incidents from cars below this position (0 = include all)"
+          label="Incident Pos Cutoff"
+          tooltip="Ignore incidents from cars ranked below this position (0 = include all)"
           value={params.incidentPositionCutoff}
           min={0} max={40} step={1}
           format={v => v === 0 ? 'Off' : `P${v}+`}
@@ -173,7 +163,7 @@ export default function HighlightWeightSliders() {
         {/* Preferred driver boost */}
         <ParamSlider
           label="Driver Boost"
-          tooltip="Score multiplier for preferred drivers"
+          tooltip="Score multiplier for events featuring preferred drivers"
           value={params.preferredDriverBoost}
           min={1.0} max={3.0} step={0.1}
           format={v => `${v.toFixed(1)}×`}
@@ -206,7 +196,7 @@ export default function HighlightWeightSliders() {
 function ParamSlider({ label, tooltip, value, min, max, step, format, onChange }) {
   return (
     <div className="flex items-center gap-2" title={tooltip}>
-      <span className="text-xxs text-text-secondary w-20 truncate">{label}</span>
+      <span className="text-xxs text-text-secondary shrink-0" style={{ minWidth: '7rem' }}>{label}</span>
       <input
         type="range"
         min={min}
@@ -216,7 +206,7 @@ function ParamSlider({ label, tooltip, value, min, max, step, format, onChange }
         onChange={(e) => onChange(parseFloat(e.target.value))}
         className="flex-1 h-1 accent-accent cursor-pointer"
       />
-      <span className="text-xxs text-text-tertiary font-mono w-10 text-right">
+      <span className="text-xxs text-text-tertiary font-mono shrink-0" style={{ minWidth: '3rem', textAlign: 'right' }}>
         {format(value)}
       </span>
     </div>

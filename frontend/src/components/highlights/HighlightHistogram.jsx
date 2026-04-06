@@ -1,39 +1,36 @@
-import { useMemo, useState, useCallback, useRef, useEffect } from 'react'
+import { useMemo, useState, useCallback, useRef } from 'react'
 import { useHighlight, EVENT_TYPE_LABELS, tierColor } from '../../context/HighlightContext'
 import { useTimeline, EVENT_COLORS } from '../../context/TimelineContext'
 import { formatTime } from '../../utils/time'
-import { Columns3, ArrowRight, Film, Scissors, Layers } from 'lucide-react'
+import { Columns3, ArrowRight, Layers } from 'lucide-react'
 
 /**
- * HighlightHistogram — Histogram-based event organizer.
+ * HighlightHistogram — Unified score histogram + result timeline.
  *
- * Layout: Left = score histogram (columns 1–10, time top→bottom),
- *         Right = result timeline (horizontal sequence of selected events).
+ * LEFT: 10 score-bucket columns. Events are positioned vertically by race time,
+ *       sized by duration. Opacity reflects selection state.
  *
- * Each event is a tile:
- *   • Column = score bucket (1–10)
- *   • Vertical position = time in race
- *   • Height = duration (with padding)
- *   • Color = event type
- *   • Opacity: full = selected, faded = rejected
- *   • Border = hover or selected
+ * RIGHT extension: Two result columns — "Chosen Events" and "PIP" — using the
+ *       SAME time axis as the histogram so alignment is visual and instant.
  *
- * The result timeline shows selected events in order with duration, drivers,
- * and segment type (event / PIP / B-roll / transition).
+ * Compress toggle: switches result columns from time-based to sequential stacking,
+ *       eliminating dead air to preview the final edit sequence.
+ *
+ * The entire view uses a tall scrollable container (3px per second of race time)
+ * so events are spread out and readable.
  */
 
 const BUCKET_COUNT = 10
 const BUCKET_LABELS = Array.from({ length: BUCKET_COUNT }, (_, i) => i + 1)
+const PX_PER_SECOND = 3    // 3 pixels per second of race time
+const MIN_HEIGHT_PX = 900  // never shorter than this
 
-/** Map a score (0–10 range) to a bucket index 0–9 */
+/** Map a score (0–10) to bucket index 0–9 */
 function scoreToBucket(score) {
   if (score == null || score <= 0) return 0
-  // Scores are 0–10; map directly to 10 buckets (0=<1, 1=1-2, ..., 9=9-10)
-  const bucket = Math.floor(score)
-  return Math.max(0, Math.min(BUCKET_COUNT - 1, bucket))
+  return Math.max(0, Math.min(BUCKET_COUNT - 1, Math.floor(score)))
 }
 
-/** Format seconds to M:SS */
 function formatDuration(sec) {
   if (!sec || sec <= 0) return '0s'
   const m = Math.floor(sec / 60)
@@ -41,70 +38,63 @@ function formatDuration(sec) {
   return m > 0 ? `${m}:${String(s).padStart(2, '0')}` : `${s}s`
 }
 
-export default function HighlightHistogram() {
-  const {
-    selection, metrics, toggleOverride, jumpToEvent,
-    videoScript,
-  } = useHighlight()
-  const { raceDuration, seekTo, selectedEventId, setSelectedEventId } = useTimeline()
-  const [hoveredId, setHoveredId] = useState(null)
-  const histogramRef = useRef(null)
+// ─────────────────────────────────────────────────────────────────────────────
 
-  // ── Compute event buckets ──────────────────────────────────────────────
-  const { buckets, totalDuration, allEvents } = useMemo(() => {
+export default function HighlightHistogram() {
+  const { selection, metrics, toggleOverride, jumpToEvent } = useHighlight()
+  const { raceDuration, selectedEventId, setSelectedEventId } = useTimeline()
+  const [hoveredId, setHoveredId] = useState(null)
+  const [compress, setCompress] = useState(false)
+  const scrollRef = useRef(null)
+
+  // ── Derive data ───────────────────────────────────────────────────────────
+  const { buckets, totalDuration, allEvents, chosenEvents, pipEvents } = useMemo(() => {
     const all = [...(selection.scoredEvents || [])]
       .sort((a, b) => a.start_time_seconds - b.start_time_seconds)
 
     const dur = raceDuration > 0
       ? raceDuration
-      : all.length > 0
-        ? Math.max(...all.map(e => e.end_time_seconds || 0))
-        : 0
+      : all.length > 0 ? Math.max(...all.map(e => e.end_time_seconds || 0)) : 0
 
-    // Distribute events into 10 buckets by score
     const bkts = Array.from({ length: BUCKET_COUNT }, () => [])
-    for (const evt of all) {
-      const idx = scoreToBucket(evt.score)
-      bkts[idx].push(evt)
-    }
+    for (const evt of all) bkts[scoreToBucket(evt.score)].push(evt)
 
-    return { buckets: bkts, totalDuration: dur, allEvents: all }
+    const highlights = all.filter(e => e.inclusion === 'highlight')
+    return {
+      buckets: bkts,
+      totalDuration: dur,
+      allEvents: all,
+      chosenEvents: highlights.filter(e => e.segment_type !== 'pip'),
+      pipEvents: highlights.filter(e => e.segment_type === 'pip'),
+    }
   }, [selection.scoredEvents, raceDuration])
 
-  // ── Selected events for result timeline ────────────────────────────────
-  const resultSegments = useMemo(() => {
-    const highlights = allEvents
-      .filter(e => e.inclusion === 'highlight')
+  // Tall scrollable height
+  const contentHeight = useMemo(() =>
+    Math.max(MIN_HEIGHT_PX, totalDuration * PX_PER_SECOND),
+    [totalDuration],
+  )
+
+  // Compressed sequential positions for result columns
+  const compressState = useMemo(() => {
+    if (!compress) return null
+    const ITEM_H = 38
+    const GAP = 4
+    const map = new Map()
+    let top = 0
+    const combined = [...chosenEvents, ...pipEvents]
       .sort((a, b) => a.start_time_seconds - b.start_time_seconds)
+    for (const evt of combined) {
+      map.set(evt.id, top)
+      top += ITEM_H + GAP
+    }
+    return { map, totalHeight: top + 20 }
+  }, [compress, chosenEvents, pipEvents])
 
-    // Include transitions and B-roll from videoScript
-    const extras = (videoScript || [])
-      .filter(s => s.type === 'transition' || s.type === 'broll')
-      .map(s => ({
-        ...s,
-        _isScript: true,
-        start_time_seconds: s.start_time_seconds ?? 0,
-        end_time_seconds: s.end_time_seconds ?? 0,
-      }))
-
-    // Merge and sort by time
-    const merged = [
-      ...highlights.map(e => ({ ...e, _segType: e.segment_type === 'pip' ? 'pip' : 'event' })),
-      ...extras.map(e => ({ ...e, _segType: e.type })),
-    ].sort((a, b) => a.start_time_seconds - b.start_time_seconds)
-
-    return merged
-  }, [allEvents, videoScript])
-
-  // ── Handle tile click → open inspector ─────────────────────────────────
-  const handleTileClick = useCallback((evt) => {
+  const handleClick = useCallback((evt) => {
     setSelectedEventId(evt.id)
     jumpToEvent(evt)
   }, [setSelectedEventId, jumpToEvent])
-
-  // ── Handle tile hover → highlight everywhere ───────────────────────────
-  const handleTileEnter = useCallback((id) => setHoveredId(id), [])
-  const handleTileLeave = useCallback(() => setHoveredId(null), [])
 
   if (totalDuration <= 0 && allEvents.length === 0) {
     return (
@@ -115,106 +105,129 @@ export default function HighlightHistogram() {
     )
   }
 
+  const innerHeight = compress && compressState ? compressState.totalHeight : contentHeight
+
   return (
-    <div className="flex h-full min-h-0 overflow-hidden">
-      {/* ── LEFT: Score Histogram ──────────────────────────────────────── */}
-      <div className="flex-1 flex flex-col min-w-0 border-r border-border">
-        {/* Header */}
-        <div className="flex items-center justify-between px-3 py-1.5 border-b border-border bg-bg-secondary shrink-0">
-          <div className="flex items-center gap-2">
-            <Columns3 size={14} className="text-accent" />
-            <span className="text-xxs font-semibold text-text-primary uppercase tracking-wider">
-              Score Histogram
-            </span>
-          </div>
-          <span className="text-xxs text-text-disabled">
-            {allEvents.length} events · {formatDuration(totalDuration)} race
-          </span>
-        </div>
+    <div className="flex flex-col h-full min-h-0 overflow-hidden">
 
-        {/* Column headers (score 1–10, low→high left→right) */}
-        <div className="flex shrink-0 border-b border-border-subtle bg-bg-secondary">
-          {/* Time gutter */}
-          <div className="w-10 shrink-0 text-center text-xxs text-text-disabled py-0.5 border-r border-border-subtle">
-            Time
-          </div>
-          {BUCKET_LABELS.map(label => (
-            <div
-              key={label}
-              className="flex-1 text-center text-xxs text-text-tertiary py-0.5 border-r border-border-subtle last:border-r-0"
-            >
-              {label}
-            </div>
-          ))}
-        </div>
-
-        {/* Histogram grid — scrollable */}
-        <div
-          ref={histogramRef}
-          className="flex-1 flex min-h-0 overflow-y-auto overflow-x-hidden relative"
+      {/* ── Header bar ─────────────────────────────────────────────────── */}
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-bg-secondary shrink-0">
+        <Columns3 size={13} className="text-accent shrink-0" />
+        <span className="text-xs font-semibold text-text-primary uppercase tracking-wider whitespace-nowrap">
+          Score Histogram
+        </span>
+        <span className="text-xs text-text-disabled">
+          {allEvents.length} events · {formatDuration(totalDuration)}
+        </span>
+        <div className="flex-1" />
+        <button
+          onClick={() => setCompress(v => !v)}
+          className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg border transition-colors
+            ${compress
+              ? 'bg-accent/15 text-accent border-accent/30'
+              : 'text-text-tertiary border-border-subtle hover:text-text-secondary hover:border-border'}`}
         >
-          {/* Time gutter with lap markers */}
-          <TimeGutter totalDuration={totalDuration} />
-
-          {/* Event columns */}
-          <div className="flex-1 flex relative">
-            {buckets.map((bucketEvents, bucketIdx) => (
-              <HistogramColumn
-                key={bucketIdx}
-                events={bucketEvents}
-                totalDuration={totalDuration}
-                hoveredId={hoveredId}
-                selectedId={selectedEventId}
-                onTileClick={handleTileClick}
-                onTileEnter={handleTileEnter}
-                onTileLeave={handleTileLeave}
-                onOverrideToggle={toggleOverride}
-                isLast={bucketIdx === BUCKET_COUNT - 1}
-              />
-            ))}
-          </div>
-        </div>
-
-        {/* Legend */}
-        <HistogramLegend />
+          ⇟ {compress ? 'Compressed' : 'Compress'}
+        </button>
+        <div className="w-px h-4 bg-border-subtle mx-1" />
+        <ArrowRight size={12} className="text-accent shrink-0" />
+        <span className="text-xs font-semibold text-text-primary uppercase tracking-wider whitespace-nowrap">
+          Result
+        </span>
+        <span className="text-xs text-text-disabled">
+          {metrics.eventCount || 0} clips · {formatDuration(metrics.duration)}
+        </span>
       </div>
 
-      {/* ── RIGHT: Result Timeline ────────────────────────────────────── */}
-      <div className="w-72 shrink-0 flex flex-col bg-bg-secondary">
-        <div className="flex items-center justify-between px-3 py-1.5 border-b border-border shrink-0">
-          <div className="flex items-center gap-2">
-            <ArrowRight size={14} className="text-accent" />
-            <span className="text-xxs font-semibold text-text-primary uppercase tracking-wider">
-              Result Timeline
-            </span>
-          </div>
-          <span className="text-xxs text-text-disabled">
-            {metrics.eventCount || 0} clips · {formatDuration(metrics.duration)}
-          </span>
+      {/* ── Column headers ─────────────────────────────────────────────── */}
+      <div className="flex shrink-0 border-b border-border-subtle bg-bg-secondary select-none">
+        <div className="shrink-0 border-r border-border-subtle text-center text-xs text-text-disabled py-1.5"
+             style={{ width: 52 }}>
+          Time
         </div>
+        {BUCKET_LABELS.map(label => (
+          <div key={label}
+               className="flex-1 text-center text-xs font-semibold text-text-tertiary py-1.5 border-r border-border-subtle last:border-r-0 min-w-0">
+            {label}
+          </div>
+        ))}
+        <div className="shrink-0 bg-border" style={{ width: 1 }} />
+        <div className="shrink-0 text-center text-xs text-text-disabled py-1.5 border-r border-border-subtle"
+             style={{ width: 130 }}>
+          Chosen Events
+        </div>
+        <div className="shrink-0 text-center text-xs text-text-disabled py-1.5"
+             style={{ width: 88 }}>
+          PIP
+        </div>
+      </div>
 
-        <div className="flex-1 overflow-y-auto px-2 py-1">
-          {resultSegments.length === 0 ? (
-            <div className="flex items-center justify-center h-full text-text-disabled text-xxs">
-              No highlights selected
-            </div>
-          ) : (
-            <div className="space-y-0.5">
-              {resultSegments.map((seg, i) => (
-                <ResultSegment
-                  key={seg.id ?? `seg-${i}`}
-                  segment={seg}
-                  isHovered={hoveredId === seg.id}
-                  isSelected={selectedEventId === seg.id}
-                  onEnter={() => seg.id && handleTileEnter(seg.id)}
-                  onLeave={handleTileLeave}
-                  onClick={() => seg.id && handleTileClick(seg)}
+      {/* ── Unified scrollable area ─────────────────────────────────────── */}
+      <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={scrollRef}>
+        <div className="flex" style={{ minHeight: `${innerHeight}px`, position: 'relative' }}>
+
+          {/* Time gutter */}
+          <TimeGutter totalDuration={totalDuration} innerHeight={innerHeight} compress={compress} />
+
+          {/* Histogram bucket columns */}
+          {buckets.map((bucketEvents, idx) => (
+            <div
+              key={idx}
+              className={`flex-1 relative ${idx < BUCKET_COUNT - 1 ? 'border-r border-border-subtle' : ''}`}
+              style={{ minHeight: `${innerHeight}px` }}
+            >
+              {bucketEvents.map(evt => (
+                <EventTile
+                  key={evt.id}
+                  event={evt}
+                  totalDuration={totalDuration}
+                  isHovered={hoveredId === evt.id}
+                  isSelected={selectedEventId === evt.id}
+                  onClick={() => handleClick(evt)}
+                  onEnter={() => setHoveredId(evt.id)}
+                  onLeave={() => setHoveredId(null)}
+                  onRightClick={() => toggleOverride(evt.id)}
                 />
               ))}
             </div>
-          )}
+          ))}
+
+          {/* Separator between histogram and result */}
+          <div className="shrink-0 bg-border" style={{ width: 1 }} />
+
+          {/* Result: Chosen events */}
+          <ResultColumn
+            events={chosenEvents}
+            totalDuration={totalDuration}
+            compress={compress}
+            compressPositions={compressState?.map}
+            hoveredId={hoveredId}
+            selectedId={selectedEventId}
+            onClick={handleClick}
+            onEnter={id => setHoveredId(id)}
+            onLeave={() => setHoveredId(null)}
+            width={130}
+          />
+
+          {/* Result: PIP events */}
+          <ResultColumn
+            events={pipEvents}
+            totalDuration={totalDuration}
+            compress={compress}
+            compressPositions={compressState?.map}
+            hoveredId={hoveredId}
+            selectedId={selectedEventId}
+            onClick={handleClick}
+            onEnter={id => setHoveredId(id)}
+            onLeave={() => setHoveredId(null)}
+            width={88}
+            isPip
+          />
         </div>
       </div>
+
+      {/* ── Legend ─────────────────────────────────────────────────────── */}
+      <HistogramLegend />
     </div>
   )
 }
@@ -224,32 +237,34 @@ export default function HighlightHistogram() {
 // Sub-components
 // ═════════════════════════════════════════════════════════════════════════════
 
-/**
- * TimeGutter — Vertical time markers (every 5 minutes).
- */
-function TimeGutter({ totalDuration }) {
+function TimeGutter({ totalDuration, innerHeight, compress }) {
   const markers = useMemo(() => {
-    if (totalDuration <= 0) return []
-    const interval = totalDuration > 600 ? 300 : totalDuration > 120 ? 60 : 30 // 5min, 1min, or 30s
+    if (compress || totalDuration <= 0) return []
+    const interval =
+      totalDuration > 7200 ? 600 :
+      totalDuration > 3600 ? 300 :
+      totalDuration > 600  ? 60  : 30
     const marks = []
     for (let t = 0; t <= totalDuration; t += interval) {
       marks.push({ time: t, pct: (t / totalDuration) * 100 })
     }
     return marks
-  }, [totalDuration])
+  }, [totalDuration, compress])
 
   return (
-    <div className="w-10 shrink-0 relative border-r border-border-subtle bg-bg-primary/50">
+    <div
+      className="shrink-0 relative border-r border-border-subtle bg-bg-primary/50"
+      style={{ width: 52, minHeight: `${innerHeight}px` }}
+    >
       {markers.map(m => (
-        <div
-          key={m.time}
-          className="absolute left-0 right-0 text-center"
-          style={{ top: `${m.pct}%` }}
-        >
-          <span className="text-text-disabled font-mono leading-none" style={{ fontSize: '8px' }}>
+        <div key={m.time} className="absolute left-0 right-0" style={{ top: `${m.pct}%` }}>
+          <span
+            className="block text-center text-text-disabled font-mono leading-none"
+            style={{ fontSize: 10 }}
+          >
             {formatTime(m.time)}
           </span>
-          <div className="absolute top-1.5 right-0 w-1.5 h-px bg-border-subtle" />
+          <div className="absolute right-0 top-2 bg-border-subtle" style={{ width: 8, height: 1 }} />
         </div>
       ))}
     </div>
@@ -257,114 +272,59 @@ function TimeGutter({ totalDuration }) {
 }
 
 
-/**
- * HistogramColumn — One score-bucket column containing event tiles.
- */
-function HistogramColumn({
-  events, totalDuration, hoveredId, selectedId,
-  onTileClick, onTileEnter, onTileLeave, onOverrideToggle,
-  isLast,
-}) {
-  return (
-    <div
-      className={`flex-1 relative ${isLast ? '' : 'border-r border-border-subtle'}`}
-      style={{ minHeight: '200px' }}
-    >
-      {events.map(evt => (
-        <EventTile
-          key={evt.id}
-          event={evt}
-          totalDuration={totalDuration}
-          isHovered={hoveredId === evt.id}
-          isSelected={selectedId === evt.id}
-          onClick={() => onTileClick(evt)}
-          onEnter={() => onTileEnter(evt.id)}
-          onLeave={onTileLeave}
-          onOverrideToggle={() => onOverrideToggle(evt.id)}
-        />
-      ))}
-    </div>
-  )
-}
-
-
-/**
- * EventTile — Single event block in the histogram.
- *
- * Positioned vertically by time, height by duration.
- * Color = event type, opacity = inclusion state.
- */
 function EventTile({
   event: evt, totalDuration,
   isHovered, isSelected,
-  onClick, onEnter, onLeave, onOverrideToggle,
+  onClick, onEnter, onLeave, onRightClick,
 }) {
   const color = EVENT_COLORS[evt.event_type] || '#6b7280'
   const isHighlight = evt.inclusion === 'highlight'
   const isFullVideo = evt.inclusion === 'full-video'
-  const isExcluded = evt.inclusion === 'excluded'
-
   const top = totalDuration > 0 ? (evt.start_time_seconds / totalDuration) * 100 : 0
   const duration = Math.max(0, (evt.end_time_seconds || 0) - (evt.start_time_seconds || 0))
-  const heightPct = totalDuration > 0 ? Math.max(1.5, (duration / totalDuration) * 100) : 2
-
+  const heightPct = totalDuration > 0 ? Math.max(0.4, (duration / totalDuration) * 100) : 0.4
   const opacity = isHighlight ? 1 : isFullVideo ? 0.5 : 0.2
-  const borderColor = isSelected
-    ? 'rgba(255,255,255,0.8)'
-    : isHovered
-      ? 'rgba(255,255,255,0.5)'
-      : 'rgba(255,255,255,0.1)'
-  const borderWidth = isSelected || isHovered ? 2 : 1
 
   return (
     <div
-      className="absolute left-0.5 right-0.5 rounded cursor-pointer transition-all duration-100 overflow-hidden group"
+      className="absolute left-0.5 right-0.5 rounded cursor-pointer transition-all duration-100 overflow-hidden"
       style={{
         top: `${top}%`,
         height: `${heightPct}%`,
-        minHeight: '14px',
+        minHeight: 20,
         backgroundColor: color,
         opacity,
+        borderWidth: isSelected || isHovered ? 2 : 1,
         borderStyle: 'solid',
-        borderWidth: `${borderWidth}px`,
-        borderColor,
+        borderColor: isSelected
+          ? 'rgba(255,255,255,0.8)'
+          : isHovered
+            ? 'rgba(255,255,255,0.5)'
+            : 'rgba(255,255,255,0.1)',
         zIndex: isSelected ? 20 : isHovered ? 10 : 1,
       }}
       onClick={onClick}
       onMouseEnter={onEnter}
       onMouseLeave={onLeave}
-      onContextMenu={(e) => {
-        e.preventDefault()
-        onOverrideToggle()
-      }}
+      onContextMenu={e => { e.preventDefault(); onRightClick() }}
       title={[
-        `${EVENT_TYPE_LABELS[evt.event_type] || evt.event_type}`,
-        `Score: ${evt.score} | Tier: ${evt.tier || '?'}`,
-        `Time: ${formatTime(evt.start_time_seconds)} — ${formatTime(evt.end_time_seconds)}`,
-        `Duration: ${formatDuration(duration)}`,
+        EVENT_TYPE_LABELS[evt.event_type] || evt.event_type,
+        `Score: ${evt.score ?? '?'} | Tier: ${evt.tier || '?'}`,
+        `${formatTime(evt.start_time_seconds)} — ${formatTime(evt.end_time_seconds)} (${formatDuration(duration)})`,
         evt.reason || '',
-        evt.llm_note ? `💬 ${evt.llm_note}` : '',
-        evt.narrative_anchor ? '⚓ Narrative Anchor' : '',
         isHighlight ? '✓ Selected' : isFullVideo ? '○ Full-video' : '✗ Excluded',
       ].filter(Boolean).join('\n')}
     >
-      {/* Narrative anchor star */}
       {evt.narrative_anchor && (
-        <span className="absolute top-0 right-0 text-yellow-300 leading-none z-10" style={{ fontSize: '8px' }}>★</span>
+        <span className="absolute top-0 right-0 text-yellow-300 z-10 leading-none" style={{ fontSize: 8 }}>★</span>
       )}
-
-      {/* PIP indicator */}
       {evt.segment_type === 'pip' && (
         <div
-          className="absolute right-0 top-0 bottom-0 w-1/3 opacity-40"
-          style={{
-            backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 2px, rgba(255,255,255,0.3) 2px, rgba(255,255,255,0.3) 4px)',
-          }}
+          className="absolute right-0 top-0 bottom-0 w-1/3 opacity-30"
+          style={{ backgroundImage: 'repeating-linear-gradient(45deg,transparent,transparent 2px,rgba(255,255,255,0.3) 2px,rgba(255,255,255,0.3) 4px)' }}
         />
       )}
-
-      {/* Content label (visible when tile is tall enough) */}
-      <div className="px-0.5 py-px truncate" style={{ fontSize: '7px', lineHeight: '9px' }}>
+      <div className="px-0.5 py-px truncate" style={{ fontSize: 9, lineHeight: '11px' }}>
         <span className="text-white/90 font-medium">
           {EVENT_TYPE_LABELS[evt.event_type]?.slice(0, 3) || '?'}
         </span>
@@ -374,122 +334,105 @@ function EventTile({
 }
 
 
-/**
- * ResultSegment — One segment in the result timeline.
- */
-function ResultSegment({ segment: seg, isHovered, isSelected, onEnter, onLeave, onClick }) {
-  const duration = Math.max(0, (seg.end_time_seconds || 0) - (seg.start_time_seconds || 0))
-  const isTransition = seg._segType === 'transition'
-  const isBroll = seg._segType === 'broll'
-  const isPip = seg._segType === 'pip'
-  const isEvent = seg._segType === 'event'
-
-  const color = isEvent || isPip
-    ? EVENT_COLORS[seg.event_type] || '#6b7280'
-    : isBroll
-      ? '#71717a'
-      : '#a1a1aa'
-
+function ResultColumn({
+  events, totalDuration, compress, compressPositions,
+  hoveredId, selectedId, onClick, onEnter, onLeave,
+  width, isPip = false,
+}) {
   return (
-    <div
-      className={`flex items-center gap-1.5 px-2 py-1 rounded cursor-pointer transition-all
-        ${isSelected ? 'ring-2 ring-accent bg-accent/10' : ''}
-        ${isHovered && !isSelected ? 'bg-bg-hover' : ''}
-        ${!isHovered && !isSelected ? 'hover:bg-bg-hover' : ''}
-        ${isTransition ? 'py-0.5' : ''}
-      `}
-      onMouseEnter={onEnter}
-      onMouseLeave={onLeave}
-      onClick={onClick}
-      title={seg.llm_note ? `💬 ${seg.llm_note}` : undefined}
-    >
-      {/* Color indicator */}
-      <div
-        className="w-1.5 shrink-0 rounded-full self-stretch"
-        style={{
-          backgroundColor: color,
-          backgroundImage: isBroll
-            ? 'repeating-linear-gradient(45deg, transparent, transparent 2px, rgba(255,255,255,0.15) 2px, rgba(255,255,255,0.15) 4px)'
-            : undefined,
-          minHeight: isTransition ? '4px' : '16px',
-        }}
-      />
+    <div className="shrink-0 relative" style={{ width }}>
+      {events.map(evt => {
+        const color = EVENT_COLORS[evt.event_type] || '#6b7280'
+        const isSelected = selectedId === evt.id
+        const isHovered = hoveredId === evt.id
+        const duration = Math.max(0, (evt.end_time_seconds || 0) - (evt.start_time_seconds || 0))
 
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-1">
-          {/* Type indicator */}
-          {isPip && <Layers size={9} className="text-info shrink-0" />}
-          {isTransition && <Scissors size={9} className="text-text-disabled shrink-0" />}
-          {isBroll && <Film size={9} className="text-text-disabled shrink-0" />}
+        let topStyle, heightStyle, minH
+        if (compress && compressPositions) {
+          topStyle = `${compressPositions.get(evt.id) ?? 0}px`
+          heightStyle = '34px'
+          minH = '34px'
+        } else {
+          const pct = totalDuration > 0 ? (evt.start_time_seconds / totalDuration) * 100 : 0
+          const hPct = totalDuration > 0 ? Math.max(0.4, (duration / totalDuration) * 100) : 0.4
+          topStyle = `${pct}%`
+          heightStyle = `${hPct}%`
+          minH = '20px'
+        }
 
-          {/* Label */}
-          <span className="text-xxs text-text-primary font-medium truncate">
-            {isEvent || isPip
-              ? EVENT_TYPE_LABELS[seg.event_type] || seg.event_type
-              : isTransition
-                ? (seg.transition_type || 'CUT').toUpperCase()
-                : 'B-ROLL'}
-          </span>
-
-          {/* Narrative anchor */}
-          {seg.narrative_anchor && (
-            <span className="text-yellow-400" style={{ fontSize: '9px' }}>★</span>
-          )}
-        </div>
-
-        {/* Meta line */}
-        <div className="flex items-center gap-1.5 text-text-disabled" style={{ fontSize: '8px' }}>
-          <span className="font-mono">{formatDuration(duration)}</span>
-          {(isEvent || isPip) && seg.tier && (
-            <span
-              className="px-0.5 rounded text-white font-bold"
-              style={{ backgroundColor: tierColor(seg.tier), fontSize: '7px' }}
-            >
-              {seg.tier}
-            </span>
-          )}
-          {isPip && <span className="text-info">PIP</span>}
-        </div>
-      </div>
-
-      {/* Score */}
-      {(isEvent || isPip) && seg.score != null && (
-        <span className="text-xxs font-mono text-text-tertiary shrink-0">
-          {seg.score}
-        </span>
-      )}
+        return (
+          <div
+            key={evt.id}
+            className="absolute left-1 right-1 rounded cursor-pointer overflow-hidden transition-all"
+            style={{
+              top: topStyle,
+              height: heightStyle,
+              minHeight: minH,
+              backgroundColor: color,
+              opacity: 0.88,
+              borderWidth: isSelected || isHovered ? 2 : 1,
+              borderStyle: 'solid',
+              borderColor: isSelected
+                ? 'rgba(255,255,255,0.9)'
+                : isHovered
+                  ? 'rgba(255,255,255,0.5)'
+                  : 'rgba(255,255,255,0.18)',
+              zIndex: isSelected ? 20 : isHovered ? 10 : 1,
+            }}
+            onClick={() => onClick(evt)}
+            onMouseEnter={() => onEnter(evt.id)}
+            onMouseLeave={onLeave}
+            title={[
+              EVENT_TYPE_LABELS[evt.event_type] || evt.event_type,
+              `Score: ${evt.score ?? '?'} | Tier: ${evt.tier || '?'}`,
+              `${formatTime(evt.start_time_seconds)} — ${formatTime(evt.end_time_seconds)} (${formatDuration(duration)})`,
+              isPip ? '• PIP' : '',
+            ].filter(Boolean).join('\n')}
+          >
+            {isPip && <Layers size={8} className="absolute top-0.5 right-0.5 text-white/80 z-10" />}
+            <div className="px-1 py-px truncate" style={{ fontSize: 9, lineHeight: '11px' }}>
+              <span className="text-white/90 font-medium">
+                {EVENT_TYPE_LABELS[evt.event_type]?.slice(0, 5) || '?'}
+              </span>
+            </div>
+            {compress && (
+              <div className="px-1 truncate" style={{ fontSize: 8, lineHeight: '10px', opacity: 0.7 }}>
+                <span className="text-white/70">{formatTime(evt.start_time_seconds)}</span>
+              </div>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
 
 
-/**
- * HistogramLegend — Visual legend for the histogram.
- */
 function HistogramLegend() {
   return (
-    <div className="flex items-center gap-3 px-3 py-1 border-t border-border bg-bg-secondary shrink-0 flex-wrap">
-      <span className="text-xxs text-text-disabled">← Low score</span>
-      <span className="text-xxs text-text-disabled flex-1 text-center">
+    <div className="flex items-center gap-3 px-3 py-1.5 border-t border-border bg-bg-secondary shrink-0 flex-wrap">
+      <span className="text-xs text-text-disabled">← Low score</span>
+      <span className="text-xs text-text-disabled flex-1 text-center">
         Columns = score buckets (1–10) · Time flows ↓
       </span>
-      <span className="text-xxs text-text-disabled">High score →</span>
+      <span className="text-xs text-text-disabled">High score →</span>
 
-      <div className="w-full flex items-center gap-3 pt-0.5">
+      <div className="w-full flex items-center gap-3 pt-0.5 flex-wrap">
         {Object.entries(EVENT_COLORS).map(([type, color]) => (
-          <span key={type} className="flex items-center gap-1 text-text-disabled" style={{ fontSize: '8px' }}>
+          <span key={type} className="flex items-center gap-1 text-text-disabled" style={{ fontSize: 9 }}>
             <span className="inline-block w-2 h-2 rounded-sm" style={{ backgroundColor: color }} />
             {EVENT_TYPE_LABELS[type]?.slice(0, 6) || type}
           </span>
         ))}
-        <span className="mx-1 text-text-disabled" style={{ fontSize: '8px' }}>│</span>
-        <span className="flex items-center gap-1 text-text-disabled" style={{ fontSize: '8px' }}>
+        <span className="mx-1 text-text-disabled" style={{ fontSize: 9 }}>│</span>
+        <span className="flex items-center gap-1 text-text-disabled" style={{ fontSize: 9 }}>
           <span className="inline-block w-2 h-2 rounded-sm bg-accent" /> Selected
         </span>
-        <span className="flex items-center gap-1 text-text-disabled" style={{ fontSize: '8px' }}>
+        <span className="flex items-center gap-1 text-text-disabled" style={{ fontSize: 9 }}>
           <span className="inline-block w-2 h-2 rounded-sm bg-text-disabled opacity-30" /> Excluded
         </span>
       </div>
     </div>
   )
 }
+

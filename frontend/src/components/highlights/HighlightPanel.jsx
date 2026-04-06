@@ -13,7 +13,7 @@ import Timeline from '../timeline/Timeline'
 import PreviewPanel from '../preview/PreviewPanel'
 import ProjectFileBrowser from '../projects/ProjectFileBrowser'
 import ResizableSidebar from '../layout/ResizableSidebar'
-import { Sparkles, List, Search, History, Folder } from 'lucide-react'
+import { Sparkles, List, Search, History, Folder, Film, Scissors } from 'lucide-react'
 
 /**
  * HighlightPanel — Main container for the Highlight Editing Suite.
@@ -25,7 +25,7 @@ import { Sparkles, List, Search, History, Folder } from 'lucide-react'
  * @param {number} props.projectId - Active project ID
  */
 export default function HighlightPanel({ projectId }) {
-  const { loadConfig, loadDrivers, loadPresets } = useHighlight()
+  const { loadConfig, loadDrivers, loadPresets, replayMode, setReplayMode } = useHighlight()
   const { fetchEvents, events } = useAnalysis()
   const { history } = useUndoRedo()
 
@@ -87,12 +87,45 @@ export default function HighlightPanel({ projectId }) {
           <div className="flex-1 flex min-h-0 overflow-hidden">
             {/* Weight sliders + metrics */}
             <div className="w-72 shrink-0 border-r border-border overflow-y-auto bg-bg-secondary">
+              {/* Section header */}
               <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
                 <Sparkles className="w-4 h-4 text-accent" />
                 <h3 className="text-xs font-semibold text-text-primary uppercase tracking-wider">
-                  Highlight Tuning
+                  Replay Tuning
                 </h3>
               </div>
+
+              {/* Replay mode toggle */}
+              <div className="px-3 py-2 border-b border-border-subtle">
+                <div className="flex items-center gap-1 p-0.5 bg-bg-primary rounded-lg border border-border">
+                  <button
+                    onClick={() => setReplayMode('highlights')}
+                    className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 text-xxs font-medium rounded transition-colors
+                      ${replayMode === 'highlights'
+                        ? 'bg-accent text-white shadow-sm'
+                        : 'text-text-secondary hover:text-text-primary'}`}
+                  >
+                    <Scissors className="w-3 h-3" />
+                    Highlights
+                  </button>
+                  <button
+                    onClick={() => setReplayMode('full')}
+                    className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 text-xxs font-medium rounded transition-colors
+                      ${replayMode === 'full'
+                        ? 'bg-accent text-white shadow-sm'
+                        : 'text-text-secondary hover:text-text-primary'}`}
+                  >
+                    <Film className="w-3 h-3" />
+                    Full Race
+                  </button>
+                </div>
+                {replayMode === 'full' && (
+                  <p className="text-xxs text-text-disabled mt-1.5 leading-relaxed">
+                    All events included — shows the full race contiguously.
+                  </p>
+                )}
+              </div>
+
               <HighlightWeightSliders />
               <HighlightMetrics />
             </div>

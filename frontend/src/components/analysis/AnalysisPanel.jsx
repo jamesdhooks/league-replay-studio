@@ -797,108 +797,6 @@ export default memo(function AnalysisPanel() {
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
 
-      {/* ── Top control bar ── always visible on active/complete/error ── */}
-      <div className="shrink-0 border-b border-border bg-bg-secondary">
-        <div className="flex items-center gap-2 px-3 py-2 min-w-0">
-
-          {/* ── Phase ① — Telemetry Collection ── */}
-          <PhaseCard
-            title="Telemetry"
-            active={isAnalyzing && isScanning}
-            done={hasTelemetry || hasEventsLocal}
-            detail={
-              hasTelemetry || hasEventsLocal
-                ? (() => {
-                    const parts = []
-                    if (analysisStatus?.total_ticks) parts.push(`${(analysisStatus.total_ticks / 1000).toFixed(1)}k samples`)
-                    if (analysisStatus?.db_size_bytes >= 1_048_576) parts.push(`${(analysisStatus.db_size_bytes / 1_048_576).toFixed(1)} MB`)
-                    else if (analysisStatus?.db_size_bytes > 0) parts.push(`${Math.round(analysisStatus.db_size_bytes / 1024)} KB`)
-                    return parts.join(' · ') || null
-                  })()
-                : null
-            }
-            progressMsg={isScanning ? (progress?.message || null) : null}
-            progressPct={isScanning ? (progress?.percent || 0) : null}
-            primaryLabel={hasTelemetry || hasEventsLocal ? 'Re-collect' : 'Collect'}
-            primaryIcon={isAnalyzing && isScanning ? null : <RefreshCw size={11} />}
-            onPrimary={isAnalyzing && isScanning ? handleCancel : handleRescan}
-            primaryDanger={isAnalyzing && isScanning}
-            primaryDisabled={!isAnalyzing && !isConnected}
-            primaryTooltip={!isConnected && !(isAnalyzing && isScanning) ? 'iRacing must be running with a replay loaded' : null}
-          />
-
-          {/* connector arrow */}
-          <ChevronRight size={13} className="text-border-subtle shrink-0" />
-
-          {/* ── Phase ② — Event Analysis ── */}
-          <PhaseCard
-            title="Analysis"
-            active={isAnalyzing && !isScanning}
-            done={hasEventsLocal}
-            detail={
-              hasEventsLocal && eventSummary?.total_events > 0
-                ? `${eventSummary.total_events} events`
-                : null
-            }
-            progressMsg={!isScanning && isAnalyzing ? (progress?.message || null) : null}
-            progressPct={!isScanning && isAnalyzing ? (progress?.percent || 0) : null}
-            primaryLabel={hasEventsLocal ? 'Re-analyze' : 'Analyze'}
-            primaryIcon={isAnalyzing && !isScanning ? null : isRedetecting ? <Loader2 size={11} className="animate-spin" /> : <SlidersHorizontal size={11} />}
-            onPrimary={isAnalyzing && !isScanning ? handleCancel : handleReanalyze}
-            primaryDanger={isAnalyzing && !isScanning}
-            primaryDisabled={isRedetecting || (!isAnalyzing && !hasTelemetry && !hasEventsLocal)}
-            primaryTooltip={!hasTelemetry && !hasEventsLocal && !isAnalyzing ? 'Collect telemetry first' : null}
-          />
-
-          {/* ── Tuning toggle ── */}
-          <button
-            onClick={() => setShowTuningPanel(v => !v)}
-            className={`ml-auto flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg
-                        transition-colors shrink-0
-                        ${showTuningPanel
-                          ? 'bg-accent/15 text-accent border border-accent/30'
-                          : 'text-text-tertiary border border-border-subtle hover:bg-bg-hover hover:text-text-secondary'}`}
-          >
-            <SlidersHorizontal size={12} />
-            Detection Tuning
-            <ChevronDown size={10} className={`transition-transform ${showTuningPanel ? 'rotate-180' : ''}`} />
-          </button>
-        </div>
-
-        {/* ── Inline tuning panel ── */}
-        {showTuningPanel && !isAnalyzing && (
-          <div className="border-t border-border px-4 py-3 animate-fade-in">
-            <TuningPanel params={tuningParams} onChange={updateTuning} horizontal />
-            <div className="flex items-center gap-2 mt-3 pt-2 border-t border-border-subtle">
-              <button
-                onClick={handleReanalyze}
-                disabled={isRedetecting || (!hasTelemetry && !hasEventsLocal)}
-                className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold
-                           text-white bg-gradient-to-r from-gradient-from to-gradient-to
-                           rounded-lg hover:from-gradient-via hover:to-gradient-from
-                           transition-all duration-200 shadow-glow-sm
-                           disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                {isRedetecting
-                  ? <Loader2 size={12} className="animate-spin" />
-                  : <SlidersHorizontal size={12} />}
-                {isRedetecting ? 'Analyzing...' : 'Re-analyze with these settings'}
-              </button>
-              <span className="text-xxs text-text-disabled">
-                Detection parameters are saved automatically and persist between sessions.
-              </span>
-            </div>
-          </div>
-        )}
-
-        {error && (
-          <div className="flex items-center gap-1.5 px-4 py-1.5 bg-danger/10 border-t border-danger/20">
-            <XCircle size={12} className="text-danger shrink-0" />
-            <span className="text-xxs text-danger">{error}</span>
-          </div>
-        )}
-      </div>
-
       {/* ── Main area: sidebar + TV + controls (fills remaining height) ── */}
       <div className="flex-1 flex overflow-hidden min-h-0 relative">
 
@@ -1768,13 +1666,67 @@ export default memo(function AnalysisPanel() {
           </div>
 
             {/* ── Options + Cameras + Drivers column ── */}
-            {!isAnalyzing && (hasEventsLocal || isConnected) && (
-              <div className="flex flex-col gap-2 w-52 shrink-0">
+            {(isAnalyzing || hasEventsLocal || isConnected) && (
+              <div className="flex flex-col gap-2 w-52 shrink-0 overflow-y-auto py-2 pr-2">
 
-                {/* Options card */}
+                {/* Analysis phases card — always shown when active or has data */}
+                <div className="rounded-xl border border-border bg-bg-secondary shadow-sm p-3 shrink-0">
+                  <span className="text-xxs font-semibold text-text-tertiary uppercase tracking-wider block mb-2">Analysis</span>
+                  <div className="flex flex-col gap-2">
+                    <PhaseCard
+                      title="Telemetry"
+                      active={isAnalyzing && isScanning}
+                      done={hasTelemetry || hasEventsLocal}
+                      detail={
+                        hasTelemetry || hasEventsLocal
+                          ? (() => {
+                              const parts = []
+                              if (analysisStatus?.total_ticks) parts.push(`${(analysisStatus.total_ticks / 1000).toFixed(1)}k`)
+                              if (analysisStatus?.db_size_bytes >= 1_048_576) parts.push(`${(analysisStatus.db_size_bytes / 1_048_576).toFixed(1)} MB`)
+                              else if (analysisStatus?.db_size_bytes > 0) parts.push(`${Math.round(analysisStatus.db_size_bytes / 1024)} KB`)
+                              return parts.join(' · ') || null
+                            })()
+                          : null
+                      }
+                      progressMsg={isScanning ? (progress?.message || null) : null}
+                      progressPct={isScanning ? (progress?.percent || 0) : null}
+                      primaryLabel={hasTelemetry || hasEventsLocal ? 'Re-collect' : 'Collect'}
+                      primaryIcon={isAnalyzing && isScanning ? null : <RefreshCw size={11} />}
+                      onPrimary={isAnalyzing && isScanning ? handleCancel : handleRescan}
+                      primaryDanger={isAnalyzing && isScanning}
+                      primaryDisabled={!isAnalyzing && !isConnected}
+                      primaryTooltip={!isConnected && !(isAnalyzing && isScanning) ? 'iRacing must be running' : null}
+                    />
+                    <PhaseCard
+                      title="Events"
+                      active={isAnalyzing && !isScanning}
+                      done={hasEventsLocal}
+                      detail={
+                        hasEventsLocal && eventSummary?.total_events > 0
+                          ? `${eventSummary.total_events} events`
+                          : null
+                      }
+                      progressMsg={!isScanning && isAnalyzing ? (progress?.message || null) : null}
+                      progressPct={!isScanning && isAnalyzing ? (progress?.percent || 0) : null}
+                      primaryLabel={hasEventsLocal ? 'Re-analyze' : 'Analyze'}
+                      primaryIcon={isAnalyzing && !isScanning ? null : isRedetecting ? <Loader2 size={11} className="animate-spin" /> : <SlidersHorizontal size={11} />}
+                      onPrimary={isAnalyzing && !isScanning ? handleCancel : handleReanalyze}
+                      primaryDanger={isAnalyzing && !isScanning}
+                      primaryDisabled={isRedetecting || (!isAnalyzing && !hasTelemetry && !hasEventsLocal)}
+                      primaryTooltip={!hasTelemetry && !hasEventsLocal && !isAnalyzing ? 'Collect telemetry first' : null}
+                    />
+                  </div>
+                  {error && (
+                    <div className="flex items-start gap-1.5 mt-2 pt-2 border-t border-danger/20">
+                      <XCircle size={10} className="text-danger shrink-0 mt-0.5" />
+                      <span className="text-xxs text-danger leading-tight">{error}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Actions card */}
                 {hasEventsLocal && (
                   <div className="rounded-xl border border-border bg-bg-secondary shadow-sm p-3 shrink-0">
-                    <span className="text-xxs font-semibold text-text-primary block mb-2">Options</span>
                     <div className="flex flex-col gap-1.5">
                       <button
                         onClick={() => advanceStep(activeProject.id)}
@@ -1783,7 +1735,7 @@ export default memo(function AnalysisPanel() {
                                    rounded-lg hover:from-gradient-via hover:to-gradient-from
                                    transition-all duration-200 shadow-glow-sm justify-center"
                       >
-                        Open Editor
+                        Go To Editing
                         <ChevronRight size={11} />
                       </button>
                       <button

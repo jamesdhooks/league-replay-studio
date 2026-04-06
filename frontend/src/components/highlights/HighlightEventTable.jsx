@@ -67,7 +67,6 @@ export default function HighlightEventTable() {
               <th className="w-8 px-1 py-1.5 text-center text-text-tertiary font-medium">✓</th>
               <th className="w-8 px-1 py-1.5 text-center text-text-tertiary font-medium">Tier</th>
               <SortableHeader column="score" label="Score" current={sortColumn} direction={sortDirection} onSort={handleSort} />
-              <SortableHeader column="severity" label="Sev" current={sortColumn} direction={sortDirection} onSort={handleSort} />
               <SortableHeader column="duration" label="Dur" current={sortColumn} direction={sortDirection} onSort={handleSort} />
               <SortableHeader column="type" label="Type" current={sortColumn} direction={sortDirection} onSort={handleSort} />
               <SortableHeader column="time" label="Time" current={sortColumn} direction={sortDirection} onSort={handleSort} />
@@ -144,16 +143,6 @@ export default function HighlightEventTable() {
                   {/* Score */}
                   <td className="px-2 py-1 font-mono text-text-primary text-right">
                     {evt.score}
-                  </td>
-
-                  {/* Severity */}
-                  <td className="px-2 py-1 text-center">
-                    <span
-                      className="inline-block px-1 py-0.5 rounded text-white font-medium"
-                      style={{ backgroundColor: severityColor(evt.severity), fontSize: '9px' }}
-                    >
-                      {evt.severity}
-                    </span>
                   </td>
 
                   {/* Duration */}
