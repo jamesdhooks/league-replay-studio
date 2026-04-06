@@ -160,12 +160,19 @@ def _start_hls_session_locked(ffmpeg: str, fps: int, crf: int, max_width: int) -
     else:
         capture_engine.update_params(fps=fps)
 
-    for _ in range(50):
+    # Wait up to 10 s for the first capture frame so we get the real source
+    # dimensions.  Previously this was capped at 5 s, which was too short when
+    # dxcam takes a moment to start (e.g. first launch) or falls back to
+    # PrintWindow.  A missed wait here means FFmpeg starts with the wrong
+    # dimensions and every incoming frame gets resized, compounding latency.
+    for _ in range(100):
         if capture_engine._out_w > 0:
             break
         time.sleep(0.1)
 
-    # Lock the raw input dimensions for this FFmpeg process
+    # Lock the raw input dimensions for this FFmpeg process.
+    # If we still don't have real dims after the wait (e.g. iRacing not open),
+    # fall back to safe defaults so FFmpeg can at least start.
     input_w = (capture_engine._out_w or max_width) & ~1
     input_h = (capture_engine._out_h or 720) & ~1
 
@@ -242,7 +249,8 @@ def _start_hls_session_locked(ffmpeg: str, fps: int, crf: int, max_width: int) -
                 frame_bytes: Optional[bytes] = None
                 try:
                     frame = capture_engine._h264_queue.popleft()
-                    # Dimension guard
+                    # Dimension guard — resize if needed so FFmpeg always sees
+                    # the exact frame dimensions it was started with.
                     if frame.shape[1] != input_w or frame.shape[0] != input_h:
                         try:
                             import cv2 as _cv2_hls
@@ -251,7 +259,7 @@ def _start_hls_session_locked(ffmpeg: str, fps: int, crf: int, max_width: int) -
                                 interpolation=_cv2_hls.INTER_LINEAR,
                             )
                         except Exception:
-                            continue  # cv2 unavailable → skip corrupted frame
+                            continue  # cv2 unavailable → skip frame
                     frame_bytes = frame.tobytes()
                     last_frame = frame_bytes
                     last_frame_at = time.monotonic()
@@ -922,8 +930,10 @@ async def hls_file(
         tmpdir = await loop.run_in_executor(None, _ensure_session)
         playlist_path = tmpdir / "playlist.m3u8"
 
-        # Wait up to 10 s for FFmpeg to write the first segment
-        for _ in range(100):
+        # Wait up to 15 s for FFmpeg to write the first segment.
+        # The extended timeout covers the case where the capture engine
+        # starts up slowly (e.g. dxcam initialisation or backend fallback).
+        for _ in range(150):
             if playlist_path.exists() and playlist_path.stat().st_size > 0:
                 break
             # Bail early if FFmpeg process already died — no point waiting longer

@@ -1194,11 +1194,26 @@ class CaptureEngine:
             rect = _get_window_rect(hwnd)
             if not rect:
                 return None
-            self._dxcam_region = (
+            new_region = (
                 rect["left"], rect["top"],
                 rect["left"] + rect["width"],
                 rect["top"] + rect["height"],
             )
+            # Region changed (e.g. window maximised, snapped, or moved) while
+            # the camera is already running.  dxcam locks the capture region at
+            # camera.start() time, so we must stop and restart with the new
+            # coordinates — otherwise we keep grabbing from the wrong position.
+            if new_region != self._dxcam_region and self._dxcam_started:
+                logger.info(
+                    "[CaptureEngine] dxcam: region changed %s -> %s, restarting camera",
+                    self._dxcam_region, new_region,
+                )
+                try:
+                    self._dxcam_camera.stop()
+                except Exception:
+                    logger.debug("Suppressed exception in cleanup", exc_info=True)
+                self._dxcam_started = False
+            self._dxcam_region = new_region
             self._pw_last_hwnd_check = now
 
         try:
