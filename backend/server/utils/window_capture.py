@@ -144,9 +144,9 @@ def _get_window_rect(hwnd: int) -> Optional[dict]:
             user32.GetClientRect(hwnd, ctypes.byref(client_rect))
             pt = _POINT(0, 0)
             user32.ClientToScreen(hwnd, ctypes.byref(pt))
-            rect.left   = pt.x
-            rect.top    = pt.y
-            rect.right  = pt.x + client_rect.right
+            rect.left = pt.x
+            rect.top = pt.y
+            rect.right = pt.x + client_rect.right
             rect.bottom = pt.y + client_rect.bottom
             got_rect = True
 
@@ -155,9 +155,9 @@ def _get_window_rect(hwnd: int) -> Optional[dict]:
 
         # Clamp to on-screen coordinates — never pass negative or zero-area
         # regions to dxcam / gdigrab.
-        left   = max(0, rect.left)
-        top    = max(0, rect.top)
-        right  = max(left, rect.right)
+        left = max(0, rect.left)
+        top = max(0, rect.top)
+        right = max(left, rect.right)
         bottom = max(top, rect.bottom)
         w = right - left
         h = bottom - top
