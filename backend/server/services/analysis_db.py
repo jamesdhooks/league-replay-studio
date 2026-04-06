@@ -326,13 +326,57 @@ def count_events(conn: sqlite3.Connection, event_type: str = "") -> int:
 
 
 def get_analysis_status(conn: sqlite3.Connection) -> dict:
-    """Get the most recent analysis run status."""
+    """Get the most recent analysis run status, augmented with live counts."""
     row = conn.execute(
         "SELECT * FROM analysis_runs ORDER BY id DESC LIMIT 1"
     ).fetchone()
+
+    tick_count = conn.execute("SELECT COUNT(*) FROM race_ticks").fetchone()[0]
+    event_count = conn.execute("SELECT COUNT(*) FROM race_events").fetchone()[0]
+
+    page_count = conn.execute("PRAGMA page_count").fetchone()[0]
+    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+    db_size_bytes = page_count * page_size
+
     if not row:
-        return {"status": "none", "total_ticks": 0, "total_events": 0}
-    return dict(row)
+        return {
+            "status": "none",
+            "total_ticks": tick_count,
+            "total_events": event_count,
+            "has_telemetry": tick_count > 0,
+            "has_events": event_count > 0,
+            "db_size_bytes": db_size_bytes,
+        }
+
+    d = dict(row)
+    d["has_telemetry"] = tick_count > 0
+    d["has_events"] = event_count > 0
+    d["total_ticks"] = tick_count
+    d["total_events"] = event_count
+    d["db_size_bytes"] = db_size_bytes
+    return d
+
+
+def save_tuning_params(conn: sqlite3.Connection, params: dict) -> None:
+    """Persist detection tuning parameters to analysis_meta."""
+    conn.execute(
+        "INSERT OR REPLACE INTO analysis_meta (key, value) VALUES (?, ?)",
+        ("tuning_params", json.dumps(params)),
+    )
+    conn.commit()
+
+
+def load_tuning_params(conn: sqlite3.Connection) -> dict | None:
+    """Load saved detection tuning parameters from analysis_meta. Returns None if not saved."""
+    row = conn.execute(
+        "SELECT value FROM analysis_meta WHERE key = 'tuning_params'"
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row[0])
+    except (json.JSONDecodeError, TypeError):
+        return None
 
 
 # ── Highlight config helpers ─────────────────────────────────────────────────

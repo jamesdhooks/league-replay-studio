@@ -13,6 +13,7 @@ const AnalysisContext = createContext(null)
  */
 export function AnalysisProvider({ children }) {
   const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [isScanning, setIsScanning] = useState(false)
   const [progress, setProgress] = useState(null)
   const [events, setEvents] = useState([])
   const [eventSummary, setEventSummary] = useState(null)
@@ -67,6 +68,7 @@ export function AnalysisProvider({ children }) {
       switch (eventName) {
         case 'pipeline:started':
           setIsAnalyzing(true)
+          setIsScanning(true)  // always start in scan phase
           setError(null)
           setAnalysisLog([])
           setDiscoveredEvents([])
@@ -78,10 +80,12 @@ export function AnalysisProvider({ children }) {
             detail: data.detail || '',
             currentTime: 0,
             totalTicks: 0,
+            phase: data.phase || 'full',
           })
           break
 
         case 'pipeline:step_completed':
+          if (data.stage === 'analysis_detect') setIsScanning(false)
           appendLog(
             data.description || data.message || 'Analyzing...',
             data.detail || '',
@@ -99,34 +103,43 @@ export function AnalysisProvider({ children }) {
           }))
           break
 
-        case 'pipeline:completed':
+        case 'pipeline:completed': {
+          const isScanPhase = data.phase === 'scan'
           setIsAnalyzing(false)
-          appendLog(
-            data.description || `Analysis complete — ${data.events_detected ?? 0} events detected`,
-            data.detail || '',
-            'success',
-          )
+          setIsScanning(false)
+          const completedMsg = isScanPhase
+            ? data.description || `Telemetry collected — ${data.telemetry_rows ?? 0} samples`
+            : data.description || `Analysis complete — ${data.events_detected ?? 0} events detected`
+          appendLog(completedMsg, data.detail || '', 'success')
           setProgress({
             percent: 100,
-            message: `Analysis complete — ${data.events_detected ?? 0} events detected`,
+            message: completedMsg,
             detail: data.detail || '',
             totalTicks: data.telemetry_rows ?? 0,
             eventsDetected: data.events_detected ?? 0,
             duration: data.duration_seconds ?? 0,
+            phase: data.phase || 'full',
           })
-          // Refresh events after completion
+          // Refresh status and events after completion
           if (data.project_id) {
-            apiGet(`/projects/${data.project_id}/events`)
-              .then(result => setEvents(result.events || []))
+            apiGet(`/projects/${data.project_id}/analysis/status`)
+              .then(status => setAnalysisStatus(status))
               .catch(() => {})
-            apiGet(`/projects/${data.project_id}/events/summary`)
-              .then(result => setEventSummary(result))
-              .catch(() => {})
+            if (!isScanPhase) {
+              apiGet(`/projects/${data.project_id}/events`)
+                .then(result => setEvents(result.events || []))
+                .catch(() => {})
+              apiGet(`/projects/${data.project_id}/events/summary`)
+                .then(result => setEventSummary(result))
+                .catch(() => {})
+            }
           }
           break
+        }
 
         case 'pipeline:error':
           setIsAnalyzing(false)
+          setIsScanning(false)
           appendLog(data.message || 'Analysis failed', '', 'error')
           setError(data.message || 'Analysis failed')
           setProgress(null)
@@ -160,14 +173,38 @@ export function AnalysisProvider({ children }) {
     }
   }, [])
 
+  // ── Start rescan (telemetry collection only, Pass 1) ─────────────────────
+  const startRescan = useCallback(async (projectId) => {
+    setError(null)
+    setAnalysisLog([])
+    setDiscoveredEvents([])
+    logIdRef.current = 0
+    activeProjectRef.current = projectId
+
+    try {
+      const result = await apiPost(`/projects/${projectId}/analyze/rescan`)
+      setIsAnalyzing(true)
+      setIsScanning(true)
+      return result
+    } catch (err) {
+      setError(err.message)
+      throw err
+    }
+  }, [])
+
   // ── Cancel analysis ─────────────────────────────────────────────────────
   const cancelAnalysis = useCallback(async (projectId) => {
     try {
       const result = await apiPost(`/projects/${projectId}/analyze/cancel`)
       setIsAnalyzing(false)
+      setIsScanning(false)
       setProgress(null)
       return result
     } catch (err) {
+      // 404 means nothing was running — clear our stale state anyway
+      setIsAnalyzing(false)
+      setIsScanning(false)
+      setProgress(null)
       setError(err.message)
       throw err
     }
@@ -201,6 +238,10 @@ export function AnalysisProvider({ children }) {
       if (status.status === 'running') {
         setIsAnalyzing(true)
         activeProjectRef.current = projectId
+      } else {
+        // Sync down stale in-memory running state
+        setIsAnalyzing(false)
+        setIsScanning(false)
       }
       return status
     } catch (err) {
@@ -266,6 +307,7 @@ export function AnalysisProvider({ children }) {
   // ── Context value ───────────────────────────────────────────────────────
   const value = useMemo(() => ({
     isAnalyzing,
+    isScanning,
     progress,
     events,
     eventSummary,
@@ -273,7 +315,10 @@ export function AnalysisProvider({ children }) {
     error,
     analysisLog,
     discoveredEvents,
+    hasTelemetry: analysisStatus?.has_telemetry ?? false,
+    hasEvents: analysisStatus?.has_events ?? events.length > 0,
     startAnalysis,
+    startRescan,
     cancelAnalysis,
     clearAnalysis,
     fetchAnalysisStatus,
@@ -282,9 +327,9 @@ export function AnalysisProvider({ children }) {
     loadAnalysisLog,
     clearDiscoveredEvents,
   }), [
-    isAnalyzing, progress, events, eventSummary, analysisStatus, error,
+    isAnalyzing, isScanning, progress, events, eventSummary, analysisStatus, error,
     analysisLog, discoveredEvents,
-    startAnalysis, cancelAnalysis, clearAnalysis, fetchAnalysisStatus, fetchEvents, fetchEventSummary,
+    startAnalysis, startRescan, cancelAnalysis, clearAnalysis, fetchAnalysisStatus, fetchEvents, fetchEventSummary,
     loadAnalysisLog, clearDiscoveredEvents,
   ])
 

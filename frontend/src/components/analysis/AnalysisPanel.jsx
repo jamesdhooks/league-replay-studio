@@ -3,6 +3,7 @@ import Hls from 'hls.js'
 import { useAnalysis } from '../../context/AnalysisContext'
 import { useProject } from '../../context/ProjectContext'
 import { useIRacing } from '../../context/IRacingContext'
+import { useToast } from '../../context/ToastContext'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { apiPost, apiGet, apiDelete } from '../../services/api'
 import {
@@ -11,7 +12,7 @@ import {
   XCircle, Terminal, ChevronRight, ChevronDown, ChevronUp, Camera, Video, Monitor,
   SkipBack, SkipForward, Rewind, FastForward, List, Trash2, Settings,
   Eye, EyeOff, Users, RefreshCw, Flame, RotateCcw, CircleDot, ShieldAlert, WifiOff, AlertCircle, Minus, Plus,
-  Folder, SlidersHorizontal, Info, CarFront,
+  Folder, SlidersHorizontal, Info, CarFront, Repeat, X,
 } from 'lucide-react'
 import ProjectFileBrowser from '../projects/ProjectFileBrowser'
 import ResizableSidebar from '../layout/ResizableSidebar'
@@ -74,6 +75,8 @@ function H264StreamPlayer({ src, className, onLoad, onError }) {
     }
 
     ms.addEventListener('sourceopen', async () => {
+      // Guard: if cleanup already ran, bail out immediately
+      if (controller.signal.aborted) return
       try {
         sb = ms.addSourceBuffer(CODEC)
         sb.mode = 'sequence'
@@ -124,8 +127,15 @@ function H264StreamPlayer({ src, className, onLoad, onError }) {
       try { video.pause() } catch {}
       video.removeAttribute('src')
       video.load()
+      // Explicitly end the MediaSource so no stale sourceopen can fire
+      try {
+        if (ms && ms.readyState === 'open') {
+          if (sb) ms.removeSourceBuffer(sb)
+          ms.endOfStream()
+        }
+      } catch {}
       try { URL.revokeObjectURL(blobUrl) } catch {}
-      // Dereference so flush() no-ops if updateend fires after cleanup
+      // Null local refs so flush() / updateend no-op after cleanup
       sb = null
       ms = null
     }
@@ -237,9 +247,9 @@ function HlsStreamPlayer({ src, className, onLoad, onError }) {
  */
 export default memo(function AnalysisPanel() {
   const {
-    isAnalyzing, progress, events, eventSummary, error,
-    analysisLog, discoveredEvents,
-    startAnalysis, cancelAnalysis, clearAnalysis,
+    isAnalyzing, isScanning, progress, events, eventSummary, error,
+    analysisLog, discoveredEvents, hasTelemetry, hasEvents, analysisStatus,
+    startAnalysis, startRescan, cancelAnalysis, clearAnalysis,
     fetchEvents, fetchEventSummary, fetchAnalysisStatus,
     loadAnalysisLog, clearDiscoveredEvents,
   } = useAnalysis()
@@ -299,6 +309,11 @@ export default memo(function AnalysisPanel() {
   const [replaySpeed, setReplaySpeed] = useState(1)
   const [isPlaying, setIsPlaying] = useState(true)
   const [replayState, setReplayState] = useState(null)
+  // Focused event — the event currently being watched in the preview
+  const [focusedEvent, setFocusedEvent] = useState(null)
+  const [autoLoop, setAutoLoop] = useState(false)
+  // Session match — validates that the currently loaded iRacing replay matches this project's analysis
+  const [sessionMatch, setSessionMatch] = useState(null)
 
   // Stream quality settings — each format has its own independent settings.
   // FPS is shared (it's a display preference, not format-specific).
@@ -325,21 +340,46 @@ export default memo(function AnalysisPanel() {
     close_call_proximity: 0.02,
     close_call_max_off_track: 3.0,
   })
+  const [showTuningPanel, setShowTuningPanel] = useState(false)
+  // Keep sidebar Tune sub-tab for the compact sidebar view
   const [showTuning, setShowTuning] = useState(false)
   const [isRedetecting, setIsRedetecting] = useState(false)
   // Stream key — changes to force <img> reload when quality settings change
   const [streamKey, setStreamKey] = useState(0)
   const [streamLoaded, setStreamLoaded] = useState(false)
   const [streamError, setStreamError] = useState(null)
+  const [streamResetting, setStreamResetting] = useState(false)
   const [streamVisible, setStreamVisible] = useState(true)
   const [isDataLoading, setIsDataLoading] = useState(true)
 
   // Timeline scrubber state
   const [raceDuration, setRaceDuration] = useState(0)
+  const [raceStart, setRaceStart] = useState(0)
+  const [raceSessionNum, setRaceSessionNum] = useState(0)
   const scrubberRef = useRef(null)
 
   // Reset loaded state whenever the stream is recycled
   useEffect(() => { setStreamLoaded(false); setStreamError(null) }, [streamKey])
+
+  // Hard-reset the entire streaming pipeline on the backend, then reconnect.
+  const handleStreamReset = async () => {
+    if (streamResetting) return
+    setStreamResetting(true)
+    setStreamLoaded(false)
+    setStreamError(null)
+    try {
+      await apiPost('/iracing/stream/reset', {
+        fps: streamFps,
+        quality: mjpegQuality,
+        max_width: mjpegMaxWidth,
+      })
+    } catch {
+      // Even on error, recycle the key so the client reconnects
+    } finally {
+      setStreamKey(k => k + 1)
+      setStreamResetting(false)
+    }
+  }
 
   // Drivers list for camera switching
   const [drivers, setDrivers] = useState([])
@@ -390,10 +430,44 @@ export default memo(function AnalysisPanel() {
   useEffect(() => {
     if (!isConnected) return
     const interval = setInterval(() => {
-      apiGet('/iracing/replay/state').then(setReplayState).catch(() => {})
+      apiGet('/iracing/replay/state').then(data => {
+        setReplayState(data)
+        // Keep isPlaying in sync with iRacing's actual playback state.
+        // replay_speed: 0 = paused, ±1-16 = playing/rewinding.
+        if (data.replay_speed !== undefined) {
+          setIsPlaying(data.replay_speed !== 0)
+          setReplaySpeed(Math.abs(data.replay_speed))
+        }
+      }).catch(() => {})
     }, 1000)
     return () => clearInterval(interval)
   }, [isConnected])
+
+  // Poll session-match every 5 s to validate the loaded replay matches this project's analysis
+  useEffect(() => {
+    if (!isConnected || !activeProject?.id || !hasTelemetry) {
+      setSessionMatch(null)
+      return
+    }
+    const check = () => {
+      apiGet(`/projects/${activeProject.id}/analysis/session-match`)
+        .then(setSessionMatch)
+        .catch(() => {})
+    }
+    check()
+    const interval = setInterval(check, 5000)
+    return () => clearInterval(interval)
+  }, [isConnected, activeProject?.id, hasTelemetry])
+
+  // Auto-loop: when enabled and playback passes the focused event's end time, seek back
+  useEffect(() => {
+    if (!autoLoop || !focusedEvent || !replayState || isSeeking) return
+    const t = replayState.session_time
+    if (t != null && t > focusedEvent.end_time_seconds + 1.5) {
+      seekToEvent(focusedEvent)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [replayState])
 
   // Load analysis data when project changes
   useEffect(() => {
@@ -407,6 +481,12 @@ export default memo(function AnalysisPanel() {
       fetchEvents(activeProject.id),
       fetchEventSummary(activeProject.id),
       logFetch,
+      // Load saved tuning params from the server if available
+      apiGet(`/projects/${activeProject.id}/analysis/tuning`)
+        .then(data => {
+          if (data?.tuning_params) setTuningParams(prev => ({ ...prev, ...data.tuning_params }))
+        })
+        .catch(() => {}),
     ]).finally(() => setIsDataLoading(false))
   }, [activeProject?.id, fetchAnalysisStatus, fetchEvents, fetchEventSummary, loadAnalysisLog])
 
@@ -414,7 +494,11 @@ export default memo(function AnalysisPanel() {
   useEffect(() => {
     if (!activeProject?.id) return
     apiGet(`/projects/${activeProject.id}/analysis/race-duration`)
-      .then(data => setRaceDuration(data?.duration_seconds || 0))
+      .then(data => {
+        setRaceDuration(data?.duration_seconds || 0)
+        setRaceStart(data?.race_start_seconds || 0)
+        setRaceSessionNum(data?.race_session_num ?? 0)
+      })
       .catch(() => {})
   }, [activeProject?.id, events])
 
@@ -445,7 +529,7 @@ export default memo(function AnalysisPanel() {
     }
   }, [cameraFollow, isAnalyzing, discoveredEvents])
 
-  const hasEvents = events.length > 0
+  const hasEventsLocal = events.length > 0 || hasEvents
 
   if (!activeProject) {
     return (
@@ -458,6 +542,11 @@ export default memo(function AnalysisPanel() {
   const handleStart = async () => {
     setSidebarTab('log')
     try { await startAnalysis(activeProject.id, tuningParams) } catch {}
+  }
+
+  const handleRescan = async () => {
+    setSidebarTab('log')
+    try { await startRescan(activeProject.id) } catch {}
   }
 
   const handleCancel = async () => {
@@ -474,10 +563,11 @@ export default memo(function AnalysisPanel() {
     await fetchEvents(activeProject.id, { eventType: newFilter })
   }
 
-  const handleRedetect = async () => {
+  const handleReanalyze = async () => {
     if (!activeProject?.id || isRedetecting) return
     setIsRedetecting(true)
     clearDiscoveredEvents()
+    setSidebarTab('log')
     try {
       await apiPost(`/projects/${activeProject.id}/analyze/redetect`, tuningParams)
       await fetchEvents(activeProject.id)
@@ -487,24 +577,48 @@ export default memo(function AnalysisPanel() {
     }
   }
 
+  // Keep old name for sidebar button
+  const handleRedetect = handleReanalyze
+
   const updateTuning = (key, value) => {
     setTuningParams(prev => ({ ...prev, [key]: value }))
   }
 
+  const { showError, showWarning } = useToast()
+  const [isSeeking, setIsSeeking] = useState(false)
+
   // Seek iRacing replay to an event's start time + focus the involved driver
   const seekToEvent = async (event) => {
-    if (!isConnected) return
-    const sessionNum = event.session_num ?? 0
-    const timeMs = Math.round((event.startTime ?? event.start_time_seconds ?? 0) * 1000)
+    if (!isConnected || !activeProject?.id || isSeeking) return
+    const startTimeSec = event.start_time_seconds ?? event.startTime ?? 0
+    const carIdx = event.carIdx ?? event.car_idx
+      ?? (event.involved_drivers && event.involved_drivers[0])
+      ?? null
+    setIsSeeking(true)
     try {
-      await apiPost('/iracing/replay/seek-time', { session_num: sessionNum, session_time_ms: timeMs })
-      // Focus the primary involved driver
-      const carIdx = event.carIdx ?? event.car_idx
-        ?? (event.involved_drivers && event.involved_drivers[0])
-      if (carIdx != null) {
-        await apiPost('/iracing/replay/camera', { car_idx: carIdx, group_num: 0 })
+      // Server-side seek: backend pauses iRacing, seeks to the exact replay
+      // frame from race_ticks (by nearest session_time), verifies, then resumes.
+      const result = await apiPost(`/projects/${activeProject.id}/analysis/seek-event`, {
+        start_time_seconds: startTimeSec,
+        car_idx: carIdx,
+      })
+      setIsPlaying(true)
+      setReplaySpeed(1)
+      setFocusedEvent(event)
+      // Warn if backend verification detected the seek didn't land on target
+      if (result && result.verified === false) {
+        showWarning(
+          `Seek may not have landed correctly — target ${result.frame ?? '?'} actual ${result.actual_frame ?? '?'}. ` +
+          'Try re-detecting events or check that a race replay is loaded.',
+          { duration: 7000 }
+        )
       }
-    } catch {}
+    } catch (err) {
+      const detail = err?.detail ?? err?.message ?? 'Unknown error'
+      showError(`Seek failed: ${detail}`, { duration: 7000 })
+    } finally {
+      setIsSeeking(false)
+    }
   }
 
   // ── Playback controls ─────────────────────────────────────────────────
@@ -575,7 +689,7 @@ export default memo(function AnalysisPanel() {
   }
 
   // ── Idle state: no analysis running, no events ────────────────────────
-  if (!isAnalyzing && !hasEvents && discoveredEvents.length === 0) {
+  if (!isAnalyzing && !hasEventsLocal && discoveredEvents.length === 0) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center p-8">
         <div className="flex flex-col items-center gap-3 text-center max-w-sm">
@@ -584,19 +698,84 @@ export default memo(function AnalysisPanel() {
             <BarChart3 size={28} className="text-white" />
           </div>
           <h2 className="text-lg font-bold text-text-primary">Replay Analysis</h2>
-          <p className="text-sm text-text-tertiary leading-relaxed">
-            Scan the replay at 16× speed to detect battles, incidents, overtakes, and key moments.
-          </p>
-          <button
-            onClick={handleStart}
-            className="flex items-center gap-2 px-6 py-3 text-sm font-semibold
-                       text-white bg-gradient-to-r from-gradient-from to-gradient-to
-                       rounded-xl hover:from-gradient-via hover:to-gradient-from
-                       transition-all duration-200 shadow-glow-sm hover:shadow-glow mt-2"
-          >
-            <Play size={16} />
-            Analyze Replay
-          </button>
+
+          {hasTelemetry ? (
+            /* Has telemetry but no events yet — show re-analyze option */
+            <>
+              <p className="text-sm text-text-tertiary leading-relaxed">
+                Telemetry collected. Adjust tuning parameters and run event detection — no iRacing connection required.
+              </p>
+              {/* Tuning summary / inline controls */}
+              <div className="w-full mt-2">
+                <button
+                  onClick={() => setShowTuningPanel(v => !v)}
+                  className="w-full flex items-center justify-between px-3 py-2 text-xs
+                             border border-border rounded-lg hover:bg-bg-hover transition-colors text-text-secondary"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <SlidersHorizontal size={13} className="text-accent" />
+                    Tuning Parameters
+                  </span>
+                  <ChevronDown size={13} className={`transition-transform ${showTuningPanel ? 'rotate-180' : ''}`} />
+                </button>
+                {showTuningPanel && (
+                  <TuningPanel params={tuningParams} onChange={updateTuning} className="mt-2" />
+                )}
+              </div>
+              <div className="flex gap-2 mt-1">
+                <button
+                  onClick={handleReanalyze}
+                  disabled={isRedetecting}
+                  className="flex items-center gap-2 px-6 py-3 text-sm font-semibold
+                             text-white bg-gradient-to-r from-gradient-from to-gradient-to
+                             rounded-xl hover:from-gradient-via hover:to-gradient-from
+                             transition-all duration-200 shadow-glow-sm hover:shadow-glow disabled:opacity-50"
+                >
+                  {isRedetecting
+                    ? <Loader2 size={16} className="animate-spin" />
+                    : <SlidersHorizontal size={16} />}
+                  {isRedetecting ? 'Analyzing...' : 'Re-analyze'}
+                </button>
+                {isConnected && (
+                  <button
+                    onClick={handleRescan}
+                    className="flex items-center gap-2 px-4 py-3 text-sm font-medium
+                               text-text-secondary border border-border rounded-xl
+                               hover:bg-bg-hover transition-colors"
+                  >
+                    <RefreshCw size={14} />
+                    Re-collect Telemetry
+                  </button>
+                )}
+              </div>
+            </>
+          ) : (
+            /* No telemetry at all — fresh start */
+            <>
+              <p className="text-sm text-text-tertiary leading-relaxed">
+                Scan the replay at 16× speed to detect battles, incidents, overtakes, and key moments.
+              </p>
+              <button
+                onClick={handleStart}
+                disabled={!isConnected}
+                title={!isConnected ? 'iRacing must be connected and a replay loaded' : undefined}
+                className="flex items-center gap-2 px-6 py-3 text-sm font-semibold
+                           text-white bg-gradient-to-r from-gradient-from to-gradient-to
+                           rounded-xl hover:from-gradient-via hover:to-gradient-from
+                           transition-all duration-200 shadow-glow-sm hover:shadow-glow mt-2
+                           disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <Play size={16} />
+                Analyze Replay
+              </button>
+              {!isConnected && (
+                <p className="text-xs text-text-disabled flex items-center gap-1">
+                  <WifiOff size={12} /> iRacing must be running with a replay loaded
+                </p>
+              )}
+            </>
+          )}
+
           {error && (
             <div className="flex items-start gap-1.5 text-danger mt-2">
               <XCircle size={14} className="shrink-0 mt-0.5" />
@@ -612,59 +791,107 @@ export default memo(function AnalysisPanel() {
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
 
-      {/* ── Top control bar — only visible during analysis or on error/complete ── */}
-      {(isAnalyzing || error || progress?.percent === 100) && (
-        <div className="shrink-0 border-b border-border bg-bg-secondary">
-          <div className="flex items-center gap-4 px-4 py-2.5">
-            {/* Stop / Complete indicator */}
-            <div className="flex items-center gap-2">
-              {isAnalyzing ? (
-                <button
-                  onClick={handleCancel}
-                  className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium
-                             text-danger bg-danger/10 rounded-lg hover:bg-danger/20 transition-colors"
-                >
-                  <Square size={13} />
-                  Stop
-                </button>
-              ) : (
-                progress?.percent === 100 && (
-                  <div className="flex items-center gap-1 text-success">
-                    <CheckCircle2 size={13} />
-                    <span className="text-xxs font-medium">Complete</span>
-                  </div>
-                )
-              )}
-            </div>
+      {/* ── Top control bar ── always visible on active/complete/error ── */}
+      <div className="shrink-0 border-b border-border bg-bg-secondary">
+        <div className="flex items-center gap-2 px-3 py-2 min-w-0">
 
-            {/* Progress bar */}
-            {isAnalyzing && progress && (
-              <div className="flex-1 flex items-center gap-3 min-w-0">
-                <div className="flex-1 h-1.5 bg-surface rounded-full overflow-hidden max-w-xs">
-                  <div
-                    className="h-full bg-gradient-to-r from-gradient-from via-gradient-via to-gradient-to
-                               rounded-full transition-all duration-300"
-                    style={{ width: `${progress.percent || 0}%` }}
-                  />
-                </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <Loader2 size={11} className="text-accent animate-spin" />
-                  <span className="text-xxs text-text-secondary truncate max-w-[200px]">
-                    {progress.message || 'Analyzing...'}
-                  </span>
-                </div>
-              </div>
-            )}
-          </div>
+          {/* ── Phase ① — Telemetry Collection ── */}
+          <PhaseCard
+            title="Telemetry"
+            active={isAnalyzing && isScanning}
+            done={hasTelemetry || hasEventsLocal}
+            detail={
+              hasTelemetry || hasEventsLocal
+                ? (() => {
+                    const parts = []
+                    if (analysisStatus?.total_ticks) parts.push(`${(analysisStatus.total_ticks / 1000).toFixed(1)}k samples`)
+                    if (analysisStatus?.db_size_bytes >= 1_048_576) parts.push(`${(analysisStatus.db_size_bytes / 1_048_576).toFixed(1)} MB`)
+                    else if (analysisStatus?.db_size_bytes > 0) parts.push(`${Math.round(analysisStatus.db_size_bytes / 1024)} KB`)
+                    return parts.join(' · ') || null
+                  })()
+                : null
+            }
+            progressMsg={isScanning ? (progress?.message || null) : null}
+            progressPct={isScanning ? (progress?.percent || 0) : null}
+            primaryLabel={hasTelemetry || hasEventsLocal ? 'Re-collect' : 'Collect'}
+            primaryIcon={isAnalyzing && isScanning ? null : <RefreshCw size={11} />}
+            onPrimary={isAnalyzing && isScanning ? handleCancel : handleRescan}
+            primaryDanger={isAnalyzing && isScanning}
+            primaryDisabled={!isAnalyzing && !isConnected}
+            primaryTooltip={!isConnected && !(isAnalyzing && isScanning) ? 'iRacing must be running with a replay loaded' : null}
+          />
 
-          {error && (
-            <div className="flex items-center gap-1.5 px-4 py-1.5 bg-danger/10 border-t border-danger/20">
-              <XCircle size={12} className="text-danger shrink-0" />
-              <span className="text-xxs text-danger">{error}</span>
-            </div>
-          )}
+          {/* connector arrow */}
+          <ChevronRight size={13} className="text-border-subtle shrink-0" />
+
+          {/* ── Phase ② — Event Analysis ── */}
+          <PhaseCard
+            title="Analysis"
+            active={isAnalyzing && !isScanning}
+            done={hasEventsLocal}
+            detail={
+              hasEventsLocal && eventSummary?.total_events > 0
+                ? `${eventSummary.total_events} events`
+                : null
+            }
+            progressMsg={!isScanning && isAnalyzing ? (progress?.message || null) : null}
+            progressPct={!isScanning && isAnalyzing ? (progress?.percent || 0) : null}
+            primaryLabel={hasEventsLocal ? 'Re-analyze' : 'Analyze'}
+            primaryIcon={isAnalyzing && !isScanning ? null : isRedetecting ? <Loader2 size={11} className="animate-spin" /> : <SlidersHorizontal size={11} />}
+            onPrimary={isAnalyzing && !isScanning ? handleCancel : handleReanalyze}
+            primaryDanger={isAnalyzing && !isScanning}
+            primaryDisabled={isRedetecting || (!isAnalyzing && !hasTelemetry && !hasEventsLocal)}
+            primaryTooltip={!hasTelemetry && !hasEventsLocal && !isAnalyzing ? 'Collect telemetry first' : null}
+          />
+
+          {/* ── Tuning toggle ── */}
+          <button
+            onClick={() => setShowTuningPanel(v => !v)}
+            className={`ml-auto flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg
+                        transition-colors shrink-0
+                        ${showTuningPanel
+                          ? 'bg-accent/15 text-accent border border-accent/30'
+                          : 'text-text-tertiary border border-border-subtle hover:bg-bg-hover hover:text-text-secondary'}`}
+          >
+            <SlidersHorizontal size={12} />
+            Tuning
+            <ChevronDown size={10} className={`transition-transform ${showTuningPanel ? 'rotate-180' : ''}`} />
+          </button>
         </div>
-      )}
+
+        {/* ── Inline tuning panel ── */}
+        {showTuningPanel && !isAnalyzing && (
+          <div className="border-t border-border px-4 py-3 animate-fade-in">
+            <TuningPanel params={tuningParams} onChange={updateTuning} horizontal />
+            <div className="flex items-center gap-2 mt-3 pt-2 border-t border-border-subtle">
+              <button
+                onClick={handleReanalyze}
+                disabled={isRedetecting || (!hasTelemetry && !hasEventsLocal)}
+                className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold
+                           text-white bg-gradient-to-r from-gradient-from to-gradient-to
+                           rounded-lg hover:from-gradient-via hover:to-gradient-from
+                           transition-all duration-200 shadow-glow-sm
+                           disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {isRedetecting
+                  ? <Loader2 size={12} className="animate-spin" />
+                  : <SlidersHorizontal size={12} />}
+                {isRedetecting ? 'Analyzing...' : 'Re-analyze with these settings'}
+              </button>
+              <span className="text-xxs text-text-disabled">
+                Tuning parameters are saved automatically and persist between sessions.
+              </span>
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div className="flex items-center gap-1.5 px-4 py-1.5 bg-danger/10 border-t border-danger/20">
+            <XCircle size={12} className="text-danger shrink-0" />
+            <span className="text-xxs text-danger">{error}</span>
+          </div>
+        )}
+      </div>
 
       {/* ── Main area: sidebar + TV + controls (fills remaining height) ── */}
       <div className="flex-1 flex overflow-hidden min-h-0 relative">
@@ -739,7 +966,7 @@ export default memo(function AnalysisPanel() {
                     </button>
                     {showTuning && (
                       <button
-                        onClick={handleRedetect}
+                        onClick={handleReanalyze}
                         disabled={isRedetecting}
                         className="ml-auto flex items-center gap-1 px-2 py-0.5 text-xxs font-medium
                                    text-white bg-gradient-to-r from-gradient-from to-gradient-to
@@ -748,115 +975,15 @@ export default memo(function AnalysisPanel() {
                         {isRedetecting
                           ? <Loader2 size={9} className="animate-spin" />
                           : <SlidersHorizontal size={9} />}
-                        {isRedetecting ? 'Running…' : 'Re-detect'}
+                        {isRedetecting ? 'Running…' : 'Re-analyze'}
                       </button>
                     )}
                   </div>
 
                   {showTuning ? (
-                    /* ── Tuning form ── */
+                    /* ── Tuning form (compact sidebar view) ── */
                     <div className="flex-1 overflow-y-auto px-3 py-2 space-y-3">
-                      {/* Battle */}
-                      <div>
-                        <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
-                          <Swords size={11} className="text-event-battle" /> Battle Detection
-                        </span>
-                        <TuneField
-                          label="Gap threshold (s)"
-                          tooltip="Maximum time gap (seconds) between two adjacent-position cars for a battle to be detected. Lower values require tighter racing. Battles must be sustained for 10+ seconds."
-                          value={tuningParams.battle_gap_threshold}
-                          onChange={v => updateTuning('battle_gap_threshold', v || 0.5)}
-                          step={0.1} min={0.1} max={5}
-                        />
-                      </div>
-                      {/* Crash */}
-                      <div>
-                        <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
-                          <Flame size={11} className="text-event-incident" /> Crash Detection
-                        </span>
-                        <div className="space-y-1.5">
-                          <TuneField
-                            label="Min time loss (s)"
-                            tooltip="Minimum estimated time lost for an off-track excursion to qualify as a crash."
-                            value={tuningParams.crash_min_time_loss}
-                            onChange={v => updateTuning('crash_min_time_loss', v || 10)}
-                            step={1} min={1} max={60}
-                          />
-                          <TuneField
-                            label="Min off-track duration (s)"
-                            tooltip="Minimum duration a car must remain off-track to count as a crash."
-                            value={tuningParams.crash_min_off_track_duration}
-                            onChange={v => updateTuning('crash_min_off_track_duration', v || 3)}
-                            step={0.5} min={0.5} max={30}
-                          />
-                        </div>
-                      </div>
-                      {/* Spinout */}
-                      <div>
-                        <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
-                          <RotateCcw size={11} className="text-event-battle" /> Spinout Detection
-                        </span>
-                        <div className="space-y-1.5">
-                          <TuneField
-                            label="Min time loss (s)"
-                            tooltip="Minimum time loss for an off-track moment to classify as a spinout."
-                            value={tuningParams.spinout_min_time_loss}
-                            onChange={v => updateTuning('spinout_min_time_loss', v || 2)}
-                            step={0.5} min={0.5} max={30}
-                          />
-                          <TuneField
-                            label="Max time loss (s)"
-                            tooltip="Maximum time loss for a spinout. Events above this threshold are classified as crashes."
-                            value={tuningParams.spinout_max_time_loss}
-                            onChange={v => updateTuning('spinout_max_time_loss', v || 10)}
-                            step={1} min={1} max={60}
-                          />
-                        </div>
-                      </div>
-                      {/* Contact */}
-                      <div>
-                        <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
-                          <CircleDot size={11} className="text-event-overtake" /> Contact Detection
-                        </span>
-                        <div className="space-y-1.5">
-                          <TuneField
-                            label="Time window (s)"
-                            tooltip="Maximum time window for grouping multiple off-track cars as a single contact event."
-                            value={tuningParams.contact_time_window}
-                            onChange={v => updateTuning('contact_time_window', v || 2)}
-                            step={0.5} min={0.5} max={10}
-                          />
-                          <TuneField
-                            label="Proximity"
-                            tooltip="Maximum track-position difference (fraction of lap) for two cars to be considered in contact."
-                            value={tuningParams.contact_proximity}
-                            onChange={v => updateTuning('contact_proximity', v || 0.05)}
-                            step={0.01} min={0.01} max={1}
-                          />
-                        </div>
-                      </div>
-                      {/* Close Call */}
-                      <div>
-                        <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
-                          <ShieldAlert size={11} className="text-event-fastest" /> Close Call Detection
-                        </span>
-                        <div className="space-y-1.5">
-                          <TuneField
-                            label="Proximity"
-                            tooltip="Maximum track-position difference between an off-track car and a nearby on-track car."
-                            value={tuningParams.close_call_proximity}
-                            onChange={v => updateTuning('close_call_proximity', v || 0.02)}
-                            step={0.005} min={0.005} max={0.5}
-                          />
-                          <TuneField
-                            label="Max off-track (s)"
-                            tooltip="Maximum time loss for a close call — recovery must be quick or it becomes a spinout/crash."
-                            value={tuningParams.close_call_max_off_track}
-                            onChange={v => updateTuning('close_call_max_off_track', v || 3)}
-                            step={0.5} min={0.5} max={15}
-                          />
-                        </div>
-                      </div>
+                      <TuningPanel params={tuningParams} onChange={updateTuning} />
                     </div>
                   ) : (
                     /* ── Events list ── */
@@ -955,8 +1082,10 @@ export default memo(function AnalysisPanel() {
                             <div key={`${isDiscovered ? 'd' : 'e'}-${eventId}`}
                                  className="border-b border-border-subtle/30 animate-slide-right">
                               <div
-                                className="grid grid-cols-[minmax(0,auto)_1fr_auto_auto]
-                                           hover:bg-bg-hover transition-colors cursor-pointer"
+                                className={`grid grid-cols-[minmax(0,auto)_1fr_auto_auto]
+                                           hover:bg-bg-hover transition-colors
+                                           ${isSeeking ? 'cursor-wait opacity-60 pointer-events-none' : 'cursor-pointer'}
+                                           ${focusedEvent?.id === ev.id ? 'bg-accent/10 border-l-2 border-accent' : ''}`}
                                 onClick={() => seekToEvent(ev)}
                               >
                                 {/* Type */}
@@ -1064,14 +1193,14 @@ export default memo(function AnalysisPanel() {
                     />
                   )}
                   {/* Error overlay */}
-                  {streamError && (
+                  {streamError && !streamResetting && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center
                                     bg-black/60 backdrop-blur-sm gap-3">
                       <AlertCircle size={32} className="text-danger" />
                       <span className="text-xs text-white/80 font-medium">Stream Disconnected</span>
                       <span className="text-xxs text-white/50 max-w-[200px] text-center">{streamError}</span>
                       <button
-                        onClick={() => setStreamKey(k => k + 1)}
+                        onClick={handleStreamReset}
                         className="mt-1 px-3 py-1 rounded-md text-xxs bg-accent/20 text-accent
                                    hover:bg-accent/30 border border-accent/30 transition-colors"
                       >
@@ -1079,12 +1208,14 @@ export default memo(function AnalysisPanel() {
                       </button>
                     </div>
                   )}
-                  {/* Loading spinner — shown until the first frame arrives */}
-                  {!streamLoaded && !streamError && (
+                  {/* Loading / resetting overlay — shown until first frame arrives or during hard reset */}
+                  {(streamResetting || (!streamLoaded && !streamError)) && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center
                                     bg-black/60 backdrop-blur-sm gap-3">
                       <Loader2 size={32} className="text-accent animate-spin" />
-                      <span className="text-xs text-white/60">Connecting to stream…</span>
+                      <span className="text-xs text-white/60">
+                        {streamResetting ? 'Resetting stream…' : 'Connecting to stream…'}
+                      </span>
                     </div>
                   )}
                   {/* Live badge */}
@@ -1093,6 +1224,33 @@ export default memo(function AnalysisPanel() {
                                     bg-black/70 backdrop-blur-sm rounded-md text-xxs text-white/90">
                       <span className="w-1.5 h-1.5 rounded-full bg-danger animate-pulse" />
                       LIVE
+                    </div>
+                  )}
+                  {/* Session match badge — shown when not actively analyzing */}
+                  {!isAnalyzing && sessionMatch &&
+                   sessionMatch.status !== 'no_fingerprint' &&
+                   sessionMatch.status !== 'not_connected' && (
+                    <div
+                      className="absolute top-3 left-3 flex items-center gap-1.5 px-2 py-1
+                                 bg-black/70 backdrop-blur-sm rounded-md text-xxs"
+                      title={sessionMatch.details}
+                    >
+                      {sessionMatch.status === 'match' ? (
+                        <>
+                          <CheckCircle2 size={11} className="text-success" />
+                          <span className="text-success">Correct replay</span>
+                        </>
+                      ) : sessionMatch.status === 'partial' ? (
+                        <>
+                          <AlertTriangle size={11} className="text-warning" />
+                          <span className="text-warning">Partial match</span>
+                        </>
+                      ) : (
+                        <>
+                          <XCircle size={11} className="text-danger" />
+                          <span className="text-danger">Wrong replay</span>
+                        </>
+                      )}
                     </div>
                   )}
                 </>
@@ -1126,13 +1284,15 @@ export default memo(function AnalysisPanel() {
                   {streamVisible ? <Eye size={11} /> : <EyeOff size={11} />}
                 </button>
                 <button
-                  onClick={() => setStreamKey(k => k + 1)}
-                  title="Restart preview stream"
+                  onClick={handleStreamReset}
+                  disabled={streamResetting}
+                  title={streamResetting ? 'Resetting…' : 'Hard-reset preview stream'}
                   className="flex items-center justify-center h-7 px-2 rounded-md text-xxs
-                             bg-black/70 backdrop-blur-sm text-white/70 hover:text-white border border-white/10
-                             transition-colors"
+                             bg-black/70 backdrop-blur-sm border border-white/10
+                             transition-colors disabled:opacity-50
+                             text-white/70 hover:text-white"
                 >
-                  <RefreshCw size={11} />
+                  <RefreshCw size={11} className={streamResetting ? 'animate-spin' : ''} />
                 </button>
                 <button
                   onClick={() => { setShowQualitySettings(prev => !prev) }}
@@ -1363,28 +1523,128 @@ export default memo(function AnalysisPanel() {
                   })}
                 </div>
               )}
+
+              {/* ── Focused event control overlay ──────────────────────── */}
+              {focusedEvent && !isAnalyzing && (() => {
+                const cfg = EVENT_CONFIG[focusedEvent.event_type] || {}
+                const EvIcon = cfg.icon || BarChart3
+                const names = focusedEvent.driver_names || []
+                const drivers = (focusedEvent.involved_drivers || []).slice(0, 5)
+                const t = replayState?.session_time
+                const start = focusedEvent.start_time_seconds
+                const end  = focusedEvent.end_time_seconds
+                const isLive    = t != null && t >= start - 3 && t <= end + 2
+                const isElapsed = t != null && t > end + 2
+                return (
+                  <div
+                    className="absolute bottom-0 left-0 right-0 z-20 pointer-events-auto"
+                    onClick={e => e.stopPropagation()}
+                  >
+                    <div className="bg-black/88 backdrop-blur-sm border-t border-white/10 px-3 pt-2 pb-2">
+                      {/* Row 1: icon + label + status + dismiss */}
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <EvIcon size={12} className={cfg.color || 'text-white/70'} />
+                        <span className="text-white text-xxs font-semibold">{cfg.label || focusedEvent.event_type}</span>
+                        {names.length > 0 && (
+                          <span className="text-white/50 text-xxs truncate max-w-[140px]">
+                            {names.join(' · ')}
+                          </span>
+                        )}
+                        {/* Status badge */}
+                        <div className="ml-auto flex items-center gap-1.5">
+                          {isLive ? (
+                            <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-full
+                                            bg-success/20 border border-success/30 text-success text-xxs">
+                              <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
+                              Live
+                            </span>
+                          ) : isElapsed ? (
+                            <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-full
+                                            bg-white/5 border border-white/10 text-white/30 text-xxs">
+                              <span className="w-1.5 h-1.5 rounded-full bg-white/30" />
+                              Elapsed
+                            </span>
+                          ) : (
+                            <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-full
+                                            bg-white/5 border border-white/10 text-white/40 text-xxs">
+                              <span className="w-1.5 h-1.5 rounded-full bg-white/40" />
+                              {formatTime(start)}
+                            </span>
+                          )}
+                          <button
+                            onClick={() => { setFocusedEvent(null); setAutoLoop(false) }}
+                            className="text-white/40 hover:text-white/80 transition-colors p-0.5"
+                            title="Dismiss"
+                          >
+                            <X size={11} />
+                          </button>
+                        </div>
+                      </div>
+                      {/* Row 2: rewind + driver POV buttons + loop toggle */}
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <button
+                          onClick={() => seekToEvent(focusedEvent)}
+                          disabled={isSeeking}
+                          className="flex items-center gap-1 px-2 py-1 rounded-md text-xxs
+                                     bg-white/10 hover:bg-white/20 text-white/80 border border-white/15
+                                     transition-colors disabled:opacity-40"
+                          title="Rewind to event start"
+                        >
+                          <SkipBack size={10} />
+                          <span>Rewind</span>
+                        </button>
+                        {/* Driver POV buttons */}
+                        {drivers.map((carIdx, i) => {
+                          const name = names[i] || `Car ${carIdx}`
+                          const isActive = replayState?.cam_car_idx === carIdx
+                          return (
+                            <button
+                              key={carIdx}
+                              onClick={() => handleSwitchDriver(carIdx)}
+                              className={`flex items-center gap-1 px-2 py-1 rounded-md text-xxs
+                                         border transition-colors
+                                         ${isActive
+                                           ? 'bg-accent/25 text-accent border-accent/40'
+                                           : 'bg-white/8 hover:bg-white/15 text-white/70 border-white/15'
+                                         }`}
+                              title={`Switch to ${name}'s POV`}
+                            >
+                              <Users size={9} />
+                              <span className="max-w-[80px] truncate">{name}</span>
+                            </button>
+                          )
+                        })}
+                        {/* Loop toggle */}
+                        <button
+                          onClick={() => setAutoLoop(v => !v)}
+                          className={`ml-auto flex items-center gap-1 px-2 py-1 rounded-md text-xxs
+                                     border transition-colors
+                                     ${autoLoop
+                                       ? 'bg-accent/25 text-accent border-accent/40'
+                                       : 'bg-white/8 hover:bg-white/15 text-white/50 border-white/15'
+                                     }`}
+                          title={autoLoop ? 'Auto-loop on — click to disable' : 'Enable auto-loop'}
+                        >
+                          <Repeat size={10} />
+                          <span>Loop</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })()}
             </div>
           </div>
 
             {/* ── Options + Cameras + Drivers column ── */}
-            {!isAnalyzing && (hasEvents || isConnected) && (
+            {!isAnalyzing && (hasEventsLocal || isConnected) && (
               <div className="flex flex-col gap-2 w-52 shrink-0">
 
                 {/* Options card */}
-                {hasEvents && (
+                {hasEventsLocal && (
                   <div className="rounded-xl border border-border bg-bg-secondary shadow-sm p-3 shrink-0">
                     <span className="text-xxs font-semibold text-text-primary block mb-2">Options</span>
                     <div className="flex flex-col gap-1.5">
-                      <button
-                        onClick={handleStart}
-                        className="flex items-center gap-1.5 px-3 py-1.5 text-xxs font-semibold
-                                   text-white bg-gradient-to-r from-gradient-from to-gradient-to
-                                   rounded-lg hover:from-gradient-via hover:to-gradient-from
-                                   transition-all duration-200 shadow-glow-sm justify-center"
-                      >
-                        <Play size={11} />
-                        Re-analyze
-                      </button>
                       <button
                         onClick={() => advanceStep(activeProject.id)}
                         className="flex items-center gap-1.5 px-3 py-1.5 text-xxs font-semibold
@@ -1403,7 +1663,7 @@ export default memo(function AnalysisPanel() {
                                    transition-colors justify-center"
                       >
                         <Trash2 size={11} />
-                        Clear
+                        Clear All Data
                       </button>
                     </div>
                   </div>
@@ -1478,62 +1738,71 @@ export default memo(function AnalysisPanel() {
                 {/* Timeline scrubber — shown when race duration is known */}
                 {raceDuration > 0 && replayState && (
                   <div className="mb-3">
-                    <div
-                      ref={scrubberRef}
-                      className="relative h-5 group cursor-pointer select-none"
-                      onMouseDown={(e) => {
-                        const bar = e.currentTarget
-                        const rect = bar.getBoundingClientRect()
-                        const seekTo = (clientX) => {
-                          const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
-                          const timeMs = Math.round(pct * raceDuration * 1000)
-                          apiPost('/iracing/replay/seek-time', { session_num: 0, session_time_ms: timeMs })
-                        }
-                        seekTo(e.clientX)
-                        let lastSeek = Date.now()
-                        const onMove = (mv) => {
-                          if (Date.now() - lastSeek < 200) return
-                          lastSeek = Date.now()
-                          seekTo(mv.clientX)
-                        }
-                        const onUp = (up) => {
-                          seekTo(up.clientX)
-                          document.removeEventListener('mousemove', onMove)
-                          document.removeEventListener('mouseup', onUp)
-                        }
-                        document.addEventListener('mousemove', onMove)
-                        document.addEventListener('mouseup', onUp)
-                      }}
-                    >
-                      {/* Track */}
-                      <div className="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-1.5 bg-surface rounded-full overflow-hidden">
+                    {(() => {
+                      // Normalise everything to the recorded data window:
+                      //   left edge  = raceStart (first recorded tick session_time)
+                      //   right edge = raceDuration (last recorded tick session_time)
+                      const span = raceDuration - raceStart || 1
+                      const toRacePct = (t) => Math.max(0, Math.min(1, (t - raceStart) / span))
+                      return (
                         <div
-                          className="h-full bg-gradient-to-r from-gradient-from via-gradient-via to-gradient-to rounded-full transition-all duration-200"
-                          style={{ width: `${Math.min(100, (replayState.session_time / raceDuration) * 100)}%` }}
-                        />
-                      </div>
-                      {/* Event markers */}
-                      {(isAnalyzing ? discoveredEvents : events).map((ev, i) => {
-                        const time = ev.startTime ?? ev.start_time_seconds ?? 0
-                        if (time <= 0) return null
-                        const pct = Math.min(100, (time / raceDuration) * 100)
-                        return (
-                          <div key={`marker-${i}`}
-                               className="absolute top-1/2 -translate-y-1/2 w-0.5 h-3 rounded-full bg-white/30 pointer-events-none"
-                               style={{ left: `${pct}%` }} />
-                        )
-                      })}
-                      {/* Thumb */}
-                      <div
-                        className="absolute top-1/2 w-3 h-3 rounded-full bg-accent border-2 border-white shadow-md
-                                   opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
-                        style={{ left: `${Math.min(100, (replayState.session_time / raceDuration) * 100)}%`,
-                                 transform: 'translate(-50%, -50%)' }}
-                      />
-                    </div>
+                          ref={scrubberRef}
+                          className="relative h-5 group cursor-pointer select-none"
+                          onMouseDown={(e) => {
+                            const bar = e.currentTarget
+                            const rect = bar.getBoundingClientRect()
+                            const seekTo = (clientX) => {
+                              const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+                              const timeMs = Math.round((raceStart + pct * span) * 1000)
+                              apiPost('/iracing/replay/seek-time', { session_num: raceSessionNum, session_time_ms: timeMs })
+                            }
+                            seekTo(e.clientX)
+                            let lastSeek = Date.now()
+                            const onMove = (mv) => {
+                              if (Date.now() - lastSeek < 200) return
+                              lastSeek = Date.now()
+                              seekTo(mv.clientX)
+                            }
+                            const onUp = (up) => {
+                              seekTo(up.clientX)
+                              document.removeEventListener('mousemove', onMove)
+                              document.removeEventListener('mouseup', onUp)
+                            }
+                            document.addEventListener('mousemove', onMove)
+                            document.addEventListener('mouseup', onUp)
+                          }}
+                        >
+                          {/* Track */}
+                          <div className="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-1.5 bg-surface rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-gradient-to-r from-gradient-from via-gradient-via to-gradient-to rounded-full transition-all duration-200"
+                              style={{ width: `${toRacePct(replayState.session_time) * 100}%` }}
+                            />
+                          </div>
+                          {/* Event markers */}
+                          {(isAnalyzing ? discoveredEvents : events).map((ev, i) => {
+                            const time = ev.startTime ?? ev.start_time_seconds ?? 0
+                            if (time <= 0) return null
+                            const pct = toRacePct(time) * 100
+                            return (
+                              <div key={`marker-${i}`}
+                                   className="absolute top-1/2 -translate-y-1/2 w-0.5 h-3 rounded-full bg-white/30 pointer-events-none"
+                                   style={{ left: `${pct}%` }} />
+                            )
+                          })}
+                          {/* Thumb */}
+                          <div
+                            className="absolute top-1/2 w-3 h-3 rounded-full bg-accent border-2 border-white shadow-md
+                                       opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
+                            style={{ left: `${toRacePct(replayState.session_time) * 100}%`,
+                                     transform: 'translate(-50%, -50%)' }}
+                          />
+                        </div>
+                      )
+                    })()}
                     <div className="flex justify-between -mt-0.5">
-                      <span className="text-xxs text-text-disabled font-mono">{formatTime(replayState.session_time)}</span>
-                      <span className="text-xxs text-text-disabled font-mono">{formatTime(raceDuration)}</span>
+                      <span className="text-xxs text-text-disabled font-mono">{formatTime(Math.max(0, replayState.session_time - raceStart))}</span>
+                      <span className="text-xxs text-text-disabled font-mono">{formatTime(raceDuration - raceStart)}</span>
                     </div>
                   </div>
                 )}
@@ -1608,6 +1877,199 @@ export default memo(function AnalysisPanel() {
   )
 })
 
+
+/**
+ * PhaseCard — combined status + action for a single analysis phase.
+ * Shows a status dot, title, optional detail line, optional progress bar,
+ * and an inline action button. Designed to be compact but scannable.
+ */
+function PhaseCard({
+  title, active, done,
+  detail, progressMsg, progressPct,
+  primaryLabel, primaryIcon, onPrimary,
+  primaryDanger, primaryDisabled, primaryTooltip,
+}) {
+  const btn = (
+    <button
+      onClick={onPrimary}
+      disabled={primaryDisabled}
+      className={`flex items-center gap-1 px-2 py-0.5 text-xxs font-medium rounded
+                  transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed
+                  ${primaryDanger
+                    ? 'text-danger bg-danger/10 hover:bg-danger/20'
+                    : 'text-text-tertiary bg-bg-hover border border-border-subtle hover:text-text-primary hover:border-border'}`}
+    >
+      {primaryDanger
+        ? <Square size={9} />
+        : primaryIcon}
+      {primaryDanger ? 'Stop' : primaryLabel}
+    </button>
+  )
+
+  return (
+    <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors min-w-0
+      ${active
+        ? 'bg-accent/5 border-accent/20'
+        : done
+          ? 'bg-success/5 border-success/30'
+          : 'bg-surface border-border-subtle'}`}
+    >
+      {/* Status dot */}
+      <div className="shrink-0">
+        {active
+          ? <Loader2 size={12} className="text-accent animate-spin" />
+          : done
+            ? <CheckCircle2 size={12} className="text-success" />
+            : <span className="block w-2 h-2 rounded-full border border-border" />}
+      </div>
+
+      {/* Labels */}
+      <div className="flex flex-col min-w-0">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xxs font-semibold text-text-primary whitespace-nowrap">
+            {title}
+          </span>
+          {detail && !active && (
+            <span className="text-xxs text-text-disabled truncate">{detail}</span>
+          )}
+          {active && progressMsg && (
+            <span className="text-xxs text-text-secondary truncate max-w-[160px]">{progressMsg}</span>
+          )}
+        </div>
+        {/* Progress bar — only while active */}
+        {active && progressPct != null && (
+          <div className="h-0.5 w-24 bg-surface rounded-full overflow-hidden mt-1">
+            <div
+              className="h-full bg-accent rounded-full transition-all duration-300"
+              style={{ width: `${progressPct}%` }}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Action button */}
+      {primaryTooltip
+        ? <Tooltip content={primaryTooltip} position="bottom" delay={300}>{btn}</Tooltip>
+        : btn}
+    </div>
+  )
+}
+
+/**
+ * TuningPanel — full detection tuning controls.
+ * horizontal=true renders in a grid layout for the control bar panel.
+ */
+function TuningPanel({ params, onChange, horizontal = false, className = '' }) {
+  const containerClass = horizontal
+    ? `grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-x-8 gap-y-3 ${className}`
+    : `space-y-3 ${className}`
+
+  return (
+    <div className={containerClass}>
+      {/* Battle */}
+      <div>
+        <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
+          <Swords size={11} className="text-event-battle" /> Battle Detection
+        </span>
+        <TuneField
+          label="Gap threshold (s)"
+          tooltip="Maximum time gap (seconds) between two adjacent-position cars for a battle to be detected. Lower values require tighter racing. Battles must be sustained for 10+ seconds."
+          value={params.battle_gap_threshold}
+          onChange={v => onChange('battle_gap_threshold', v || 0.5)}
+          step={0.1} min={0.1} max={5}
+        />
+      </div>
+      {/* Crash */}
+      <div>
+        <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
+          <Flame size={11} className="text-event-incident" /> Crash Detection
+        </span>
+        <div className="space-y-1.5">
+          <TuneField
+            label="Min time loss (s)"
+            tooltip="Minimum estimated time lost for an off-track excursion to qualify as a crash."
+            value={params.crash_min_time_loss}
+            onChange={v => onChange('crash_min_time_loss', v || 10)}
+            step={1} min={1} max={60}
+          />
+          <TuneField
+            label="Min off-track (s)"
+            tooltip="Minimum duration a car must remain off-track to count as a crash."
+            value={params.crash_min_off_track_duration}
+            onChange={v => onChange('crash_min_off_track_duration', v || 3)}
+            step={0.5} min={0.5} max={30}
+          />
+        </div>
+      </div>
+      {/* Spinout */}
+      <div>
+        <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
+          <RotateCcw size={11} className="text-event-battle" /> Spinout Detection
+        </span>
+        <div className="space-y-1.5">
+          <TuneField
+            label="Min time loss (s)"
+            tooltip="Minimum time loss for an off-track moment to classify as a spinout."
+            value={params.spinout_min_time_loss}
+            onChange={v => onChange('spinout_min_time_loss', v || 2)}
+            step={0.5} min={0.5} max={30}
+          />
+          <TuneField
+            label="Max time loss (s)"
+            tooltip="Maximum time loss for a spinout. Events above this threshold are classified as crashes."
+            value={params.spinout_max_time_loss}
+            onChange={v => onChange('spinout_max_time_loss', v || 10)}
+            step={1} min={1} max={60}
+          />
+        </div>
+      </div>
+      {/* Contact */}
+      <div>
+        <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
+          <CircleDot size={11} className="text-event-overtake" /> Contact Detection
+        </span>
+        <div className="space-y-1.5">
+          <TuneField
+            label="Time window (s)"
+            tooltip="Maximum time window for grouping multiple off-track cars as a single contact event."
+            value={params.contact_time_window}
+            onChange={v => onChange('contact_time_window', v || 2)}
+            step={0.5} min={0.5} max={10}
+          />
+          <TuneField
+            label="Proximity (lap%)"
+            tooltip="Maximum track-position difference (fraction of lap) for two cars to be considered in contact."
+            value={params.contact_proximity}
+            onChange={v => onChange('contact_proximity', v || 0.05)}
+            step={0.01} min={0.01} max={1}
+          />
+        </div>
+      </div>
+      {/* Close Call */}
+      <div>
+        <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
+          <ShieldAlert size={11} className="text-event-fastest" /> Close Call Detection
+        </span>
+        <div className="space-y-1.5">
+          <TuneField
+            label="Proximity (lap%)"
+            tooltip="Maximum track-position difference between an off-track car and a nearby on-track car."
+            value={params.close_call_proximity}
+            onChange={v => onChange('close_call_proximity', v || 0.02)}
+            step={0.005} min={0.005} max={0.5}
+          />
+          <TuneField
+            label="Max off-track (s)"
+            tooltip="Maximum time loss for a close call — recovery must be quick or it becomes a spinout/crash."
+            value={params.close_call_max_off_track}
+            onChange={v => onChange('close_call_max_off_track', v || 3)}
+            step={0.5} min={0.5} max={15}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
 
 /**
  * EventDetail — expanded view showing all captured data for an event.

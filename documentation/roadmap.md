@@ -241,6 +241,8 @@ Core race event detection: incidents, battles, overtakes, pit stops, fastest lap
 
 **v2 Enhancement (highlight_plan_v2):** Extended telemetry capture (speed_ms, f2_time, last_lap_time, steer_angle, parsed flag bits). BattleDetector extended with N-car chain detection via union-find graph. Speed-based severity for IncidentDetector and CrashDetector. 14 total detectors.
 
+**v3 Enhancement — Two-Phase Split:** Analysis is now explicitly split into two independently-triggerable phases. Phase ① (Telemetry Collection) scans at 16× speed and requires iRacing; Phase ② (Event Detection) re-runs all detectors from cached SQLite with no iRacing needed. Detection thresholds are user-tunable per project and persisted to `analysis_meta`. Control bar exposes "Re-collect Telemetry" and "Re-analyze" buttons with phase status badges and an inline collapsible tuning panel.
+
 **Acceptance Criteria**
 - [x] Analysis connects to iRacing and scans the replay at 16× speed
 - [x] Incidents are detected with 15-second deduplication per car
@@ -258,6 +260,15 @@ Core race event detection: incidents, battles, overtakes, pit stops, fastest lap
 - [x] Live analysis log panel in UI with level-specific icons (info, detect, success, error)
 - [x] Live event particle feed shows animated chips for discovered events during analysis
 - [x] iRacing window screenshot embed visible in analysis panel during scan (polling /api/iracing/screenshot)
+- [x] Phase ① (telemetry) and Phase ② (event detection) can be triggered independently via separate API endpoints
+- [x] "Re-collect Telemetry" button in control bar re-runs Phase ① (requires iRacing connection)
+- [x] "Re-analyze" button in control bar re-runs Phase ② instantly from cached telemetry (no iRacing needed)
+- [x] Phase status badges (① Telemetry, ② Analysis) show done/active/pending states in control bar
+- [x] All 9 detection thresholds are tunable per project (battle gap, crash/spinout time loss, contact window, etc.)
+- [x] Tuning parameters are persisted to `analysis_meta` SQLite table and loaded on project open
+- [x] Inline "Tuning ▾" panel in control bar exposes all tuning controls without leaving the analysis step
+- [x] `GET/PUT /api/projects/{id}/analysis/tuning` endpoints support read/write of saved tuning params
+- [x] `GET /api/projects/{id}/analysis/status` returns `has_telemetry` and `has_events` phase flags
 
 ---
 

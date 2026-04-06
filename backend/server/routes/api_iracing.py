@@ -496,6 +496,7 @@ async def replay_state() -> dict:
         "cam_car_idx": snap.get("cam_car_idx", 0),
         "cam_group_num": snap.get("cam_group_num", 0),
         "race_laps": snap.get("race_laps", 0),
+        "replay_speed": snap.get("replay_speed", 1),
     }
 
 
@@ -1143,6 +1144,44 @@ async def stream_stop():
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, capture_engine.stop)
     return {"status": "stopped"}
+
+
+@router.post("/stream/reset")
+async def stream_reset(
+    fps: int = 15,
+    quality: int = 70,
+    max_width: int = 1280,
+    backend: str = "auto",
+):
+    """Hard-reset the entire streaming pipeline.
+
+    1. Kill all active H.264/HLS FFmpeg consumers and their feeder threads.
+    2. Stop the capture engine completely (destroys the capture device handle
+       and both capture + encoder threads).
+    3. Wait briefly for OS resources to be released.
+    4. Start a fresh engine with the supplied (or default) parameters.
+
+    Returns the engine metrics dict so the client knows the new stream is live.
+    All of this runs off-thread so the async event loop is never blocked.
+    """
+    from server.utils.capture_engine import capture_engine
+
+    loop = asyncio.get_running_loop()
+
+    def _do_reset():
+        import time as _t
+        # Step 1: kill all H.264/HLS consumers
+        _stop_h264_consumers()
+        # Step 2: stop and destroy the capture engine entirely
+        capture_engine.stop()
+        # Step 3: give the OS a moment to release the capture device handle
+        _t.sleep(0.3)
+        # Step 4: start a completely fresh engine
+        capture_engine._backend_pref = backend
+        capture_engine.start(fps=fps, quality=quality, max_width=max_width)
+
+    await loop.run_in_executor(None, _do_reset)
+    return {"status": "ok", **capture_engine.metrics}
 
 
 @router.post("/stream/start")

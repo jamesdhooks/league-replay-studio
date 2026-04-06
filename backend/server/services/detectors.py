@@ -220,232 +220,254 @@ def _find_chains(pairs):
 
 
 class BattleDetector(BaseDetector):
-    """Detect sustained battles between adjacent position cars.
+    """Detect sustained battles between adjacent cars using continuous lap distance.
 
-    A battle exists when two cars in adjacent positions maintain a gap
-    below the threshold for a minimum duration.
+    Two bugs existed in the previous SQL-based design:
+    1. CarIdxPosition is only updated at S/F crossings, so mid-lap adjacency
+       checks were stale by up to a full lap.
+    2. The merge logic only checked battles[-1] and merged any chain that
+       shared a single driver, causing the entire field to collapse into
+       1-2 mega-battles with a dozen drivers each.
 
-    Uses MIN(ABS(diff), 1-ABS(diff)) on lap_pct to handle wrapping
-    at the start/finish line — without this fix, two cars 0.5s apart
-    at the S/F line would calculate as ~lap_time apart (catastrophic
-    false negative).
+    Fix: use cont_dist = lap + lap_pct (live, accurate) to rank cars in
+    each tick.  Track one independent battle window per PAIR of adjacent
+    cars.  Each pair starts, extends, and closes entirely on its own —
+    no cross-pair merging.  A 3-car train (A-B-C) produces two separate
+    battle events (A-B and B-C), which is more useful than one 3-car blob.
     """
 
     event_type = EVENT_BATTLE
-    MIN_DURATION = 10.0     # seconds of sustained close racing
-    MERGE_GAP = 5.0         # merge battles within this gap
+    MIN_DURATION = 10.0   # seconds of sustained close running
+    MERGE_GAP = 5.0       # gap (s) before a pair's battle window is closed
 
     def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
-        gap_threshold = session_info.get("battle_gap_threshold", 0.5)
-        avg_lap_time = session_info.get("avg_lap_time", 90.0) or 90.0
+        gap_threshold = session_info.get("battle_gap_threshold", 0.5)  # seconds
+        avg_lap_time  = session_info.get("avg_lap_time", 90.0) or 90.0
+        # Convert gap from seconds to lap fraction for cont_dist comparison
+        gap_laps = gap_threshold / avg_lap_time
 
-        # Find adjacent-position car pairs that are close together.
-        # The MIN(...) expression handles the start/finish wrapping case
-        # where leader_pct ≈ 0.01 and follower_pct ≈ 0.99 (or vice-versa).
+        # Load all on-track cars during racing, ordered by tick time
         rows = db.execute("""
             SELECT t.session_time, t.replay_frame,
-                   leader.car_idx AS leader_idx, leader.position AS leader_pos,
-                   follower.car_idx AS follower_idx,
-                   leader.lap, leader.lap_pct AS leader_pct,
-                   follower.lap_pct AS follower_pct
-            FROM car_states leader
-            JOIN car_states follower ON follower.tick_id = leader.tick_id
-                AND follower.position = leader.position + 1
-            JOIN race_ticks t ON leader.tick_id = t.id
+                   cs.car_idx, cs.lap, cs.lap_pct
+            FROM car_states cs
+            JOIN race_ticks t ON cs.tick_id = t.id
             WHERE t.session_state IN (?, ?)
-              AND leader.surface = ?
-              AND follower.surface = ?
-              AND leader.position > 0
-              AND MIN(
-                  ABS(leader.lap_pct - follower.lap_pct),
-                  1.0 - ABS(leader.lap_pct - follower.lap_pct)
-              ) * ? < ?
+              AND cs.position > 0
+              AND cs.surface = ?
             ORDER BY t.session_time
-        """, (
-            SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
-            SURFACE_ON_TRACK, SURFACE_ON_TRACK,
-            avg_lap_time, gap_threshold,
-        )).fetchall()
+        """, (SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
+              SURFACE_ON_TRACK)).fetchall()
 
-        # Group rows by tick time and find N-car chains per tick
-        tick_pairs: dict[float, list[tuple]] = defaultdict(list)
-        tick_meta: dict[float, dict] = {}
+        # Group car states by tick
+        ticks: dict[float, list[dict]] = defaultdict(list)
+        tick_frames: dict[float, int] = {}
         for row in rows:
             time_s = row["session_time"]
-            tick_pairs[time_s].append((row["leader_idx"], row["follower_idx"]))
-            if time_s not in tick_meta:
-                tick_meta[time_s] = {
-                    "frame": row["replay_frame"],
-                    "lap": row["lap"],
-                    "position": row["leader_pos"],
-                }
+            ticks[time_s].append({
+                "car_idx":   row["car_idx"],
+                "cont_dist": row["lap"] + row["lap_pct"],
+                "lap":       row["lap"],
+            })
+            tick_frames[time_s] = row["replay_frame"]
 
-        # Build per-tick chains (connected components)
-        tick_chains: list[tuple[float, frozenset]] = []
-        for time_s in sorted(tick_pairs):
-            chains = _find_chains(tick_pairs[time_s])
-            for chain in chains:
-                tick_chains.append((time_s, frozenset(chain)))
+        # active[(ahead_idx, behind_idx)] = current open battle window
+        active: dict[tuple[int, int], dict] = {}
+        finished: list[dict] = []
 
-        # Group consecutive ticks with overlapping chains into battle windows.
-        # A chain is "the same battle" if it shares at least one car with the
-        # previous tick's chain and is within MERGE_GAP seconds.
-        battles: list[dict] = []
-        for time_s, chain in tick_chains:
-            meta = tick_meta[time_s]
-            drivers = sorted(chain)
+        for time_s in sorted(ticks.keys()):
+            # Sort by cont_dist descending: index 0 = furthest ahead on track
+            cars = sorted(ticks[time_s], key=lambda c: c["cont_dist"], reverse=True)
+            frame = tick_frames[time_s]
 
-            # Try to extend an existing battle whose drivers overlap
-            extended = False
-            if battles:
-                last = battles[-1]
-                last_drivers = set(last["involved_drivers"])
-                if chain & last_drivers and time_s - last["end_time"] < self.MERGE_GAP:
-                    # Merge drivers into the existing battle
-                    merged = last_drivers | chain
-                    last["involved_drivers"] = sorted(merged)
-                    last["end_time"] = time_s
-                    last["end_frame"] = meta["frame"]
-                    last["metadata"]["chain_length"] = len(merged)
-                    extended = True
+            # Find all adjacent pairs that are within the gap threshold
+            close_pairs: set[tuple[int, int]] = set()
+            for i in range(len(cars) - 1):
+                a = cars[i]      # ahead
+                b = cars[i + 1]  # just behind
+                if a["cont_dist"] - b["cont_dist"] <= gap_laps:
+                    pair = (a["car_idx"], b["car_idx"])
+                    close_pairs.add(pair)
+                    if pair in active:
+                        # Extend the existing battle window
+                        active[pair]["end_time"]  = time_s
+                        active[pair]["end_frame"] = frame
+                    else:
+                        # Open a new battle window for this pair
+                        active[pair] = {
+                            "start_time":  time_s,
+                            "end_time":    time_s,
+                            "start_frame": frame,
+                            "end_frame":   frame,
+                            "lap":         a["lap"],
+                            "position":    i + 1,  # 1-indexed from cont_dist rank
+                            "ahead_idx":   a["car_idx"],
+                            "behind_idx":  b["car_idx"],
+                        }
 
-            if not extended:
-                battles.append({
-                    "event_type": self.event_type,
-                    "start_time": time_s,
-                    "end_time": time_s,
-                    "start_frame": meta["frame"],
-                    "end_frame": meta["frame"],
-                    "lap_number": meta["lap"],
-                    "severity": 5,
-                    "involved_drivers": drivers,
-                    "position": meta["position"],
-                    "metadata": {
-                        "gap_threshold": gap_threshold,
-                        "chain_length": len(drivers),
-                    },
-                })
+            # Close out pairs that have been out of proximity long enough
+            to_close = [
+                pair for pair, b in active.items()
+                if pair not in close_pairs
+                and time_s - b["end_time"] > self.MERGE_GAP
+            ]
+            for pair in to_close:
+                finished.append(active.pop(pair))
 
-        # Filter out battles shorter than minimum duration
-        battles = [b for b in battles if b["end_time"] - b["start_time"] >= self.MIN_DURATION]
+        # Flush all still-open battles at end of data
+        finished.extend(active.values())
 
-        # Score based on position importance and duration
-        for b in battles:
+        # Convert raw windows to events, filtering by minimum duration
+        events: list[dict] = []
+        for b in finished:
             duration = b["end_time"] - b["start_time"]
-            pos = b.get("position", 20) or 20
-            # Higher severity for lead battles and longer duration
-            pos_bonus = max(0, 3 - (pos - 1))  # +3 for P1, +2 for P2, etc.
-            dur_bonus = min(3, int(duration / 20))
-            b["severity"] = min(10, 4 + pos_bonus + dur_bonus)
+            if duration < self.MIN_DURATION:
+                continue
 
-        logger.info("[Detector:Battle] Found %d battles", len(battles))
-        return battles
+            pos = b["position"]
+            pos_bonus = max(0, 3 - (pos - 1))        # +3 for P1, +2 P2, …
+            dur_bonus = min(3, int(duration / 20))    # +1 per 20 s of battle
+            severity  = min(10, 4 + pos_bonus + dur_bonus)
+
+            events.append({
+                "event_type":       self.event_type,
+                "start_time":       b["start_time"],
+                "end_time":         b["end_time"],
+                "start_frame":      b["start_frame"],
+                "end_frame":        b["end_frame"],
+                "lap_number":       b["lap"],
+                "severity":         severity,
+                "involved_drivers": [b["ahead_idx"], b["behind_idx"]],
+                "position":         pos,
+                "metadata": {
+                    "gap_threshold_laps": round(gap_laps, 5),
+                    "duration_seconds":   round(duration, 1),
+                },
+            })
+
+        events.sort(key=lambda e: e["start_time"])
+        logger.info("[Detector:Battle] Found %d battles", len(events))
+        return events
 
 
 # ── Overtake Detector ────────────────────────────────────────────────────────
 
 class OvertakeDetector(BaseDetector):
-    """Detect position changes (overtakes) with proximity verification.
+    """Detect overtakes using continuous lap distance (lap + lap_pct).
 
-    Mirrors the iRacingReplayDirector approach: overtakes are only counted
-    when a car gains position AND is close to the car it passed.  Without
-    this proximity requirement, pit stops and retirements would register
-    as overtakes.
+    The fundamental problem with CarIdxPosition: iRacing only updates it
+    when cars CROSS THE START/FINISH LINE.  A pass at lap_pct=0.7 won't
+    be reflected until the end of that lap — up to ~60 seconds late on a
+    90-second lap.  Any approach that looks for position-number changes will
+    therefore timestamp the event a full lap after it actually happened.
 
-    Uses SQL window functions to find ticks where a car's position
-    decreased (improved) compared to the previous sample, then verifies
-    that the car that *lost* the position was on track and close by.
+    Fix: use cont_dist = lap + lap_pct as a monotonically increasing
+    continuous track distance.  When car A's cont_dist crosses above car
+    B's cont_dist while they are physically close, that IS the overtake
+    moment — accurate to our scan sample rate (~320ms at 16×/20ms poll).
+
+    Algorithm:
+      For each tick, sort all on-track cars by cont_dist (highest = furthest
+      ahead).  Detect adjacent pairs where the order flipped since the
+      previous tick AND the gap is small enough to be a genuine on-track
+      pass (not lapped traffic or a pit-stop-gap).
     """
 
     event_type = EVENT_OVERTAKE
     DEDUP_SECONDS = 10.0
-    PROXIMITY_FACTOR = 1.5  # max gap (seconds) to count as a real overtake
+    PROXIMITY_LAPS = 0.06   # max |cont_dist| gap to count (~5.4 s on a 90 s lap)
+    LEAD_IN = 2.0            # seconds before crossing to use as start_time
 
     def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
-        avg_lap_time = session_info.get("avg_lap_time", 90.0) or 90.0
-
-        # Find position gains where the overtaking car is close to
-        # a car that now sits in the old position (i.e. the car that was
-        # passed).  We join to find the car that currently occupies the
-        # overtaker's old position, and verify it's on-track and nearby.
+        # Load all on-track car states during racing, ordered by time.
+        # We only need lap, lap_pct, and the frame number — NOT position.
         rows = db.execute("""
-            WITH pos_changes AS (
-                SELECT cs.car_idx, cs.position, cs.lap, cs.lap_pct,
-                       cs.surface,
-                       t.session_time, t.replay_frame, t.id AS tick_id,
-                       LAG(cs.position) OVER (
-                           PARTITION BY cs.car_idx ORDER BY t.session_time
-                       ) AS prev_position
-                FROM car_states cs
-                JOIN race_ticks t ON cs.tick_id = t.id
-                WHERE t.session_state IN (?, ?)
-                  AND cs.position > 0
-            )
-            SELECT pc.session_time, pc.replay_frame, pc.car_idx,
-                   pc.position, pc.prev_position, pc.lap,
-                   passed.car_idx AS passed_car_idx
-            FROM pos_changes pc
-            -- Join to find the car now in the overtaker's old position
-            JOIN car_states passed ON passed.tick_id = pc.tick_id
-                AND passed.position = pc.prev_position
-                AND passed.car_idx != pc.car_idx
-                AND passed.surface = ?
-            WHERE pc.prev_position IS NOT NULL
-              AND pc.position < pc.prev_position
-              AND pc.prev_position - pc.position <= 3
-              AND pc.surface = ?
-              -- Proximity check: both cars must be close (handles S/F wrapping)
-              AND MIN(
-                  ABS(pc.lap_pct - passed.lap_pct),
-                  1.0 - ABS(pc.lap_pct - passed.lap_pct)
-              ) * ? < ?
-            ORDER BY pc.session_time
-        """, (
-            SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
-            SURFACE_ON_TRACK,
-            SURFACE_ON_TRACK,
-            avg_lap_time, self.PROXIMITY_FACTOR,
-        )).fetchall()
+            SELECT t.session_time, t.replay_frame,
+                   cs.car_idx, cs.lap, cs.lap_pct
+            FROM car_states cs
+            JOIN race_ticks t ON cs.tick_id = t.id
+            WHERE t.session_state IN (?, ?)
+              AND cs.position > 0
+              AND cs.surface = ?
+            ORDER BY t.session_time
+        """, (SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
+              SURFACE_ON_TRACK)).fetchall()
 
-        events: list[dict] = []
-        seen: dict[int, float] = {}
-
+        # Group car states by tick timestamp
+        ticks: dict[float, list[dict]] = defaultdict(list)
+        tick_frames: dict[float, int] = {}
         for row in rows:
             time_s = row["session_time"]
-            frame = row["replay_frame"]
-            car_idx = row["car_idx"]
-            new_pos = row["position"]
-            old_pos = row["prev_position"]
-            lap = row["lap"]
-            passed_car = row["passed_car_idx"]
-
-            if time_s - seen.get(car_idx, -999) < self.DEDUP_SECONDS:
-                continue
-
-            places_gained = old_pos - new_pos
-            severity = min(10, 3 + places_gained + max(0, 3 - (new_pos - 1)))
-
-            events.append({
-                "event_type": self.event_type,
-                "start_time": max(0, time_s - 3.0),
-                "end_time": time_s + 5.0,
-                "start_frame": max(0, frame),
-                "end_frame": frame,
-                "lap_number": lap,
-                "severity": severity,
-                "involved_drivers": [car_idx, passed_car],
-                "position": new_pos,
-                "metadata": {
-                    "old_position": old_pos,
-                    "new_position": new_pos,
-                    "places_gained": places_gained,
-                    "passed_car_idx": passed_car,
-                },
+            ticks[time_s].append({
+                "car_idx":   row["car_idx"],
+                "cont_dist": row["lap"] + row["lap_pct"],
+                "lap":       row["lap"],
             })
-            seen[car_idx] = time_s
+            tick_frames[time_s] = row["replay_frame"]
+
+        events: list[dict] = []
+        # (min_car_idx, max_car_idx) → last overtake session_time (per-pair dedup)
+        seen_pairs: dict[tuple[int, int], float] = {}
+        # car_idx → rank in previous tick (0 = furthest ahead in field)
+        prev_ranks: dict[int, int] = {}
+
+        for time_s in sorted(ticks.keys()):
+            # Sort by continuous distance, descending: index 0 = race leader
+            cars = sorted(ticks[time_s], key=lambda c: c["cont_dist"], reverse=True)
+            curr_ranks = {c["car_idx"]: i for i, c in enumerate(cars)}
+
+            # Examine each adjacent pair in the current on-track order
+            for i in range(len(cars) - 1):
+                a = cars[i]       # currently ahead
+                b = cars[i + 1]   # currently just behind
+
+                # Proximity gate: ignore pairs separated by more than a small
+                # fraction of a lap — that means lapped traffic or a pit gap,
+                # not a wheel-to-wheel pass.
+                gap = a["cont_dist"] - b["cont_dist"]
+                if gap > self.PROXIMITY_LAPS:
+                    continue
+
+                idx_a, idx_b = a["car_idx"], b["car_idx"]
+                prev_rank_a = prev_ranks.get(idx_a)
+                prev_rank_b = prev_ranks.get(idx_b)
+                if prev_rank_a is None or prev_rank_b is None:
+                    continue
+
+                # In the previous tick, B had a lower rank number (= further
+                # ahead) than A.  Now A has the lower rank.  B → A: overtake.
+                if prev_rank_b < prev_rank_a:
+                    pair_key = (min(idx_a, idx_b), max(idx_a, idx_b))
+                    last_t = seen_pairs.get(pair_key, -999.0)
+                    if time_s - last_t < self.DEDUP_SECONDS:
+                        continue
+
+                    lap_num  = a["lap"]
+                    new_pos  = i + 1   # 1-indexed field position from cont_dist rank
+                    severity = min(10, 4 + max(0, 3 - (new_pos - 1)))
+
+                    events.append({
+                        "event_type":      self.event_type,
+                        "start_time":      max(0.0, time_s - self.LEAD_IN),
+                        "end_time":        time_s + 5.0,
+                        "start_frame":     tick_frames.get(time_s, 0),
+                        "end_frame":       tick_frames.get(time_s, 0),
+                        "lap_number":      lap_num,
+                        "severity":        severity,
+                        "involved_drivers": [idx_a, idx_b],
+                        "position":        new_pos,
+                        "metadata": {
+                            "gap_laps":    round(gap, 4),
+                            "cross_time":  round(time_s, 2),
+                        },
+                    })
+                    seen_pairs[pair_key] = time_s
+
+            prev_ranks = curr_ranks
 
         logger.info("[Detector:Overtake] Found %d overtakes", len(events))
         return events
+
 
 
 # ── Pit Stop Detector ────────────────────────────────────────────────────────
@@ -594,53 +616,81 @@ class FastestLapDetector(BaseDetector):
 # ── Leader Change Detector ───────────────────────────────────────────────────
 
 class LeaderChangeDetector(BaseDetector):
-    """Detect changes in the race leader (P1)."""
+    """Detect changes in the race leader using continuous lap distance.
+
+    CarIdxPosition = 1 only updates at start/finish crossings, so a lead
+    change at lap_pct=0.5 wouldn't register until both cars lap — up to a
+    full lap late.  Instead, we find the car with the highest cont_dist
+    (lap + lap_pct) in each tick; that car IS the actual leader at that
+    moment, regardless of where the S/F line is.
+    """
 
     event_type = EVENT_LEADER_CHANGE
+    DEDUP_SECONDS = 5.0
+    LEAD_IN = 3.0
 
     def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
+        # Load all on-track cars during racing, ordered by tick time.
         rows = db.execute("""
-            WITH leaders AS (
-                SELECT cs.car_idx, cs.lap, t.session_time, t.replay_frame,
-                       LAG(cs.car_idx) OVER (ORDER BY t.session_time) AS prev_leader
-                FROM car_states cs
-                JOIN race_ticks t ON cs.tick_id = t.id
-                WHERE cs.position = 1
-                  AND t.session_state IN (?, ?)
-                  AND cs.surface = ?
-            )
-            SELECT session_time, replay_frame, car_idx, prev_leader, lap
-            FROM leaders
-            WHERE prev_leader IS NOT NULL
-              AND car_idx != prev_leader
-            ORDER BY session_time
-        """, (SESSION_STATE_RACING, SESSION_STATE_CHECKERED, SURFACE_ON_TRACK)).fetchall()
+            SELECT t.session_time, t.replay_frame,
+                   cs.car_idx, cs.lap, cs.lap_pct
+            FROM car_states cs
+            JOIN race_ticks t ON cs.tick_id = t.id
+            WHERE t.session_state IN (?, ?)
+              AND cs.position > 0
+              AND cs.surface = ?
+            ORDER BY t.session_time
+        """, (SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
+              SURFACE_ON_TRACK)).fetchall()
 
-        events: list[dict] = []
-        last_time = -999.0
-
+        # Group into ticks and find the cont_dist leader in each
+        ticks: dict[float, list[dict]] = defaultdict(list)
+        tick_frames: dict[float, int] = {}
         for row in rows:
             time_s = row["session_time"]
-            # Deduplicate close-together leader changes
-            if time_s - last_time < 5.0:
+            ticks[time_s].append({
+                "car_idx":   row["car_idx"],
+                "cont_dist": row["lap"] + row["lap_pct"],
+                "lap":       row["lap"],
+            })
+            tick_frames[time_s] = row["replay_frame"]
+
+        events: list[dict] = []
+        prev_leader: int | None = None
+        last_event_time = -999.0
+
+        for time_s in sorted(ticks.keys()):
+            cars = ticks[time_s]
+            if not cars:
+                continue
+            leader_car = max(cars, key=lambda c: c["cont_dist"])
+            leader_idx = leader_car["car_idx"]
+
+            if prev_leader is None:
+                prev_leader = leader_idx
                 continue
 
-            events.append({
-                "event_type": self.event_type,
-                "start_time": max(0, time_s - 3.0),
-                "end_time": time_s + 5.0,
-                "start_frame": max(0, row["replay_frame"]),
-                "end_frame": row["replay_frame"],
-                "lap_number": row["lap"],
-                "severity": 8,
-                "involved_drivers": [row["car_idx"], row["prev_leader"]],
-                "position": 1,
-                "metadata": {
-                    "new_leader": row["car_idx"],
-                    "old_leader": row["prev_leader"],
-                },
-            })
-            last_time = time_s
+            if leader_idx != prev_leader and time_s - last_event_time >= self.DEDUP_SECONDS:
+                frame = tick_frames[time_s]
+                events.append({
+                    "event_type": self.event_type,
+                    "start_time": max(0.0, time_s - self.LEAD_IN),
+                    "end_time": time_s + 5.0,
+                    "start_frame": max(0, frame),
+                    "end_frame": frame,
+                    "lap_number": leader_car["lap"],
+                    "severity": 8,
+                    "involved_drivers": [leader_idx, prev_leader],
+                    "position": 1,
+                    "metadata": {
+                        "new_leader": leader_idx,
+                        "old_leader": prev_leader,
+                        "cross_time": round(time_s, 2),
+                    },
+                })
+                last_event_time = time_s
+
+            prev_leader = leader_idx
 
         logger.info("[Detector:LeaderChange] Found %d leader changes", len(events))
         return events

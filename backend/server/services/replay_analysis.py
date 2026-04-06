@@ -288,6 +288,81 @@ class ReplayAnalyzer:
         """Signal the analysis to stop at the next check point."""
         self._cancelled = True
 
+    async def scan_only(self) -> dict:
+        """Run ONLY Pass 1 (telemetry scan) — no event detection.
+
+        Use this when you want to re-collect iRacing telemetry without
+        changing tuning parameters, or as the first step before a
+        separate re-analyze call.
+        """
+        started_at = datetime.now(timezone.utc).isoformat()
+
+        init_analysis_db(self.project_dir)
+        conn = get_project_db(self.project_dir)
+
+        conn.execute(
+            "INSERT INTO analysis_runs (started_at, status) VALUES (?, 'running')",
+            (started_at,),
+        )
+        run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.commit()
+
+        try:
+            self.on_progress("started", {
+                "project_id": self.project_id,
+                "stage": "analysis",
+                "phase": "scan",
+                "description": "Collecting telemetry from replay...",
+            })
+
+            self._save_preview_screenshot()
+            clear_analysis_data(conn)
+            self._save_drivers(conn)
+
+            scan_start = time.monotonic()
+            total_ticks = await self._scan_telemetry(conn)
+            scan_duration = time.monotonic() - scan_start
+
+            if self._cancelled:
+                self._finish_run(conn, run_id, "scan_cancelled", total_ticks, 0, scan_duration)
+                return {"status": "cancelled"}
+
+            self._finish_run(conn, run_id, "scan_complete", total_ticks, 0, scan_duration)
+
+            self.on_progress("completed", {
+                "project_id": self.project_id,
+                "stage": "analysis",
+                "phase": "scan",
+                "telemetry_rows": total_ticks,
+                "duration_seconds": round(scan_duration, 1),
+                "description": f"Telemetry collected — {total_ticks:,} samples in {_format_time(scan_duration)}",
+                "detail": "Ready for event detection. Adjust tuning parameters and click Re-analyze.",
+            })
+
+            logger.info(
+                "[Analysis] Scan-only complete: %d ticks in %.1fs", total_ticks, scan_duration,
+            )
+
+            return {
+                "status": "scan_complete",
+                "total_ticks": total_ticks,
+                "scan_duration": round(scan_duration, 1),
+            }
+
+        except Exception as exc:
+            error_msg = str(exc)
+            self._finish_run(conn, run_id, "error", 0, 0, 0, error_msg)
+            self.on_progress("error", {
+                "project_id": self.project_id,
+                "stage": "analysis",
+                "message": error_msg,
+            })
+            logger.error("[Analysis] Scan-only error: %s", exc)
+            raise
+        finally:
+            self._save_analysis_log()
+            conn.close()
+
     async def analyze(self) -> dict:
         """Run the full two-pass analysis. Returns summary dict."""
         started_at = datetime.now(timezone.utc).isoformat()
@@ -330,7 +405,7 @@ class ReplayAnalyzer:
                 self._finish_run(conn, run_id, "cancelled", total_ticks, 0, scan_duration)
                 return {"status": "cancelled"}
 
-            # Pass 2: Detect events
+            # Pass 2: Detect events (run in a thread pool — CPU-bound; must not block the event loop)
             num_detectors = len(ALL_DETECTORS)
             self.on_progress("step_completed", {
                 "project_id": self.project_id,
@@ -339,7 +414,8 @@ class ReplayAnalyzer:
                 "detail": f"Analysing {total_ticks:,} telemetry samples with {num_detectors} event detectors",
                 "progress_percent": 85,
             })
-            total_events = self._detect_events(conn)
+            loop = asyncio.get_running_loop()
+            total_events = await loop.run_in_executor(None, self._run_detect_in_thread)
 
             # Mark complete
             self._finish_run(conn, run_id, "completed", total_ticks, total_events, scan_duration)
@@ -412,12 +488,46 @@ class ReplayAnalyzer:
         race_session_num = session_data.get("race_session_num")
         all_sessions = session_data.get("sessions", [])
 
+        # ── Persist session fingerprint for later replay-validation ─────────
+        # Stored in analysis_meta so the frontend can later confirm the user
+        # has the same replay loaded during review/editing phases.
+        fingerprint = {
+            "track_name":      session_data.get("track_name", ""),
+            "track_id":        session_data.get("track_id", 0),
+            "subsession_id":   session_data.get("subsession_id", 0),
+            "driver_count":    len([d for d in session_data.get("drivers", []) if not d.get("is_spectator")]),
+            "driver_cust_ids": session_data.get("driver_cust_ids", []),
+        }
+        conn.execute(
+            "INSERT OR REPLACE INTO analysis_meta (key, value) VALUES (?, ?)",
+            ("session_fingerprint", json.dumps(fingerprint)),
+        )
+        conn.commit()
+        logger.info(
+            "[Analysis] Session fingerprint saved: track=%r subsession=%s drivers=%d",
+            fingerprint["track_name"], fingerprint["subsession_id"], fingerprint["driver_count"],
+        )
+
         if all_sessions:
             session_names = ", ".join(
                 f"{s.get('name', s.get('type', '?'))} (#{s['index']})"
                 for s in all_sessions
             )
             logger.info("[Analysis] Available sessions: %s", session_names)
+
+        # Always rewind to the absolute start of the replay first.
+        # This is critical when iRacing is paused at the end of the race —
+        # replay_search_session_time (and set_replay_speed) will silently do
+        # nothing if the engine is in an "ended" state at the last frame.
+        self.on_progress("step_completed", {
+            "project_id": self.project_id,
+            "stage": "analysis_scan",
+            "description": "Rewinding replay to start...",
+            "detail": "Seeking to frame 0 before jumping to race session",
+            "progress_percent": 1,
+        })
+        iracing_bridge.seek_to_frame(0)
+        await asyncio.sleep(0.8)  # Give iRacing time to process the seek
 
         jumped_to_race = False
         if race_session_num is not None:
@@ -438,19 +548,17 @@ class ReplayAnalyzer:
                     race_session_num,
                 )
             else:
-                logger.warning("[Analysis] replay_search_session_time failed, falling back")
+                logger.warning("[Analysis] replay_search_session_time failed, falling back to frame-0 scan")
 
         if not jumped_to_race:
-            # Fallback: seek to beginning and scan forward
+            # Fallback: already at frame 0 from the initial rewind above
             self.on_progress("step_completed", {
                 "project_id": self.project_id,
                 "stage": "analysis_scan",
-                "description": "Seeking to replay start...",
+                "description": "Scanning from replay start...",
                 "detail": "Could not identify race session — scanning from beginning at 16× speed",
-                "progress_percent": 1,
+                "progress_percent": 2,
             })
-            iracing_bridge.seek_to_frame(0)
-            await asyncio.sleep(0.5)
 
         # Now scan forward at 16× to find the exact moment SessionState==Racing
         # Use a higher speed when scanning from frame 0 (must skip practice/qual)
@@ -549,6 +657,10 @@ class ReplayAnalyzer:
             "INSERT OR REPLACE INTO analysis_meta (key, value) VALUES (?, ?)",
             ("race_start_session_time", str(race_start_session_time)),
         )
+        conn.execute(
+            "INSERT OR REPLACE INTO analysis_meta (key, value) VALUES (?, ?)",
+            ("race_session_num", str(race_session_num if race_session_num is not None else 0)),
+        )
         conn.commit()
 
         # ── Phase B: Seek back to race start and begin captured scan ────────
@@ -636,10 +748,17 @@ class ReplayAnalyzer:
                 })
                 finish_poll_start = time.monotonic()
                 MAX_FINISH_WAIT = 30.0  # real seconds (480 race seconds at 16×)
+                last_speed_assert = time.monotonic()
 
                 while time.monotonic() - finish_poll_start < MAX_FINISH_WAIT:
                     if self._cancelled:
                         break
+                    # iRacing auto-pauses when the session state transitions to
+                    # Checkered — re-assert speed every second to keep advancing.
+                    now = time.monotonic()
+                    if now - last_speed_assert >= 1.0:
+                        iracing_bridge.set_replay_speed(SCAN_SPEED)
+                        last_speed_assert = now
                     snap = self._capture_snapshot()
                     if snap:
                         writer.write_tick(snap)
@@ -731,6 +850,19 @@ class ReplayAnalyzer:
 
         writer.flush()
         return writer.total_ticks
+
+    def _run_detect_in_thread(self) -> int:
+        """Thread-pool entry: open a fresh DB connection and run event detection.
+
+        Called via run_in_executor so the asyncio event loop stays free during
+        the CPU-bound detection pass.  The on_progress callback is thread-safe
+        (api_analysis._on_progress uses run_coroutine_threadsafe internally).
+        """
+        conn = get_project_db(self.project_dir)
+        try:
+            return self._detect_events(conn)
+        finally:
+            conn.close()
 
     def _detect_events(self, conn: sqlite3.Connection) -> int:
         """Pass 2: Run all event detectors on cached telemetry data.
@@ -946,6 +1078,29 @@ class AnalysisManager:
         self._tasks[project_id] = task
         return True
 
+    def start_rescan(
+        self,
+        project_id: int,
+        project_dir: str,
+        session_info: dict | None = None,
+        on_progress: Callable[[str, dict], None] | None = None,
+    ) -> bool:
+        """Start a telemetry-only scan (Pass 1) for a project. Returns False if already running."""
+        if self.is_running(project_id):
+            return False
+
+        analyzer = ReplayAnalyzer(
+            project_id=project_id,
+            project_dir=project_dir,
+            session_info=session_info,
+            on_progress=on_progress,
+        )
+        self._active[project_id] = analyzer
+
+        task = asyncio.create_task(self._run_scan_only(project_id, analyzer))
+        self._tasks[project_id] = task
+        return True
+
     async def _run(self, project_id: int, analyzer: ReplayAnalyzer) -> dict:
         """Execute analysis and clean up when done."""
         try:
@@ -953,6 +1108,17 @@ class AnalysisManager:
             return result
         except Exception as exc:
             logger.error("[AnalysisManager] Analysis failed for project %d: %s", project_id, exc)
+            return {"status": "error", "message": str(exc)}
+        finally:
+            self._active.pop(project_id, None)
+
+    async def _run_scan_only(self, project_id: int, analyzer: ReplayAnalyzer) -> dict:
+        """Execute scan-only pass and clean up when done."""
+        try:
+            result = await analyzer.scan_only()
+            return result
+        except Exception as exc:
+            logger.error("[AnalysisManager] Scan failed for project %d: %s", project_id, exc)
             return {"status": "error", "message": str(exc)}
         finally:
             self._active.pop(project_id, None)

@@ -272,6 +272,9 @@ class IRacingBridge:
             # Include track_length from session data for speed derivation fallback
             track_length = self._session_data.get("track_length", 0.0)
 
+            replay_speed_raw = self._ir["ReplayPlaySpeed"]
+            replay_speed = int(replay_speed_raw) if replay_speed_raw is not None else 1
+
             return {
                 "session_time":  self._ir["SessionTime"]    or 0.0,
                 "session_state": self._ir["SessionState"]   or 0,
@@ -281,6 +284,7 @@ class IRacingBridge:
                 "cam_car_idx":   self._ir["CamCarIdx"]      or 0,
                 "cam_group_num": self._ir["CamGroupNumber"] or 0,
                 "flags":         self._ir["SessionFlags"]   or 0,
+                "replay_speed":  replay_speed,
                 "track_length":  track_length,
                 "car_states":    car_states,
             }
@@ -413,11 +417,17 @@ class IRacingBridge:
             self._session_data = {
                 "track_name": track_name,
                 "track_length": track_length_m,
+                "track_id": int(weekend_info.get("TrackID", 0) or 0),
+                "subsession_id": int(weekend_info.get("SubSessionID", 0) or 0),
                 "session_type": session_type,
                 "avg_lap_time": avg_lap_time,
                 "drivers": drivers,
                 "cameras": cameras,
                 "race_session_num": race_session_num,
+                "driver_cust_ids": sorted([
+                    d["iracing_cust_id"] for d in drivers
+                    if not d.get("is_spectator") and d.get("iracing_cust_id", 0) > 0
+                ]),
                 "sessions": [
                     {"index": i, "type": s.get("SessionType", ""), "name": s.get("SessionName", "")}
                     for i, s in enumerate(sessions)

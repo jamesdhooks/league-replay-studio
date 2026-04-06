@@ -241,10 +241,12 @@ Everything revolves around a **Race Project** — a self-contained workspace for
 |------|------|-------------------|-----------------|
 | 1 | **Setup** | Project created, replay file selected | Always available |
 | 2 | **Capture** | OBS recording complete, capture file validated | Replay file available |
-| 3 | **Analysis** | Events detected, telemetry stored | Capture file present |
+| 3 | **Analysis** | Telemetry collected + events detected | Capture file present |
 | 4 | **Editing** | Events reviewed, highlights configured, overlays set | Analysis complete |
 | 5 | **Export** | Encoding complete, files on disk | Edit decisions finalised |
 | 6 | **Upload** | Published to YouTube (optional) | Export files exist |
+
+> **Analysis is a two-phase step.** Phase ① (Telemetry Collection) requires iRacing and re-runs the replay at 16×. Phase ② (Event Detection) operates purely on cached SQLite data and can be re-run at any time to tune how battles, crashes, and contacts are detected — without replaying iRacing. See Section 4.3.8 for the full two-phase architecture.
 
 The UI prominently shows which step the project is on, with a **step indicator bar** at the top of the project view. Completed steps show a green check, the active step is highlighted, and future steps are greyed out.
 
@@ -992,12 +994,62 @@ class IRacingBridge:
 
 The analyser runs the analysis loop against a live 16× replay and produces the normalised telemetry database (`race_ticks` + `car_states`) that all subsequent processing (event detection, highlight editor, camera director) reads from.
 
-**Two-pass approach:**
+#### 4.4.1 Two-Phase Analysis Architecture
 
-1. **Analysis Scan** (1-3 minutes): Jump directly to the race session via `replay_search_session_time(race_session_num, 0)` to skip practice/qualifying, then set replay to 16× speed and run the full analysis loop. Each `freeze_var_buffer_latest()` call produces one `race_ticks` row and N `car_states` rows (one per active car). This produces a complete, queryable record of the entire race. Falls back to legacy frame-0 scan if session jumping is unavailable.
-2. **Event Detection** (seconds, from cached data): Run all detectors against the normalised tables — no iRacing connection needed after this point. Results populate the `race_events` table. The Highlight Editing Suite reprocesses this same cached data instantly.
+Analysis is explicitly split into **two independent phases** that can be triggered separately from the UI:
 
-> **Key insight:** After the scan is complete, all event detection and highlight editing operates entirely on cached SQLite data. Reprocessing the highlight algorithm takes milliseconds because it never touches iRacing or the video file.
+| Phase | Name | Requires iRacing | Duration | Can re-run |
+|-------|------|-----------------|----------|------------|
+| **① Telemetry Collection** | `POST /api/projects/{id}/analyze/rescan` | Yes (replay must be loaded) | 1–3 min | Any time iRacing is connected |
+| **② Event Detection** | `POST /api/projects/{id}/analyze/redetect` | No | Seconds | Any time after Phase ① |
+
+**Phase ①: Telemetry Collection (16× Scan)**
+- Jump directly to the race session via `replay_search_session_time(race_session_num, 0)`
+- Set replay to 16× speed and sample every 20ms (50Hz)
+- Write each sample to `race_ticks` + `car_states` tables
+- Status `scan_complete` in `analysis_runs` indicates telemetry is ready for detection
+- Falls back to legacy frame-0 scan if session jumping is unavailable
+
+**Phase ②: Event Detection (detector pass)**
+- Runs all 13 event detectors sequentially on cached SQLite data
+- No iRacing connection required — entirely computed from stored telemetry
+- Results populate the `race_events` table
+- Can be re-run instantly by adjusting tuning parameters and clicking "Re-analyze"
+- Tuning parameters are persisted to `analysis_meta` so they survive page refreshes
+
+**API endpoints:**
+```
+POST /api/projects/{id}/analyze          — Full analysis (Phase ① + Phase ②)
+POST /api/projects/{id}/analyze/rescan   — Phase ① only (re-collect telemetry)
+POST /api/projects/{id}/analyze/redetect — Phase ② only (re-detect events)
+POST /api/projects/{id}/analyze/cancel   — Cancel running analysis
+GET  /api/projects/{id}/analysis/status  — Phase flags: has_telemetry, has_events
+GET  /api/projects/{id}/analysis/tuning  — Load saved tuning parameters
+PUT  /api/projects/{id}/analysis/tuning  — Save tuning parameters (without re-detecting)
+```
+
+**Frontend control bar (AnalysisPanel):**
+- **Phase badges** show ① Telemetry (green=done, spinning=active) and ② Analysis (green=done)
+- **"Re-collect Telemetry"** button — disabled when iRacing not connected, clears all data and re-scans
+- **"Re-analyze"** button — always available when telemetry exists, no iRacing needed
+- **"Tuning ▾"** toggle — expands inline tuning panel below the control bar
+- Tuning controls also accessible from sidebar "Events → Tune" sub-tab
+
+#### 4.4.2 Tuning Parameters
+
+Detection thresholds are user-tunable per project and persisted to `analysis_meta`:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `battle_gap_threshold` | 0.5s | Max time gap between adjacent-position cars to be in a battle |
+| `crash_min_time_loss` | 10s | Min estimated time lost for an off-track event to classify as crash |
+| `crash_min_off_track_duration` | 3s | Min duration off-track for crash classification |
+| `spinout_min_time_loss` | 2s | Min time loss for spinout (below crash threshold) |
+| `spinout_max_time_loss` | 10s | Max time loss for spinout (above = crash) |
+| `contact_time_window` | 2s | Max time window to group multiple off-track cars as a contact event |
+| `contact_proximity` | 0.05 | Max lap-fraction distance between cars counted as contact |
+| `close_call_proximity` | 0.02 | Max lap-fraction distance for near-miss detection |
+| `close_call_max_off_track` | 3s | Max off-track time for a close call (longer = spinout/crash) |
 
 #### Telemetry Data Model
 

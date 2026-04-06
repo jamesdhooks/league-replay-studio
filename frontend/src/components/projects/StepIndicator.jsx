@@ -57,17 +57,15 @@ function StepIndicator({ currentStep, onStepClick, stepReadiness = {}, compact =
           <div key={step.id} className="flex items-center">
             <button
               onClick={() => onStepClick?.(step.id)}
-              title={`${step.label}${status === 'completed' ? ' ✓' : status === 'active' ? ' (current)' : status === 'pending' ? ' (not ready)' : ''}`}
+              title={`${step.label}${status === 'completed' ? ' ✓' : status === 'active' ? ' (current)' : ''}`}
               className={`
-                flex items-center gap-1.5 rounded-lg transition-all duration-150
+                flex items-center gap-1.5 rounded-lg transition-all duration-150 cursor-pointer
                 ${compact ? 'px-1.5 py-1' : 'px-3 py-1.5'}
                 ${status === 'completed'
-                  ? 'text-success hover:bg-success/10 cursor-pointer'
+                  ? 'text-success hover:bg-success/10'
                   : status === 'active'
-                    ? 'bg-gradient-to-r from-gradient-from/20 via-gradient-via/15 to-gradient-to/20 text-accent font-semibold cursor-pointer ring-1 ring-accent/20'
-                    : status === 'ready'
-                      ? 'text-text-secondary hover:bg-bg-hover cursor-pointer'
-                      : 'text-text-disabled hover:bg-bg-hover/50 cursor-pointer opacity-60'
+                    ? 'bg-gradient-to-r from-gradient-from/20 via-gradient-via/15 to-gradient-to/20 text-accent font-semibold ring-1 ring-accent/20'
+                    : 'text-text-secondary hover:bg-bg-hover'
                 }
               `}
             >

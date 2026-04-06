@@ -23,6 +23,9 @@ REST endpoints for the replay analysis engine.
   GET  /api/highlights/presets — List global highlight presets
   POST /api/highlights/presets — Save a global highlight preset
   DELETE /api/highlights/presets/{name} — Delete a global highlight preset
+  POST /api/projects/{id}/analyze/rescan — Re-collect telemetry (scan only, no detection)
+  GET  /api/projects/{id}/analysis/tuning — Get saved tuning parameters
+  PUT  /api/projects/{id}/analysis/tuning — Save tuning parameters
 """
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ import logging
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from server.services.project_service import project_service
 from server.services.replay_analysis import analysis_manager
@@ -49,6 +52,8 @@ from server.services.analysis_db import (
     save_highlight_config,
     batch_update_highlight_flags,
     get_drivers,
+    save_tuning_params,
+    load_tuning_params,
 )
 from server.services.detectors import ALL_DETECTORS
 from server.services.replay_analysis import ReplayAnalyzer
@@ -132,8 +137,12 @@ def _build_session_info_from_body(body) -> dict:
     return info
 
 
-async def _run_redetect(project_id: int, project_dir: str, session_info: dict) -> int:
-    """Re-run ONLY the event detection pass with new tuning parameters."""
+def _run_redetect_sync(project_id: int, project_dir: str, session_info: dict) -> int:
+    """Synchronous core of redetect — runs in a thread pool via run_in_executor.
+
+    All _on_progress calls are thread-safe because _analysis_broadcast uses
+    run_coroutine_threadsafe internally.
+    """
     conn = get_project_db(project_dir)
     try:
         # Check for existing telemetry data
@@ -209,9 +218,6 @@ async def _run_redetect(project_id: int, project_dir: str, session_info: dict) -
             except Exception as exc:
                 logger.error("[Redetect] %s failed: %s", detector_name, exc)
 
-            # Yield to event loop so broadcasts can flush
-            await asyncio.sleep(0)
-
         _on_progress("step_completed", {
             "project_id": project_id,
             "stage": "redetect_complete",
@@ -222,6 +228,14 @@ async def _run_redetect(project_id: int, project_dir: str, session_info: dict) -
         return total
     finally:
         conn.close()
+
+
+async def _run_redetect(project_id: int, project_dir: str, session_info: dict) -> int:
+    """Re-run ONLY the event detection pass with new tuning parameters."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, _run_redetect_sync, project_id, project_dir, session_info
+    )
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -282,11 +296,50 @@ async def cancel_analysis(project_id: int):
     return {"status": "cancelled", "project_id": project_id}
 
 
+@router.post("/projects/{project_id}/analyze/rescan")
+async def rescan_telemetry(project_id: int, body: AnalyzeRequest | None = None):
+    """Re-collect telemetry from the iRacing replay (Pass 1 only).
+
+    Clears all existing telemetry AND events, then re-runs the 16× scan.
+    Event detection is NOT run — call /analyze/redetect afterwards.
+    Requires an active iRacing connection.
+    """
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if analysis_manager.is_running(project_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Analysis is already running for this project",
+        )
+
+    project_dir = project["project_dir"]
+
+    from server.services.iracing_bridge import bridge as iracing_bridge
+    session_info = dict(iracing_bridge.session_data) if iracing_bridge.is_connected else {}
+    session_info.update(_build_session_info_from_body(body) if body else {})
+
+    started = analysis_manager.start_rescan(
+        project_id=project_id,
+        project_dir=project_dir,
+        session_info=session_info,
+        on_progress=_on_progress,
+    )
+
+    if not started:
+        raise HTTPException(status_code=500, detail="Failed to start rescan")
+
+    logger.info("[Analysis API] Started rescan for project #%d", project_id)
+    return {"status": "started", "project_id": project_id, "phase": "scan"}
+
+
 @router.post("/projects/{project_id}/analyze/redetect")
 async def redetect_events(project_id: int, body: RedetectRequest):
     """Re-run ONLY the event detection pass with new tuning parameters.
 
     Requires existing telemetry data (from a previous analysis scan).
+    Saves the supplied tuning parameters to the project database.
     """
     project = project_service.get_project(project_id)
     if not project:
@@ -300,6 +353,24 @@ async def redetect_events(project_id: int, body: RedetectRequest):
 
     project_dir = project["project_dir"]
     session_info = _build_session_info_from_body(body)
+
+    # Persist tuning params so they survive page refresh
+    try:
+        init_analysis_db(project_dir)
+        conn = get_project_db(project_dir)
+        try:
+            save_tuning_params(conn, {k: v for k, v in vars(body).items()
+                                       if k in [
+                                           "battle_gap_threshold", "crash_min_time_loss",
+                                           "crash_min_off_track_duration", "spinout_min_time_loss",
+                                           "spinout_max_time_loss", "contact_time_window",
+                                           "contact_proximity", "close_call_proximity",
+                                           "close_call_max_off_track",
+                                       ] and v is not None})
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("[Analysis API] Could not save tuning params: %s", exc)
 
     try:
         total = await _run_redetect(project_id, project_dir, session_info)
@@ -351,29 +422,326 @@ async def clear_analysis(project_id: int):
 
 @router.get("/projects/{project_id}/analysis/status")
 async def get_analysis_status(project_id: int):
-    """Get the current analysis status for a project."""
+    """Get the current analysis status for a project.
+
+    Returns has_telemetry and has_events flags so the frontend can
+    determine which phase controls to show.
+    """
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Check if actively running
-    if analysis_manager.is_running(project_id):
-        return {"status": "running", "project_id": project_id}
-
-    # Check database for most recent run
     project_dir = project["project_dir"]
+
+    # Check if actively running
+    is_running = analysis_manager.is_running(project_id)
+
+    # Check database for most recent run + live counts
     try:
         init_analysis_db(project_dir)
         conn = get_project_db(project_dir)
         try:
             db_status = db_get_analysis_status(conn)
             db_status["project_id"] = project_id
+            if is_running:
+                db_status["status"] = "running"
+            # Attach saved tuning params if available
+            saved_tuning = load_tuning_params(conn)
+            if saved_tuning:
+                db_status["tuning_params"] = saved_tuning
             return db_status
         finally:
             conn.close()
     except Exception as exc:
         logger.warning("[Analysis API] Status check error: %s", exc)
-        return {"status": "none", "project_id": project_id}
+        return {"status": "none", "project_id": project_id,
+                "has_telemetry": False, "has_events": False}
+
+
+@router.get("/projects/{project_id}/analysis/session-match")
+async def session_match(project_id: int):
+    """Compare the current iRacing session against the fingerprint recorded during analysis.
+
+    Returns:
+      status:  "match"         — same track + same driver roster
+               "mismatch"      — connected but wrong replay loaded
+               "partial"       — track matches but driver set differs
+               "no_fingerprint"— analysis hasn't run yet for this project
+               "not_connected" — iRacing is not running
+    """
+    from server.services.iracing_bridge import bridge as iracing_bridge
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    stored_fp = None
+    try:
+        init_analysis_db(project["project_dir"])
+        conn = get_project_db(project["project_dir"])
+        try:
+            row = conn.execute(
+                "SELECT value FROM analysis_meta WHERE key = 'session_fingerprint'"
+            ).fetchone()
+            if row:
+                stored_fp = json.loads(row[0])
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("[Analysis API] session-match DB error: %s", exc)
+
+    if stored_fp is None:
+        return {"status": "no_fingerprint", "details": "No analysis run yet.", "stored": None, "current": None}
+
+    if not iracing_bridge.is_connected:
+        return {"status": "not_connected", "details": "iRacing is not running.", "stored": stored_fp, "current": None}
+
+    sd = iracing_bridge.session_data
+    current = {
+        "track_name":      sd.get("track_name", ""),
+        "track_id":        sd.get("track_id", 0),
+        "subsession_id":   sd.get("subsession_id", 0),
+        "driver_count":    len([d for d in sd.get("drivers", []) if not d.get("is_spectator")]),
+        "driver_cust_ids": sd.get("driver_cust_ids", []),
+    }
+
+    stored_sub  = stored_fp.get("subsession_id", 0)
+    current_sub = current["subsession_id"]
+    if stored_sub and current_sub and stored_sub == current_sub:
+        return {"status": "match", "match_type": "subsession_id",
+                "details": f"Exact match — SubsessionID {stored_sub}.",
+                "stored": stored_fp, "current": current}
+
+    stored_track  = stored_fp.get("track_id", 0)
+    current_track = current["track_id"]
+    track_id_match = bool(stored_track and current_track and stored_track == current_track)
+    stored_name  = (stored_fp.get("track_name") or "").lower().strip()
+    current_name = (current["track_name"] or "").lower().strip()
+    name_match = bool(stored_name and current_name and stored_name == current_name)
+    track_match = track_id_match or name_match
+
+    stored_ids  = set(stored_fp.get("driver_cust_ids") or [])
+    current_ids = set(current["driver_cust_ids"] or [])
+    shared = stored_ids & current_ids
+    driver_pct = len(shared) / max(len(stored_ids), 1)
+
+    if track_match and driver_pct >= 0.75:
+        return {"status": "match", "match_type": "track_and_drivers",
+                "details": f"Track '{current['track_name']}' matches and {len(shared)}/{len(stored_ids)} drivers present ({driver_pct:.0%}).",
+                "stored": stored_fp, "current": current}
+
+    if track_match:
+        return {"status": "partial", "match_type": "track_only",
+                "details": f"Track matches ('{current['track_name']}') but only {len(shared)}/{len(stored_ids)} drivers overlap ({driver_pct:.0%}). Possibly a different race on the same track.",
+                "stored": stored_fp, "current": current}
+
+    return {"status": "mismatch", "match_type": None,
+            "details": f"Wrong replay. Expected '{stored_fp.get('track_name')}' (ID {stored_track}), got '{current['track_name']}' (ID {current_track}).",
+            "stored": stored_fp, "current": current}
+
+
+@router.get("/projects/{project_id}/analysis/tuning")
+async def get_tuning_params(project_id: int):
+    """Get saved detection tuning parameters for a project."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project["project_dir"]
+    try:
+        init_analysis_db(project_dir)
+        conn = get_project_db(project_dir)
+        try:
+            params = load_tuning_params(conn)
+            return {"tuning_params": params}
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("[Analysis API] Tuning params fetch error: %s", exc)
+        return {"tuning_params": None}
+
+
+@router.put("/projects/{project_id}/analysis/tuning")
+async def save_tuning(project_id: int, body: RedetectRequest):
+    """Save detection tuning parameters for a project (without running re-detection)."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project["project_dir"]
+    try:
+        init_analysis_db(project_dir)
+        conn = get_project_db(project_dir)
+        try:
+            params = {k: v for k, v in vars(body).items()
+                      if k in [
+                          "battle_gap_threshold", "crash_min_time_loss",
+                          "crash_min_off_track_duration", "spinout_min_time_loss",
+                          "spinout_max_time_loss", "contact_time_window",
+                          "contact_proximity", "close_call_proximity",
+                          "close_call_max_off_track",
+                      ] and v is not None}
+            save_tuning_params(conn, params)
+            return {"status": "saved", "tuning_params": params}
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.error("[Analysis API] Save tuning error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+class SeekEventRequest(BaseModel):
+    """Request body for seeking the replay to an event."""
+    start_time_seconds: float = Field(..., ge=0)
+    car_idx: int | None = Field(None)
+
+
+@router.post("/projects/{project_id}/analysis/seek-event")
+async def seek_to_event(project_id: int, body: SeekEventRequest):
+    """Seek the iRacing replay to a specific analysis event time.
+
+    Combines two sources of truth so neither alone can fail:
+      1.  race_ticks   — look up the replay_frame nearest to start_time_seconds.
+                         Frame-based seeking is session-agnostic (global index).
+      2.  analysis_meta — race_session_num + race_start_session_time, used as
+                         fallback via replay_search_session_time if frame = 0.
+
+    This runs entirely server-side so the frontend never needs to know
+    the race session number or worry about stale start_frame values in events.
+    """
+    from server.services.iracing_bridge import bridge as iracing_bridge
+
+    if not iracing_bridge.is_connected:
+        raise HTTPException(status_code=409, detail="iRacing is not connected")
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project["project_dir"]
+    try:
+        init_analysis_db(project_dir)
+        conn = get_project_db(project_dir)
+        try:
+            # 1. Find the replay frame closest to the requested time
+            tick_row = conn.execute(
+                """SELECT replay_frame, session_time
+                   FROM race_ticks
+                   ORDER BY ABS(session_time - ?) LIMIT 1""",
+                (body.start_time_seconds,)
+            ).fetchone()
+
+            frame = tick_row["replay_frame"] if tick_row else 0
+            session_time = tick_row["session_time"] if tick_row else body.start_time_seconds
+
+            # 2. Read race session metadata as fallback
+            def _meta(key, default):
+                r = conn.execute(
+                    "SELECT value FROM analysis_meta WHERE key=?", (key,)
+                ).fetchone()
+                return r[0] if r else default
+
+            race_session_num = int(_meta("race_session_num", 0))
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.error("[Analysis API] seek-event DB error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    loop = asyncio.get_running_loop()
+
+    def _snapshot() -> dict:
+        snap = iracing_bridge.capture_snapshot()
+        if snap is None:
+            return {"actual_frame": None, "actual_session_time": None}
+        return {
+            "actual_frame": snap.get("replay_frame"),
+            "actual_session_time": snap.get("session_time"),
+        }
+
+    # 3. PAUSE FIRST.
+    #    iRacing silently ignores replay_set_play_position while playing.
+    logger.info("[Analysis API] seek-event: pausing replay before seek")
+    await loop.run_in_executor(None, iracing_bridge.set_replay_speed, 0)
+    await asyncio.sleep(0.15)
+
+    # 4. Frame-based seek (primary) — falls back to session_time if frame=0
+    if frame > 0:
+        logger.info(
+            "[Analysis API] seek-event: frame-based seek → frame=%d  (session_time=%.3f)",
+            frame, session_time,
+        )
+        ok = await loop.run_in_executor(None, iracing_bridge.seek_to_frame, frame)
+    else:
+        logger.warning(
+            "[Analysis API] seek-event: no replay_frame for session_time=%.3f — "
+            "using replay_search_session_time(session_num=%d, time_ms=%d)",
+            body.start_time_seconds, race_session_num, int(body.start_time_seconds * 1000),
+        )
+        time_ms = int(session_time * 1000)
+        ok = await loop.run_in_executor(
+            None, iracing_bridge.replay_search_session_time, race_session_num, time_ms
+        )
+
+    if not ok:
+        logger.error(
+            "[Analysis API] seek-event: seek command returned False "
+            "(frame=%d, session_num=%d, time=%.3f)",
+            frame, race_session_num, body.start_time_seconds,
+        )
+        raise HTTPException(status_code=500, detail="iRacing seek command failed — is a replay loaded?")
+
+    # 5. Switch camera while still paused (cleaner cut).
+    if body.car_idx is not None:
+        logger.info("[Analysis API] seek-event: switching camera to car_idx=%d", body.car_idx)
+        await loop.run_in_executor(None, iracing_bridge.cam_switch_car, body.car_idx, 0)
+
+    # 6. Resume playback.
+    #    IMPORTANT: ReplayFrameNum in telemetry is 0/stale while paused — iRacing
+    #    does not update shared-memory variables when the replay is frozen. We must
+    #    resume first, let at least one telemetry tick propagate, then verify.
+    await asyncio.sleep(0.1)
+    await loop.run_in_executor(None, iracing_bridge.set_replay_speed, 1)
+    await asyncio.sleep(0.35)
+
+    # 7. Verify frame position now that the replay is running and telemetry is live.
+    TOL_FRAMES = 360   # 6 s at 60 Hz — generous; accounts for resume lag + seek imprecision
+    verification = await loop.run_in_executor(None, _snapshot)
+    actual_frame = verification["actual_frame"]
+    actual_time  = verification["actual_session_time"]
+
+    if actual_frame is None or actual_frame == 0:
+        # Telemetry unreadable — can't confirm, but don't fail. Treat as success.
+        verified = True
+        logger.info(
+            "[Analysis API] seek-event: telemetry unreadable after resume — "
+            "assuming seek ok (frame=%d)", frame,
+        )
+    elif frame > 0 and abs(actual_frame - frame) > TOL_FRAMES:
+        verified = False
+        logger.warning(
+            "[Analysis API] seek-event: MISMATCH after resume — "
+            "target_frame=%d  actual_frame=%d  actual_time=%.3f  drift=%d frames",
+            frame, actual_frame, actual_time or 0, abs(actual_frame - frame),
+        )
+    else:
+        verified = True
+        logger.info(
+            "[Analysis API] seek-event: verified after resume — "
+            "actual_frame=%d  actual_time=%.3f  drift=%d frames",
+            actual_frame, actual_time or 0,
+            abs((actual_frame or 0) - frame) if frame > 0 else 0,
+        )
+
+    return {
+        "status": "ok",
+        "frame": frame,
+        "session_time": session_time,
+        "race_session_num": race_session_num,
+        "verified": verified,
+        "actual_frame": actual_frame,
+        "actual_session_time": actual_time,
+    }
 
 
 @router.get("/projects/{project_id}/events")
@@ -818,13 +1186,25 @@ async def get_race_duration(project_id: int):
         conn = get_project_db(project_dir)
         try:
             row = conn.execute(
-                "SELECT MAX(session_time) AS max_time, MAX(replay_frame) AS max_frame FROM race_ticks"
+                "SELECT MAX(session_time) AS max_time, MIN(session_time) AS min_time, MAX(replay_frame) AS max_frame FROM race_ticks"
             ).fetchone()
             max_time = row["max_time"] if row and row["max_time"] else 0
+            min_time = row["min_time"] if row and row["min_time"] else 0
             max_frame = row["max_frame"] if row and row["max_frame"] else 0
+
+            # Read race metadata for correct session seeking
+            def _meta(key, default):
+                r = conn.execute("SELECT value FROM analysis_meta WHERE key=?", (key,)).fetchone()
+                return r[0] if r else default
+
+            race_session_num = int(_meta("race_session_num", 0))
+            race_start_time = float(_meta("race_start_session_time", min_time))
+
             return {
                 "project_id": project_id,
                 "duration_seconds": max_time,
+                "race_start_seconds": race_start_time,
+                "race_session_num": race_session_num,
                 "total_frames": max_frame,
             }
         finally:
