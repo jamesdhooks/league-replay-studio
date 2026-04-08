@@ -1,5 +1,6 @@
 import { useUndoRedo } from '../../context/UndoRedoContext'
 import { History, Undo2, Redo2, Trash2 } from 'lucide-react'
+import { formatTimeAgo } from '../../utils/time'
 
 /**
  * EditHistoryPanel — shows a scrollable list of recent editing operations.
@@ -136,14 +137,4 @@ function ActionIcon({ type }) {
 }
 
 
-/**
- * Format a timestamp as "Xs ago", "Xm ago", etc.
- */
-function formatTimeAgo(timestamp) {
-  const seconds = Math.floor((Date.now() - timestamp) / 1000)
-  if (seconds < 5) return 'just now'
-  if (seconds < 60) return `${seconds}s ago`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  return `${Math.floor(minutes / 60)}h ago`
-}
+

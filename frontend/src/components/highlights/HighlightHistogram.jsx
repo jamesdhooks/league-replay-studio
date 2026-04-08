@@ -4,7 +4,7 @@ import { TIER_COLORS } from '../../utils/highlight-scoring'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { useTimeline, EVENT_COLORS } from '../../context/TimelineContext'
 import { useToast } from '../../context/ToastContext'
-import { formatTime } from '../../utils/time'
+import { formatTime, formatDuration } from '../../utils/time'
 import { Columns3, ArrowRight, Layers, RotateCw, ChevronDown, ChevronRight, Download, FileText, Copy, X } from 'lucide-react'
 
 /**
@@ -34,13 +34,6 @@ const CHOSEN_ROW_H = 56     // result row height in horizontal mode
 function scoreToBucket(score) {
   if (score == null || score <= 0) return 0
   return Math.max(0, Math.min(BUCKET_COUNT - 1, Math.floor(score)))
-}
-
-function formatDuration(sec) {
-  if (!sec || sec <= 0) return '0s'
-  const m = Math.floor(sec / 60)
-  const s = Math.floor(sec % 60)
-  return m > 0 ? `${m}:${String(s).padStart(2, '0')}` : `${s}s`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
