@@ -1,416 +1,464 @@
-import { useMemo, useState } from 'react'
-import { useHighlight } from '../../context/HighlightContext'
+import { useMemo, useState, useCallback, useRef, useEffect } from 'react'
+import { useHighlight, EVENT_TYPE_LABELS } from '../../context/HighlightContext'
 import { useTimeline, EVENT_COLORS } from '../../context/TimelineContext'
 import { useIRacing } from '../../context/IRacingContext'
+import { useProject } from '../../context/ProjectContext'
+import { apiGet, apiPost } from '../../services/api'
+import { formatTime } from '../../utils/time'
+import { useLocalStorage } from '../../hooks/useLocalStorage'
+import TimelineToolbar from '../timeline/TimelineToolbar'
+import { ChevronDown, ChevronRight, Film, FastForward, Square } from 'lucide-react'
 
-/** Section display colors */
-const SECTION_COLORS = {
-  intro: '#8b5cf6',              // Purple
-  qualifying_results: '#06b6d4', // Cyan
-  race: 'transparent',           // Race events use EVENT_COLORS
-  race_results: '#f59e0b',       // Amber
-}
-
-/** Section labels for display */
-const SECTION_LABELS = {
-  intro: 'Intro',
-  qualifying_results: 'Qualifying',
-  race: 'Race',
-  race_results: 'Results',
-}
 
 /**
- * HighlightTimeline — Condensed mini-timeline showing all events.
+ * HighlightTimeline — Final Script Timeline (NLS / edit-order view).
  *
- * Now includes four sections (intro, qualifying, race, results)
- * with distinct visual regions. Non-race sections are shown as
- * solid colored blocks that can be clicked to select for editing.
+ * IMPORTANT: Segments are displayed in EDIT ORDER with sequential positioning —
+ * not at race-time. This eliminates gaps between clips and shows the final video
+ * as it will actually be cut: Intro → Qualifying Results → Race Clips → Results.
  *
- * Included events are bright and fully opaque.
- * Excluded events are dimmed with striped pattern, showing what was NOT selected.
- * Gives a clear visual overview of the editing decisions.
+ * Tracks (top → bottom):
+ *   Section row  — coloured band per section (Intro / Qualifying / Race / Results)
+ *   Camera track — iRacing camera group assigned to each clip
+ *   Events track — clip blocks coloured by type / section
+ *   Tick ruler   — edit time (final video minutes:seconds)
+ *
+ * Execute Script drives iRacing replay through every segment in script order.
  */
+
+// ── Edit-timeline layout constants ──────────────────────────────────────────
+const SECTION_H    = 18   // section label row
+const CAM_H        = 18   // camera track
+const EVT_H        = 46   // events track
+const TICK_H       = 20   // tick ruler
+const TOTAL_TRACK_H = SECTION_H + CAM_H + EVT_H + TICK_H
+const GUTTER_W     = 52
+const EDIT_PX_PER_SEC = 20  // pixels per second in edit time (fixed scale)
+
+// ── Section metadata ─────────────────────────────────────────────────────────
+const SECTION_ORDER = ['intro', 'qualifying_results', 'race', 'race_results']
+
+const SECTION_META = {
+  intro:              { label: 'Intro',      color: 'rgba(139,92,246,0.28)',  border: 'rgba(139,92,246,0.55)', text: 'rgba(192,165,255,0.95)' },
+  qualifying_results: { label: 'Qualifying', color: 'rgba(6,182,212,0.20)',   border: 'rgba(6,182,212,0.48)',  text: 'rgba(103,232,249,0.95)' },
+  race:               { label: 'Race',       color: 'rgba(249,115,22,0.15)',  border: 'rgba(249,115,22,0.40)', text: 'rgba(253,186,116,0.95)' },
+  race_results:       { label: 'Results',    color: 'rgba(34,197,94,0.20)',   border: 'rgba(34,197,94,0.45)',  text: 'rgba(134,239,172,0.95)' },
+}
+
+// ── Camera assignment helpers ─────────────────────────────────────────────────
+const DEFAULT_CAM = {
+  battle: 'TV1', overtake: 'TV1',
+  crash: 'Cockpit', incident: 'Cockpit', spinout: 'Cockpit',
+  contact: 'Bumper', close_call: 'Bumper',
+  race_start: 'TV Scenic', race_finish: 'TV Scenic',
+  fastest_lap: 'TV1', pit_stop: 'Pit Lane',
+  leader_change: 'TV1', first_lap: 'TV Scenic', last_lap: 'TV1',
+}
+
+function getCameraLabel(seg) {
+  if (seg?.camera_hints?.establishing_angle) return seg.camera_hints.establishing_angle
+  if (seg?.camera_preferences?.length)       return seg.camera_preferences[0]
+  return DEFAULT_CAM[seg?.event_type] || 'TV1'
+}
+
+function fmtDur(sec) {
+  if (!sec || sec <= 0) return '0s'
+  const m = Math.floor(sec / 60)
+  const s = Math.floor(sec % 60)
+  return m > 0 ? `${m}m ${s}s` : `${s}s`
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
 export default function HighlightTimeline() {
-  const { selection, metrics, videoScript, videoSections, updateSectionConfig } = useHighlight()
-  const { raceDuration, seekTo, playheadTime } = useTimeline()
-  const [selectedSection, setSelectedSection] = useState(null)
+  const { videoScript, metrics } = useHighlight()
+  const { isConnected, sessionData } = useIRacing()
+  const { activeProject } = useProject()
 
-  const { highlightEvents, fullVideoEvents, excludedEvents } = useMemo(() => {
-    const sorted = [...selection.scoredEvents].sort((a, b) => a.start_time_seconds - b.start_time_seconds)
-    return {
-      highlightEvents: sorted.filter(e => e.inclusion === 'highlight'),
-      fullVideoEvents: sorted.filter(e => e.inclusion === 'full-video'),
-      excludedEvents: sorted.filter(e => e.inclusion === 'excluded'),
-    }
-  }, [selection.scoredEvents])
+  const [collapsed, setCollapsed] = useLocalStorage('lrs:editing:timeline:collapsed', false)
+  const [executing, setExecuting] = useState(false)
+  const [activeSegId, setActiveSegId] = useState(null)
+  const abortRef = useRef({ cancelled: false })
+  const scrollRef = useRef(null)
 
-  // Compute section regions from videoScript
-  const sectionRegions = useMemo(() => {
-    if (!videoScript || videoScript.length === 0) return []
-    const regions = {}
-    for (const seg of videoScript) {
-      const section = seg.section || 'race'
-      if (!regions[section]) {
-        regions[section] = {
-          name: section,
-          start: seg.start_time_seconds || 0,
-          end: seg.end_time_seconds || 0,
-          segments: [],
-        }
-      } else {
-        regions[section].start = Math.min(regions[section].start, seg.start_time_seconds || 0)
-        regions[section].end = Math.max(regions[section].end, seg.end_time_seconds || 0)
-      }
-      regions[section].segments.push(seg)
-    }
-    return Object.values(regions)
+  const [raceSessionNum, setRaceSessionNum] = useState(0)
+  useEffect(() => {
+    if (!activeProject?.id) return
+    apiGet(`/projects/${activeProject.id}/analysis/race-duration`)
+      .then(d => setRaceSessionNum(d?.race_session_num ?? 0))
+      .catch(() => {})
+  }, [activeProject?.id])
+
+  // ── Build sequential edit segments ─────────────────────────────────────────
+  // Converts videoScript (race-time positions) into edit-time (sequential).
+  // Sections are ordered: intro → qualifying_results → race clips → race_results
+  // Within the race section, clips are sorted by their race start_time_seconds.
+  const editSegments = useMemo(() => {
+    if (!videoScript?.length) return []
+
+    const filtered = videoScript.filter(s => s.type !== 'transition')
+
+    // Sort by section, then by race start time within each section
+    const sorted = [...filtered].sort((a, b) => {
+      const ai = SECTION_ORDER.indexOf(a.section || 'race')
+      const bi = SECTION_ORDER.indexOf(b.section || 'race')
+      if (ai !== bi) return ai - bi
+      return (a.start_time_seconds || 0) - (b.start_time_seconds || 0)
+    })
+
+    // Assign sequential edit positions — no gaps
+    let cursor = 0
+    return sorted.map(seg => {
+      const dur = Math.max(1, (seg.end_time_seconds || 0) - (seg.start_time_seconds || 0))
+      const editStart = cursor
+      cursor += dur
+      return { ...seg, editStart, editEnd: cursor, editDur: dur }
+    })
   }, [videoScript])
 
-  // Use race duration or compute total from script
-  const totalDuration = useMemo(() => {
-    if (raceDuration > 0) return raceDuration
-    if (sectionRegions.length > 0) {
-      return Math.max(...sectionRegions.map(r => r.end), 0)
+  // Section spans for the section row
+  const sectionSpans = useMemo(() => {
+    const spans = {}
+    for (const seg of editSegments) {
+      const s = seg.section || 'race'
+      if (!spans[s]) spans[s] = { editStart: seg.editStart, editEnd: seg.editEnd }
+      else {
+        spans[s].editStart = Math.min(spans[s].editStart, seg.editStart)
+        spans[s].editEnd   = Math.max(spans[s].editEnd,   seg.editEnd)
+      }
     }
-    return 0
-  }, [raceDuration, sectionRegions])
+    return spans
+  }, [editSegments])
 
-  if (totalDuration <= 0) {
-    return (
-      <div className="h-full flex items-center justify-center text-text-disabled text-xxs">
-        No timeline data
-      </div>
-    )
-  }
+  const totalEditDuration = editSegments.length > 0
+    ? editSegments[editSegments.length - 1].editEnd : 0
 
-  const handleClick = (e) => {
-    const rect = e.currentTarget.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const time = (x / rect.width) * totalDuration
-    seekTo(time)
-  }
+  const totalW = Math.max(totalEditDuration * EDIT_PX_PER_SEC, 600)
+  const toX = useCallback((t) => t * EDIT_PX_PER_SEC, [])
 
-  const playheadPct = (playheadTime / totalDuration) * 100
+  const hasData = editSegments.length > 0
+
+  // ── Execute Script ──────────────────────────────────────────────────────────
+  const executeScript = useCallback(async () => {
+    if (!editSegments.length) return
+    const abort = { cancelled: false }
+    abortRef.current = abort
+    setExecuting(true)
+
+    const cameras = sessionData?.cameras || []
+
+    for (const seg of editSegments) {
+      if (abort.cancelled) break
+      const startSec = seg.start_time_seconds ?? 0
+      const durMs    = Math.max(500, seg.editDur * 1000)
+
+      setActiveSegId(seg.id)
+
+      try {
+        await apiPost('/iracing/replay/seek-time', {
+          session_num: raceSessionNum,
+          session_time_ms: Math.round(startSec * 1000),
+        })
+      } catch { /* iRacing disconnected */ }
+
+      try {
+        const camLabel = getCameraLabel(seg)
+        const cam = cameras.find(c => c.group_name === camLabel)
+        if (cam) await apiPost('/iracing/replay/camera', { group_num: cam.group_num, position: 1 })
+      } catch { /* non-fatal */ }
+
+      try { await apiPost('/iracing/replay/play') } catch { /* non-fatal */ }
+
+      await new Promise(resolve => {
+        const timer = setTimeout(resolve, durMs)
+        const poll  = setInterval(() => {
+          if (abort.cancelled) { clearTimeout(timer); clearInterval(poll); resolve() }
+        }, 100)
+        setTimeout(() => clearInterval(poll), durMs + 200)
+      })
+    }
+
+    if (!abort.cancelled) {
+      try { await apiPost('/iracing/replay/pause') } catch { /* non-fatal */ }
+    }
+    setExecuting(false)
+    setActiveSegId(null)
+  }, [editSegments, raceSessionNum, sessionData])
+
+  const stopExecution = useCallback(() => {
+    abortRef.current.cancelled = true
+    setExecuting(false)
+    setActiveSegId(null)
+    apiPost('/iracing/replay/pause').catch(() => {})
+  }, [])
+
+  // ── Clip count summary ──────────────────────────────────────────────────────
+  const clipCount = editSegments.filter(s => s.type !== 'broll').length
+  const brollCount = editSegments.filter(s => s.type === 'broll').length
 
   return (
-    <div className="h-full flex flex-col px-3 py-1.5 bg-bg-secondary">
-      {/* Label row with legend */}
-      <div className="flex items-center justify-between mb-1">
-        <div className="flex items-center gap-3">
-          <span className="text-xxs text-text-tertiary font-medium">
-            Highlight Timeline
-          </span>
-          <span className="flex items-center gap-1 text-xxs text-text-disabled">
-            <span className="inline-block w-2 h-2 rounded-sm bg-accent" /> Highlight
-          </span>
-          <span className="flex items-center gap-1 text-xxs text-text-disabled">
-            <span className="inline-block w-2 h-2 rounded-sm bg-info opacity-50" /> Full-video
-          </span>
-          <span className="flex items-center gap-1 text-xxs text-text-disabled">
-            <span className="inline-block w-2 h-2 rounded-sm bg-text-disabled opacity-20" /> Excluded
-          </span>
-          <span className="flex items-center gap-1 text-xxs text-text-disabled">
-            <span className="inline-block w-2 h-2 rounded-sm bg-zinc-500/40 border border-zinc-400/30" style={{ backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 1px, rgba(255,255,255,0.1) 1px, rgba(255,255,255,0.1) 2px)' }} /> B-roll
-          </span>
-          <span className="flex items-center gap-1 text-xxs text-text-disabled">
-            <span className="inline-block w-2 h-2 rounded-sm bg-white/20 border border-white/10" /> Trans
-          </span>
-          {/* Section legend */}
-          {sectionRegions.length > 0 && (
-            <>
-              <span className="text-xxs text-text-disabled mx-1">│</span>
-              {Object.entries(SECTION_COLORS).filter(([k]) => k !== 'race').map(([key, color]) => (
-                <span key={key} className="flex items-center gap-1 text-xxs text-text-disabled">
-                  <span
-                    className="inline-block w-2 h-2 rounded-sm"
-                    style={{ backgroundColor: color }}
-                  />
-                  {SECTION_LABELS[key]}
-                </span>
-              ))}
-            </>
-          )}
-        </div>
-        <span className="text-xxs text-text-disabled font-mono">
-          {metrics.eventCount} highlight + {metrics.fullVideoCount || 0} full · {formatCompactDuration(metrics.duration)}
-        </span>
-      </div>
+    <div className="h-full flex flex-col overflow-hidden">
 
-      {/* Timeline bar */}
-      <div
-        className="flex-1 relative bg-bg-primary rounded cursor-pointer overflow-hidden min-h-[16px]"
-        onClick={handleClick}
+      {/* Header / collapse toggle */}
+      <button
+        onClick={() => setCollapsed(v => !v)}
+        className="flex items-center gap-2 px-3 py-2 border-b border-border bg-bg-secondary shrink-0 w-full text-left hover:bg-bg-primary/40 transition-colors"
       >
-        {/* Section region backgrounds (non-race) */}
-        {sectionRegions.filter(r => r.name !== 'race').map(region => {
-          const left = (region.start / totalDuration) * 100
-          const width = Math.max(0.5, ((region.end - region.start) / totalDuration) * 100)
-          const color = SECTION_COLORS[region.name] || '#666'
-          const isSelected = selectedSection === region.name
-
-          return (
-            <div
-              key={`section-${region.name}`}
-              className={`absolute top-0 bottom-0 rounded-sm cursor-pointer transition-opacity ${
-                isSelected ? 'ring-2 ring-white/40' : ''
+        {collapsed
+          ? <ChevronRight className="w-3 h-3 text-text-tertiary shrink-0" />
+          : <ChevronDown  className="w-3 h-3 text-text-tertiary shrink-0" />}
+        <Film className="w-3.5 h-3.5 text-accent shrink-0" />
+        <span className="text-xs font-semibold text-text-primary uppercase tracking-wider whitespace-nowrap">
+          Final Script
+        </span>
+        {!collapsed && hasData && (
+          <>
+            <span className="text-xs text-text-disabled">
+              {clipCount} clips &middot; {brollCount} b-roll &middot; {fmtDur(totalEditDuration)}
+            </span>
+            <div className="flex-1" />
+            <button
+              className={`flex items-center gap-1 px-2.5 py-0.5 text-xs font-medium rounded border transition-colors ${
+                executing
+                  ? 'bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/25'
+                  : isConnected
+                    ? 'bg-accent/12 text-accent border-accent/30 hover:bg-accent/22'
+                    : 'text-text-disabled border-border-subtle opacity-50 cursor-not-allowed'
               }`}
-              style={{
-                left: `${left}%`,
-                width: `${width}%`,
-                backgroundColor: color,
-                opacity: isSelected ? 0.6 : 0.3,
-              }}
-              onClick={(e) => {
-                e.stopPropagation()
-                setSelectedSection(prev => prev === region.name ? null : region.name)
-              }}
-              title={`${SECTION_LABELS[region.name] || region.name} (${formatCompactDuration(region.end - region.start)})`}
+              onClick={e => { e.stopPropagation(); executing ? stopExecution() : executeScript() }}
+              title={isConnected
+                ? (executing ? 'Stop execution' : 'Execute script in iRacing')
+                : 'iRacing not connected'}
             >
-              {width > 3 && (
-                <span className="absolute inset-0 flex items-center justify-center text-white/80 text-xxs font-semibold truncate px-0.5">
-                  {SECTION_LABELS[region.name]}
-                </span>
-              )}
+              {executing
+                ? <><Square size={9} className="shrink-0" />&nbsp;Stop</>
+                : <><FastForward size={9} className="shrink-0" />&nbsp;Execute Script</>}
+            </button>
+          </>
+        )}
+        {!hasData && !collapsed && <div className="flex-1" />}
+      </button>
+
+      {!collapsed && (
+        <>
+          {!hasData ? (
+            <div className="flex-1 flex flex-col items-center justify-center gap-1 text-center px-4 bg-bg-secondary">
+              <Film className="w-5 h-5 text-text-disabled opacity-35" />
+              <span className="text-xs text-text-disabled">No script generated yet.</span>
+              <span className="text-xs text-text-disabled/60">
+                Click &ldquo;Apply to Timeline&rdquo; in the Score Histogram header.
+              </span>
             </div>
-          )
-        })}
+          ) : (
+            <div className="flex-1 flex min-h-0 overflow-hidden bg-bg-secondary">
 
-        {/* Excluded event segments (background, dimmed) */}
-        {excludedEvents.map(evt => {
-          const left = (evt.start_time_seconds / totalDuration) * 100
-          const width = Math.max(0.15, ((evt.end_time_seconds - evt.start_time_seconds) / totalDuration) * 100)
-          const color = EVENT_COLORS[evt.event_type] || '#666'
+              {/* Gutter labels */}
+              <div
+                className="shrink-0 flex flex-col border-r border-border bg-bg-primary select-none z-10"
+                style={{ width: GUTTER_W }}
+              >
+                <div className="border-b border-border-subtle flex items-center justify-end pr-2"
+                     style={{ height: SECTION_H }}>
+                  <span className="text-[7px] text-text-disabled uppercase tracking-wider">Sect</span>
+                </div>
+                <div className="border-b border-border-subtle flex items-center justify-end pr-2"
+                     style={{ height: CAM_H }}>
+                  <span className="text-[7px] text-text-disabled uppercase tracking-wider">Cam</span>
+                </div>
+                <div className="border-b border-border-subtle flex items-center justify-end pr-2"
+                     style={{ height: EVT_H }}>
+                  <span className="text-[7px] text-text-disabled uppercase tracking-wider">Clips</span>
+                </div>
+                <div style={{ height: TICK_H }} />
+              </div>
 
-          return (
-            <div
-              key={`ex-${evt.id}`}
-              className="absolute top-0 bottom-0 rounded-sm"
-              style={{
-                left: `${left}%`,
-                width: `${width}%`,
-                backgroundColor: color,
-                opacity: 0.12,
-              }}
-              title={[`✗ ${evt.event_type} [${evt.tier || '?'}] (score ${evt.score}) — ${evt.reason}`, ...(evt.driver_names?.length ? [`Drivers: ${evt.driver_names.join(', ')}`] : [])].join('\n')}
-            />
-          )
-        })}
+              {/* Scrollable tracks */}
+              <div
+                ref={scrollRef}
+                className="flex-1 overflow-x-auto overflow-y-hidden"
+              >
+                <div className="relative" style={{ width: totalW, height: TOTAL_TRACK_H }}>
 
-        {/* Full-video event segments (mid brightness) */}
-        {fullVideoEvents.map(evt => {
-          const left = (evt.start_time_seconds / totalDuration) * 100
-          const width = Math.max(0.15, ((evt.end_time_seconds - evt.start_time_seconds) / totalDuration) * 100)
-          const color = EVENT_COLORS[evt.event_type] || '#666'
+                  {/* ── Section band row ──────────────────────────────── */}
+                  <div className="absolute left-0 right-0 border-b border-border-subtle"
+                       style={{ top: 0, height: SECTION_H }}>
+                    {SECTION_ORDER.map(sectionName => {
+                      const span   = sectionSpans[sectionName]
+                      if (!span) return null
+                      const meta   = SECTION_META[sectionName] || SECTION_META.race
+                      const left   = toX(span.editStart)
+                      const width  = Math.max(4, toX(span.editEnd - span.editStart))
+                      return (
+                        <div key={sectionName}
+                             className="absolute top-0 h-full flex items-center overflow-hidden"
+                             style={{
+                               left, width,
+                               backgroundColor: meta.color,
+                               borderRight: `1px solid ${meta.border}`,
+                             }}>
+                          <span className="truncate select-none"
+                                style={{ fontSize: 8, fontWeight: 700, letterSpacing: '0.07em',
+                                         textTransform: 'uppercase', paddingLeft: 4,
+                                         color: meta.text }}>
+                            {meta.label}
+                          </span>
+                        </div>
+                      )
+                    })}
+                  </div>
 
-          return (
-            <div
-              key={`fv-${evt.id}`}
-              className="absolute top-0 bottom-0 rounded-sm border border-white/10"
-              style={{
-                left: `${left}%`,
-                width: `${width}%`,
-                backgroundColor: color,
-                opacity: 0.4,
-              }}
-              title={[`○ ${evt.event_type} [${evt.tier || '?'}] (score ${evt.score}) — full-video only`, ...(evt.driver_names?.length ? [`Drivers: ${evt.driver_names.join(', ')}`] : [])].join('\n')}
-            />
-          )
-        })}
+                  {/* ── Camera track ──────────────────────────────────── */}
+                  <div className="absolute left-0 right-0 border-b border-border-subtle"
+                       style={{ top: SECTION_H, height: CAM_H }}>
+                    {editSegments.map(seg => {
+                      const left  = toX(seg.editStart)
+                      const width = Math.max(3, toX(seg.editDur))
+                      const camLabel = getCameraLabel(seg)
+                      const isActive = activeSegId === seg.id
+                      const sectionMeta = SECTION_META[seg.section] || SECTION_META.race
+                      const bgColor = isActive ? 'rgba(99,102,241,0.65)' : 'rgba(99,102,241,0.36)'
+                      return (
+                        <div key={`cam-${seg.id}`}
+                             className={`absolute flex items-center overflow-hidden ${isActive ? 'ring-1 ring-white/60' : ''}`}
+                             style={{
+                               left, width, top: 2, height: CAM_H - 4,
+                               backgroundColor: seg.section !== 'race' ? sectionMeta.color.replace('0.20', '0.50').replace('0.15', '0.45').replace('0.28', '0.55') : bgColor,
+                               borderLeft: `2px solid ${isActive ? 'rgba(255,255,255,0.6)' : (seg.section !== 'race' ? sectionMeta.border : 'rgba(99,102,241,0.55)')}`,
+                             }}
+                             title={`${seg.section !== 'race' ? (SECTION_META[seg.section]?.label || seg.section) : ''} Camera: ${camLabel}`}>
+                          {width > 18 && (
+                            <span className="px-0.5 truncate font-mono leading-none"
+                                  style={{ fontSize: 7, color: seg.section !== 'race' ? sectionMeta.text : 'rgba(220,210,255,0.85)' }}>
+                              {camLabel}
+                            </span>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
 
-        {/* Highlight event segments (foreground, bright) */}
-        {highlightEvents.map(evt => {
-          const left = (evt.start_time_seconds / totalDuration) * 100
-          const width = Math.max(0.2, ((evt.end_time_seconds - evt.start_time_seconds) / totalDuration) * 100)
-          const color = EVENT_COLORS[evt.event_type] || '#666'
-          const isPip = evt.segment_type === 'pip'
-          const llmNote = evt.llm_note
-          const isAnchor = !!evt.narrative_anchor
+                  {/* ── Events / clips track ──────────────────────────── */}
+                  <div className="absolute left-0 right-0 border-b border-border-subtle"
+                       style={{ top: SECTION_H + CAM_H, height: EVT_H }}>
+                    {editSegments.map(seg => {
+                      const left   = toX(seg.editStart)
+                      const width  = Math.max(3, toX(seg.editDur))
+                      const isActive = activeSegId === seg.id
+                      const section = seg.section || 'race'
+                      const sectionMeta = SECTION_META[section] || SECTION_META.race
 
-          return (
-            <div
-              key={`hl-${evt.id}`}
-              className="absolute top-0 bottom-0 rounded-sm ring-1 ring-white/20 overflow-hidden"
-              style={{
-                left: `${left}%`,
-                width: `${width}%`,
-                backgroundColor: color,
-                opacity: 0.85,
-              }}
-              title={[
-                `✓ ${evt.event_type} [${evt.tier || '?'}] (score ${evt.score})`,
-                evt.driver_names?.length ? `Drivers: ${evt.driver_names.join(', ')}` : null,
-                llmNote ? `💬 ${llmNote}` : null,
-                isAnchor ? '⚓ narrative anchor' : null,
-              ].filter(Boolean).join('\n')}
-            >
-              {/* PIP indicator stripe */}
-              {isPip && (
-                <div
-                  className="absolute right-0 top-0 bottom-0 w-1/3 opacity-50"
-                  style={{ backgroundColor: '#000', backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 2px, rgba(255,255,255,0.3) 2px, rgba(255,255,255,0.3) 4px)' }}
-                />
-              )}
-              {/* Narrative anchor star */}
-              {isAnchor && width > 1.5 && (
-                <span className="absolute top-0.5 left-0.5 text-white/80 leading-none" style={{ fontSize: '7px' }}>★</span>
-              )}
+                      // Colour: event type for race clips, section colour for non-race
+                      const color = section === 'race' && seg.type !== 'broll'
+                        ? (EVENT_COLORS[seg.event_type] || '#f97316')
+                        : sectionMeta.border.replace('0.40', '0.80').replace('0.45', '0.80')
+                                             .replace('0.48', '0.80').replace('0.55', '0.80')
+
+                      const isBroll  = seg.type === 'broll'
+                      const isPip    = seg.segment_type === 'pip'
+                      const label    = section !== 'race'
+                        ? sectionMeta.label
+                        : (EVENT_TYPE_LABELS[seg.event_type] || seg.event_type || 'Clip')
+
+                      const raceTimeLabel = seg.start_time_seconds != null
+                        ? formatTime(seg.start_time_seconds)
+                        : null
+
+                      return (
+                        <div
+                          key={`evt-${seg.id}`}
+                          className={`absolute overflow-hidden cursor-pointer transition-all ${
+                            isActive ? 'ring-2 ring-white/80 z-20' : 'hover:z-10'
+                          }`}
+                          style={{
+                            left, width,
+                            top: isBroll ? Math.floor(EVT_H * 0.62) : (isPip ? Math.floor(EVT_H * 0.50) : 2),
+                            height: isBroll ? Math.floor(EVT_H * 0.34) : (isPip ? Math.floor(EVT_H * 0.46) : EVT_H - 4),
+                            backgroundColor: color,
+                            opacity: isActive ? 1 : isBroll ? 0.55 : 0.88,
+                            borderLeft: `2px solid ${isActive ? 'rgba(255,255,255,0.8)' : 'rgba(0,0,0,0.2)'}`,
+                          }}
+                          title={[
+                            label,
+                            raceTimeLabel ? `Race time: ${raceTimeLabel}` : null,
+                            `Edit: ${formatTime(seg.editStart)} – ${formatTime(seg.editEnd)}`,
+                            `Duration: ${fmtDur(seg.editDur)}`,
+                            isBroll ? 'B-roll / gap filler' : null,
+                          ].filter(Boolean).join('\n')}
+                        >
+                          {/* Hatching for b-roll */}
+                          {isBroll && (
+                            <div className="absolute inset-0 opacity-30"
+                                 style={{ backgroundImage: 'repeating-linear-gradient(45deg,transparent,transparent 3px,rgba(255,255,255,0.25) 3px,rgba(255,255,255,0.25) 6px)' }} />
+                          )}
+                          {/* PIP stripe */}
+                          {isPip && width > 8 && (
+                            <div className="absolute right-0 top-0 bottom-0 w-1/4 opacity-35"
+                                 style={{ backgroundImage: 'repeating-linear-gradient(45deg,transparent,transparent 2px,rgba(255,255,255,0.4) 2px,rgba(255,255,255,0.4) 4px)' }} />
+                          )}
+                          {/* Active pulse */}
+                          {isActive && <div className="absolute inset-0 bg-white/12 animate-pulse pointer-events-none" />}
+                          {/* Label */}
+                          {width > 18 && !isBroll && (
+                            <div className="px-0.5 pt-0.5 truncate" style={{ fontSize: 8, lineHeight: '10px' }}>
+                              <span className="text-white/92 font-semibold">{label.slice(0, 10)}</span>
+                            </div>
+                          )}
+                          {/* Race time stamp for race clips */}
+                          {width > 38 && !isBroll && raceTimeLabel && (
+                            <div className="px-0.5 truncate" style={{ fontSize: 7, lineHeight: '9px' }}>
+                              <span className="text-white/55 font-mono">{raceTimeLabel}</span>
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  {/* ── Edit-time tick ruler ───────────────────────────── */}
+                  <EditTickRuler
+                    totalW={totalW}
+                    totalEditDuration={totalEditDuration}
+                    pxPerSec={EDIT_PX_PER_SEC}
+                    top={SECTION_H + CAM_H + EVT_H}
+                    height={TICK_H}
+                  />
+                </div>
+              </div>
             </div>
-          )
-        })}
-
-        {/* Script-level segments: transitions + B-roll from videoScript */}
-        {videoScript && videoScript.filter(seg => seg.type === 'transition' || seg.type === 'broll').map((seg, i) => {
-          const start = seg.start_time_seconds ?? 0
-          const end = seg.end_time_seconds ?? start
-          const left = (start / totalDuration) * 100
-          const width = Math.max(0.3, ((end - start) / totalDuration) * 100)
-          const isBroll = seg.type === 'broll'
-
-          return (
-            <div
-              key={`seg-${i}`}
-              className={`absolute top-1/4 bottom-1/4 rounded-sm flex items-center justify-center overflow-hidden ${
-                isBroll
-                  ? 'bg-zinc-500/50 border border-zinc-400/30'
-                  : 'bg-white/20 border border-white/10'
-              }`}
-              style={{
-                left: `${left}%`,
-                width: `${width}%`,
-                backgroundImage: isBroll
-                  ? 'repeating-linear-gradient(45deg, transparent, transparent 3px, rgba(255,255,255,0.08) 3px, rgba(255,255,255,0.08) 6px)'
-                  : undefined,
-              }}
-              title={isBroll ? `B-roll gap filler (${Math.round(end - start)}s)` : `Transition: ${seg.transition_type || 'CUT'}`}
-            >
-              {width > 2 && (
-                <span className="text-white/60 font-mono uppercase truncate px-0.5" style={{ fontSize: '7px' }}>
-                  {isBroll ? 'GAP' : (seg.transition_type || 'CUT')}
-                </span>
-              )}
-            </div>
-          )
-        })}
-
-        {/* Playhead */}
-        <div
-          className="absolute top-0 bottom-0 w-0.5 bg-accent z-10"
-          style={{ left: `${playheadPct}%` }}
-        />
-      </div>
-
-      {/* Section editor (when a non-race section is selected) */}
-      {selectedSection && selectedSection !== 'race' && (
-        <SectionEditor
-          sectionName={selectedSection}
-          region={sectionRegions.find(r => r.name === selectedSection)}
-          onUpdate={updateSectionConfig}
-          onClose={() => setSelectedSection(null)}
-        />
+          )}
+        </>
       )}
     </div>
   )
 }
 
-/**
- * SectionEditor — Inline editor for non-race section properties.
- * Allows changing duration and camera preference.
- * Camera groups are populated from live iRacing session data.
- */
-function SectionEditor({ sectionName, region, onUpdate, onClose }) {
-  const { sessionData } = useIRacing()
-  const cameras = sessionData?.cameras || []
-
-  const duration = region ? (region.end - region.start) : 10
-  const segment = region?.segments?.[0] || {}
-  const camPrefs = segment.camera_preferences || []
-  const currentCam = segment.camera_group ?? ''
-
-  // Sort cameras: show preferred ones first (those matching the section preferences)
-  const sortedCameras = useMemo(() => {
-    if (!cameras.length) return []
-    const prefSet = new Set(camPrefs)
-    return [...cameras].sort((a, b) => {
-      const aPreferred = prefSet.has(a.group_name) ? 0 : 1
-      const bPreferred = prefSet.has(b.group_name) ? 0 : 1
-      return aPreferred - bPreferred || a.group_name.localeCompare(b.group_name)
-    })
-  }, [cameras, camPrefs])
+// ── Edit-time tick ruler ──────────────────────────────────────────────────────
+function EditTickRuler({ totalW, totalEditDuration, pxPerSec, top, height }) {
+  const ticks = useMemo(() => {
+    if (totalEditDuration <= 0 || pxPerSec <= 0) return []
+    const rawInterval = 80 / pxPerSec
+    const nice = [1, 5, 10, 15, 30, 60, 120, 300, 600]
+    const interv = nice.find(v => v >= rawInterval) || 600
+    const major  = interv * 5
+    const result = []
+    for (let t = 0; t <= totalEditDuration + interv; t += interv) {
+      result.push({ t, major: t % major === 0 })
+    }
+    return result
+  }, [totalEditDuration, pxPerSec])
 
   return (
-    <div className="mt-1.5 p-2 bg-bg-tertiary rounded border border-border-subtle text-xs">
-      <div className="flex items-center justify-between mb-1.5">
-        <span className="font-medium text-text-secondary">
-          {SECTION_LABELS[sectionName] || sectionName} Section
-        </span>
-        <button
-          className="text-text-disabled hover:text-text-primary text-xxs"
-          onClick={onClose}
-        >
-          ✕
-        </button>
-      </div>
-      <div className="flex items-center gap-4 flex-wrap">
-        <label className="flex items-center gap-1.5">
-          <span className="text-text-tertiary">Duration:</span>
-          <input
-            type="number"
-            className="w-16 px-1.5 py-0.5 bg-bg-primary border border-border rounded text-text-primary text-xs"
-            value={Math.round(duration)}
-            min={3}
-            max={60}
-            step={1}
-            onChange={(e) => onUpdate(sectionName, { duration: Number(e.target.value) })}
-          />
-          <span className="text-text-disabled">sec</span>
-        </label>
-        <label className="flex items-center gap-1.5">
-          <span className="text-text-tertiary">Camera:</span>
-          <select
-            className="px-1.5 py-0.5 bg-bg-primary border border-border rounded text-text-primary text-xs"
-            value={currentCam}
-            onChange={(e) => onUpdate(sectionName, {
-              camera_group: e.target.value !== '' && !Number.isNaN(Number(e.target.value))
-                ? Number(e.target.value)
-                : null,
-            })}
-          >
-            <option value="">
-              Auto {camPrefs[0] ? `(${camPrefs[0]})` : ''}
-            </option>
-            {sortedCameras.map((cam) => (
-              <option key={cam.group_num} value={cam.group_num}>
-                {cam.group_name}
-                {camPrefs.includes(cam.group_name) ? ' ★' : ''}
-              </option>
-            ))}
-            {!cameras.length && (
-              <option disabled value="">iRacing not connected</option>
-            )}
-          </select>
-        </label>
-        <label className="flex items-center gap-1.5">
-          <span className="text-text-tertiary">Start:</span>
-          <input
-            type="number"
-            className="w-20 px-1.5 py-0.5 bg-bg-primary border border-border rounded text-text-primary text-xs"
-            value={Math.round(region?.start || 0)}
-            min={0}
-            step={1}
-            onChange={(e) => onUpdate(sectionName, { start_time_seconds: Number(e.target.value) })}
-          />
-          <span className="text-text-disabled">sec</span>
-        </label>
-      </div>
+    <div className="absolute left-0 bg-bg-secondary border-t border-border-subtle select-none overflow-hidden"
+         style={{ top, height, width: totalW }}>
+      {ticks.map(({ t, major }) => (
+        <div key={t} className="absolute" style={{ left: t * pxPerSec }}>
+          <div className={`absolute top-0 w-px ${major ? 'h-full bg-border' : 'h-1/2 bg-border-subtle'}`} />
+          {major && (
+            <span className="absolute left-1 top-1 font-mono text-text-disabled whitespace-nowrap" style={{ fontSize: 7 }}>
+              {formatTime(t)}
+            </span>
+          )}
+        </div>
+      ))}
     </div>
   )
-}
-
-
-function formatCompactDuration(seconds) {
-  if (!seconds) return '0s'
-  const m = Math.floor(seconds / 60)
-  const s = Math.floor(seconds % 60)
-  if (m > 0) return `${m}m ${s}s`
-  return `${s}s`
 }

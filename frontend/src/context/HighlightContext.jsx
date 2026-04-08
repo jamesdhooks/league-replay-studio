@@ -26,25 +26,42 @@ const DEFAULT_WEIGHTS = {
   pit_stop: 20,
   fastest_lap: 50,
   leader_change: 90,
-  first_lap: 100,
-  last_lap: 100,
+  first_lap: 70,
+  last_lap: 70,
+  // SessionLog-sourced incident types (IncidentLogDetector)
+  car_contact: 85,     // "Car Contact" (car-to-car) — high priority
+  contact: 60,         // "Contact" (barrier/wall hit)
+  lost_control: 50,    // "Lost Control" (spin)
+  off_track: 25,       // "Off Track"
+  turn_cutting: 15,    // "Turn Cutting"
+  // Legacy inferred types kept for backward-compat with older recordings
   crash: 80,
   spinout: 60,
-  contact: 65,
   close_call: 40,
+  race_start: 100,
+  race_finish: 100,
 }
 
 /** Default detection/camera tuning parameters (inspired by iRacingReplayDirector) */
 const DEFAULT_PARAMS = {
   battleGap: 1.0,               // Max gap (seconds) between cars to be "in battle"
-  battleStickyPeriod: 120,      // Seconds to track one battle before switching
+  battleStickyPeriod: 15,       // Seconds to track one battle before switching
   cameraStickyPeriod: 20,       // Seconds to hold one camera angle
   overtakeBoost: 1.5,           // Score multiplier for events with overtakes
   incidentPositionCutoff: 0,    // Ignore incidents from cars below this position (0 = disabled)
-  firstLapWeight: 1.0,          // Multiplier for first-lap events (1.0 = normal)
-  lastLapWeight: 1.0,           // Multiplier for last-lap events (1.0 = normal)
+  firstLapWeight: 1.0,          // Multiplier for events in the first-lap sticky window
+  lastLapWeight: 1.0,           // Multiplier for events in the last-lap sticky window
   preferredDrivers: '',         // Comma-separated preferred driver names (boost their events)
   preferredDriverBoost: 1.3,    // Score multiplier for preferred driver events
+  // iRD-inspired tuning knobs
+  battleFrontBias: 1.0,         // Extra multiplier for front-of-field battles (1.0 = off)
+  preferredDriversOnly: false,  // When true, exclude events with no preferred driver
+  ignoreIncidentsDuringFirstLap: false, // Suppress incident events in the first-lap bucket
+  firstLapStickyPeriod: 0,      // Seconds from race start for firstLapWeight boost (0 = off)
+  lastLapStickyPeriod: 0,       // Seconds before race end for lastLapWeight boost (0 = off)
+  lateRaceThreshold: 0.9,       // Race fraction after which late-race bonus activates
+  lateRaceMultiplier: 1.2,      // Multiplier applied to events beyond lateRaceThreshold
+  pipThreshold: 7.0,            // Min score for two overlapping events to use Picture-in-Picture
 }
 
 /** Event type labels for UI display */
@@ -57,12 +74,23 @@ export const EVENT_TYPE_LABELS = {
   leader_change: 'Leader Changes',
   first_lap: 'First Lap',
   last_lap: 'Last Lap',
+  // SessionLog-sourced
+  car_contact: 'Car Contact',
+  contact: 'Contact',
+  lost_control: 'Lost Control',
+  off_track: 'Off Track',
+  turn_cutting: 'Turn Cutting',
+  // Legacy
   crash: 'Crashes',
   spinout: 'Spinouts',
-  contact: 'Contacts',
   close_call: 'Close Calls',
   pace_lap: 'Pace Lap',
   restart: 'Restart',
+  race_start: 'Race Start',
+  race_finish: 'Race Finish',
+  overcut: 'Overcut',
+  undercut: 'Undercut',
+  pit_battle: 'Pit Battle',
 }
 
 
@@ -102,7 +130,7 @@ export function HighlightProvider({ children }) {
 
   // ── Get data from sibling contexts ──────────────────────────────────────
   const { events } = useAnalysis()
-  const { raceDuration, seekTo } = useTimeline()
+  const { raceDuration, seekTo, setSelectedEventId } = useTimeline()
   const { pushAction } = useUndoRedo()
 
   // React 19: Use transition for heavy reprocessing operations
@@ -231,8 +259,20 @@ export function HighlightProvider({ children }) {
         constraints: {
           target_duration: targetDuration || 300,
           min_severity: minSeverity,
-          pip_threshold: opts.pipThreshold || 7.0,
+          pip_threshold: params.pipThreshold ?? opts.pipThreshold ?? 7.0,
           max_driver_exposure: opts.maxDriverExposure || 0.25,
+        },
+        tuning: {
+          battleFrontBias: params.battleFrontBias,
+          preferredDriversOnly: params.preferredDriversOnly,
+          preferredDrivers: params.preferredDrivers,
+          ignoreIncidentsDuringFirstLap: params.ignoreIncidentsDuringFirstLap,
+          firstLapStickyPeriod: params.firstLapStickyPeriod,
+          lastLapStickyPeriod: params.lastLapStickyPeriod,
+          firstLapWeight: params.firstLapWeight,
+          lastLapWeight: params.lastLapWeight,
+          lateRaceThreshold: params.lateRaceThreshold,
+          lateRaceMultiplier: params.lateRaceMultiplier,
         },
       })
       if (result.scored_events) {
@@ -494,7 +534,8 @@ export function HighlightProvider({ children }) {
   // ── Navigate to event ─────────────────────────────────────────────────
   const jumpToEvent = useCallback((event) => {
     seekTo(event.start_time_seconds)
-  }, [seekTo])
+    setSelectedEventId(event.id)
+  }, [seekTo, setSelectedEventId])
 
   // ── Table sorting ─────────────────────────────────────────────────────
   const handleSort = useCallback((column) => {

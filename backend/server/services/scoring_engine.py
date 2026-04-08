@@ -43,20 +43,30 @@ logger = logging.getLogger(__name__)
 # ── Base scores by event type ────────────────────────────────────────────────
 
 BASE_SCORES: dict[str, float] = {
-    "crash": 1.5,
-    "incident": 1.5,
-    "battle": 1.3,
-    "spinout": 1.2,
-    "overtake": 1.0,
+    # SessionLog-sourced incident types (IncidentLogDetector)
+    "car_contact":  1.6,   # "Car Contact" (car-to-car) — highest incident priority
+    "contact":      1.2,   # "Contact" (wall / barrier)
+    "lost_control": 1.1,   # "Lost Control" (spin)
+    "off_track":    0.5,   # "Off Track" (track limits)
+    "turn_cutting": 0.3,   # "Turn Cutting" (lowest priority)
+    # Legacy inferred types (kept for older project databases)
+    "crash":        1.5,
+    "spinout":      1.2,
+    # Other event types
+    "incident":     1.5,
+    "battle":       1.3,
+    "overtake":     1.0,
     "leader_change": 0.9,
-    "fastest_lap": 0.7,
-    "pit_stop": 0.5,
-    "contact": 1.2,
-    "close_call": 0.8,
+    "fastest_lap":  0.7,
+    "pit_stop":     0.5,
+    "close_call":   0.8,
+    "first_lap":    1.3,
+    "last_lap":     1.3,
+    "pace_lap":     0.4,
 }
 
 # These event types are always included (mandatory)
-MANDATORY_TYPES = frozenset({"first_lap", "last_lap", "restart", "pace_lap"})
+MANDATORY_TYPES = frozenset({"race_start", "race_finish", "restart"})
 
 # Tier thresholds
 TIER_S_THRESHOLD = 9.0
@@ -133,6 +143,7 @@ def score_events(
     race_duration: float = 0.0,
     num_drivers: int = 1,
     target_duration: float = 300.0,
+    tuning: Optional[dict] = None,
 ) -> list[dict]:
     """Score all events through the 8-stage pipeline.
 
@@ -142,6 +153,17 @@ def score_events(
         race_duration: Total race duration in seconds.
         num_drivers: Number of drivers in the race.
         target_duration: Target highlight duration in seconds.
+        tuning: Optional dict of iRD-inspired scoring knobs:
+            battleFrontBias       — extra multiplier for front-of-field battles (default 1.0)
+            preferredDriversOnly  — if True, zero-score events with no preferred driver (default False)
+            preferredDrivers      — comma-separated preferred driver name substrings
+            ignoreIncidentsDuringFirstLap — zero-score incidents in the first-lap bucket (default False)
+            firstLapStickyPeriod  — seconds from race start to boost first-lap events (0 = off)
+            lastLapStickyPeriod   — seconds before race end to boost last-lap events (0 = off)
+            firstLapWeight        — multiplier for events in the first-lap window (default 1.0)
+            lastLapWeight         — multiplier for events in the last-lap window (default 1.0)
+            lateRaceThreshold     — race fraction after which late-race bonus applies (default 0.9)
+            lateRaceMultiplier    — multiplier applied beyond lateRaceThreshold (default 1.2)
 
     Returns:
         List of scored event dicts with 'score', 'tier', 'bucket',
@@ -156,6 +178,40 @@ def score_events(
         len(events), race_duration, num_drivers, target_duration,
     )
 
+    # ── Extract tuning knobs ──────────────────────────────────────────────
+    tuning = tuning or {}
+    battle_front_bias: float = tuning.get("battleFrontBias", 1.0)
+    preferred_drivers_only: bool = bool(tuning.get("preferredDriversOnly", False))
+    preferred_driver_str: str = tuning.get("preferredDrivers", "") or ""
+    preferred_names: list[str] = [
+        n.strip().lower() for n in preferred_driver_str.split(",") if n.strip()
+    ]
+    ignore_incidents_first_lap: bool = bool(tuning.get("ignoreIncidentsDuringFirstLap", False))
+    first_lap_sticky: float = float(tuning.get("firstLapStickyPeriod", 0))
+    last_lap_sticky: float = float(tuning.get("lastLapStickyPeriod", 0))
+    first_lap_weight: float = float(tuning.get("firstLapWeight", 1.0))
+    last_lap_weight: float = float(tuning.get("lastLapWeight", 1.0))
+    late_race_threshold: float = float(tuning.get("lateRaceThreshold", 0.9))
+    late_race_multiplier: float = float(tuning.get("lateRaceMultiplier", 1.2))
+
+    _INCIDENT_TYPES = frozenset({"incident", "crash", "spinout", "contact", "close_call"})
+    _FIRST_LAP_BUCKET_END = BUCKET_BOUNDARIES["intro"][1]  # 0.15 of race
+    _POST_RACE_EXCLUDED_TYPES = frozenset({
+        "battle", "overtake", "incident", "crash", "spinout", "contact", "close_call",
+        "leader_change", "pit_stop", "fastest_lap", "undercut", "overcut", "pit_battle",
+        "first_lap",
+    })
+
+    # Pre-compute the race finish cutoff: end of the race_finish event window.
+    # Events of excluded types that start after this time are cooldown-lap events
+    # and should not appear in the highlight reel.
+    race_finish_cutoff: Optional[float] = None
+    for ev in events:
+        if ev.get("event_type") == "race_finish":
+            t = ev.get("end_time_seconds") or 0.0
+            if race_finish_cutoff is None or t < race_finish_cutoff:
+                race_finish_cutoff = t
+
     exposure_map: dict[int, float] = defaultdict(float)
     driver_weight = 1.0  # Equal weight for all drivers
     results = []
@@ -164,14 +220,13 @@ def score_events(
         components: dict[str, float] = {}
 
         # Stage 1 — Base Score
+        # Mandatory events use their natural base score (not inflated to 10)
+        # so they don't distort the score range. They're force-included in selection instead.
         event_type = event.get("event_type", "")
-        if event_type in MANDATORY_TYPES:
-            score = 10.0  # Mandatory events always included
-            components["base"] = 10.0
-        else:
-            base = BASE_SCORES.get(event_type, 0.5)
-            score = base
-            components["base"] = base
+        base = BASE_SCORES.get(event_type, 0.5)
+        score = base
+        components["base"] = base
+        components["mandatory"] = event_type in MANDATORY_TYPES
 
         # Stage 2 — Position Importance Multiplier
         position = event.get("position") or 99
@@ -181,6 +236,15 @@ def score_events(
             pos_mult = 1.5
         else:
             pos_mult = 1.0
+        # Battle front bias: scale up front-of-field battles relative to mid-pack.
+        # Inspired by iRD BattleFactor2 — a bias > 1.0 makes front battles comparatively
+        # more likely to be selected.  Applied as a graduated multiplier so P1 battles
+        # gain the full bias and P4-10 gain a partial (√bias) bump.
+        if event_type == "battle" and battle_front_bias != 1.0:
+            if position <= 3:
+                pos_mult *= battle_front_bias
+            elif position <= 10:
+                pos_mult *= math.sqrt(battle_front_bias)
         score *= pos_mult
         components["position"] = pos_mult
 
@@ -210,14 +274,57 @@ def score_events(
         if event_type == "battle":
             chain_length = metadata.get("chain_length", 2)
             narrative_bonus += math.log(chain_length + 1) * 0.5
+        # Overtakes during a sustained battle are more exciting (passer earned it)
+        if event_type == "overtake" and metadata.get("in_battle"):
+            narrative_bonus += 0.4
+        evt_time = event.get("start_time_seconds", 0)
         if race_duration > 0:
-            race_pct = event.get("start_time_seconds", 0) / race_duration
-            if race_pct > 0.9:
-                late_race_bonus = score * 0.2  # 20% boost for late-race events
-                score *= 1.2
+            race_pct = evt_time / race_duration
+            # Late-race bonus (threshold and multiplier are now tunable)
+            if race_pct > late_race_threshold:
+                late_race_bonus = score * (late_race_multiplier - 1)
+                score *= late_race_multiplier
                 narrative_bonus += late_race_bonus
+        # First-lap sticky window bonus
+        if first_lap_sticky > 0 and evt_time <= first_lap_sticky:
+            score *= first_lap_weight
+        # Last-lap sticky window bonus
+        if last_lap_sticky > 0 and race_duration > 0:
+            if race_duration - evt_time <= last_lap_sticky:
+                score *= last_lap_weight
         score += narrative_bonus
         components["narrative_bonus"] = round(narrative_bonus, 3)
+
+        # ── Tuning filters (applied before exposure stage) ───────────────
+        # Ignore incidents during the first-lap window
+        if ignore_incidents_first_lap and event_type in _INCIDENT_TYPES:
+            if race_duration > 0:
+                if evt_time / race_duration <= _FIRST_LAP_BUCKET_END:
+                    score = 0.0
+                    components["filtered"] = "ignore_incidents_first_lap"
+
+        # Exclusive preferred-driver mode: zero out events with no preferred driver
+        if preferred_drivers_only and preferred_names and event_type not in MANDATORY_TYPES:
+            driver_names = event.get("driver_names") or []
+            if isinstance(driver_names, str):
+                try:
+                    driver_names = json.loads(driver_names)
+                except (json.JSONDecodeError, TypeError):
+                    driver_names = []
+            has_preferred = any(
+                any(p in name.lower() for p in preferred_names)
+                for name in driver_names
+            )
+            if not has_preferred:
+                score = 0.0
+                components["filtered"] = "preferred_drivers_only"
+
+        # Filter cooldown-lap events: zero out excluded types that start after the
+        # race finish window ends. last_lap (P2–P10 finish crossings) is exempt.
+        if race_finish_cutoff is not None and event_type in _POST_RACE_EXCLUDED_TYPES:
+            if evt_time > race_finish_cutoff:
+                score = 0.0
+                components["filtered"] = "post_race_finish"
 
         # Stage 6 — Exposure Adjustment
         involved = event.get("involved_drivers") or "[]"
@@ -242,15 +349,12 @@ def score_events(
 
         # Stage 7 — User Weight Override
         user_weight = weights.get(event_type, 50) / 100.0
-        if event_type not in MANDATORY_TYPES:
-            score *= user_weight
+        score *= user_weight
         components["user_weight"] = user_weight
 
         # Stage 8 — Tier Classification
         score = round(score, 2)
-        if event_type in MANDATORY_TYPES:
-            tier = "S"
-        elif score > TIER_S_THRESHOLD:
+        if score > TIER_S_THRESHOLD:
             tier = "S"
         elif score >= TIER_A_THRESHOLD:
             tier = "A"
@@ -276,16 +380,53 @@ def score_events(
         results.append({
             **event,
             "score": score,
+            "raw_score": score,
             "tier": tier,
             "bucket": bucket,
             "score_components": components,
         })
 
+    # ── Normalize scores to 0–10 range ──────────────────────────────────
+    raw_scores = [r["score"] for r in results if r["score"] > 0]
+    if len(raw_scores) >= 2:
+        min_raw = min(raw_scores)
+        max_raw = max(raw_scores)
+        score_range = max_raw - min_raw
+        if score_range > 0:
+            for r in results:
+                if r["score"] <= 0:
+                    continue
+                # Normalize to 0.5–10 (floor at 0.5 so nothing maps to exactly 0)
+                r["score"] = round(0.5 + ((r["score"] - min_raw) / score_range) * 9.5, 2)
+                r["score_components"]["normalization"] = {
+                    "raw": r["raw_score"], "min": min_raw, "max": max_raw,
+                }
+        else:
+            for r in results:
+                if r["score"] <= 0:
+                    continue
+                r["score"] = 5.0
+                r["score_components"]["normalization"] = {
+                    "raw": r["raw_score"], "min": min_raw, "max": max_raw,
+                }
+
+        # Re-classify tiers with normalized scores
+        for r in results:
+            s = r["score"]
+            if s > TIER_S_THRESHOLD:
+                r["tier"] = "S"
+            elif s >= TIER_A_THRESHOLD:
+                r["tier"] = "A"
+            elif s >= TIER_B_THRESHOLD:
+                r["tier"] = "B"
+            else:
+                r["tier"] = "C"
+
     tier_counts = defaultdict(int)
     for r in results:
         tier_counts[r["tier"]] += 1
     logger.info(
-        "score_events: scored %d events — S:%d A:%d B:%d C:%d",
+        "score_events: scored %d events — S:%d A:%d B:%d C:%d (normalized to 0-10)",
         len(results), tier_counts["S"], tier_counts["A"], tier_counts["B"], tier_counts["C"],
     )
     return results
@@ -328,11 +469,11 @@ def allocate_timeline(
     # Sort by score descending within each tier
     candidates.sort(key=lambda e: (-_tier_priority(e["tier"]), -e["score"]))
 
-    # Pass 1 — Must-have events
+    # Pass 1 — Must-have events (mandatory types always included regardless of score)
     must_have = []
     remaining = []
     for evt in candidates:
-        if evt.get("tier") == "S" or evt.get("event_type") in MANDATORY_TYPES:
+        if evt.get("event_type") in MANDATORY_TYPES:
             must_have.append(evt)
         else:
             remaining.append(evt)
@@ -349,6 +490,7 @@ def allocate_timeline(
     for evt in timeline:
         bucket_used[evt.get("bucket", "mid")] += _evt_duration(evt)
 
+    selected_ids = {id(e) for e in timeline}
     for evt in remaining:
         if used_duration >= target_duration:
             break
@@ -358,11 +500,24 @@ def allocate_timeline(
             continue
         evt_dur = _evt_duration(evt)
         timeline.append(evt)
+        selected_ids.add(id(evt))
         used_duration += evt_dur
         bucket_used[bucket] += evt_dur
 
+    # Pass 2b — Overflow fill: if still under target, ignore bucket limits
+    if used_duration < target_duration:
+        for evt in remaining:
+            if used_duration >= target_duration:
+                break
+            if id(evt) in selected_ids:
+                continue
+            evt_dur = _evt_duration(evt)
+            timeline.append(evt)
+            selected_ids.add(id(evt))
+            used_duration += evt_dur
+
     # Pass 3 — Smoothing
-    timeline = _smooth_timeline(timeline, pip_threshold, max_driver_exposure)
+    timeline = _smooth_timeline(timeline, pip_threshold, max_driver_exposure, target_duration)
 
     # Sort by time
     timeline.sort(key=lambda e: e.get("start_time_seconds", 0))
@@ -473,6 +628,7 @@ def generate_highlights(
     constraints: Optional[dict] = None,
     overrides: Optional[dict] = None,
     race_info: Optional[dict] = None,
+    tuning: Optional[dict] = None,
 ) -> dict:
     """Run the full highlight generation pipeline.
 
@@ -483,6 +639,7 @@ def generate_highlights(
         constraints: max_driver_exposure, pip_threshold, min_severity.
         overrides: Manual overrides {event_id: action}.
         race_info: Race metadata (track, num_drivers, duration, etc.).
+        tuning: iRD-inspired scoring knobs (see score_events docstring).
 
     Returns:
         Dict with scored_events, timeline, and metrics.
@@ -491,6 +648,7 @@ def generate_highlights(
     constraints = constraints or {}
     overrides = overrides or {}
     race_info = race_info or {}
+    tuning = tuning or {}
 
     race_duration = race_info.get("duration", 0)
     num_drivers = race_info.get("num_drivers", 1)
@@ -501,7 +659,7 @@ def generate_highlights(
     )
 
     # Stage 1: Score all events
-    scored = score_events(events, weights, race_duration, num_drivers, target_duration)
+    scored = score_events(events, weights, race_duration, num_drivers, target_duration, tuning=tuning)
 
     # Stage 2: Apply manual overrides
     scored = _apply_overrides(scored, overrides, phase="pre")
@@ -545,6 +703,7 @@ def generate_video_script(
     race_info: Optional[dict] = None,
     section_config: Optional[dict] = None,
     clip_padding: float = DEFAULT_CLIP_PADDING,
+    tuning: Optional[dict] = None,
 ) -> dict:
     """Generate a full Video Composition Script with four sections.
 
@@ -586,6 +745,7 @@ def generate_video_script(
         constraints=constraints,
         overrides=overrides,
         race_info=race_info,
+        tuning=tuning,
     )
     race_timeline = hl_result["timeline"]
 
@@ -610,12 +770,30 @@ def generate_video_script(
                 DEFAULT_SECTION_TEMPLATES.get("race", "broadcast"),
             )
             for seg in race_timeline:
-                script.append({
+                seg_entry: dict = {
                     **seg,
                     "section": "race",
                     "clip_padding": clip_padding,
                     "overlay_template_id": seg.get("overlay_template_id") or race_template,
-                })
+                }
+                # Battle camera choreography hints (iRD-inspired)
+                # Guides the capture engine to: open with a broadcast angle,
+                # cycle through cockpit/bumper/TV views, and prefer a reverse
+                # angle when the following car is looking at the car ahead.
+                if seg.get("event_type") == "battle":
+                    drivers = seg.get("involved_drivers") or []
+                    if isinstance(drivers, str):
+                        try:
+                            drivers = json.loads(drivers)
+                        except (json.JSONDecodeError, TypeError):
+                            drivers = []
+                    seg_entry["camera_hints"] = {
+                        "establishing_angle": "TV1",
+                        "cycle_angles": ["cockpit", "bumper", "TV1"],
+                        "reverse_on_behind": True,
+                        "preferred_car_idx": drivers[0] if drivers else None,
+                    }
+                script.append(seg_entry)
             continue
 
         # Static B-roll section
@@ -774,8 +952,13 @@ def _replace_in_list(lst: list, old: Any, new: Any) -> None:
 
 
 def _smooth_timeline(timeline: list[dict], pip_threshold: float,
-                     max_driver_exposure: float) -> list[dict]:
-    """Pass 3 — Smoothing: repetition, spacing, exposure rebalance."""
+                     max_driver_exposure: float,
+                     target_duration: float = 0) -> list[dict]:
+    """Pass 3 — Smoothing: repetition, spacing, exposure rebalance.
+    
+    Will not remove events if doing so would drop total duration below
+    the target_duration.
+    """
     if len(timeline) < 2:
         return timeline
 
@@ -787,15 +970,26 @@ def _smooth_timeline(timeline: list[dict], pip_threshold: float,
     score_range = max(scores) - min(scores) if scores else 0
     threshold = max(score_range * 0.15, 0.5)  # Minimum 0.5 for narrow score distributions
 
+    # Track total duration to avoid dropping below target
+    current_duration = sum(_evt_duration(e) for e in timeline)
+
     # Remove back-to-back same-type events unless score differential is significant
     smoothed = [timeline[0]]
     for evt in timeline[1:]:
         prev = smoothed[-1]
         if (evt.get("event_type") == prev.get("event_type")
                 and abs(evt.get("score", 0) - prev.get("score", 0)) <= threshold):
-            # Keep the higher-scoring one
-            if evt.get("score", 0) > prev.get("score", 0):
-                smoothed[-1] = evt
+            # Would removing the lower-scored one drop us below target?
+            loser = prev if evt.get("score", 0) > prev.get("score", 0) else evt
+            loser_dur = _evt_duration(loser)
+            if target_duration > 0 and (current_duration - loser_dur) < target_duration:
+                # Keep both — can't afford to lose duration
+                smoothed.append(evt)
+            else:
+                # Keep the higher-scoring one
+                current_duration -= loser_dur
+                if evt.get("score", 0) > prev.get("score", 0):
+                    smoothed[-1] = evt
         else:
             smoothed.append(evt)
 

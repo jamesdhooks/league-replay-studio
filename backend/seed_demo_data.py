@@ -374,18 +374,23 @@ def seed_events(project_dir: str) -> list[dict]:
             },
             # ── Crashes / Incidents ──────────────────────────────────────────
             {
-                "event_type": "crash",
+                "event_type": "car_contact",
                 "start_time": 620.0,
                 "end_time": 648.0,
                 "start_frame": _t_to_frame(620),
                 "end_frame": _t_to_frame(648),
                 "lap_number": 4,
                 "severity": 9,
-                "involved_drivers": [12],
-                "position": 13,
+                "involved_drivers": [12, 14],
+                "position": 12,
                 "metadata": {
-                    "car_idx": 12, "speed_ms": 67.4,
-                    "time_loss_seconds": 18.0, "off_track_duration": 4.2,
+                    "incident_source": "iracing_session_log",
+                    "iracing_description": "Car Contact",
+                    "incident_points": 8,
+                    "car_count": 2,
+                    "speed_ms": 67.4,
+                    "time_loss": 18.0,
+                    "lap_pct": 0.4321,
                 },
             },
             {
@@ -400,22 +405,27 @@ def seed_events(project_dir: str) -> list[dict]:
                 "position": 9,
                 "metadata": {"incident_type": "contact", "positions_lost": 2},
             },
-            # ── Spinout ──────────────────────────────────────────────────────
+            # ── Loss of control ─────────────────────────────────────────
             {
-                "event_type": "spinout",
+                "event_type": "lost_control",
                 "start_time": 1445.0,
                 "end_time": 1462.0,
                 "start_frame": _t_to_frame(1445),
                 "end_frame": _t_to_frame(1462),
                 "lap_number": 9,
-                "severity": 7,
+                "severity": 5,
                 "involved_drivers": [15],
                 "position": 15,
                 "metadata": {
-                    "car_idx": 15, "time_loss_seconds": 8.5, "off_track_duration": 3.1,
+                    "incident_source": "iracing_session_log",
+                    "iracing_description": "Lost Control",
+                    "incident_points": 1,
+                    "time_loss": 8.5,
+                    "speed_ms": 44.2,
+                    "lap_pct": 0.7812,
                 },
             },
-            # ── Contact ──────────────────────────────────────────────────────
+            # ── Wall Contact ───────────────────────────────────────────────
             {
                 "event_type": "contact",
                 "start_time": 340.0,
@@ -424,9 +434,36 @@ def seed_events(project_dir: str) -> list[dict]:
                 "end_frame": _t_to_frame(355),
                 "lap_number": 3,
                 "severity": 5,
-                "involved_drivers": [6, 8],
+                "involved_drivers": [6],
                 "position": 7,
-                "metadata": {"contact_type": "side-by-side", "time_window": 0.4},
+                "metadata": {
+                    "incident_source": "iracing_session_log",
+                    "iracing_description": "Contact",
+                    "incident_points": 2,
+                    "time_loss": 3.8,
+                    "speed_ms": 58.1,
+                    "lap_pct": 0.2345,
+                },
+            },
+            # ── Off track ────────────────────────────────────────────────────
+            {
+                "event_type": "off_track",
+                "start_time": 970.0,
+                "end_time": 977.0,
+                "start_frame": _t_to_frame(970),
+                "end_frame": _t_to_frame(977),
+                "lap_number": 6,
+                "severity": 2,
+                "involved_drivers": [11],
+                "position": 11,
+                "metadata": {
+                    "incident_source": "iracing_session_log",
+                    "iracing_description": "Off Track",
+                    "incident_points": 1,
+                    "time_loss": 0.8,
+                    "speed_ms": 62.3,
+                    "lap_pct": 0.5612,
+                },
             },
             # ── Close call ───────────────────────────────────────────────────
             {
@@ -504,18 +541,23 @@ def seed_highlight_config(project_dir: str) -> None:
         save_highlight_config(
             conn,
             weights={
-                "crash": 95,
+                "car_contact": 95,
                 "incident": 80,
-                "spinout": 75,
+                "lost_control": 65,
+                "contact": 60,
+                "off_track": 25,
+                "turn_cutting": 15,
                 "leader_change": 90,
                 "overtake": 85,
                 "battle": 70,
                 "fastest_lap": 60,
-                "contact": 55,
-                "close_call": 45,
+                "close_call": 40,
                 "pit_stop": 30,
                 "first_lap": 100,
                 "last_lap": 100,
+                # Legacy types kept for older project DBs
+                "crash": 95,
+                "spinout": 65,
             },
             target_duration=420.0,   # 7-minute highlight reel
             min_severity=3,
@@ -544,10 +586,13 @@ def build_highlight_script(project_dir: str, events: list[dict]) -> dict:
 
     # Score events (simplified)
     BASE = {
-        "crash": 1.5, "incident": 1.5, "battle": 1.3, "spinout": 1.2,
+        "car_contact": 1.5, "incident": 1.5, "battle": 1.3,
+        "lost_control": 1.2, "contact": 1.1,
         "leader_change": 0.9, "overtake": 1.0, "fastest_lap": 0.7,
-        "contact": 1.2, "close_call": 0.8, "pit_stop": 0.5,
+        "off_track": 0.4, "close_call": 0.8, "pit_stop": 0.5,
         "first_lap": 10.0, "last_lap": 10.0,
+        # Legacy
+        "crash": 1.5, "spinout": 1.2,
     }
 
     def _tier(score: float) -> str:
@@ -728,7 +773,7 @@ def seed_pipeline_preset(project_dir: str) -> None:
                 "target_duration": 420,
                 "min_severity": 3,
                 "weights": {
-                    "crash": 95, "leader_change": 90, "overtake": 85,
+                    "car_contact": 95, "leader_change": 90, "overtake": 85,
                     "incident": 80, "spinout": 75, "battle": 70,
                     "fastest_lap": 60, "contact": 55, "close_call": 45,
                     "pit_stop": 30,
@@ -804,7 +849,7 @@ def main() -> None:
     print(f"   Project ID : {project_id}")
     print(f"   Project dir: {project_dir}")
     print(f"   Events     : {len(events)}")
-    print(f"   Server URL : http://127.0.0.1:6175\n")
+    print(f"   Server URL : http://127.0.0.1:7175\n")
 
 
 if __name__ == "__main__":

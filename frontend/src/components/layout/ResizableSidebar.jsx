@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, forwardRef, useImperativeHandle } from 'react'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 
@@ -12,12 +12,12 @@ import { ChevronLeft, ChevronRight } from 'lucide-react'
  * @param {number}  [props.defaultWidth=384]
  * @param {string}  [props.defaultTab]  - initial active tab id (defaults to first tab)
  */
-export default function ResizableSidebar({
+export default forwardRef(function ResizableSidebar({
   tabs,
   storageKey,
   defaultWidth = 384,
   defaultTab,
-}) {
+}, ref) {
   const firstTab = defaultTab || tabs[0]?.id || ''
 
   const [activeTab, setActiveTab] = useLocalStorage(`${storageKey}:tab`, firstTab)
@@ -25,9 +25,20 @@ export default function ResizableSidebar({
   const [collapsed, setCollapsed] = useLocalStorage(`${storageKey}:collapsed`, false)
   const [overlay, setOverlay] = useState(false)
   const isDragging = useRef(false)
+  const [dragging, setDragging] = useState(false)
+
+  useImperativeHandle(ref, () => ({
+    switchTab: (tabId) => {
+      setActiveTab(tabId)
+      if (collapsed) {
+        setOverlay(true)
+      }
+    },
+  }), [collapsed, setActiveTab])
 
   const handleDragStart = useCallback((e) => {
     isDragging.current = true
+    setDragging(true)
     const startX = e.clientX
     const startWidth = width
 
@@ -37,6 +48,7 @@ export default function ResizableSidebar({
         setCollapsed(true)
         setWidth(defaultWidth)
         isDragging.current = false
+        setDragging(false)
         document.removeEventListener('mousemove', onMove)
         document.removeEventListener('mouseup', onUp)
       } else {
@@ -46,6 +58,7 @@ export default function ResizableSidebar({
 
     const onUp = () => {
       isDragging.current = false
+      setDragging(false)
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
     }
@@ -121,7 +134,7 @@ export default function ResizableSidebar({
   // ── Expanded: full sidebar with resize handle ───────────────────────
   return (
     <div
-      className="flex flex-col overflow-hidden border-r border-border bg-bg-primary/50 shrink-0 relative select-none"
+      className={`flex flex-col overflow-hidden bg-bg-primary/50 shrink-0 relative${dragging ? ' select-none' : ''}`}
       style={{ width }}
     >
       {/* Tab bar */}
@@ -158,8 +171,12 @@ export default function ResizableSidebar({
       {/* Drag handle */}
       <div
         onMouseDown={handleDragStart}
-        className="absolute top-0 right-0 bottom-0 w-1 cursor-col-resize hover:bg-accent/40 transition-colors z-10"
-      />
+        className="absolute top-0 bottom-0 right-0 cursor-col-resize group/divider z-10"
+        style={{ width: 1, marginRight: -1 }}
+      >
+        <div className="absolute inset-y-0 -left-2 -right-2" />
+        <div className="absolute inset-y-0 right-0 w-px bg-border transition-colors group-hover/divider:bg-accent group-active/divider:bg-accent" />
+      </div>
     </div>
   )
-}
+})

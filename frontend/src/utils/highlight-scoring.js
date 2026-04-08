@@ -17,23 +17,33 @@
 
 /** Base scores by event type for the multi-pass scoring pipeline */
 export const BASE_SCORES = {
+  // SessionLog-sourced incident types (IncidentLogDetector)
+  car_contact:  1.6,   // "Car Contact" (car-to-car)
+  contact:      1.2,   // "Contact" (wall / barrier)
+  lost_control: 1.1,   // "Lost Control" (spin)
+  off_track:    0.5,   // "Off Track" (track limits)
+  turn_cutting: 0.3,   // "Turn Cutting" (lowest priority)
+  // Legacy inferred types (backward-compat with older project DBs)
   crash: 1.5,
+  spinout: 1.2,
+  // Other event types
   incident: 1.5,
   battle: 1.3,
-  spinout: 1.2,
   overtake: 1.0,
   leader_change: 0.9,
   fastest_lap: 0.7,
   pit_stop: 0.5,
-  contact: 1.2,
   close_call: 0.8,
   undercut: 1.1,
   overcut: 1.1,
   pit_battle: 1.0,
+  first_lap: 1.3,
+  last_lap: 1.3,
+  pace_lap: 0.4,
 }
 
 /** Event types that are always included (mandatory) */
-export const MANDATORY_TYPES = new Set(['first_lap', 'last_lap', 'restart', 'pace_lap'])
+export const MANDATORY_TYPES = new Set(['race_start', 'race_finish', 'restart'])
 
 /** Tier classification thresholds */
 export const TIER_S_THRESHOLD = 9.0
@@ -91,21 +101,24 @@ export function computeEventScore(event, weights, params = {}, raceDuration = 0)
   const components = {}
 
   // Stage 1 — Base Score
-  let score
-  if (MANDATORY_TYPES.has(eventType)) {
-    score = 10.0
-    components.base = 10.0
-  } else {
-    const base = BASE_SCORES[eventType] ?? 0.5
-    score = base
-    components.base = base
-  }
+  // Mandatory events use their natural base score (not inflated to 10)
+  // so they don't distort the score range. They're force-included in selection instead.
+  const base = BASE_SCORES[eventType] ?? 0.5
+  let score = base
+  components.base = base
+  components.mandatory = MANDATORY_TYPES.has(eventType)
 
   // Stage 2 — Position Importance Multiplier
   const position = event.position || 99
   let posMult = 1.0
   if (position <= 3) posMult = 2.0
   else if (position <= 10) posMult = 1.5
+  // Battle front bias: extra weight for front-of-field battle events.
+  // Mirrors scoring_engine.py Stage 2 battleFrontBias logic.
+  if (eventType === 'battle' && params.battleFrontBias && params.battleFrontBias !== 1.0) {
+    if (position <= 3) posMult *= params.battleFrontBias
+    else if (position <= 10) posMult *= Math.sqrt(params.battleFrontBias)
+  }
   score *= posMult
   components.position = posMult
 
@@ -133,12 +146,31 @@ export function computeEventScore(event, weights, params = {}, raceDuration = 0)
     const chainLength = metadata.chain_length || 2
     narrativeBonus += Math.log(chainLength + 1) * 0.5
   }
+  // Overtakes during a sustained battle are more exciting
+  if (eventType === 'overtake' && metadata.in_battle) {
+    narrativeBonus += 0.4
+  }
+  const evtTime = event.start_time_seconds || 0
   if (raceDuration > 0) {
-    const racePct = (event.start_time_seconds || 0) / raceDuration
-    if (racePct > 0.9) {
-      const lateRaceBonus = score * 0.2 // 20% boost for late-race events
-      score *= 1.2
+    const racePct = evtTime / raceDuration
+    const lateThreshold = params.lateRaceThreshold ?? 0.9
+    const lateMult = params.lateRaceMultiplier ?? 1.2
+    if (racePct > lateThreshold) {
+      const lateRaceBonus = score * (lateMult - 1)
+      score *= lateMult
       narrativeBonus += lateRaceBonus
+    }
+  }
+  // First-lap sticky window bonus
+  const firstLapSticky = params.firstLapStickyPeriod ?? 0
+  if (firstLapSticky > 0 && evtTime <= firstLapSticky) {
+    score *= params.firstLapWeight ?? 1.0
+  }
+  // Last-lap sticky window bonus
+  const lastLapSticky = params.lastLapStickyPeriod ?? 0
+  if (lastLapSticky > 0 && raceDuration > 0) {
+    if (raceDuration - evtTime <= lastLapSticky) {
+      score *= params.lastLapWeight ?? 1.0
     }
   }
   score += narrativeBonus
@@ -162,11 +194,32 @@ export function computeEventScore(event, weights, params = {}, raceDuration = 0)
     }
   }
 
+  // Preferred-drivers-only exclusive filter
+  // When enabled, zero out events that don't involve a preferred driver
+  // (mandatory events are always kept).
+  if (params.preferredDriversOnly && params.preferredDrivers && !MANDATORY_TYPES.has(eventType)) {
+    const preferred = params.preferredDrivers.split(',').map(n => n.trim().toLowerCase()).filter(Boolean)
+    if (preferred.length > 0) {
+      const driverNames = event.driver_names || []
+      const hasPreferred = driverNames.some(name =>
+        preferred.some(p => name.toLowerCase().includes(p))
+      )
+      if (!hasPreferred) score = 0
+    }
+  }
+
+  // Ignore incidents during first-lap bucket
+  // Suppresses crash/incident/spinout/contact/close_call events in the first 15% of the race.
+  const _incidentTypes = new Set(['incident', 'crash', 'spinout', 'contact', 'close_call'])
+  if (params.ignoreIncidentsDuringFirstLap && _incidentTypes.has(eventType)) {
+    if (raceDuration > 0 && evtTime / raceDuration <= 0.15) {
+      score = 0
+    }
+  }
+
   // Stage 6 — User Weight Override
   const userWeight = (weights[eventType] ?? 50) / 100.0
-  if (!MANDATORY_TYPES.has(eventType)) {
-    score *= userWeight
-  }
+  score *= userWeight
   components.user_weight = userWeight
 
   // Round score
@@ -174,7 +227,7 @@ export function computeEventScore(event, weights, params = {}, raceDuration = 0)
 
   // Tier classification
   let tier
-  if (MANDATORY_TYPES.has(eventType) || score > TIER_S_THRESHOLD) {
+  if (score > TIER_S_THRESHOLD) {
     tier = 'S'
   } else if (score >= TIER_A_THRESHOLD) {
     tier = 'A'
@@ -233,12 +286,13 @@ export function buildReason(event, score, overrides, minSeverity, inclusion, tie
  * Returns { scoredEvents, selectedIds, fullVideoIds, excludedIds, metrics }
  */
 export function computeHighlightSelection(events, weights, targetDuration, minSeverity, overrides, raceDuration, drivers, params = {}) {
-  // 1. Score all events using multi-pass pipeline
+  // 1. Score all events using multi-pass pipeline (raw scores)
   const scored = events.map(evt => {
     const { score, tier, bucket, components } = computeEventScore(evt, weights, params, raceDuration)
     return {
       ...evt,
       score,
+      raw_score: score,
       tier,
       bucket,
       score_components: components,
@@ -246,6 +300,36 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
       duration: Math.max(0, evt.end_time_seconds - evt.start_time_seconds),
     }
   })
+
+  // 1b. Normalize scores to 0–10 range so histogram buckets and tiers work
+  const rawScores = scored.filter(e => e.score > 0).map(e => e.score)
+  if (rawScores.length >= 2) {
+    const minScore = Math.min(...rawScores)
+    const maxScore = Math.max(...rawScores)
+    const range = maxScore - minScore
+    if (range > 0) {
+      for (const evt of scored) {
+        if (evt.score <= 0) continue
+        // Normalize to 0.5–10 (floor at 0.5 so nothing maps to exactly 0)
+        evt.score = Math.round((0.5 + ((evt.score - minScore) / range) * 9.5) * 100) / 100
+        evt.score_components.normalization = { raw: evt.raw_score, min: minScore, max: maxScore }
+      }
+    } else {
+      // All scores identical — set to midpoint
+      for (const evt of scored) {
+        if (evt.score <= 0) continue
+        evt.score = 5.0
+        evt.score_components.normalization = { raw: evt.raw_score, min: minScore, max: maxScore }
+      }
+    }
+    // Re-classify tiers with normalized scores
+    for (const evt of scored) {
+      if (evt.score > TIER_S_THRESHOLD) evt.tier = 'S'
+      else if (evt.score >= TIER_A_THRESHOLD) evt.tier = 'A'
+      else if (evt.score >= TIER_B_THRESHOLD) evt.tier = 'B'
+      else evt.tier = 'C'
+    }
+  }
 
   // 2. Multi-pass selection:
   //    Pass 1 — Must-have events (mandatory types + Tier S) + manual overrides
@@ -284,19 +368,43 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     }
   }
 
-  // Pass 1b: Must-have events (Tier S + mandatory types)
+  // Pass 1b: Must-have events (mandatory types — always included regardless of score)
   for (const evt of sortedByScore) {
     if (highlightIds.has(evt.id) || fullVideoIds.has(evt.id) || excludedIds.has(evt.id)) continue
-    if (evt.tier === 'S' || MANDATORY_TYPES.has(evt.event_type)) {
+    if (MANDATORY_TYPES.has(evt.event_type)) {
       highlightIds.add(evt.id)
       highlightDuration += evt.duration
       bucketUsed[evt.bucket] = (bucketUsed[evt.bucket] || 0) + evt.duration
     }
   }
 
+  // Find the race finish cutoff: events of non-mandatory types after this time
+  // are cooldown-lap content (battles/incidents during the cool-down lap) and
+  // should be excluded. last_lap (P2-P10 finish crossings) is exempt.
+  const _POST_RACE_EXCLUDED = new Set([
+    'battle', 'overtake', 'incident', 'crash', 'spinout', 'contact', 'close_call',
+    'leader_change', 'pit_stop', 'fastest_lap', 'undercut', 'overcut', 'pit_battle',
+    'first_lap',
+  ])
+  let raceFinishCutoff = null
+  for (const evt of scored) {
+    if (evt.event_type === 'race_finish') {
+      const t = evt.end_time_seconds || 0
+      if (raceFinishCutoff === null || t < raceFinishCutoff) raceFinishCutoff = t
+    }
+  }
+
   // Pass 2: Bucket fill — select by score within bucket budgets
   for (const evt of sortedByScore) {
     if (highlightIds.has(evt.id) || fullVideoIds.has(evt.id) || excludedIds.has(evt.id)) continue
+
+    // Exclude cooldown-lap events
+    if (raceFinishCutoff !== null
+        && _POST_RACE_EXCLUDED.has(evt.event_type)
+        && (evt.start_time_seconds || 0) > raceFinishCutoff) {
+      excludedIds.add(evt.id)
+      continue
+    }
 
     if (evt.severity < minSeverity) {
       excludedIds.add(evt.id)

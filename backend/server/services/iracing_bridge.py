@@ -214,6 +214,28 @@ class IRacingBridge:
         except Exception:
             return -1
 
+    def get_replay_frame(self) -> int:
+        """Read the current ReplayFrameNum telemetry variable."""
+        if not self._connected or self._ir is None:
+            return -1
+        try:
+            self._ir.freeze_var_buffer_latest()
+            val = self._ir["ReplayFrameNum"]
+            return int(val) if val is not None else -1
+        except Exception:
+            return -1
+
+    def get_replay_speed(self) -> int:
+        """Read the current ReplayPlaySpeed telemetry variable."""
+        if not self._connected or self._ir is None:
+            return -1
+        try:
+            self._ir.freeze_var_buffer_latest()
+            val = self._ir["ReplayPlaySpeed"]
+            return int(val) if val is not None else -1
+        except Exception:
+            return -1
+
     def get_sessions_info(self) -> list[dict]:
         """Return the list of sessions from SessionInfo with type and index."""
         try:
@@ -275,11 +297,20 @@ class IRacingBridge:
             replay_speed_raw = self._ir["ReplayPlaySpeed"]
             replay_speed = int(replay_speed_raw) if replay_speed_raw is not None else 1
 
+            # ReplaySessionNum tracks which session the replay is currently positioned
+            # in, and updates when replay_search_session_time() is used.
+            # SessionNum reflects the live/original session and does NOT change
+            # during replay seeking — so we must use ReplaySessionNum for all
+            # replay-position checks.
+            replay_session_num_raw = self._ir["ReplaySessionNum"]
+            replay_session_num = int(replay_session_num_raw) if replay_session_num_raw is not None else 0
+
             return {
-                "session_time":  self._ir["SessionTime"]    or 0.0,
-                "session_state": self._ir["SessionState"]   or 0,
-                "session_num":   self._ir["SessionNum"]     if self._ir["SessionNum"] is not None else 0,
-                "replay_frame":  self._ir["ReplayFrameNum"] or 0,
+                "session_time":       self._ir["SessionTime"]    or 0.0,
+                "session_state":      self._ir["SessionState"]   or 0,
+                "session_num":        self._ir["SessionNum"]     if self._ir["SessionNum"] is not None else 0,
+                "replay_session_num": replay_session_num,
+                "replay_frame":       self._ir["ReplayFrameNum"] or 0,
                 "race_laps":     self._ir["RaceLaps"]       or 0,
                 "cam_car_idx":   self._ir["CamCarIdx"]      or 0,
                 "cam_group_num": self._ir["CamGroupNumber"] or 0,
@@ -374,6 +405,7 @@ class IRacingBridge:
             driver_info   = self._ir["DriverInfo"]   or {}
             camera_info   = self._ir["CameraInfo"]   or {}
             session_info  = self._ir["SessionInfo"]  or {}
+            session_log   = self._ir["SessionLog"]   or {}
 
             if not weekend_info and not driver_info:
                 return
@@ -414,6 +446,23 @@ class IRacingBridge:
                 except (ValueError, TypeError):
                     avg_lap_time = 0.0
 
+            # Parse SessionLog incident messages — used by IncidentLogDetector.
+            # Each message has: CarIdx, CarNumber, Description, Incident (points),
+            # Lap, SessionNum, SessionTime, UserName.
+            # We parse all messages up-front so the analysis engine has
+            # complete incident history when it starts the telemetry scan.
+            raw_messages = session_log.get("Messages") or []
+            _KEEP_FIELDS = {"CarIdx", "SessionTime", "Lap", "Description", "Incident",
+                            "SessionNum", "UserName"}
+            incident_log: list[dict] = []
+            for m in raw_messages:
+                if not isinstance(m, dict):
+                    continue
+                car_idx = m.get("CarIdx")
+                if car_idx is None:
+                    continue
+                incident_log.append({k: v for k, v in m.items() if k in _KEEP_FIELDS})
+
             self._session_data = {
                 "track_name": track_name,
                 "track_length": track_length_m,
@@ -432,16 +481,18 @@ class IRacingBridge:
                     {"index": i, "type": s.get("SessionType", ""), "name": s.get("SessionName", "")}
                     for i, s in enumerate(sessions)
                 ],
+                "incident_log": incident_log,
             }
 
             self._push_update(
                 {"event": "iracing:session_info", "data": self._session_data}
             )
             logger.info(
-                "[IRacingBridge] Session info updated: %s, %d drivers, %d cameras",
+                "[IRacingBridge] Session info updated: %s, %d drivers, %d cameras, %d incidents",
                 track_name,
                 len(drivers),
                 len(cameras),
+                len(incident_log),
             )
         except Exception as exc:
             logger.warning("[IRacingBridge] Session info parse error: %s", exc)

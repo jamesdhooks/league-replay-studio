@@ -302,6 +302,14 @@ export default function EventInspectorPanel({ projectId }) {
 
         {/* ── Involved Drivers ──────────────────────────────────────────── */}
         <Section icon={Users} label="Involved Drivers">
+          {(() => {
+            const involvedDrivers = drivers.filter(d => editState.involved_drivers.includes(d.car_idx))
+            return involvedDrivers.length > 0 ? (
+              <div className="text-xxs text-accent font-medium mb-1.5 px-2 leading-relaxed">
+                {involvedDrivers.map(d => d.user_name || `Car ${d.car_idx}`).join(', ')}
+              </div>
+            ) : null
+          })()}
           {drivers.length > 0 ? (
             <div className="space-y-0.5 max-h-36 overflow-y-auto">
               {drivers.map(driver => {

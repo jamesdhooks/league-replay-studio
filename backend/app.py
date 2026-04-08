@@ -453,7 +453,7 @@ def _apply_app_user_model_id() -> None:
 
 # ── Server runner ────────────────────────────────────────────────────────────
 
-def start_server(port: int = 6175, reload_enabled: bool = False) -> None:
+def start_server(port: int = 7175, reload_enabled: bool = False) -> None:
     """Start the FastAPI server with uvicorn."""
     import uvicorn
     logger.info("[App] Starting FastAPI on http://127.0.0.1:%d (reload=%s)", port, reload_enabled)
@@ -479,7 +479,7 @@ def start_server(port: int = 6175, reload_enabled: bool = False) -> None:
 
 def main() -> None:
     """Launch the application — pywebview window or browser."""
-    port = int(os.environ.get("LRS_PORT", "6175"))
+    port = int(os.environ.get("LRS_PORT", "7175"))
     argv = sys.argv[1:]
     web_only = (os.environ.get("WEB_ONLY", "0") == "1") or ("--web" in argv)
     reload_requested = (os.environ.get("LRS_RELOAD", "0") == "1") or ("--reload" in argv)

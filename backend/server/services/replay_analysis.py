@@ -31,6 +31,7 @@ from server.services.analysis_db import (
     clear_analysis_data,
     insert_events_batch,
     count_events,
+    format_event_log,
 )
 from server.services.detectors import ALL_DETECTORS
 from server.services.iracing_bridge import bridge as iracing_bridge
@@ -264,11 +265,23 @@ class ReplayAnalyzer:
         self._raw_on_progress(event_type, data)
 
     def _save_analysis_log(self) -> None:
-        """Persist the full analysis log to a JSON file in the project directory."""
+        """Persist the full analysis log to a JSON file in the project directory.
+
+        Loads any existing log entries first so re-runs append rather than overwrite.
+        """
         try:
             log_path = Path(self.project_dir) / "analysis_log.json"
-            log_path.write_text(json.dumps(self._log_entries, indent=2, default=str))
-            logger.info("[Analysis] Saved analysis log to %s", log_path)
+            existing: list[dict] = []
+            if log_path.exists():
+                try:
+                    existing = json.loads(log_path.read_text())
+                    if not isinstance(existing, list):
+                        existing = []
+                except Exception:
+                    existing = []
+            combined = existing + self._log_entries
+            log_path.write_text(json.dumps(combined, indent=2, default=str))
+            logger.info("[Analysis] Saved analysis log to %s (%d entries)", log_path, len(combined))
         except Exception as exc:
             logger.warning("[Analysis] Failed to save analysis log: %s", exc)
 
@@ -456,6 +469,130 @@ class ReplayAnalyzer:
             self._save_analysis_log()
             conn.close()
 
+    # ── Verified replay-control helpers ──────────────────────────────────────
+
+    async def _verified_seek(
+        self,
+        frame: int,
+        label: str = "",
+        max_retries: int = 4,
+        poll_timeout: float = 5.0,
+        poll_interval: float = 0.1,
+        tolerance: int = 120,  # frames (~2 s at 60 fps)
+    ) -> bool:
+        """Seek to *frame* and confirm ReplayFrameNum is within *tolerance*.
+
+        Retries up to *max_retries* times.  Returns True if confirmed, False
+        if all attempts fail (caller decides how to proceed).
+        Emits on_progress events so every attempt is visible in the UI.
+        """
+        tag = f" ({label})" if label else ""
+        for attempt in range(1, max_retries + 1):
+            iracing_bridge.seek_to_frame(frame)
+            self.on_progress("step_completed", {
+                "project_id": self.project_id,
+                "stage": "analysis_scan",
+                "description": f"Seeking to frame {frame:,}{tag}... (attempt {attempt}/{max_retries})",
+                "detail": f"Sent seek command to iRacing — polling ReplayFrameNum to confirm (timeout {poll_timeout:.0f}s)",
+                "progress_percent": 1,
+            })
+            deadline = time.monotonic() + poll_timeout
+            while time.monotonic() < deadline:
+                await asyncio.sleep(poll_interval)
+                current = iracing_bridge.get_replay_frame()
+                if current >= 0 and abs(current - frame) <= tolerance:
+                    logger.info(
+                        "[Analysis] Seek to frame %d confirmed (current=%d)%s",
+                        frame, current, tag,
+                    )
+                    self.on_progress("step_completed", {
+                        "project_id": self.project_id,
+                        "stage": "analysis_scan",
+                        "description": f"Seek confirmed{tag} ✓",
+                        "detail": f"ReplayFrameNum={current:,} (target {frame:,}, within {tolerance} frames)",
+                        "progress_percent": 1,
+                    })
+                    return True
+            current = iracing_bridge.get_replay_frame()
+            logger.warning(
+                "[Analysis] Seek to frame %d not confirmed%s — "
+                "ReplayFrameNum=%d after %.0fs, attempt %d/%d",
+                frame, tag, current, poll_timeout, attempt, max_retries,
+            )
+            self.on_progress("step_completed", {
+                "project_id": self.project_id,
+                "stage": "analysis_scan",
+                "description": f"Seek NOT confirmed{tag} — retrying... (attempt {attempt}/{max_retries})",
+                "detail": (
+                    f"ReplayFrameNum={current:,} after {poll_timeout:.0f}s, expected ~{frame:,}. "
+                    "iRacing may be ignoring seek commands — check it is in Replay mode."
+                ),
+                "progress_percent": 1,
+            })
+            if attempt < max_retries:
+                # Brief pause before retry so iRacing can settle
+                await asyncio.sleep(0.5)
+        return False
+
+    async def _verified_set_speed(
+        self,
+        speed: int,
+        label: str = "",
+        max_retries: int = 4,
+        poll_timeout: float = 3.0,
+        poll_interval: float = 0.1,
+    ) -> bool:
+        """Set replay speed and confirm ReplayPlaySpeed matches.
+
+        Retries up to *max_retries* times.  Returns True if confirmed.
+        Emits on_progress events so every attempt is visible in the UI.
+        """
+        tag = f" ({label})" if label else ""
+        for attempt in range(1, max_retries + 1):
+            iracing_bridge.set_replay_speed(speed)
+            self.on_progress("step_completed", {
+                "project_id": self.project_id,
+                "stage": "analysis_scan",
+                "description": f"Setting replay speed to {speed}×{tag}... (attempt {attempt}/{max_retries})",
+                "detail": f"Sent speed command to iRacing — polling ReplayPlaySpeed to confirm (timeout {poll_timeout:.0f}s)",
+                "progress_percent": 1,
+            })
+            deadline = time.monotonic() + poll_timeout
+            while time.monotonic() < deadline:
+                await asyncio.sleep(poll_interval)
+                current = iracing_bridge.get_replay_speed()
+                if current == speed:
+                    logger.info(
+                        "[Analysis] Replay speed %d× confirmed%s", speed, tag,
+                    )
+                    self.on_progress("step_completed", {
+                        "project_id": self.project_id,
+                        "stage": "analysis_scan",
+                        "description": f"Speed {speed}× confirmed{tag} ✓",
+                        "detail": f"ReplayPlaySpeed={current}×",
+                        "progress_percent": 1,
+                    })
+                    return True
+            current = iracing_bridge.get_replay_speed()
+            logger.warning(
+                "[Analysis] Speed %d× not confirmed%s — "
+                "ReplayPlaySpeed=%d after %.0fs, attempt %d/%d",
+                speed, tag, current, poll_timeout, attempt, max_retries,
+            )
+            self.on_progress("step_completed", {
+                "project_id": self.project_id,
+                "stage": "analysis_scan",
+                "description": f"Speed {speed}× NOT confirmed{tag} — retrying... (attempt {attempt}/{max_retries})",
+                "detail": (
+                    f"ReplayPlaySpeed={current}× after {poll_timeout:.0f}s, expected {speed}×. "
+                    "iRacing may be ignoring speed commands."
+                ),
+                "progress_percent": 1,
+            })
+            if attempt < max_retries:
+                await asyncio.sleep(0.3)
+        return False
+
     async def _scan_telemetry(self, conn: sqlite3.Connection) -> int:
         """Pass 1: Scan the replay at 16× speed, capturing telemetry.
 
@@ -474,13 +611,48 @@ class ReplayAnalyzer:
 
         writer = TelemetryWriter(conn)
 
+        # ── Step 0: Rewind to frame 0 before doing anything else ─────────
+        # Must happen first. When iRacing is paused at the end of the race
+        # the replay engine is in an "ended" state — replay_search_session_time
+        # and set_replay_speed will silently do nothing until we unstick it.
+        self.on_progress("step_completed", {
+            "project_id": self.project_id,
+            "stage": "analysis_scan",
+            "description": "Rewinding replay to start...",
+            "detail": "Seeking to frame 0 before reading session data",
+            "progress_percent": 0,
+        })
+        rewind_ok = await self._verified_seek(0, label="rewind", tolerance=60)
+        if not rewind_ok:
+            logger.warning("[Analysis] Frame-0 seek not confirmed — trying replay_search to_start (mode=0)")
+            self.on_progress("step_completed", {
+                "project_id": self.project_id,
+                "stage": "analysis_scan",
+                "description": "Rewind failed — trying alternate seek method...",
+                "detail": "ReplayFrameNum did not reach 0. Attempting to_start search as fallback.",
+                "progress_percent": 0,
+            })
+            iracing_bridge.replay_search(0)  # RpySrchMode.to_start = 0
+            rewind_ok = await self._verified_seek(0, label="rewind-fallback", max_retries=2, tolerance=300)
+            if not rewind_ok:
+                logger.error("[Analysis] Could not rewind replay to frame 0 — iRacing may not be in replay mode")
+                self.on_progress("error", {
+                    "project_id": self.project_id,
+                    "stage": "analysis_scan",
+                    "message": (
+                        "Cannot rewind replay: iRacing is not responding to seek commands. "
+                        "Make sure the replay is loaded and iRacing is in Replay mode."
+                    ),
+                })
+                return 0
+
         # ── Phase A: Jump to race session & find start frame ─────────────
         self.on_progress("step_completed", {
             "project_id": self.project_id,
             "stage": "analysis_scan",
             "description": "Locating race session...",
             "detail": "Reading session info to identify race, qualifying, and practice sessions",
-            "progress_percent": 0,
+            "progress_percent": 1,
         })
 
         # Try to find the race session index from session info
@@ -508,26 +680,52 @@ class ReplayAnalyzer:
             fingerprint["track_name"], fingerprint["subsession_id"], fingerprint["driver_count"],
         )
 
+        # ── Persist SessionLog incidents (ground-truth for IncidentLogDetector) ──
+        # Filter to only the race session so the incident_log table contains
+        # exclusively race incidents (avoids session_time collisions with
+        # practice / qualifying events that share the 0–N seconds range).
+        race_session_num = session_data.get("race_session_num")
+        raw_incidents = session_data.get("incident_log", [])
+        incident_rows = []
+        for m in raw_incidents:
+            if race_session_num is not None and m.get("SessionNum") != race_session_num:
+                continue
+            car_idx = m.get("CarIdx")
+            if car_idx is None:
+                continue
+            incident_rows.append((
+                int(car_idx),
+                float(m.get("SessionTime", 0)),
+                int(m.get("Lap", 0)),
+                str(m.get("Description", "")),
+                int(m.get("Incident", 0)),
+                int(m.get("SessionNum", 0)),
+                str(m.get("UserName", "")),
+            ))
+        if incident_rows:
+            conn.executemany(
+                "INSERT INTO incident_log "
+                "(car_idx, session_time, lap, description, incident_points, session_num, user_name) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                incident_rows,
+            )
+            conn.commit()
+            logger.info(
+                "[Analysis] Stored %d incident_log entries (race session #%s)",
+                len(incident_rows), race_session_num,
+            )
+        else:
+            logger.info(
+                "[Analysis] No incident_log entries to store "
+                "(SessionLog empty or no race session match)"
+            )
+
         if all_sessions:
             session_names = ", ".join(
                 f"{s.get('name', s.get('type', '?'))} (#{s['index']})"
                 for s in all_sessions
             )
             logger.info("[Analysis] Available sessions: %s", session_names)
-
-        # Always rewind to the absolute start of the replay first.
-        # This is critical when iRacing is paused at the end of the race —
-        # replay_search_session_time (and set_replay_speed) will silently do
-        # nothing if the engine is in an "ended" state at the last frame.
-        self.on_progress("step_completed", {
-            "project_id": self.project_id,
-            "stage": "analysis_scan",
-            "description": "Rewinding replay to start...",
-            "detail": "Seeking to frame 0 before jumping to race session",
-            "progress_percent": 1,
-        })
-        iracing_bridge.seek_to_frame(0)
-        await asyncio.sleep(0.8)  # Give iRacing time to process the seek
 
         jumped_to_race = False
         if race_session_num is not None:
@@ -539,16 +737,73 @@ class ReplayAnalyzer:
                 "progress_percent": 2,
             })
 
-            # Jump directly to the start of the race session
+            # Jump directly to the start of the race session.
+            # replay_search_session_time() is asynchronous — iRacing updates the
+            # ReplaySessionNum telemetry var only after the seek is processed
+            # (can take 1-3 seconds).  We MUST verify this instead of sleeping
+            # a fixed 1s and blindly trusting it worked.
             if iracing_bridge.replay_search_session_time(race_session_num, 0):
-                await asyncio.sleep(1.0)  # Wait for iRacing to seek
-                jumped_to_race = True
-                logger.info(
-                    "[Analysis] Jumped to race session #%d via replay_search_session_time",
-                    race_session_num,
-                )
+                # Poll ReplaySessionNum for up to 5 seconds to confirm the jump
+                jump_confirmed = False
+                for _attempt in range(100):  # 100 × 0.05 s = 5 s max
+                    await asyncio.sleep(0.05)
+                    current_replay_sn = iracing_bridge.get_replay_session_num()
+                    if current_replay_sn == race_session_num:
+                        jump_confirmed = True
+                        break
+
+                if jump_confirmed:
+                    jumped_to_race = True
+                    logger.info(
+                        "[Analysis] Jump to race session #%d confirmed (ReplaySessionNum validated)",
+                        race_session_num,
+                    )
+                else:
+                    # replay_search_session_time succeeded but ReplaySessionNum
+                    # never updated — try advancing session-by-session as fallback
+                    current_replay_sn = iracing_bridge.get_replay_session_num()
+                    logger.warning(
+                        "[Analysis] replay_search_session_time did not confirm "
+                        "(ReplaySessionNum=%d, expected=%d) — trying next_session fallback",
+                        current_replay_sn, race_session_num,
+                    )
+                    self.on_progress("step_completed", {
+                        "project_id": self.project_id,
+                        "stage": "analysis_scan",
+                        "description": "Jump verification failed — trying session-by-session advance...",
+                        "detail": (
+                            f"ReplaySessionNum is {current_replay_sn}, not {race_session_num}. "
+                            "Using next_session search as fallback."
+                        ),
+                        "progress_percent": 3,
+                    })
+                    # Advance through sessions one-by-one (RpySrchMode.next_session = 3)
+                    for _step in range(race_session_num * 2 + 4):
+                        current_replay_sn = iracing_bridge.get_replay_session_num()
+                        if current_replay_sn >= race_session_num:
+                            break
+                        iracing_bridge.replay_search(3)  # next_session
+                        # Wait for the session hop to register
+                        for _w in range(30):  # up to 1.5 s per hop
+                            await asyncio.sleep(0.05)
+                            if iracing_bridge.get_replay_session_num() > current_replay_sn:
+                                break
+
+                    final_sn = iracing_bridge.get_replay_session_num()
+                    if final_sn == race_session_num:
+                        jumped_to_race = True
+                        logger.info(
+                            "[Analysis] next_session fallback succeeded — now at session #%d",
+                            final_sn,
+                        )
+                    else:
+                        logger.warning(
+                            "[Analysis] Could not reach race session #%d (stuck at #%d) "
+                            "— falling back to full-replay scan",
+                            race_session_num, final_sn,
+                        )
             else:
-                logger.warning("[Analysis] replay_search_session_time failed, falling back to frame-0 scan")
+                logger.warning("[Analysis] replay_search_session_time call failed — falling back to full-replay scan")
 
         if not jumped_to_race:
             # Fallback: already at frame 0 from the initial rewind above
@@ -556,77 +811,131 @@ class ReplayAnalyzer:
                 "project_id": self.project_id,
                 "stage": "analysis_scan",
                 "description": "Scanning from replay start...",
-                "detail": "Could not identify race session — scanning from beginning at 16× speed",
+                "detail": "Could not jump to race session — scanning from beginning to find green flag",
                 "progress_percent": 2,
             })
 
-        # Now scan forward at 16× to find the exact moment SessionState==Racing
-        # Use a higher speed when scanning from frame 0 (must skip practice/qual)
+        # Now scan forward to find the exact frame where SessionState==Racing
+        # AND ReplaySessionNum==race_session_num.
+        # Use a higher speed when scanning from frame 0 (must skip practice/qual).
         skip_speed = SCAN_SPEED if jumped_to_race else 32
-        iracing_bridge.set_replay_speed(skip_speed)
+        speed_ok = await self._verified_set_speed(skip_speed, label="green-flag-scan")
+        if not speed_ok:
+            logger.warning(
+                "[Analysis] Could not confirm replay speed %d× — iRacing may be paused or unresponsive",
+                skip_speed,
+            )
+            self.on_progress("step_completed", {
+                "project_id": self.project_id,
+                "stage": "analysis_scan",
+                "description": f"Speed {skip_speed}× not confirmed — continuing anyway...",
+                "detail": "ReplayPlaySpeed did not update. Check that iRacing is in replay mode and not paused at start.",
+                "progress_percent": 5,
+            })
 
         self.on_progress("step_completed", {
             "project_id": self.project_id,
             "stage": "analysis_scan",
             "description": "Scanning for race start (green flag)...",
             "detail": (
-                "Fast-forwarding at 16× speed, waiting for SessionState to change to Racing (green flag drop)"
+                f"Fast-forwarding at {skip_speed}× speed — waiting for green flag in race session #{race_session_num}"
                 if jumped_to_race else
-                f"Fast-forwarding at {skip_speed}× speed — skipping practice/qualifying sessions to find race green flag"
+                f"Fast-forwarding at {skip_speed}× speed — scanning entire replay to reach race session"
             ),
             "progress_percent": 5,
         })
 
         race_start_frame = 0
         race_start_session_time = 0.0
-        scan_limit = 1500 if jumped_to_race else 12000  # Longer limit when scanning from start (must traverse practice/qual)
+        race_start_found = False
+        # Generous scan limit in both cases; session-number validation prevents
+        # false positives from practice/qualifying RACING states.  At 0.02 s/tick:
+        #   jumped → 3000 ticks = 60 real-s window within the race session
+        #   full scan → 18000 ticks = 6 min to traverse a multi-session replay
+        scan_limit = 3000 if jumped_to_race else 18000
+        last_skip_log = -1
         for tick in range(scan_limit):
             if self._cancelled:
                 iracing_bridge.set_replay_speed(0)
                 return 0
 
             snapshot = self._capture_snapshot()
-            if snapshot and snapshot.get("session_state") == SESSION_STATE_RACING:
-                # If we know the race session number, verify we're actually in
-                # the race session — not practice or qualifying (which also have
-                # session_state == RACING).
-                current_session_num = snapshot.get("session_num")
-                if race_session_num is not None and current_session_num is not None:
-                    if current_session_num != race_session_num:
-                        # Still in practice/qualifying — keep scanning
-                        if tick > 0 and tick % 500 == 0:
+            if snapshot:
+                # Use ReplaySessionNum (tracks replay position) not SessionNum
+                # (tracks original live session — does NOT change during replay seeks).
+                current_replay_sn = snapshot.get("replay_session_num", snapshot.get("session_num", 0))
+                current_state = snapshot.get("session_state", 0)
+
+                if current_state == SESSION_STATE_RACING:
+                    # Validate we are in the correct session.
+                    # Skip if race_session_num is known but we haven't reached it yet.
+                    if race_session_num is not None and current_replay_sn != race_session_num:
+                        if tick - last_skip_log >= 100:
+                            last_skip_log = tick
                             self.on_progress("step_completed", {
                                 "project_id": self.project_id,
                                 "stage": "analysis_scan",
-                                "description": f"Skipping session #{current_session_num} (not race)...",
-                                "detail": f"Currently in session #{current_session_num}, race is session #{race_session_num} — fast-forwarding",
+                                "description": f"Skipping session #{current_replay_sn} (not race)...",
+                                "detail": (
+                                    f"Currently in session #{current_replay_sn}, "
+                                    f"race is session #{race_session_num} — fast-forwarding"
+                                ),
                                 "progress_percent": 5,
                             })
                         await asyncio.sleep(TICK_INTERVAL)
                         continue
 
-                race_start_frame = snapshot.get("replay_frame", 0)
-                race_start_session_time = snapshot.get("session_time", 0.0)
-                break
+                    # Found green flag in the correct session
+                    race_start_frame = snapshot.get("replay_frame", 0)
+                    race_start_session_time = snapshot.get("session_time", 0.0)
+                    race_start_found = True
+                    logger.info(
+                        "[Analysis] Green flag detected: session=#%d state=%d frame=%d t=%.1fs",
+                        current_replay_sn, current_state, race_start_frame, race_start_session_time,
+                    )
+                    break
 
-            # Periodic progress during race-start search
-            if tick > 0 and tick % 250 == 0:
-                elapsed_race_s = (snapshot or {}).get("session_time", 0.0)
-                current_sn = (snapshot or {}).get("session_num")
-                detail_parts = [f"Scanned {_format_time(elapsed_race_s)} of replay so far"]
-                if current_sn is not None and race_session_num is not None:
-                    detail_parts.append(f"in session #{current_sn}, looking for race session #{race_session_num}")
-                else:
-                    detail_parts.append("waiting for racing to begin")
-                self.on_progress("step_completed", {
-                    "project_id": self.project_id,
-                    "stage": "analysis_scan",
-                    "description": "Still searching for green flag...",
-                    "detail": " — ".join(detail_parts),
-                    "progress_percent": 5,
-                })
+                # Periodic progress while waiting for green flag
+                if tick > 0 and tick % 250 == 0:
+                    elapsed_race_s = snapshot.get("session_time", 0.0)
+                    detail_parts = [f"Scanned {_format_time(elapsed_race_s)} of replay so far"]
+                    if race_session_num is not None:
+                        detail_parts.append(
+                            f"session #{current_replay_sn} → looking for race session #{race_session_num}"
+                        )
+                    else:
+                        detail_parts.append("waiting for racing to begin")
+                    self.on_progress("step_completed", {
+                        "project_id": self.project_id,
+                        "stage": "analysis_scan",
+                        "description": "Searching for green flag...",
+                        "detail": " — ".join(detail_parts),
+                        "progress_percent": 5,
+                    })
 
             await asyncio.sleep(TICK_INTERVAL)
+
+        if not race_start_found:
+            # Scan limit exhausted without finding the race start.
+            # This means either the jump failed, the replay has no RACING state,
+            # or the session numbering is unexpected.
+            snap = self._capture_snapshot()
+            current_sn_now = (snap or {}).get("replay_session_num", (snap or {}).get("session_num", "?"))
+            current_state_now = (snap or {}).get("session_state", "?")
+            msg = (
+                f"Could not find race green flag after {scan_limit} scan steps "
+                f"(jumped_to_race={jumped_to_race}, race_session_num={race_session_num}, "
+                f"currently in session #{current_sn_now} state={current_state_now}). "
+                "Check that the correct replay is loaded and the race session exists."
+            )
+            logger.error("[Analysis] %s", msg)
+            iracing_bridge.set_replay_speed(0)
+            self.on_progress("error", {
+                "project_id": self.project_id,
+                "stage": "analysis_scan",
+                "message": f"Race start not found: {msg}",
+            })
+            raise RuntimeError(msg)
 
         # Subtract 20 seconds (1200 frames at 60fps) to capture pre-race grid,
         # matching the original AnalyseRace.cs offset
@@ -664,11 +973,46 @@ class ReplayAnalyzer:
         conn.commit()
 
         # ── Phase B: Seek back to race start and begin captured scan ────────
-        iracing_bridge.set_replay_speed(0)
-        await asyncio.sleep(0.3)
-        iracing_bridge.seek_to_frame(race_start_frame)
-        await asyncio.sleep(0.5)
-        iracing_bridge.set_replay_speed(SCAN_SPEED)
+        # Pause first so the seek isn't fighting a running replay.
+        await self._verified_set_speed(0, label="pause-before-seek")
+        seek_ok = await self._verified_seek(
+            race_start_frame,
+            label="race-start",
+            tolerance=120,
+        )
+        if not seek_ok:
+            current_frame = iracing_bridge.get_replay_frame()
+            logger.warning(
+                "[Analysis] Seek to race start frame %d not confirmed (ReplayFrameNum=%d) "
+                "— proceeding from current position",
+                race_start_frame, current_frame,
+            )
+            self.on_progress("step_completed", {
+                "project_id": self.project_id,
+                "stage": "analysis_scan",
+                "description": "Race start seek not confirmed — starting from current position...",
+                "detail": (
+                    f"Expected frame {race_start_frame:,}, iRacing reports {current_frame:,}. "
+                    "Scan will proceed from wherever the replay is positioned."
+                ),
+                "progress_percent": 11,
+            })
+        scan_speed_ok = await self._verified_set_speed(SCAN_SPEED, label="main-scan")
+        if not scan_speed_ok:
+            logger.error(
+                "[Analysis] Cannot start main scan — replay speed %d× not confirmed. Aborting.",
+                SCAN_SPEED,
+            )
+            self.on_progress("error", {
+                "project_id": self.project_id,
+                "stage": "analysis_scan",
+                "message": (
+                    f"Failed to set replay speed to {SCAN_SPEED}×. "
+                    "iRacing is not responding to speed commands. "
+                    "Try pausing and resuming the replay manually, then re-run analysis."
+                ),
+            })
+            return 0
 
         last_progress = time.monotonic()
         all_finished = False
@@ -919,7 +1263,19 @@ class ReplayAnalyzer:
                         "[Analysis] %s: %d events", detector_name, count,
                     )
 
-                    # Emit each discovered event for the live frontend feed
+                    # Emit a sidebar log entry per event with human-readable detail
+                    for ev in events:
+                        desc, detail = format_event_log(ev, self._driver_map)
+                        self.on_progress("step_completed", {
+                            "project_id": self.project_id,
+                            "stage": "analysis_detect",
+                            "description": desc,
+                            "detail": detail,
+                            "detector": detector_name,
+                            "progress_percent": progress_pct,
+                        })
+
+                    # Also emit each event to the live discovered-events feed
                     for ev in events:
                         car_indices = ev.get("involved_drivers", [])
                         self.on_progress("event_discovered", {
@@ -938,7 +1294,6 @@ class ReplayAnalyzer:
                         })
                 else:
                     logger.info("[Analysis] %s: 0 events", detector_name)
-                    # Log zero-event detectors in the analysis feed for diagnostics
                     self.on_progress("step_completed", {
                         "project_id": self.project_id,
                         "stage": "analysis_detect",

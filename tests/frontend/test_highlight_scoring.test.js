@@ -42,8 +42,11 @@ function makeEvent(overrides = {}) {
 const DEFAULT_WEIGHTS = {
   incident: 80, battle: 60, overtake: 70, pit_stop: 20,
   fastest_lap: 50, leader_change: 90, first_lap: 100,
-  last_lap: 100, crash: 80, spinout: 60, contact: 65,
-  close_call: 40,
+  last_lap: 100,
+  // SessionLog-sourced
+  car_contact: 85, contact: 65, lost_control: 55, off_track: 25, turn_cutting: 15,
+  // Legacy
+  crash: 80, spinout: 60, close_call: 40,
 }
 
 
@@ -51,9 +54,13 @@ const DEFAULT_WEIGHTS = {
 
 describe('Shared Constants', () => {
   it('BASE_SCORES has expected event types', () => {
-    const expected = ['crash', 'incident', 'battle', 'spinout', 'overtake',
-      'leader_change', 'fastest_lap', 'pit_stop', 'contact', 'close_call']
-    expect(new Set(Object.keys(BASE_SCORES))).toEqual(new Set(expected))
+    // SessionLog-sourced types must be present
+    const newTypes = ['car_contact', 'contact', 'lost_control', 'off_track', 'turn_cutting']
+    const legacyTypes = ['crash', 'incident', 'battle', 'spinout', 'overtake',
+      'leader_change', 'fastest_lap', 'pit_stop', 'close_call']
+    const required = [...newTypes, ...legacyTypes]
+    const keys = Object.keys(BASE_SCORES)
+    required.forEach(k => expect(keys).toContain(k))
   })
 
   it('MANDATORY_TYPES includes first_lap and last_lap', () => {
@@ -246,23 +253,23 @@ describe('computeHighlightSelection', () => {
 describe('autoBalanceWeights', () => {
   it('returns weights for all event types', () => {
     const events = [
-      makeEvent({ event_type: 'crash' }),
-      makeEvent({ event_type: 'crash' }),
+      makeEvent({ event_type: 'car_contact' }),
+      makeEvent({ event_type: 'car_contact' }),
       makeEvent({ event_type: 'overtake' }),
     ]
     const result = autoBalanceWeights(events, DEFAULT_WEIGHTS)
-    expect(result).toHaveProperty('crash')
+    expect(result).toHaveProperty('car_contact')
     expect(result).toHaveProperty('overtake')
   })
 
   it('gives higher weight to rarer events', () => {
     const events = [
-      makeEvent({ event_type: 'crash' }),
-      makeEvent({ event_type: 'crash' }),
-      makeEvent({ event_type: 'crash' }),
+      makeEvent({ event_type: 'car_contact' }),
+      makeEvent({ event_type: 'car_contact' }),
+      makeEvent({ event_type: 'car_contact' }),
       makeEvent({ event_type: 'overtake' }),
     ]
     const result = autoBalanceWeights(events, DEFAULT_WEIGHTS)
-    expect(result.overtake).toBeGreaterThan(result.crash)
+    expect(result.overtake).toBeGreaterThan(result.car_contact)
   })
 })

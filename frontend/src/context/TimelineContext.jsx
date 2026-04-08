@@ -30,13 +30,21 @@ export const EVENT_COLORS = {
   leader_change: '#eab308',
   first_lap:     '#06b6d4',
   last_lap:      '#ec4899',
+  // SessionLog-sourced incident types
+  car_contact:   '#ef4444',   // "Car Contact" \u2014 red
+  contact:       '#f97316',   // "Contact" (wall) \u2014 orange
+  lost_control:  '#fb923c',   // "Lost Control" (spin) \u2014 amber-orange
+  off_track:     '#84cc16',   // "Off Track" \u2014 lime
+  turn_cutting:  '#a3e635',   // "Turn Cutting" \u2014 lighter lime (lowest urgency)
+  // Legacy types (backward-compat)
   crash:         '#ef4444',
   spinout:       '#f97316',
-  contact:       '#3b82f6',
   close_call:    '#22c55e',
   undercut:      '#8b5cf6',
   overcut:       '#8b5cf6',
   pit_battle:    '#f97316',
+  race_start:    '#06b6d4',
+  race_finish:   '#ec4899',
 }
 
 /**

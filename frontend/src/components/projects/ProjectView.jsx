@@ -46,7 +46,6 @@ function ProjectView({ project, isLoading }) {
         return <AnalysisPanel />
 
       case 'editing':
-        if (!hasAnalysis) return <StepGate currentStep="editing" requiredStep="analysis" />
         return <HighlightPanel projectId={project.id} />
 
       case 'overlay':

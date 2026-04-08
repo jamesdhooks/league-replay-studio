@@ -54,6 +54,7 @@ from server.services.analysis_db import (
     get_drivers,
     save_tuning_params,
     load_tuning_params,
+    format_event_log,
 )
 from server.services.detectors import ALL_DETECTORS
 from server.services.replay_analysis import ReplayAnalyzer
@@ -137,13 +138,35 @@ def _build_session_info_from_body(body) -> dict:
     return info
 
 
+def _append_redetect_log(project_dir: str, log_entries: list[dict]) -> None:
+    """Append redetect log entries to the project's analysis_log.json file."""
+    try:
+        from pathlib import Path
+        log_path = Path(project_dir) / "analysis_log.json"
+        existing: list[dict] = []
+        if log_path.exists():
+            try:
+                existing = json.loads(log_path.read_text())
+                if not isinstance(existing, list):
+                    existing = []
+            except Exception:
+                existing = []
+        combined = existing + log_entries
+        log_path.write_text(json.dumps(combined, indent=2, default=str))
+        logger.info("[Redetect] Saved %d log entries to %s", len(log_entries), log_path)
+    except Exception as exc:
+        logger.warning("[Redetect] Failed to save analysis log: %s", exc)
+
+
 def _run_redetect_sync(project_id: int, project_dir: str, session_info: dict) -> int:
     """Synchronous core of redetect — runs in a thread pool via run_in_executor.
 
     All _on_progress calls are thread-safe because _analysis_broadcast uses
     run_coroutine_threadsafe internally.
     """
+    import time
     conn = get_project_db(project_dir)
+    redetect_log: list[dict] = []
     try:
         # Check for existing telemetry data
         tick_count = conn.execute("SELECT COUNT(*) FROM race_ticks").fetchone()[0]
@@ -200,6 +223,22 @@ def _run_redetect_sync(project_id: int, project_dir: str, session_info: dict) ->
                     total += count
                     conn.commit()
 
+                    # Emit a sidebar log entry per event with human-readable detail
+                    for ev in events:
+                        desc, detail = format_event_log(ev, driver_map)
+                        entry = {
+                            "event": "step_completed",
+                            "ts": time.time(),
+                            "project_id": project_id,
+                            "stage": "analysis_detect",
+                            "description": desc,
+                            "detail": detail,
+                            "detector": detector_name,
+                            "progress_percent": progress_pct,
+                        }
+                        redetect_log.append(entry)
+                        _on_progress("step_completed", {k: v for k, v in entry.items() if k not in ("event", "ts")})
+
                     for ev in events:
                         car_indices = ev.get("involved_drivers", [])
                         _on_progress("event_discovered", {
@@ -227,6 +266,7 @@ def _run_redetect_sync(project_id: int, project_dir: str, session_info: dict) ->
             "description": f"Re-detection complete — {total} events found",
         })
 
+        _append_redetect_log(project_dir, redetect_log)
         return total
     finally:
         conn.close()
@@ -771,7 +811,7 @@ async def list_events(
     event_type: str = Query("", description="Filter by event type"),
     min_severity: int = Query(0, ge=0, le=10, description="Minimum severity"),
     skip: int = Query(0, ge=0, description="Offset for pagination"),
-    limit: int = Query(200, ge=1, le=1000, description="Max events to return"),
+    limit: int = Query(10000, ge=1, le=100000, description="Max events to return"),
 ):
     """List detected race events for a project."""
     project = project_service.get_project(project_id)
@@ -1376,6 +1416,7 @@ class ReprocessRequest(BaseModel):
     """Extended recompute request for multi-pass scoring pipeline."""
     weights: dict[str, float] = {}
     constraints: dict[str, Any] = {}
+    tuning: dict[str, Any] = {}  # iRD-inspired scoring tuning knobs
 
 
 
@@ -1425,6 +1466,24 @@ async def reprocess_highlights(project_id: int, body: ReprocessRequest):
                 "target_duration": body.constraints.get("target_duration", 300),
             }
 
+            # Inject driver_names into events so the scoring engine can apply
+            # name-based filters (e.g. preferredDriversOnly).
+            driver_map = {
+                d["car_idx"]: d.get("user_name", f"Car {d.get('car_idx', '?')}")
+                for d in drivers
+                if d.get("car_idx") is not None
+            }
+            for event in events:
+                involved = event.get("involved_drivers") or []
+                if isinstance(involved, str):
+                    try:
+                        involved = json.loads(involved)
+                    except (json.JSONDecodeError, TypeError):
+                        involved = []
+                event.setdefault("driver_names", [
+                    driver_map.get(idx, f"Car {idx}") for idx in involved
+                ])
+
             # Merge weights from request with config
             weights = {**config.get("weights", {}), **body.weights}
 
@@ -1436,6 +1495,7 @@ async def reprocess_highlights(project_id: int, body: ReprocessRequest):
                 constraints=body.constraints,
                 overrides=overrides,
                 race_info=race_info,
+                tuning=body.tuning,
             )
 
             logger.info(
@@ -1465,6 +1525,7 @@ class VideoScriptRequest(BaseModel):
     constraints: dict = {}
     section_config: dict = {}
     clip_padding: float = 0.5
+    tuning: dict = {}  # iRD-inspired scoring tuning knobs
 
 
 @router.post("/projects/{project_id}/highlights/video-script")
@@ -1518,6 +1579,7 @@ async def generate_video_script_endpoint(project_id: int, body: VideoScriptReque
                 race_info=race_info,
                 section_config=body.section_config,
                 clip_padding=body.clip_padding,
+                tuning=body.tuning,
             )
 
             logger.info(

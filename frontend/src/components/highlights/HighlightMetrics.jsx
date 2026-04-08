@@ -1,7 +1,7 @@
 import { memo } from 'react'
 import { useHighlight, tierColor } from '../../context/HighlightContext'
 import { useTimeline } from '../../context/TimelineContext'
-import { Clock, BarChart3, Activity, Users, Target } from 'lucide-react'
+import { Clock, BarChart3, Activity, Users, Target, Info } from 'lucide-react'
 import Tooltip from '../ui/Tooltip'
 
 /**
@@ -114,7 +114,7 @@ function MetricRow({ icon: Icon, label, value, suffix, warning, warningColor, to
   const labelEl = (
     <span className="text-xxs text-text-secondary flex-1 flex items-center gap-1">
       {label}
-      {tooltip && <span className="text-text-disabled cursor-help">ⓘ</span>}
+      {tooltip && <Info className="w-3 h-3 text-text-disabled cursor-help shrink-0" />}
     </span>
   )
   return (
@@ -138,7 +138,7 @@ function MetricBar({ icon: Icon, label, value, color, tooltip }) {
   const labelEl = (
     <span className="text-xxs text-text-secondary flex-1 flex items-center gap-1">
       {label}
-      {tooltip && <span className="text-text-disabled cursor-help">ⓘ</span>}
+      {tooltip && <Info className="w-3 h-3 text-text-disabled cursor-help shrink-0" />}
     </span>
   )
   return (

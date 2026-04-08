@@ -118,6 +118,18 @@ CREATE TABLE IF NOT EXISTS highlight_config (
     updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
+-- iRacing SessionLog incident entries (written once per scan from session YAML)
+CREATE TABLE IF NOT EXISTS incident_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    car_idx         INTEGER NOT NULL,
+    session_time    REAL    NOT NULL,
+    lap             INTEGER NOT NULL DEFAULT 0,
+    description     TEXT    NOT NULL DEFAULT '',
+    incident_points INTEGER NOT NULL DEFAULT 0,
+    session_num     INTEGER NOT NULL DEFAULT 0,
+    user_name       TEXT    NOT NULL DEFAULT ''
+);
+
 -- ── Indexes ─────────────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_car_states_tick ON car_states(tick_id);
 CREATE INDEX IF NOT EXISTS idx_car_states_car  ON car_states(car_idx);
@@ -125,6 +137,8 @@ CREATE INDEX IF NOT EXISTS idx_car_states_pos  ON car_states(position);
 CREATE INDEX IF NOT EXISTS idx_race_ticks_time ON race_ticks(session_time);
 CREATE INDEX IF NOT EXISTS idx_race_events_type ON race_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_lap_completions_car ON lap_completions(car_idx, lap_number);
+CREATE INDEX IF NOT EXISTS idx_incident_log_time ON incident_log(session_time);
+CREATE INDEX IF NOT EXISTS idx_incident_log_car  ON incident_log(car_idx);
 """
 
 
@@ -175,6 +189,30 @@ def init_analysis_db(project_dir: str) -> None:
                 except sqlite3.OperationalError as exc:
                     logger.debug("race_ticks migration skip %s: %s", col, exc)
 
+        # Migration: create incident_log table if not present (older DBs)
+        existing_tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        if "incident_log" not in existing_tables:
+            try:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS incident_log (
+                        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                        car_idx         INTEGER NOT NULL,
+                        session_time    REAL    NOT NULL,
+                        lap             INTEGER NOT NULL DEFAULT 0,
+                        description     TEXT    NOT NULL DEFAULT '',
+                        incident_points INTEGER NOT NULL DEFAULT 0,
+                        session_num     INTEGER NOT NULL DEFAULT 0,
+                        user_name       TEXT    NOT NULL DEFAULT ''
+                    )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_incident_log_time ON incident_log(session_time)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_incident_log_car  ON incident_log(car_idx)")
+                logger.info("[AnalysisDB] Created incident_log table (migration)")
+            except sqlite3.OperationalError as exc:
+                logger.debug("incident_log migration failed: %s", exc)
+
         conn.commit()
         logger.info("[AnalysisDB] Initialised project database at %s", project_dir)
     finally:
@@ -190,6 +228,7 @@ def clear_analysis_data(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM lap_completions")
     conn.execute("DELETE FROM race_ticks")
     conn.execute("DELETE FROM race_events")
+    conn.execute("DELETE FROM incident_log")
     conn.execute("DELETE FROM drivers")
     conn.commit()
     logger.info("[AnalysisDB] Cleared previous analysis data")
@@ -488,3 +527,202 @@ def get_drivers(conn: sqlite3.Connection) -> list[dict]:
         "SELECT * FROM drivers WHERE is_spectator = 0 ORDER BY car_idx"
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def format_event_log(ev: dict, driver_map: dict[int, str]) -> tuple[str, str]:
+    """Return (description, detail) strings for a detected event to display in the analysis log.
+
+    Both the full-analysis pipeline and the redetect route call this to produce
+    consistent, human-readable sidebar log entries for every detected event.
+    """
+    event_type = ev.get("event_type", "unknown")
+    meta = ev.get("metadata") or {}
+    if isinstance(meta, str):
+        try:
+            import json as _json
+            meta = _json.loads(meta)
+        except Exception:
+            meta = {}
+
+    drivers = ev.get("involved_drivers") or []
+    lap = ev.get("lap_number", "?")
+    t = ev.get("start_time", 0)
+    pos = ev.get("position")
+
+    def name(idx):
+        return driver_map.get(idx, f"car {idx}")
+
+    pos_tag = f" P{pos}" if pos else ""
+    t_tag = f"t={t:.1f}s"
+    lap_tag = f"lap {lap}"
+
+    if event_type == "battle":
+        a, b = (drivers + [None, None])[:2]
+        dur = meta.get("duration_seconds", "?")
+        lc = meta.get("lead_changes", 0)
+        gap = meta.get("min_gap_laps")
+        gap_str = f"{gap:.4f} laps" if gap is not None else "?"
+        desc = f"Battle: {name(a)} vs {name(b)}{pos_tag}"
+        detail = f"{lap_tag} · {t_tag} · {dur}s · {lc} lead change(s) · closest gap {gap_str}"
+
+    elif event_type == "overtake":
+        a, b = (drivers + [None, None])[:2]
+        gap = meta.get("gap_laps")
+        crash = " [crash-caused]" if meta.get("crash_caused") else ""
+        desc = f"Overtake: {name(a)} passed {name(b)}{pos_tag}{crash}"
+        detail = f"{lap_tag} · {t_tag} · gap {gap:.4f} laps" if gap is not None else f"{lap_tag} · {t_tag}"
+
+    elif event_type == "leader_change":
+        new_idx = meta.get("new_leader", drivers[0] if drivers else None)
+        old_idx = meta.get("old_leader", drivers[1] if len(drivers) > 1 else None)
+        gap = meta.get("cont_dist_gap")
+        pit_tag = " [pit-related]" if meta.get("pit_related") else ""
+        new_cd = meta.get("new_leader_cont_dist")
+        old_cd = meta.get("old_leader_cont_dist")
+        desc = f"Leader change: {name(new_idx)} took lead from {name(old_idx)}{pit_tag}"
+        parts = [lap_tag, t_tag]
+        if gap is not None:
+            parts.append(f"gap={gap:.4f} laps")
+        if new_cd is not None and old_cd is not None:
+            parts.append(f"new_cd={new_cd:.4f} old_cd={old_cd:.4f}")
+        detail = " · ".join(parts)
+
+    elif event_type == "pit_stop":
+        a = drivers[0] if drivers else None
+        dur = round(ev.get("end_time", t) - t, 1)
+        desc = f"Pit stop: {name(a)}{pos_tag}"
+        detail = f"{lap_tag} · {t_tag} · ~{dur}s stop"
+
+    elif event_type == "fastest_lap":
+        a = drivers[0] if drivers else None
+        lt = meta.get("lap_time")
+        best = " [session best]" if meta.get("is_session_best") else ""
+        desc = f"Fastest lap: {name(a)}{pos_tag}{best}"
+        detail = f"{lap_tag} · {t_tag} · {lt:.3f}s" if lt else f"{lap_tag} · {t_tag}"
+
+    elif event_type == "car_contact":
+        involved = [name(d) for d in drivers]
+        pts = meta.get("incident_points", "?")
+        car_count = meta.get("car_count", len(drivers))
+        time_loss = meta.get("time_loss")
+        desc = f"Car Contact: {', '.join(involved) or '?'} ({car_count} cars){pos_tag}"
+        parts = [lap_tag, t_tag, f"{pts}x incident points"]
+        if time_loss:
+            parts.append(f"time loss {time_loss:.1f}s")
+        detail = " · ".join(parts)
+
+    elif event_type == "lost_control":
+        a = drivers[0] if drivers else None
+        pts = meta.get("incident_points", 1)
+        time_loss = meta.get("time_loss")
+        desc = f"Lost Control: {name(a)}{pos_tag}"
+        parts = [lap_tag, t_tag, f"{pts}x incident points"]
+        if time_loss:
+            parts.append(f"time loss {time_loss:.1f}s")
+        detail = " · ".join(parts)
+
+    elif event_type == "off_track":
+        a = drivers[0] if drivers else None
+        pts = meta.get("incident_points", 1)
+        desc = f"Off Track: {name(a)}{pos_tag}"
+        detail = f"{lap_tag} · {t_tag} · {pts}x points · lap_pct={meta.get('lap_pct', '?')}"
+
+    elif event_type == "turn_cutting":
+        a = drivers[0] if drivers else None
+        pts = meta.get("incident_points", 1)
+        desc = f"Turn Cutting: {name(a)}{pos_tag}"
+        detail = f"{lap_tag} · {t_tag} · {pts}x points · lap_pct={meta.get('lap_pct', '?')}"
+
+    elif event_type == "crash":
+        # Legacy fallback (superseded by car_contact from IncidentLogDetector)
+        time_loss = meta.get("time_loss")
+        dur = meta.get("off_track_duration")
+        involved = [name(d) for d in drivers]
+        desc = f"Crash: {', '.join(involved) or '?'}{pos_tag}"
+        parts = [lap_tag, t_tag]
+        if time_loss:
+            parts.append(f"time loss {time_loss:.1f}s")
+        if dur:
+            parts.append(f"off track {dur:.1f}s")
+        detail = " · ".join(parts)
+
+    elif event_type == "spinout":
+        # Legacy fallback (superseded by lost_control from IncidentLogDetector)
+        a = drivers[0] if drivers else None
+        time_loss = meta.get("time_loss")
+        desc = f"Spinout: {name(a)}{pos_tag}"
+        detail = f"{lap_tag} · {t_tag}" + (f" · time loss {time_loss:.1f}s" if time_loss else "")
+
+    elif event_type == "contact":
+        involved = [name(d) for d in drivers]
+        pts = meta.get("incident_points")
+        time_loss = meta.get("time_loss")
+        desc = f"Contact: {', '.join(involved) or '?'}{pos_tag}"
+        parts = [lap_tag, t_tag]
+        if pts:
+            parts.append(f"{pts}x incident points")
+        if time_loss:
+            parts.append(f"time loss {time_loss:.1f}s")
+        if not pts and not time_loss:
+            parts.append(f"lap_pct={meta.get('lap_pct', '?')}")
+        detail = " · ".join(parts)
+
+    elif event_type == "close_call":
+        a, b = (drivers + [None, None])[:2]
+        desc = f"Close call: {name(a)} near {name(b)}{pos_tag}"
+        detail = f"{lap_tag} · {t_tag} · lap_pct={meta.get('lap_pct', '?')}"
+
+    elif event_type == "undercut":
+        a, b = (drivers + [None, None])[:2]
+        gap = meta.get("pit_gap_seconds")
+        desc = f"Undercut: {name(a)} undercut {name(b)}{pos_tag}"
+        detail = f"{lap_tag} · {t_tag}" + (f" · pit gap {gap:.1f}s" if gap else "")
+
+    elif event_type == "overcut":
+        a, b = (drivers + [None, None])[:2]
+        gap = meta.get("pit_gap_seconds")
+        desc = f"Overcut: {name(a)} overcut {name(b)}{pos_tag}"
+        detail = f"{lap_tag} · {t_tag}" + (f" · pit gap {gap:.1f}s" if gap else "")
+
+    elif event_type == "pit_battle":
+        involved = [name(d) for d in drivers]
+        overlap = meta.get("pit_overlap_seconds")
+        desc = f"Pit battle: {', '.join(involved) or '?'}{pos_tag}"
+        detail = f"{lap_tag} · {t_tag}" + (f" · {overlap:.1f}s overlap" if overlap else "")
+
+    elif event_type == "race_start":
+        desc = "Race start — green flag"
+        detail = f"{t_tag} · {meta.get('description', '')}"
+
+    elif event_type == "race_finish":
+        winner_idx = meta.get("winner_car_idx")
+        winner = name(winner_idx) if winner_idx is not None else "?"
+        desc = f"Race finish — {winner} wins"
+        detail = f"{t_tag} · checkered at {meta.get('checkered_time', t):.1f}s"
+
+    elif event_type == "first_lap":
+        desc = "First lap"
+        detail = f"{t_tag}"
+
+    elif event_type == "last_lap":
+        desc = f"Last lap (lap {meta.get('lap_number', lap)})"
+        detail = f"{t_tag}"
+
+    elif event_type == "pace_lap":
+        restart = meta.get("restart_time")
+        if restart:
+            desc = f"Restart after yellow flag"
+            detail = f"{t_tag} · restart at {restart:.1f}s"
+        else:
+            desc = f"Yellow flag / pace lap"
+            detail = f"{t_tag}"
+
+    elif event_type == "incident":
+        desc = f"Incident{pos_tag}"
+        detail = f"{lap_tag} · {t_tag}"
+
+    else:
+        desc = f"{event_type.replace('_', ' ').title()}{pos_tag}"
+        detail = f"{lap_tag} · {t_tag}"
+
+    return desc, detail

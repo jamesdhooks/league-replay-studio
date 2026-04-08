@@ -132,7 +132,7 @@ export function AnalysisProvider({ children }) {
               .then(status => setAnalysisStatus(status))
               .catch(() => {})
             if (!isScanPhase) {
-              apiGet(`/projects/${data.project_id}/events`)
+              apiGet(`/projects/${data.project_id}/events?limit=50000`)
                 .then(result => setEvents(result.events || []))
                 .catch(() => {})
               apiGet(`/projects/${data.project_id}/events/summary`)

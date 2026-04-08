@@ -41,8 +41,18 @@ echo       League Replay Studio  v0.1.0
 echo  ========================================
 echo.
 
+REM ── Kill any existing LRS processes ────────────────────────
+echo [0/6] Cleaning up old processes...
+
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%lrs-cleanup.ps1"
+
+REM Brief pause so OS has time to release ports before we bind them again
+%SystemRoot%\System32\timeout.exe /t 1 /nobreak >nul
+
+echo       Done.
+
 REM ── Python virtual environment ─────────────────────────────
-echo [1/5] Setting up Python environment...
+echo [1/6] Setting up Python environment...
 
 if not exist "%VENV%\Scripts\activate.bat" (
     echo       Creating virtual environment (Python 3.11^)...
@@ -66,7 +76,7 @@ if errorlevel 1 (
 )
 
 REM ── Native C++ capture service ─────────────────────────────
-echo [2/5] Native capture service...
+echo [2/6] Native capture service...
 
 set "NATIVE_SRC=%BACKEND%\native_capture"
 set "NATIVE_EXE=%NATIVE_SRC%\build\Release\lrs_capture.exe"
@@ -115,7 +125,7 @@ echo       lrs_capture.exe built successfully.
 :native_done
 
 REM ── Node.js dependencies ───────────────────────────────────
-echo [3/5] Setting up Node.js environment...
+echo [3/6] Setting up Node.js environment...
 
 cd /d "%FRONTEND%"
 if not exist "node_modules" (
@@ -131,7 +141,7 @@ if not exist "node_modules" (
 )
 
 REM ── Build frontend ─────────────────────────────────────────
-echo [4/5] Building frontend...
+echo [4/6] Building frontend...
 
 call npm run build --silent
 if errorlevel 1 (
@@ -141,11 +151,21 @@ if errorlevel 1 (
 )
 
 REM ── Launch application ─────────────────────────────────────
-echo [5/5] Launching League Replay Studio...
+echo [5/6] Launching League Replay Studio...
 echo.
 
 cd /d "%BACKEND%"
 python app.py %RUN_ARGS%
 
+REM Capture Python exit code and clean up remaining processes
+set "PYTHON_EXIT_CODE=%ERRORLEVEL%"
+echo.
+echo [5/6] Cleaning up after exit...
+
+REM Force-kill any remaining LRS processes on ports 7175 and 3174
+REM (in case Python didn't terminate or Ctrl+C orphaned child processes)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%lrs-cleanup.ps1"
+
 endlocal
+exit /b %PYTHON_EXIT_CODE%
 
