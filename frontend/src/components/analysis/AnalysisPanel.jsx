@@ -343,7 +343,7 @@ export default memo(function AnalysisPanel() {
   const handleFilterChange = async (type) => {
     const newFilter = activeFilter === type ? '' : type
     setActiveFilter(newFilter)
-    await fetchEvents(activeProject.id, { eventType: newFilter, limit: 1000 })
+    await fetchEvents(activeProject.id, { eventType: newFilter, limit: 50000 })
   }
 
   const handleReanalyze = async () => {
@@ -353,7 +353,7 @@ export default memo(function AnalysisPanel() {
     setSidebarTab('log')
     try {
       await apiPost(`/projects/${activeProject.id}/analyze/redetect`, tuningParams)
-      await fetchEvents(activeProject.id, { limit: 1000 })
+      await fetchEvents(activeProject.id, { limit: 50000 })
       await fetchEventSummary(activeProject.id)
     } catch {} finally {
       setIsRedetecting(false)
@@ -871,7 +871,7 @@ function EventsTabContent({
                 <div
                   className="h-full bg-gradient-to-r from-gradient-from to-gradient-to
                              rounded-full transition-all duration-500"
-                  style={{ width: `${Math.max(0, Math.min(100, ((progress.percent ?? 85) - 85) / 12 * 100))}%` }}
+                  style={{ width: `${Math.max(0, Math.min(100, ((progress.percent ?? 55) - 55) / 40 * 100))}%` }}
                 />
               </div>
               {progress.message && (

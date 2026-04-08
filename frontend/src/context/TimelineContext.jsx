@@ -210,7 +210,7 @@ export function TimelineProvider({ children }) {
   // Raw update (no undo tracking, used by undo/redo callbacks)
   const _rawUpdateEvent = useCallback(async (projectId, eventId, updates) => {
     const result = await apiPut(`/projects/${projectId}/events/${eventId}`, updates)
-    await fetchEvents(projectId, { limit: 1000 })
+    await fetchEvents(projectId, { limit: 50000 })
     return result
   }, [fetchEvents])
 
@@ -257,7 +257,7 @@ export function TimelineProvider({ children }) {
 
       const result = await apiDelete(`/projects/${projectId}/events/${eventId}`)
       setSelectedEventId(null)
-      await fetchEvents(projectId, { limit: 1000 })
+      await fetchEvents(projectId, { limit: 50000 })
 
       // Track the recreated event ID for redo
       let recreatedId = null
@@ -281,7 +281,7 @@ export function TimelineProvider({ children }) {
             metadata: oldEvent.metadata || {},
           })
           recreatedId = created.id
-          await fetchEvents(projectId, { limit: 1000 })
+          await fetchEvents(projectId, { limit: 50000 })
         },
         redo: async () => {
           // Delete the recreated event by its stored ID
@@ -290,7 +290,7 @@ export function TimelineProvider({ children }) {
             recreatedId = null
           }
           setSelectedEventId(null)
-          await fetchEvents(projectId, { limit: 1000 })
+          await fetchEvents(projectId, { limit: 50000 })
         },
       })
 
@@ -310,7 +310,7 @@ export function TimelineProvider({ children }) {
       const result = await apiPost(`/projects/${projectId}/events/${eventId}/split`, {
         split_time: splitTime,
       })
-      await fetchEvents(projectId, { limit: 1000 })
+      await fetchEvents(projectId, { limit: 50000 })
 
       const newEventId = result.new_id
 
@@ -324,13 +324,13 @@ export function TimelineProvider({ children }) {
             end_time_seconds: oldEvent.end_time_seconds,
             end_frame: oldEvent.end_frame,
           })
-          await fetchEvents(projectId, { limit: 1000 })
+          await fetchEvents(projectId, { limit: 50000 })
         },
         redo: async () => {
           await apiPost(`/projects/${projectId}/events/${eventId}/split`, {
             split_time: splitTime,
           })
-          await fetchEvents(projectId, { limit: 1000 })
+          await fetchEvents(projectId, { limit: 50000 })
         },
       })
 

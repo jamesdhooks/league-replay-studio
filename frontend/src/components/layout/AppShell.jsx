@@ -29,7 +29,7 @@ function PanelFallback() {
  */
 function AppShell() {
   const { activeProject, openProject, closeProject, setStep } = useProject()
-  const { events, eventSummary } = useAnalysis()
+  const { events, eventSummary, isAnalyzing, progress: analysisProgress } = useAnalysis()
   const { loading: settingsLoading } = useSettings()
   const [showSettings, setShowSettings] = useState(false)
   const { undo, redo, canUndo, canRedo, history, currentIndex } = useUndoRedo()
@@ -143,6 +143,7 @@ function AppShell() {
         onBack={closeProject}
         onStepClick={handleStepClick}
         stepReadiness={stepReadiness}
+        analysisProgress={isAnalyzing ? analysisProgress : null}
         onOpenSettings={openSettings}
         onOpenHelp={openHelp}
         canUndo={canUndo}

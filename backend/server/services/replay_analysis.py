@@ -425,7 +425,7 @@ class ReplayAnalyzer:
                 "stage": "analysis_detect",
                 "description": "Running event detectors on telemetry data...",
                 "detail": f"Analysing {total_ticks:,} telemetry samples with {num_detectors} event detectors",
-                "progress_percent": 85,
+                "progress_percent": 55,
             })
             loop = asyncio.get_running_loop()
             total_events = await loop.run_in_executor(None, self._run_detect_in_thread)
@@ -954,7 +954,7 @@ class ReplayAnalyzer:
             "stage": "analysis_scan",
             "description": "Race start identified!",
             "detail": f"Green flag at frame {race_start_frame + PRE_RACE_OFFSET_FRAMES:,} — rewinding 20 seconds for formation lap",
-            "progress_percent": 10,
+            "progress_percent": 6,
         })
 
         # Store for use during capture phase
@@ -995,7 +995,7 @@ class ReplayAnalyzer:
                     f"Expected frame {race_start_frame:,}, iRacing reports {current_frame:,}. "
                     "Scan will proceed from wherever the replay is positioned."
                 ),
-                "progress_percent": 11,
+                "progress_percent": 7,
             })
         scan_speed_ok = await self._verified_set_speed(SCAN_SPEED, label="main-scan")
         if not scan_speed_ok:
@@ -1025,7 +1025,7 @@ class ReplayAnalyzer:
             "stage": "analysis_scan",
             "description": f"Recording telemetry at {SCAN_SPEED}× speed...",
             "detail": "Capturing car positions, surfaces, gaps, and camera switches every 20ms",
-            "progress_percent": 12,
+            "progress_percent": 8,
         })
 
         while not self._cancelled:
@@ -1063,6 +1063,19 @@ class ReplayAnalyzer:
                 car_count = len(snapshot.get("car_states", []))
                 detail = f"Tracking {car_count} cars · {writer.total_ticks:,} telemetry samples captured"
 
+                # Compute scan progress: maps 8% → 49% based on elapsed race time
+                elapsed_race = max(0.0, session_time - first_session_time)
+                # Refine estimate once we have lap data
+                if current_lap >= 2 and elapsed_race > 0:
+                    avg_lap = elapsed_race / (current_lap - 1)
+                    # Assume ~3 more laps remain beyond current
+                    estimated_race_duration = max(
+                        estimated_race_duration,
+                        elapsed_race + avg_lap * 3,
+                    )
+                scan_fraction = min(0.98, elapsed_race / max(1.0, estimated_race_duration))
+                scan_pct = 8 + int(41 * scan_fraction)  # 8 → 49
+
                 self.on_progress("step_completed", {
                     "project_id": self.project_id,
                     "stage": "analysis_scan",
@@ -1073,6 +1086,7 @@ class ReplayAnalyzer:
                     "current_lap": current_lap,
                     "car_count": car_count,
                     "message": f"Scanned {_format_time(session_time)} of race...",
+                    "progress_percent": scan_pct,
                 })
                 last_progress = now
 
@@ -1087,7 +1101,7 @@ class ReplayAnalyzer:
                     "stage": "analysis_scan",
                     "description": "Checkered flag! Waiting for all cars to finish...",
                     "detail": "Continuing to record telemetry while remaining cars cross the line",
-                    "progress_percent": 80,
+                    "progress_percent": 50,
                     "total_ticks": writer.total_ticks,
                 })
                 finish_poll_start = time.monotonic()
@@ -1218,6 +1232,19 @@ class ReplayAnalyzer:
         session_info = dict(self.session_info)
         num_detectors = len(ALL_DETECTORS)
 
+        # Determine checkered flag time — events starting after this are filtered out.
+        # Exempt event types that naturally occur at/after the checkered flag.
+        EXEMPT_POST_CHECKERED = {
+            "race_finish", "last_lap", "pace_lap", "race_start", "first_lap",
+        }
+        chk_row = conn.execute(
+            "SELECT MIN(session_time) AS chk_time FROM race_ticks WHERE session_state = ?",
+            (SESSION_STATE_CHECKERED,),
+        ).fetchone()
+        checkered_time: float | None = chk_row["chk_time"] if chk_row and chk_row["chk_time"] is not None else None
+        if checkered_time is not None:
+            logger.info("[Analysis] Checkered flag at %.1fs — post-finish events will be filtered", checkered_time)
+
         # Detector display names for UI
         DETECTOR_LABELS = {
             "IncidentDetector": ("Incidents", "Scanning camera switches for off-track cars"),
@@ -1242,7 +1269,7 @@ class ReplayAnalyzer:
         for i, detector in enumerate(ALL_DETECTORS):
             detector_name = detector.__class__.__name__
             label, detail = DETECTOR_LABELS.get(detector_name, (detector_name, ""))
-            progress_pct = 85 + int((i / num_detectors) * 12)  # 85% → 97%
+            progress_pct = 55 + int((i / num_detectors) * 40)  # 55% → 95%
 
             self.on_progress("step_completed", {
                 "project_id": self.project_id,
@@ -1255,6 +1282,21 @@ class ReplayAnalyzer:
 
             try:
                 events = detector.detect(conn, session_info)
+                if events:
+                    # Filter out events that start after the checkered flag
+                    if checkered_time is not None:
+                        pre_count = len(events)
+                        events = [
+                            ev for ev in events
+                            if ev.get("event_type") in EXEMPT_POST_CHECKERED
+                            or ev.get("start_time", 0) <= checkered_time
+                        ]
+                        filtered_count = pre_count - len(events)
+                        if filtered_count > 0:
+                            logger.info(
+                                "[Analysis] %s: filtered %d post-checkered events",
+                                detector_name, filtered_count,
+                            )
                 if events:
                     count = insert_events_batch(conn, events)
                     total_events += count

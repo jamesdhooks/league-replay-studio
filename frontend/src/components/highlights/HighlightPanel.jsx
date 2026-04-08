@@ -81,7 +81,7 @@ export default function HighlightPanel({ projectId }) {
   // Load highlight data on mount
   useEffect(() => {
     if (projectId) {
-      fetchEvents(projectId, { limit: 1000 })
+      fetchEvents(projectId, { limit: 50000 })
       loadConfig(projectId)
       loadDrivers(projectId)
       loadPresets()

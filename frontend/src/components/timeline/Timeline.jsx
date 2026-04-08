@@ -23,7 +23,7 @@ export default function Timeline({ projectId }) {
   useEffect(() => {
     if (projectId) {
       loadRaceDuration(projectId)
-      fetchEvents(projectId, { limit: 1000 })
+      fetchEvents(projectId, { limit: 50000 })
       setActiveProjectId(projectId)
     }
     return () => {

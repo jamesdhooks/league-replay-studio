@@ -106,7 +106,7 @@ export default memo(function AnalysisRightPanel({
                   : null
               }
               progressMsg={isScanning ? (progress?.message || null) : null}
-              progressPct={isScanning ? (progress?.percent || 0) : null}
+              progressPct={isScanning ? Math.min(100, (progress?.percent || 0) / 50 * 100) : null}
               primaryLabel={hasTelemetry || hasEventsLocal ? 'Re-collect' : 'Collect'}
               primaryIcon={isAnalyzing && isScanning ? null : <RefreshCw size={11} />}
               onPrimary={isAnalyzing && isScanning ? handleCancel : handleRescan}
@@ -124,7 +124,7 @@ export default memo(function AnalysisRightPanel({
                   : null
               }
               progressMsg={!isScanning && isAnalyzing ? (progress?.message || null) : null}
-              progressPct={!isScanning && isAnalyzing ? (progress?.percent || 0) : null}
+              progressPct={!isScanning && isAnalyzing ? Math.min(100, Math.max(0, ((progress?.percent || 55) - 55) / 40 * 100)) : null}
               primaryLabel={hasEventsLocal ? 'Re-analyze' : 'Analyze'}
               primaryIcon={isAnalyzing && !isScanning ? null : isRedetecting ? <Loader2 size={11} className="animate-spin" /> : <SlidersHorizontal size={11} />}
               onPrimary={isAnalyzing && !isScanning ? handleCancel : handleReanalyze}

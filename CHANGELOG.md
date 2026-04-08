@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Scan progress bars**: Backend now emits `progress_percent` during the telemetry scan loop, mapping 8%→49% based on elapsed race time. Previously the bar jumped from 12% to 80% with no updates during the entire scan.
+- **Post-checkered events**: Events like leader_change no longer fire after the checkered flag. A post-processing filter in `_detect_events` removes any events starting after the first CHECKERED tick (race_finish, last_lap, etc. are exempt).
+- **Event truncation**: All frontend `fetchEvents` calls now use `limit: 50000` instead of `limit: 1000`, which was overwriting the full event list with only the first 1000 events sorted by time — causing events to appear truncated to ~10 minutes in dense races.
+
+### Improved
+- **Step indicator progress bar**: The pipeline step selector in the toolbar now shows a thin progress bar under the active "Analysis" step during scan/detection.
+- **Progress bar normalization**: Telemetry and Events phase cards now show 0→100% local progress instead of the raw global percentage.
+- **Playback transport controls**: Bigger icons (14→18px), larger play/pause button (16→20px icon, rounded-xl), more padding throughout. Speed buttons upgraded from text-xxs to text-xs.
+- **Time/lap display**: Session time and lap counter moved to the left of transport controls, rendered at text-sm with font-semibold for much better readability.
+- **Lap +/- buttons**: Now use proper Plus/Minus icons inside bordered button-style containers (w-6 h-6, bg-white/8, border). Fixed bug where "next lap" used a rotated Minus icon instead of Plus.
+- **Event focus header**: Close button moved to right side with "Close" label + X icon, styled as a proper button. Driver names no longer truncated (`max-w-[60px] truncate` and `max-w-[120px]` removed). Event timespan details (start–end times, duration) now shown with a Clock icon.
+- **Timeline marker hover**: Markers grow larger on hover (w-1.5→w-4, h-4→h-9) with stronger white glow effect (3-layer shadow).
+
 ---
 
 ## [0.1.0-alpha] — 2026-03-31

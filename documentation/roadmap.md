@@ -270,6 +270,12 @@ Core race event detection: incidents, battles, overtakes, pit stops, fastest lap
 - [x] `GET/PUT /api/projects/{id}/analysis/tuning` endpoints support read/write of saved tuning params
 - [x] `GET /api/projects/{id}/analysis/status` returns `has_telemetry` and `has_events` phase flags
 
+**v4 Fixes & Improvements:**
+- [x] Scan progress bar accurately reflects how far through the race we've scanned (8%→49% during scan, 55%→95% during detection)
+- [x] Post-checkered event filtering: events starting after the checkered flag are automatically removed (except race_finish, last_lap, etc.)
+- [x] Pipeline step indicator shows progress bar under the active step during analysis
+- [x] Event fetch limit increased from 1000 to 50000 to prevent timeline/sidebar event truncation in dense races
+
 ---
 
 ### Feature 8 — NLE-Style Timeline Editor `MUST` `✅ completed`
@@ -289,6 +295,13 @@ Canvas-based multi-track timeline: Camera, Events, Overlays, Cuts, Audio tracks.
 - [x] J/K/L keyboard shuttle controls work for playback speed
 - [x] I/O keys set in/out points at the playhead position
 - [x] Timeline updates in real-time as new events are detected during analysis
+
+**v2 UI Improvements:**
+- [x] Playback transport controls enlarged (18px icons, 20px play/pause) with more prominent styling
+- [x] Session time and lap counter displayed at text-sm to the left of transport controls for readability
+- [x] Lap +/- buttons styled as proper bordered buttons with correct Plus/Minus icons
+- [x] Event markers grow significantly on hover (w-4 h-9) with 3-layer white glow shadow
+- [x] Event focus header: Close button on right with label, un-truncated driver names, timespan details shown
 
 ---
 

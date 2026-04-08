@@ -29,6 +29,7 @@ import { useSettings } from '../../context/SettingsContext'
  */
 function Toolbar({
   activeProject, onBack, onStepClick, stepReadiness,
+  analysisProgress,
   onOpenSettings, onOpenHelp,
   canUndo = false, canRedo = false, onUndo, onRedo,
   undoDescription, redoDescription,
@@ -94,6 +95,7 @@ function Toolbar({
             currentStep={activeProject.current_step}
             onStepClick={onStepClick}
             stepReadiness={stepReadiness}
+            progress={activeProject.current_step === 'analysis' ? analysisProgress : null}
           />
         </div>
       )}
