@@ -340,10 +340,8 @@ export default memo(function AnalysisPanel() {
     try { await clearAnalysis(activeProject.id) } catch {}
   }
 
-  const handleFilterChange = async (type) => {
-    const newFilter = activeFilter === type ? '' : type
-    setActiveFilter(newFilter)
-    await fetchEvents(activeProject.id, { eventType: newFilter, limit: 50000 })
+  const handleFilterChange = (type) => {
+    setActiveFilter(prev => prev === type ? '' : type)
   }
 
   const handleReanalyze = async () => {
@@ -611,7 +609,7 @@ export default memo(function AnalysisPanel() {
                   isScanning={isScanning}
                   isRedetecting={isRedetecting}
                   progress={progress}
-                  events={events}
+                  events={filteredEvents}
                   eventSummary={eventSummary}
                   eventSort={eventSort}
                   activeFilter={activeFilter}
