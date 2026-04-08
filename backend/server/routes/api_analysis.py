@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field
 
 from server.services.project_service import project_service
 from server.services.replay_analysis import analysis_manager
+from server.routes.route_utils import get_project_or_404, get_project_db_or_404, safe_endpoint
 from server.services.analysis_db import (
     get_project_db,
     init_analysis_db,
@@ -289,9 +290,7 @@ async def start_analysis(project_id: int, body: AnalyzeRequest | None = None):
     If analysis is already running, returns 409 Conflict.
     If iRacing is not connected, falls back to mock analysis.
     """
-    project = project_service.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = get_project_or_404(project_id)
 
     if analysis_manager.is_running(project_id):
         raise HTTPException(
@@ -346,9 +345,7 @@ async def rescan_telemetry(project_id: int, body: AnalyzeRequest | None = None):
     Event detection is NOT run — call /analyze/redetect afterwards.
     Requires an active iRacing connection.
     """
-    project = project_service.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = get_project_or_404(project_id)
 
     if analysis_manager.is_running(project_id):
         raise HTTPException(
@@ -383,9 +380,7 @@ async def redetect_events(project_id: int, body: RedetectRequest):
     Requires existing telemetry data (from a previous analysis scan).
     Saves the supplied tuning parameters to the project database.
     """
-    project = project_service.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = get_project_or_404(project_id)
 
     if analysis_manager.is_running(project_id):
         raise HTTPException(
@@ -398,8 +393,7 @@ async def redetect_events(project_id: int, body: RedetectRequest):
 
     # Persist tuning params so they survive page refresh
     try:
-        init_analysis_db(project_dir)
-        conn = get_project_db(project_dir)
+        conn, _ = get_project_db_or_404(project_id)
         try:
             save_tuning_params(conn, {k: v for k, v in vars(body).items()
                                        if k in [
@@ -411,6 +405,8 @@ async def redetect_events(project_id: int, body: RedetectRequest):
                                        ] and v is not None})
         finally:
             conn.close()
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.warning("[Analysis API] Could not save tuning params: %s", exc)
 
@@ -430,17 +426,14 @@ async def redetect_events(project_id: int, body: RedetectRequest):
 @router.delete("/projects/{project_id}/analysis")
 async def clear_analysis(project_id: int):
     """Clear all analysis data for a project (events, telemetry, runs)."""
-    project = project_service.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = get_project_or_404(project_id)
 
     if analysis_manager.is_running(project_id):
         analysis_manager.cancel(project_id)
 
     project_dir = project["project_dir"]
     try:
-        init_analysis_db(project_dir)
-        conn = get_project_db(project_dir)
+        conn, _ = get_project_db_or_404(project_id)
         try:
             clear_analysis_data(conn)
             # Clear analysis runs too
@@ -457,6 +450,8 @@ async def clear_analysis(project_id: int):
 
         logger.info("[Analysis API] Cleared analysis for project #%d", project_id)
         return {"status": "cleared", "project_id": project_id}
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("[Analysis API] Clear error: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
@@ -469,10 +464,7 @@ async def get_analysis_status(project_id: int):
     Returns has_telemetry and has_events flags so the frontend can
     determine which phase controls to show.
     """
-    project = project_service.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
+    project = get_project_or_404(project_id)
     project_dir = project["project_dir"]
 
     # Check if actively running
@@ -480,8 +472,7 @@ async def get_analysis_status(project_id: int):
 
     # Check database for most recent run + live counts
     try:
-        init_analysis_db(project_dir)
-        conn = get_project_db(project_dir)
+        conn, _ = get_project_db_or_404(project_id)
         try:
             db_status = db_get_analysis_status(conn)
             db_status["project_id"] = project_id
