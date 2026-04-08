@@ -12,7 +12,6 @@ import {
   Laptop,
   Youtube,
   Wand2,
-  FolderOpen,
   Sparkles,
   Eye,
   EyeOff,
@@ -22,6 +21,7 @@ import { useToast } from '../../context/ToastContext'
 import { apiGet, apiPost } from '../../services/api'
 import YouTubeSettings from '../youtube/YouTubeSettings'
 import SetupWizard from '../wizard/SetupWizard'
+import { NumberInput, TextInput, BrowseInput, Select, Toggle, SettingGroup } from '../ui/inputs'
 
 /**
  * Settings category definitions.
@@ -642,129 +642,6 @@ function CapBadge({ label, available, desc }) {
       />
       {label}
     </span>
-  )
-}
-
-function NumberInput({ value, onChange, min, max, placeholder }) {
-  return (
-    <input
-      type="number"
-      value={value ?? ''}
-      onChange={(e) => {
-        const v = parseInt(e.target.value, 10)
-        if (!isNaN(v) && v >= min && v <= max) onChange(v)
-        else if (e.target.value === '') onChange(min)
-      }}
-      min={min}
-      max={max}
-      placeholder={placeholder}
-      className="w-full px-3 py-2 text-sm bg-bg-primary border border-border rounded-lg
-                 text-text-primary placeholder:text-text-disabled
-                 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent
-                 transition-colors"
-    />
-  )
-}
-
-function SettingGroup({ label, description, children }) {
-  return (
-    <div className="flex flex-col gap-1.5">
-      <label className="text-sm font-medium text-text-primary">{label}</label>
-      {description && (
-        <p className="text-xs text-text-tertiary">{description}</p>
-      )}
-      <div className="mt-1">{children}</div>
-    </div>
-  )
-}
-
-function TextInput({ value, onChange, placeholder }) {
-  return (
-    <input
-      type="text"
-      value={value || ''}
-      onChange={(e) => onChange(e.target.value)}
-      placeholder={placeholder}
-      className="w-full px-3 py-2 text-sm bg-bg-primary border border-border rounded-lg
-                 text-text-primary placeholder:text-text-disabled
-                 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent
-                 transition-colors"
-    />
-  )
-}
-
-function BrowseInput({ value, onChange, placeholder, browseTitle }) {
-  const handleBrowse = async () => {
-    try {
-      const result = await apiPost('/system/browse', {
-        mode: 'folder',
-        title: browseTitle || 'Select Folder',
-        initial_dir: value || '',
-      })
-      if (result.path) onChange(result.path)
-    } catch { /* dialog cancelled or failed */ }
-  }
-
-  return (
-    <div className="flex gap-2">
-      <input
-        type="text"
-        value={value || ''}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="flex-1 px-3 py-2 text-sm bg-bg-primary border border-border rounded-lg
-                   text-text-primary placeholder:text-text-disabled
-                   focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent
-                   transition-colors"
-      />
-      <button
-        type="button"
-        onClick={handleBrowse}
-        className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-bg-primary
-                   text-text-secondary hover:text-text-primary hover:bg-surface-hover text-sm transition-colors"
-      >
-        <FolderOpen className="w-4 h-4" />
-        Browse
-      </button>
-    </div>
-  )
-}
-
-function Select({ value, onChange, options }) {
-  return (
-    <select
-      value={value || ''}
-      onChange={(e) => onChange(e.target.value)}
-      className="w-full px-3 py-2 text-sm bg-bg-primary border border-border rounded-lg
-                 text-text-primary
-                 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent
-                 transition-colors appearance-none cursor-pointer"
-    >
-      {options.map(opt => (
-        <option key={opt.value} value={opt.value}>
-          {opt.label}
-        </option>
-      ))}
-    </select>
-  )
-}
-
-function Toggle({ checked, onChange }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onChange(!checked)}
-      className={`relative w-10 h-5 rounded-full transition-colors ${
-        checked ? 'bg-accent' : 'bg-surface-active'
-      }`}
-    >
-      <span
-        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow-sm
-                    transition-transform ${checked ? 'translate-x-5' : 'translate-x-0'}`}
-      />
-    </button>
   )
 }
 

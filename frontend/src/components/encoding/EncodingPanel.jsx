@@ -6,6 +6,9 @@ import { formatTime } from '../../utils/time'
 import ExportPresetEditor from './ExportPresetEditor'
 import EncodingDashboard from './EncodingDashboard'
 import CompletedExports from './CompletedExports'
+import GPUStatus from './GPUStatus'
+import PresetSelector from './PresetSelector'
+import JobQueue from './JobQueue'
 import {
   Cpu, Play, Square, CheckCircle2, XCircle, AlertTriangle,
   Settings2, Clock, HardDrive, FileVideo, RefreshCw, Layers,
@@ -48,11 +51,6 @@ export default function EncodingPanel({ projectId }) {
     () => presets.find(p => p.id === selectedPresetId) || presets[0],
     [presets, selectedPresetId],
   )
-
-  const bestEncoder = useMemo(() => {
-    if (!gpuInfo) return null
-    return gpuInfo.best_h264 || null
-  }, [gpuInfo])
 
   // Active job for this project
   const projectActiveJob = useMemo(
@@ -125,157 +123,20 @@ export default function EncodingPanel({ projectId }) {
 
         {/* ── GPU Detection ───────────────────────────────────────── */}
         <Section icon={Cpu} title="GPU Encoder">
-          {gpuInfo ? (
-            <div className="space-y-2">
-              {/* FFmpeg status */}
-              <div className="flex items-center gap-2 px-3 py-2 bg-bg-primary border border-border rounded-md">
-                {gpuInfo.ffmpeg_available ? (
-                  <CheckCircle2 className="w-4 h-4 text-success shrink-0" />
-                ) : (
-                  <XCircle className="w-4 h-4 text-danger shrink-0" />
-                )}
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs font-medium text-text-primary">
-                    FFmpeg {gpuInfo.ffmpeg_available ? 'Available' : 'Not Found'}
-                  </div>
-                  {gpuInfo.ffmpeg_version && (
-                    <div className="text-xxs text-text-tertiary font-mono truncate">
-                      v{gpuInfo.ffmpeg_version}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Best encoder */}
-              {bestEncoder && (
-                <div className={`flex items-center gap-2 px-3 py-2 rounded-md border
-                  ${bestEncoder.type === 'gpu'
-                    ? 'bg-accent/5 border-accent/30'
-                    : 'bg-bg-primary border-border'
-                  }`}>
-                  {bestEncoder.type === 'gpu' ? (
-                    <Zap className="w-4 h-4 text-accent shrink-0" />
-                  ) : (
-                    <Cpu className="w-4 h-4 text-text-tertiary shrink-0" />
-                  )}
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs font-medium text-text-primary">{bestEncoder.label}</div>
-                    <div className="text-xxs text-text-tertiary">
-                      {bestEncoder.type === 'gpu' ? 'Hardware accelerated' : 'CPU fallback'}
-                      {' · '}{bestEncoder.ffmpeg_codec}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Available encoders summary */}
-              {gpuInfo.encoders && (
-                <div className="text-xxs text-text-tertiary">
-                  {gpuInfo.encoders.filter(e => e.available).length} encoder(s) available
-                  {gpuInfo.gpu_vendors?.length > 0 && ` · GPU: ${gpuInfo.gpu_vendors.join(', ')}`}
-                </div>
-              )}
-
-              <button
-                onClick={handleRefreshGpus}
-                className="flex items-center gap-1.5 px-2 py-1 rounded text-xxs text-text-secondary
-                           hover:text-text-primary hover:bg-bg-hover transition-colors"
-              >
-                <RefreshCw className="w-3 h-3" />
-                Refresh
-              </button>
-            </div>
-          ) : (
-            <div className="text-xs text-text-tertiary italic">Detecting GPU capabilities…</div>
-          )}
+          <GPUStatus gpuInfo={gpuInfo} onRefresh={handleRefreshGpus} />
         </Section>
 
         {/* ── Export Preset ────────────────────────────────────────── */}
         <Section icon={Settings2} title="Export Preset">
-          <div className="space-y-2">
-            <div className="relative">
-              <select
-                value={selectedPresetId}
-                onChange={e => setSelectedPresetId(e.target.value)}
-                className="w-full appearance-none bg-bg-primary border border-border rounded-md
-                           px-3 py-2 pr-8 text-xs text-text-primary cursor-pointer
-                           focus:outline-none focus:ring-1 focus:ring-accent"
-              >
-                {presets.map(p => (
-                  <option key={p.id} value={p.id}>{p.name}{p.is_builtin === false ? ' ✦' : ''}</option>
-                ))}
-              </select>
-              <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-tertiary pointer-events-none" />
-            </div>
-
-            {selectedPreset && (
-              <div className="bg-bg-primary border border-border rounded-md p-2.5 space-y-1">
-                {selectedPreset.description && (
-                  <p className="text-xxs text-text-tertiary">{selectedPreset.description}</p>
-                )}
-                <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xxs">
-                  <span className="text-text-tertiary">Resolution</span>
-                  <span className="text-text-secondary">{selectedPreset.resolution_width}×{selectedPreset.resolution_height}</span>
-                  <span className="text-text-tertiary">Frame Rate</span>
-                  <span className="text-text-secondary">{selectedPreset.fps} fps</span>
-                  <span className="text-text-tertiary">Video Bitrate</span>
-                  <span className="text-text-secondary">{selectedPreset.video_bitrate_mbps} Mbps</span>
-                  <span className="text-text-tertiary">Audio Bitrate</span>
-                  <span className="text-text-secondary">{selectedPreset.audio_bitrate_kbps} kbps</span>
-                  <span className="text-text-tertiary">Codec</span>
-                  <span className="text-text-secondary">{selectedPreset.codec_family?.toUpperCase()}</span>
-                  <span className="text-text-tertiary">Quality</span>
-                  <span className="text-text-secondary capitalize">{selectedPreset.quality_preset}</span>
-                </div>
-              </div>
-            )}
-
-            {/* Preset management buttons */}
-            <div className="flex items-center gap-1.5">
-              <button
-                onClick={() => setPresetEditor({ mode: 'create', preset: null })}
-                className="flex items-center gap-1 px-2 py-1 rounded text-xxs font-medium
-                           text-text-secondary hover:text-text-primary hover:bg-bg-hover
-                           border border-border transition-colors"
-                title="Create new preset"
-              >
-                <Plus className="w-3 h-3" />
-                New
-              </button>
-              {selectedPreset && (
-                <>
-                  <button
-                    onClick={() => setPresetEditor({
-                      mode: selectedPreset.is_builtin !== false ? 'duplicate' : 'edit',
-                      preset: selectedPreset,
-                    })}
-                    className="flex items-center gap-1 px-2 py-1 rounded text-xxs font-medium
-                               text-text-secondary hover:text-text-primary hover:bg-bg-hover
-                               border border-border transition-colors"
-                    title={selectedPreset.is_builtin !== false ? 'Duplicate preset' : 'Edit preset'}
-                  >
-                    {selectedPreset.is_builtin !== false ? (
-                      <><Copy className="w-3 h-3" />Duplicate</>
-                    ) : (
-                      <><Edit3 className="w-3 h-3" />Edit</>
-                    )}
-                  </button>
-                  {selectedPreset.is_builtin !== false && (
-                    <button
-                      onClick={() => handleDuplicate(selectedPreset.id)}
-                      className="flex items-center gap-1 px-2 py-1 rounded text-xxs font-medium
-                                 text-text-secondary hover:text-text-primary hover:bg-bg-hover
-                                 border border-border transition-colors"
-                      title="Quick duplicate"
-                    >
-                      <Copy className="w-3 h-3" />
-                      Duplicate
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
+          <PresetSelector
+            presets={presets}
+            selectedPresetId={selectedPresetId}
+            selectedPreset={selectedPreset}
+            onSelect={setSelectedPresetId}
+            onDuplicate={handleDuplicate}
+            onEdit={(mode, preset) => setPresetEditor({ mode, preset })}
+            onCreate={() => setPresetEditor({ mode: 'create', preset: null })}
+          />
         </Section>
 
         {/* ── Output Type ─────────────────────────────────────────── */}
@@ -379,41 +240,13 @@ export default function EncodingPanel({ projectId }) {
           </Section>
         )}
 
-        {/* ── Queue ───────────────────────────────────────────────── */}
-        {queuedJobs.length > 0 && (
-          <Section icon={Layers} title={`Queue (${queuedJobs.length})`}>
-            <div className="space-y-1.5">
-              {queuedJobs.map(job => (
-                <div key={job.job_id} className="flex items-center gap-2 px-3 py-2 bg-bg-primary border border-border rounded-md">
-                  <Clock className="w-3.5 h-3.5 text-text-tertiary shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs text-text-secondary truncate">
-                      {job.preset?.name || 'Custom'} · {job.job_type}
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => handleCancel(job.job_id)}
-                    className="p-1 rounded hover:bg-bg-hover text-text-tertiary hover:text-danger transition-colors"
-                    title="Cancel"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </Section>
-        )}
-
-        {/* ── Other Active Jobs ────────────────────────────────────── */}
-        {activeJobs.filter(j => j.project_id !== projectId).length > 0 && (
-          <Section icon={Film} title="Other Active Encodes">
-            <div className="space-y-2">
-              {activeJobs.filter(j => j.project_id !== projectId).map(job => (
-                <JobProgress key={job.job_id} job={job} onCancel={handleCancel} compact />
-              ))}
-            </div>
-          </Section>
-        )}
+        {/* ── Queue + Other Active Jobs ─────────────────────────── */}
+        <JobQueue
+          activeJobs={activeJobs}
+          queuedJobs={queuedJobs}
+          projectId={projectId}
+          onCancel={handleCancel}
+        />
 
         {/* ── Recent Jobs ─────────────────────────────────────────── */}
         {recentJobs.length > 0 && (
@@ -527,79 +360,5 @@ function TypeButton({ active, label, onClick }) {
     >
       {label}
     </button>
-  )
-}
-
-
-function MetricBox({ icon: Icon, label, value }) {
-  return (
-    <div className="bg-bg-secondary rounded px-2.5 py-1.5">
-      <div className="flex items-center gap-1 mb-0.5">
-        <Icon className="w-3 h-3 text-text-disabled" />
-        <span className="text-xxs text-text-tertiary">{label}</span>
-      </div>
-      <span className="text-sm font-mono text-text-primary">{value}</span>
-    </div>
-  )
-}
-
-
-function JobProgress({ job, onCancel, compact = false }) {
-  const progress = job.progress || {}
-  const pct = progress.percentage || 0
-  const eta = progress.eta_seconds
-  const fps = progress.fps || 0
-  const speed = progress.speed || ''
-
-  return (
-    <div className="bg-bg-primary border border-border rounded-md p-3 space-y-2">
-      {/* Status */}
-      <div className="flex items-center gap-2">
-        <div className="w-2.5 h-2.5 rounded-full bg-accent animate-pulse" />
-        <span className="text-xs font-medium text-accent">
-          Encoding{job.preset?.name ? ` · ${job.preset.name}` : ''}
-        </span>
-        <div className="flex-1" />
-        {job.encoder?.label && (
-          <span className="text-xxs text-text-tertiary">{job.encoder.label}</span>
-        )}
-      </div>
-
-      {/* Progress bar */}
-      <div className="w-full bg-bg-secondary rounded-full h-1.5">
-        <div
-          className="bg-accent h-1.5 rounded-full transition-all duration-300"
-          style={{ width: `${Math.min(100, pct)}%` }}
-        />
-      </div>
-
-      {/* Metrics */}
-      {!compact && (
-        <div className="grid grid-cols-2 gap-2">
-          <MetricBox icon={Film} label="Progress" value={`${pct.toFixed(1)}%`} />
-          <MetricBox icon={Clock} label="ETA" value={eta != null ? formatTime(eta) : '—'} />
-          <MetricBox icon={Zap} label="FPS" value={fps > 0 ? fps.toFixed(0) : '—'} />
-          <MetricBox icon={HardDrive} label="Speed" value={speed || '—'} />
-        </div>
-      )}
-
-      {compact && (
-        <div className="flex items-center gap-3 text-xxs text-text-tertiary">
-          <span>{pct.toFixed(1)}%</span>
-          {eta != null && <span>ETA {formatTime(eta)}</span>}
-          {fps > 0 && <span>{fps.toFixed(0)} fps</span>}
-        </div>
-      )}
-
-      {/* Cancel button */}
-      <button
-        onClick={() => onCancel(job.job_id)}
-        className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md text-xs
-          font-medium bg-danger hover:bg-danger/90 text-white transition-colors"
-      >
-        <Square className="w-3.5 h-3.5" />
-        Cancel Encoding
-      </button>
-    </div>
   )
 }

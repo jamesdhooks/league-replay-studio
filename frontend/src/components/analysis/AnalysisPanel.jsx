@@ -7,20 +7,19 @@ import { useHighlight } from '../../context/HighlightContext'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { apiPost, apiGet, apiDelete } from '../../services/api'
 import {
-  Play, BarChart3, Loader2, CheckCircle2,
-  XCircle, Terminal, ChevronDown, ChevronUp,
-  List, Zap, WifiOff, RefreshCw,
-  Folder, SlidersHorizontal, Minus, Check, Film, X,
+  Play, BarChart3, Loader2,
+  XCircle, Terminal, ChevronDown,
+  List, WifiOff, RefreshCw,
+  Folder, SlidersHorizontal,
 } from 'lucide-react'
 import ProjectFileBrowser from '../projects/ProjectFileBrowser'
 import ResizableSidebar from '../layout/ResizableSidebar'
-import Tooltip from '../ui/Tooltip'
 import PreviewPlayer from './PreviewPlayer'
 import PlaybackTimeline from './PlaybackTimeline'
 import AnalysisRightPanel from './AnalysisRightPanel'
-import EventDetail from './EventDetail'
 import TuningPanel from './TuningPanel'
-import { EVENT_CONFIG, formatTime, scoreColor } from './analysisConstants'
+import LogTabContent from './LogTabContent'
+import EventsTabContent from './EventsTabContent'
 
 export default memo(function AnalysisPanel() {
   // ── Context ────────────────────────────────────────────────────────────
@@ -745,131 +744,7 @@ export default memo(function AnalysisPanel() {
     </div>
   )
 })
-
-
-// ── Sidebar tab content sub-components ───────────────────────────────────
-
-function LogTabContent({ isAnalyzing, progress, analysisLog }) {
-  return (
-    <div className="font-mono">
-      {isAnalyzing && progress && (
-        <div className="px-3 pt-2 pb-1.5 border-b border-border-subtle sticky top-0 bg-bg-secondary z-10">
-          <div className="h-1 bg-bg-tertiary rounded-full overflow-hidden">
-            <div
-              className="h-full bg-accent/70 rounded-full transition-all duration-500"
-              style={{ width: `${progress.percent ?? 0}%` }}
-            />
-          </div>
-          <span className="text-xxs text-text-disabled mt-1 block truncate">
-            {progress.message || 'Analyzing...'}
-          </span>
-        </div>
-      )}
-      {analysisLog.length === 0 && !isAnalyzing && (
-        <div className="flex items-center justify-center py-8 text-text-disabled text-xs">
-          No log entries yet
-        </div>
-      )}
-      {analysisLog.length === 0 && isAnalyzing && (
-        <div className="flex items-center gap-2 px-3 py-4 text-text-disabled text-xxs">
-          <Loader2 size={11} className="animate-spin shrink-0" />
-          <span>Initializing...</span>
-        </div>
-      )}
-      {[...analysisLog].reverse().map(entry => (
-        <div
-          key={entry.id}
-          className="flex gap-2 px-3 py-1.5 text-xxs border-b border-border-subtle/30 animate-fade-in"
-        >
-          <span className="shrink-0 select-none mt-0.5">
-            {entry.level === 'success' ? (
-              <CheckCircle2 size={11} className="text-success" />
-            ) : entry.level === 'error' ? (
-              <XCircle size={11} className="text-danger" />
-            ) : entry.level === 'detect' ? (
-              <Zap size={11} className="text-warning" />
-            ) : (
-              <span className="text-text-disabled">›</span>
-            )}
-          </span>
-          <div className="flex-1 min-w-0">
-            <span className="text-text-disabled font-mono mr-1.5">
-              {new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-            </span>
-            <span className="text-text-secondary">{entry.message}</span>
-            {entry.detail && (
-              <span className="text-text-disabled ml-1">— {entry.detail}</span>
-            )}
-          </div>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-
-function EventsTabContent({
-  showTuning, setShowTuning,
-  isAnalyzing, isScanning, isRedetecting, progress,
-  events, eventSummary, eventSort, activeFilter,
-  expandedEvent, focusedEvent, raceStart, isSeeking,
-  overrides, tuningParams,
-  handleFilterChange, handleReanalyze, cycleSort, seekToEvent,
-  setExpandedEvent, toggleOverride, updateTuning,
-  eventsEndRef,
-}) {
-  return (
-    <div className="flex flex-col h-full">
-      {/* Sub-navigation: Events list ↔ Tuning */}
-      <div className="shrink-0 flex items-center gap-1 px-3 py-1.5 border-b border-border-subtle bg-bg-secondary/50">
-        <button
-          onClick={() => setShowTuning(false)}
-          className={`px-2 py-0.5 text-xxs rounded transition-colors
-            ${!showTuning ? 'bg-accent/15 text-accent' : 'text-text-disabled hover:text-text-secondary'}`}
-        >
-          Events
-        </button>
-        <button
-          onClick={() => setShowTuning(true)}
-          className={`flex items-center gap-1 px-2 py-0.5 text-xxs rounded transition-colors
-            ${showTuning ? 'bg-accent/15 text-accent' : 'text-text-disabled hover:text-text-secondary'}`}
-        >
-          <SlidersHorizontal size={9} />
-          Detection
-        </button>
-        {showTuning && (
-          <button
-            onClick={handleReanalyze}
-            disabled={isRedetecting}
-            className="ml-auto flex items-center gap-1 px-2 py-0.5 text-xxs font-medium
-                       text-white bg-gradient-to-r from-gradient-from to-gradient-to
-                       rounded transition-all duration-150 shadow-glow-sm disabled:opacity-50"
-          >
-            {isRedetecting
-              ? <Loader2 size={9} className="animate-spin" />
-              : <SlidersHorizontal size={9} />}
-            {isRedetecting ? 'Running…' : 'Re-analyze'}
-          </button>
-        )}
-      </div>
-
-      {showTuning ? (
-        <div className="flex-1 overflow-y-auto px-3 py-2 space-y-3">
-          <TuningPanel params={tuningParams} onChange={updateTuning} />
-        </div>
-      ) : isAnalyzing ? (
-        <div className="flex-1 flex flex-col items-center justify-center gap-3 px-4 py-10">
-          <Loader2 size={22} className="animate-spin text-text-disabled" />
-          <span className="text-xs text-text-disabled text-center">
-            {isScanning ? 'Collecting telemetry…' : 'Detecting events…'}
-          </span>
-          {!isScanning && progress != null && (
-            <div className="w-full max-w-[160px]">
-              <div className="h-1.5 bg-bg-tertiary rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-gradient-from to-gradient-to
-                             rounded-full transition-all duration-500"
-                  style={{ width: `${Math.max(0, Math.min(100, ((progress.percent ?? 55) - 55) / 40 * 100))}%` }}
+                  style={{ width: `${Math.max(0, Math.min(100, ((progress.percent ?? 85) - 85) / 12 * 100))}%` }}
                 />
               </div>
               {progress.message && (
