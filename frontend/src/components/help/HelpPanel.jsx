@@ -215,7 +215,7 @@ const CONTENT = {
         </div>
         <div className="p-3 rounded-xl bg-surface border border-border text-sm">
           <p className="font-medium text-text-primary mb-1">Replay files</p>
-          <p className="text-xs text-text-secondary">Load your <code className="text-accent">.ibt</code> replay file into iRacing first (Replay → Load). LRS will detect the session when you start analysis.</p>
+          <p className="text-xs text-text-secondary">Load your <code className="text-accent">.rpy</code> replay file into iRacing first (Replay → Load). LRS will detect the session when you start analysis.</p>
         </div>
         <div className="p-3 rounded-xl bg-surface border border-border text-sm">
           <p className="font-medium text-text-primary mb-1">Broadcasting API</p>

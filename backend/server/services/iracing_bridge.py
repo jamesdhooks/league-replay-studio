@@ -63,6 +63,12 @@ class IRacingBridge:
         self._connected: bool = False
         self._session_info_version: int = -1
         self._session_data: dict = {}             # parsed session info cache
+        # Per-car cumulative incident counts from the last SessionInfo update.
+        # Used to compute deltas between updates (ResultsPositions approach).
+        self._prev_result_incidents: dict[int, int] = {}
+        # Incident deltas detected by _handle_session_info; drained by the
+        # scan loop via drain_incidents().
+        self._pending_incidents: list[dict] = []
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._update_queue: Optional[asyncio.Queue] = None
         self._stop_event = threading.Event()
@@ -100,6 +106,17 @@ class IRacingBridge:
     @property
     def session_data(self) -> dict:
         return dict(self._session_data)
+
+    def drain_incidents(self) -> list[dict]:
+        """Return and clear all incident deltas detected since the last call.
+
+        Called by the scan loop each tick so incidents are written to the DB
+        in real time as iRacing updates SessionInfo during replay playback.
+        """
+        if not self._pending_incidents:
+            return []
+        incidents, self._pending_incidents = self._pending_incidents, []
+        return incidents
 
     # ── Replay Control (Broadcasting API) ─────────────────────────────────────
 
@@ -253,6 +270,57 @@ class IRacingBridge:
         except Exception:
             return []
 
+    def capture_all_vars(self) -> tuple[dict, dict] | None:
+        """Capture ALL available iRacing telemetry variables in one atomic read.
+
+        Returns (catalog, snapshot) where:
+          catalog  — {var_name: {type, unit, description, count}} from var_headers
+          snapshot — {var_name: value} for every variable, with list values for
+                     array types and scalar values for single vars.
+
+        Returns None if not connected.  Array values are returned as plain Python
+        lists so they are JSON-serialisable.
+        """
+        if not self._connected or self._ir is None:
+            return None
+        try:
+            self._ir.freeze_var_buffer_latest()
+
+            # _var_headers_dict is an @property on IRSDK that returns
+            # {name: VarHeader}.  VarHeader fields (name, desc, unit) are
+            # decoded Python strings via property_value_str; type/count are ints.
+            # NOTE: do NOT use self._ir.var_headers — that attribute does not
+            # exist; accessing it falls through __getitem__ → session YAML lookup
+            # → returns None, causing (None).items() to raise and the method to
+            # return None every call.
+            var_headers_dict: dict = self._ir._var_headers_dict or {}
+
+            catalog: dict = {}
+            snapshot: dict = {}
+
+            for name, header in var_headers_dict.items():
+                catalog[name] = {
+                    "type":  header.type,
+                    "unit":  header.unit,
+                    "desc":  header.desc,
+                    "count": header.count,
+                }
+                try:
+                    val = self._ir[name]
+                    if val is None:
+                        snapshot[name] = None
+                    elif hasattr(val, "__iter__") and not isinstance(val, (str, bytes)):
+                        snapshot[name] = list(val)
+                    else:
+                        snapshot[name] = val
+                except Exception:
+                    snapshot[name] = None
+
+            return catalog, snapshot
+        except Exception as exc:
+            logger.debug("[IRacingBridge] capture_all_vars error: %s", exc)
+            return None
+
     def capture_snapshot(self) -> dict | None:
         """
         Capture a telemetry snapshot directly from shared memory.
@@ -266,14 +334,15 @@ class IRacingBridge:
         try:
             self._ir.freeze_var_buffer_latest()
 
-            positions  = list(self._ir["CarIdxPosition"]     or [])
-            lap_pcts   = list(self._ir["CarIdxLapDistPct"]   or [])
-            surfaces   = list(self._ir["CarIdxTrackSurface"] or [])
-            est_times  = list(self._ir["CarIdxEstTime"]       or [])
-            laps       = list(self._ir["CarIdxLap"]           or [])
-            class_pos  = list(self._ir["CarIdxClassPosition"] or [])
-            best_laps  = list(self._ir["CarIdxBestLapTime"]   or [])
-            speeds     = list(self._ir["CarIdxSpeed"]         or [])
+            positions      = list(self._ir["CarIdxPosition"]       or [])
+            lap_pcts       = list(self._ir["CarIdxLapDistPct"]     or [])
+            surfaces       = list(self._ir["CarIdxTrackSurface"]   or [])
+            est_times      = list(self._ir["CarIdxEstTime"]         or [])
+            laps           = list(self._ir["CarIdxLap"]             or [])
+            class_pos      = list(self._ir["CarIdxClassPosition"]   or [])
+            best_laps      = list(self._ir["CarIdxBestLapTime"]     or [])
+            speeds         = list(self._ir["CarIdxSpeed"]           or [])
+            incident_counts = list(self._ir["CarIdxIncidentCount"] or [])
 
             NOT_IN_WORLD = -1
             car_states: list[dict] = []
@@ -315,9 +384,10 @@ class IRacingBridge:
                 "cam_car_idx":   self._ir["CamCarIdx"]      or 0,
                 "cam_group_num": self._ir["CamGroupNumber"] or 0,
                 "flags":         self._ir["SessionFlags"]   or 0,
-                "replay_speed":  replay_speed,
-                "track_length":  track_length,
-                "car_states":    car_states,
+                "replay_speed":    replay_speed,
+                "track_length":    track_length,
+                "car_states":      car_states,
+                "incident_counts": incident_counts,
             }
         except Exception as exc:
             logger.debug("[IRacingBridge] capture_snapshot error: %s", exc)
@@ -382,6 +452,8 @@ class IRacingBridge:
         self._connected = False
         self._session_info_version = -1
         self._session_data = {}
+        self._prev_result_incidents = {}
+        self._pending_incidents = []
         logger.info("[IRacingBridge] iRacing disconnected")
         try:
             self._ir.shutdown()
@@ -446,22 +518,57 @@ class IRacingBridge:
                 except (ValueError, TypeError):
                     avg_lap_time = 0.0
 
-            # Parse SessionLog incident messages — used by IncidentLogDetector.
-            # Each message has: CarIdx, CarNumber, Description, Incident (points),
-            # Lap, SessionNum, SessionTime, UserName.
-            # We parse all messages up-front so the analysis engine has
-            # complete incident history when it starts the telemetry scan.
-            raw_messages = session_log.get("Messages") or []
-            _KEEP_FIELDS = {"CarIdx", "SessionTime", "Lap", "Description", "Incident",
-                            "SessionNum", "UserName"}
+            # Parse per-driver incident counts from ResultsPositions in the
+            # SessionInfo YAML.  Unlike SessionLog.Messages (which is empty
+            # during replay), ResultsPositions.Incidents IS updated by iRacing
+            # as the replay plays forward, so diffing between session-info
+            # updates gives us the exact incident point delta per driver.
+            # Build a name lookup while we're here.
+            _driver_name_map: dict[int, str] = {
+                d["car_idx"]: d.get("user_name") or d.get("name") or ""
+                for d in drivers
+                if "car_idx" in d
+            }
+            current_session_time = float(self._ir["SessionTime"] or 0.0)
+
             incident_log: list[dict] = []
-            for m in raw_messages:
-                if not isinstance(m, dict):
-                    continue
-                car_idx = m.get("CarIdx")
-                if car_idx is None:
-                    continue
-                incident_log.append({k: v for k, v in m.items() if k in _KEEP_FIELDS})
+            race_session = None
+            if race_session_num is not None and sessions:
+                race_session = sessions[race_session_num] if race_session_num < len(sessions) else None
+            if race_session is not None:
+                results_positions = race_session.get("ResultsPositions") or []
+                for rp in results_positions:
+                    if not isinstance(rp, dict):
+                        continue
+                    try:
+                        car_idx = int(rp.get("CarIdx", -1))
+                    except (ValueError, TypeError):
+                        continue
+                    if car_idx < 0:
+                        continue
+                    try:
+                        inc_total = int(rp.get("Incidents", 0) or 0)
+                    except (ValueError, TypeError):
+                        inc_total = 0
+                    prev_total = self._prev_result_incidents.get(car_idx, 0)
+                    delta = inc_total - prev_total
+                    if delta > 0 and car_idx in self._prev_result_incidents:
+                        try:
+                            lap = int(rp.get("Lap", 0) or 0)
+                        except (ValueError, TypeError):
+                            lap = 0
+                        entry = {
+                            "CarIdx":      car_idx,
+                            "SessionTime": current_session_time,
+                            "Lap":         lap,
+                            "Description": f"+{delta}x",
+                            "Incident":    delta,
+                            "SessionNum":  race_session_num,
+                            "UserName":    _driver_name_map.get(car_idx, ""),
+                        }
+                        incident_log.append(entry)
+                        self._pending_incidents.append(entry)
+                    self._prev_result_incidents[car_idx] = inc_total
 
             self._session_data = {
                 "track_name": track_name,
@@ -488,7 +595,7 @@ class IRacingBridge:
                 {"event": "iracing:session_info", "data": self._session_data}
             )
             logger.info(
-                "[IRacingBridge] Session info updated: %s, %d drivers, %d cameras, %d incidents",
+                "[IRacingBridge] Session info updated: %s, %d drivers, %d cameras, %d incident deltas",
                 track_name,
                 len(drivers),
                 len(cameras),

@@ -7,13 +7,16 @@ import { formatTimePrecise } from '../../utils/time'
 import {
   Info, X, Save, RotateCcw, Scissors, Trash2,
   ChevronDown, Users, Clock, Star, Camera, Zap,
-  ToggleLeft, ToggleRight, BarChart2,
+  ToggleLeft, ToggleRight, BarChart2, AlertTriangle,
 } from 'lucide-react'
 
-/** All event types available for the dropdown */
+/** All event types available for the dropdown — must match live detectors */
 const EVENT_TYPES = [
-  'incident', 'battle', 'overtake', 'pit_stop',
+  'incident', 'car_contact', 'contact', 'lost_control', 'off_track', 'turn_cutting',
+  'battle', 'overtake', 'close_call',
+  'pit_stop', 'undercut', 'overcut', 'pit_battle',
   'fastest_lap', 'leader_change', 'first_lap', 'last_lap',
+  'pace_lap', 'race_start', 'race_finish',
 ]
 
 /**
@@ -264,6 +267,55 @@ export default function EventInspectorPanel({ projectId }) {
             Duration: {formatTimePrecise(duration)}
           </div>
         </Section>
+
+        {/* ── Incident Clip Window (incident events only) ───────────────── */}
+        {editState.event_type === 'incident' &&
+         selectedEvent.metadata?.incident_time != null && (() => {
+          const anchorTime = selectedEvent.metadata.incident_time
+          const currentLeadIn = Math.max(0, anchorTime - editState.start_time_seconds)
+          const currentFollowOut = Math.max(0, editState.end_time_seconds - anchorTime)
+          return (
+            <Section icon={AlertTriangle} label="Incident Clip Window">
+              <div className="space-y-2.5">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xxs">
+                    <span className="text-text-secondary">Lead-in</span>
+                    <span className="font-mono text-text-primary">{currentLeadIn.toFixed(1)}s</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.5} max={10} step={0.5}
+                    value={currentLeadIn}
+                    onChange={e => {
+                      const li = parseFloat(e.target.value)
+                      updateField('start_time_seconds', Math.max(0, anchorTime - li))
+                    }}
+                    className="w-full h-1.5 accent-accent cursor-pointer"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xxs">
+                    <span className="text-text-secondary">Follow-out</span>
+                    <span className="font-mono text-text-primary">{currentFollowOut.toFixed(1)}s</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={2} max={30} step={0.5}
+                    value={currentFollowOut}
+                    onChange={e => {
+                      const fo = parseFloat(e.target.value)
+                      updateField('end_time_seconds', anchorTime + fo)
+                    }}
+                    className="w-full h-1.5 accent-accent cursor-pointer"
+                  />
+                </div>
+                <div className="text-xxs text-text-disabled">
+                  Anchor: {formatTimePrecise(anchorTime)}
+                </div>
+              </div>
+            </Section>
+          )
+        })()}
 
         {/* ── Include in Highlight ──────────────────────────────────────── */}
         <Section icon={editState.included_in_highlight ? ToggleRight : ToggleLeft} label="Highlight">

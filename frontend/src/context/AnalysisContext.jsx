@@ -306,6 +306,10 @@ export function AnalysisProvider({ children }) {
     setDiscoveredEvents([])
   }, [])
 
+  const clearLog = useCallback(() => {
+    setAnalysisLog([])
+  }, [])
+
   // ── Context value ───────────────────────────────────────────────────────
   const value = useMemo(() => ({
     isAnalyzing,
@@ -328,11 +332,12 @@ export function AnalysisProvider({ children }) {
     fetchEventSummary,
     loadAnalysisLog,
     clearDiscoveredEvents,
+    clearLog,
   }), [
     isAnalyzing, isScanning, progress, events, eventSummary, analysisStatus, error,
     analysisLog, discoveredEvents,
     startAnalysis, startRescan, cancelAnalysis, clearAnalysis, fetchAnalysisStatus, fetchEvents, fetchEventSummary,
-    loadAnalysisLog, clearDiscoveredEvents,
+    loadAnalysisLog, clearDiscoveredEvents, clearLog,
   ])
 
   return (

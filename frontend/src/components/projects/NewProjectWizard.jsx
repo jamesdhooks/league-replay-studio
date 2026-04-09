@@ -1,25 +1,22 @@
-import { useState, useEffect } from 'react'
-import { X, FolderOpen, FileSearch, ChevronRight } from 'lucide-react'
+﻿import { useState, useEffect, useRef } from 'react'
+import { X, FolderOpen, FileSearch, ChevronRight, Sparkles } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext'
 import { useToast } from '../../context/ToastContext'
 import { formatFileSize } from '../../utils/format'
 
 /**
- * New Project Wizard — multi-step dialog for creating a new project.
+ * New Project Wizard â€” multi-step dialog for creating a new project.
  *
  * Steps:
- * 1. Project name
+ * 1. Project name + track
  * 2. Replay file selection (auto-discover .rpy or browse)
  * 3. Review & create
- *
- * @param {Object} props
- * @param {() => void} props.onClose
- * @param {(project: Object) => void} [props.onCreated]
  */
 function NewProjectWizard({ onClose, onCreated }) {
-  const { createProject, discoverReplays } = useProject()
+  const { createProject, discoverReplays, suggestReplay } = useProject()
   const { showSuccess, showError } = useToast()
 
+  const TOTAL_STEPS = 3
   const [step, setStep] = useState(1)
   const [name, setName] = useState('')
   const [replayFile, setReplayFile] = useState('')
@@ -30,19 +27,31 @@ function NewProjectWizard({ onClose, onCreated }) {
   const [discoveredFiles, setDiscoveredFiles] = useState([])
   const [discovering, setDiscovering] = useState(false)
   const [replaySearch, setReplaySearch] = useState('')
-  const hasDiscovered = useState(false)
+  const hasDiscovered = useRef(false)
 
-  // Discover replays on step 2
+  // Suggested replay from project name
+  const [suggestedReplay, setSuggestedReplay] = useState(null)
+
+  // Discover replays on step 2 + auto-suggest from project name
   useEffect(() => {
-    if (step === 2 && !hasDiscovered[0] && !discovering) {
-      setDiscovering(true)
-      hasDiscovered[0] = true
-      discoverReplays()
-        .then(files => setDiscoveredFiles(files))
-        .catch(() => setDiscoveredFiles([]))
-        .finally(() => setDiscovering(false))
-    }
-  }, [step, discovering, discoverReplays, hasDiscovered])
+    if (step !== 2 || hasDiscovered.current) return
+    hasDiscovered.current = true
+    setDiscovering(true)
+    Promise.all([
+      discoverReplays(),
+      name.trim() ? suggestReplay(name.trim()) : Promise.resolve(null),
+    ])
+      .then(([files, suggestion]) => {
+        setDiscoveredFiles(files)
+        if (suggestion) {
+          setSuggestedReplay(suggestion)
+          setReplayFile(prev => prev || suggestion.path)
+        }
+      })
+      .catch(() => setDiscoveredFiles([]))
+      .finally(() => setDiscovering(false))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step])
 
   const filteredFiles = replaySearch
     ? discoveredFiles.filter(f =>
@@ -72,7 +81,6 @@ function NewProjectWizard({ onClose, onCreated }) {
 
   const canProceed = () => {
     if (step === 1) return name.trim().length > 0
-    if (step === 2) return true // Replay is optional
     return true
   }
 
@@ -84,7 +92,7 @@ function NewProjectWizard({ onClose, onCreated }) {
           <div className="flex items-center gap-2">
             <FolderOpen className="w-5 h-5 text-accent" />
             <h3 className="text-base font-semibold text-text-primary">New Project</h3>
-            <span className="text-xxs text-text-tertiary ml-2">Step {step} of 3</span>
+            <span className="text-xxs text-text-tertiary ml-2">Step {step} of {TOTAL_STEPS}</span>
           </div>
           <button
             onClick={onClose}
@@ -112,6 +120,7 @@ function NewProjectWizard({ onClose, onCreated }) {
               discovering={discovering}
               replaySearch={replaySearch}
               setReplaySearch={setReplaySearch}
+              suggestedReplay={suggestedReplay}
             />
           )}
           {step === 3 && (
@@ -133,7 +142,7 @@ function NewProjectWizard({ onClose, onCreated }) {
             {step > 1 ? 'Back' : 'Cancel'}
           </button>
 
-          {step < 3 ? (
+          {step < TOTAL_STEPS ? (
             <button
               onClick={() => setStep(step + 1)}
               disabled={!canProceed()}
@@ -161,7 +170,7 @@ function NewProjectWizard({ onClose, onCreated }) {
   )
 }
 
-// ── Step Components ──────────────────────────────────────────────────────────
+// â”€â”€ Step Components â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function Step1_Name({ name, setName, trackName, setTrackName }) {
   return (
@@ -200,8 +209,7 @@ function Step1_Name({ name, setName, trackName, setTrackName }) {
   )
 }
 
-function Step2_Replay({ replayFile, setReplayFile, discoveredFiles, discovering, replaySearch, setReplaySearch }) {
-
+function Step2_Replay({ replayFile, setReplayFile, discoveredFiles, discovering, replaySearch, setReplaySearch, suggestedReplay }) {
   return (
     <div className="space-y-3">
       <div>
@@ -218,6 +226,32 @@ function Step2_Replay({ replayFile, setReplayFile, discoveredFiles, discovering,
                      focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent/30"
         />
       </div>
+
+      {/* Suggested match from project name */}
+      {suggestedReplay && (
+        <button
+          onClick={() => setReplayFile(suggestedReplay.path)}
+          className={`w-full text-left px-3 py-2.5 rounded-lg border text-xs transition-colors ${
+            replayFile === suggestedReplay.path
+              ? 'bg-accent/10 border-accent/30 text-accent'
+              : 'bg-success/5 border-success/20 hover:bg-success/10 text-text-secondary'
+          }`}
+        >
+          <div className="flex items-center gap-2 mb-0.5">
+            <Sparkles className="w-3.5 h-3.5 text-success shrink-0" />
+            <span className="font-medium text-text-primary">Name match</span>
+            <span className="text-xxs text-success ml-auto">
+              {Math.round((suggestedReplay.match_score || 0) * 100)}% match
+            </span>
+          </div>
+          <div className="font-medium truncate">{suggestedReplay.name}</div>
+          <div className="text-xxs text-text-tertiary mt-0.5 flex items-center gap-2">
+            <span>{formatFileSize(suggestedReplay.size_bytes)}</span>
+            <span>Â·</span>
+            <span>{new Date(suggestedReplay.modified_at).toLocaleDateString()}</span>
+          </div>
+        </button>
+      )}
 
       {/* Discovered files */}
       <div>
@@ -264,7 +298,7 @@ function Step2_Replay({ replayFile, setReplayFile, discoveredFiles, discovering,
               <div className="font-medium truncate">{file.name}</div>
               <div className="text-xxs text-text-tertiary mt-0.5 flex items-center gap-2">
                 <span>{formatFileSize(file.size_bytes)}</span>
-                <span>·</span>
+                <span>Â·</span>
                 <span>{new Date(file.modified_at).toLocaleDateString()}</span>
               </div>
             </button>
@@ -284,7 +318,7 @@ function Step3_Review({ name, replayFile, trackName }) {
 
       <div className="bg-bg-primary rounded-lg border border-border divide-y divide-border">
         <ReviewRow label="Project Name" value={name} />
-        <ReviewRow label="Track" value={trackName || '—'} />
+        <ReviewRow label="Track" value={trackName || 'â€”'} />
         <ReviewRow
           label="Replay File"
           value={replayFile ? replayFile.split(/[/\\]/).pop() : 'None selected'}

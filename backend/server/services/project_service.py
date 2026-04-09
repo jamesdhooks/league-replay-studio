@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import os
 import shutil
 import sqlite3
@@ -27,6 +28,45 @@ logger = logging.getLogger(__name__)
 
 # Valid workflow steps in order
 WORKFLOW_STEPS = ["analysis", "editing", "overlay", "capture", "export", "upload"]
+
+
+def _normalize(text: str) -> str:
+    """Lowercase and strip non-alphanumeric characters for fuzzy comparison."""
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def fuzzy_match_replay(
+    project_name: str,
+    replay_files: list[dict],
+) -> Optional[dict]:
+    """Fuzzy-match a project name against replay filenames."""
+    if not project_name or not replay_files:
+        return None
+
+    words = _normalize(project_name)
+    tokens = [w for w in re.findall(r"[a-z0-9]{2,}", project_name.lower())
+              if w not in {"the", "of", "at", "in", "on"}]
+    if not tokens:
+        return None
+
+    best: dict | None = None
+    best_score = 0.0
+
+    for f in replay_files:
+        fname = _normalize(Path(f["name"]).stem)
+        if not fname:
+            continue
+        hits = sum(1 for t in tokens if t in fname)
+        score = hits / len(tokens) if tokens else 0.0
+        if words and words in fname:
+            score = max(score, 0.95)
+        if score > best_score:
+            best_score = score
+            best = f
+
+    if best and best_score >= 0.5:
+        return {**best, "match_score": round(best_score, 2)}
+    return None
 
 # Standard project sub-directories created for every new project
 PROJECT_SUBDIRS = [

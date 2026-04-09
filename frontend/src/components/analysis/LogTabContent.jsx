@@ -1,8 +1,20 @@
-import { Loader2, CheckCircle2, XCircle, Zap } from 'lucide-react'
+import { Loader2, CheckCircle2, XCircle, Zap, Trash2 } from 'lucide-react'
 
-export default function LogTabContent({ isAnalyzing, progress, analysisLog }) {
+export default function LogTabContent({ isAnalyzing, progress, analysisLog, onClearLog }) {
   return (
     <div className="font-mono">
+      {analysisLog.length > 0 && !isAnalyzing && (
+        <div className="flex justify-end px-2 pt-1.5 pb-1 border-b border-border-subtle sticky top-0 bg-bg-secondary z-10">
+          <button
+            onClick={onClearLog}
+            className="flex items-center gap-1 px-2 py-0.5 rounded text-xxs text-text-disabled hover:text-danger hover:bg-danger/10 transition-colors"
+            title="Clear log"
+          >
+            <Trash2 size={10} />
+            Clear
+          </button>
+        </div>
+      )}
       {isAnalyzing && progress && (
         <div className="px-3 pt-2 pb-1.5 border-b border-border-subtle sticky top-0 bg-bg-secondary z-10">
           <div className="h-1 bg-bg-tertiary rounded-full overflow-hidden">

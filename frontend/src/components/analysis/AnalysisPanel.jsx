@@ -17,6 +17,7 @@ import ResizableSidebar from '../layout/ResizableSidebar'
 import PreviewPlayer from './PreviewPlayer'
 import PlaybackTimeline from './PlaybackTimeline'
 import AnalysisRightPanel from './AnalysisRightPanel'
+import AnalysisTuningColumn from './AnalysisTuningColumn'
 import TuningPanel from './TuningPanel'
 import LogTabContent from './LogTabContent'
 import EventsTabContent from './EventsTabContent'
@@ -28,7 +29,7 @@ export default memo(function AnalysisPanel() {
     analysisLog, discoveredEvents, hasTelemetry, hasEvents, analysisStatus,
     startAnalysis, startRescan, cancelAnalysis, clearAnalysis,
     fetchEvents, fetchEventSummary, fetchAnalysisStatus,
-    loadAnalysisLog, clearDiscoveredEvents,
+    loadAnalysisLog, clearDiscoveredEvents, clearLog,
   } = useAnalysis()
   const { activeProject, advanceStep } = useProject()
   const { isConnected } = useIRacing()
@@ -108,15 +109,11 @@ export default memo(function AnalysisPanel() {
 
   // Tuning parameters
   const [tuningParams, setTuningParams] = useLocalStorage('lrs:analysis:tuningParams', {
+    incident_lead_in: 2.0,
+    incident_follow_out: 8.0,
     battle_gap_threshold: 0.5,
-    crash_min_time_loss: 10.0,
-    crash_min_off_track_duration: 3.0,
-    spinout_min_time_loss: 2.0,
-    spinout_max_time_loss: 10.0,
-    contact_time_window: 2.0,
-    contact_proximity: 0.05,
-    close_call_proximity: 0.02,
-    close_call_max_off_track: 3.0,
+    close_call_proximity_pct: 0.02,
+    close_call_max_time_loss: 2.0,
   })
   const [showTuningPanel, setShowTuningPanel] = useState(false)
   const [showTuning, setShowTuning] = useState(false)
@@ -194,10 +191,16 @@ export default memo(function AnalysisPanel() {
   }, [isConnected, activeProject?.id, hasTelemetry])
 
   useEffect(() => {
-    if (!autoLoop || !focusedEvent || !replayState || isSeeking) return
+    if (!focusedEvent || !replayState || isSeeking) return
     const t = replayState.session_time
-    if (t != null && t > focusedEvent.end_time_seconds + 1.5) {
+    if (t == null) return
+    if (autoLoop && t > focusedEvent.end_time_seconds + 1.5) {
       seekToEvent(focusedEvent)
+    } else if (!autoLoop && isPlaying && t > focusedEvent.end_time_seconds + 0.5) {
+      // Stop playback at the end of the focused event when not looping
+      apiPost('/iracing/replay/speed', { speed: 0 })
+        .then(() => { setIsPlaying(false); setReplaySpeed(0) })
+        .catch(() => {})
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [replayState])
@@ -592,6 +595,7 @@ export default memo(function AnalysisPanel() {
                   isAnalyzing={isAnalyzing}
                   progress={progress}
                   analysisLog={analysisLog}
+                  onClearLog={clearLog}
                 />
               ),
             },
@@ -602,8 +606,6 @@ export default memo(function AnalysisPanel() {
               count: isAnalyzing ? null : (eventSummary?.total_events || events.length || 0),
               content: (
                 <EventsTabContent
-                  showTuning={showTuning}
-                  setShowTuning={setShowTuning}
                   isAnalyzing={isAnalyzing}
                   isScanning={isScanning}
                   isRedetecting={isRedetecting}
@@ -617,14 +619,11 @@ export default memo(function AnalysisPanel() {
                   raceStart={raceStart}
                   isSeeking={isSeeking}
                   overrides={overrides}
-                  tuningParams={tuningParams}
                   handleFilterChange={handleFilterChange}
-                  handleReanalyze={handleReanalyze}
                   cycleSort={cycleSort}
                   seekToEvent={seekToEvent}
                   setExpandedEvent={setExpandedEvent}
                   toggleOverride={toggleOverride}
-                  updateTuning={updateTuning}
                   eventsEndRef={eventsEndRef}
                 />
               ),
@@ -636,6 +635,28 @@ export default memo(function AnalysisPanel() {
               content: <ProjectFileBrowser projectId={activeProject.id} />,
             },
           ]}
+        />
+
+        {/* Analysis tuning column (resizable, collapsible) */}
+        <AnalysisTuningColumn
+          tuningParams={tuningParams}
+          updateTuning={updateTuning}
+          isAnalyzing={isAnalyzing}
+          isScanning={isScanning}
+          progress={progress}
+          error={error}
+          hasTelemetry={hasTelemetry}
+          hasEventsLocal={hasEventsLocal}
+          eventSummary={eventSummary}
+          analysisStatus={analysisStatus}
+          isConnected={isConnected}
+          isRedetecting={isRedetecting}
+          handleCancel={handleCancel}
+          handleRescan={handleRescan}
+          handleReanalyze={handleReanalyze}
+          handleClear={handleClear}
+          advanceStep={advanceStep}
+          activeProjectId={activeProject.id}
         />
 
         {/* Center + right column */}
@@ -712,221 +733,20 @@ export default memo(function AnalysisPanel() {
             />
           </div>
 
-          {/* Right panel: Analysis / Cameras / Drivers */}
+          {/* Right panel: Cameras / Drivers */}
           <AnalysisRightPanel
-            isAnalyzing={isAnalyzing}
-            isScanning={isScanning}
-            progress={progress}
-            error={error}
-            hasTelemetry={hasTelemetry}
-            hasEventsLocal={hasEventsLocal}
-            eventSummary={eventSummary}
-            analysisStatus={analysisStatus}
             isConnected={isConnected}
-            isRedetecting={isRedetecting}
             replayState={replayState}
             cameraGroups={cameraGroups}
             drivers={drivers}
             rightPanelWidth={rightPanelWidth}
             setRightPanelWidth={setRightPanelWidth}
             isPortrait={isPortrait}
-            handleCancel={handleCancel}
-            handleRescan={handleRescan}
-            handleReanalyze={handleReanalyze}
-            handleClear={handleClear}
             handleSwitchCamera={handleSwitchCamera}
             handleSwitchDriver={handleSwitchDriver}
-            advanceStep={advanceStep}
-            activeProjectId={activeProject.id}
           />
         </div>
       </div>
     </div>
   )
 })
-                  style={{ width: `${Math.max(0, Math.min(100, ((progress.percent ?? 85) - 85) / 12 * 100))}%` }}
-                />
-              </div>
-              {progress.message && (
-                <span className="text-xxs text-text-disabled mt-1.5 block text-center truncate">
-                  {progress.message}
-                </span>
-              )}
-            </div>
-          )}
-        </div>
-      ) : (
-        <div className="flex-1 overflow-y-auto">
-          {/* Filter chips */}
-          {eventSummary && eventSummary.total_events > 0 && (
-            <div className="px-3 py-2 border-b border-border-subtle flex flex-wrap gap-1">
-              {eventSummary.by_type.map(({ event_type, count }) => {
-                const cfg = EVENT_CONFIG[event_type] || {}
-                const Icon = cfg.icon || BarChart3
-                const isActive = activeFilter === event_type
-                return (
-                  <Tooltip
-                    key={event_type}
-                    content={`${cfg.label || event_type}: ${count} event${count !== 1 ? 's' : ''} — click to ${isActive ? 'show all' : 'filter'}`}
-                    position="bottom"
-                    delay={200}
-                  >
-                    <button
-                      onClick={() => handleFilterChange(event_type)}
-                      className={`flex items-center gap-1 px-1.5 py-0.5 text-xxs rounded
-                                 transition-colors border
-                                 ${isActive
-                                   ? 'border-accent bg-accent/10 text-accent'
-                                   : 'border-border text-text-tertiary hover:text-text-secondary'
-                                 }`}
-                    >
-                      <Icon size={9} className={cfg.color} />
-                      <span>{count}</span>
-                    </button>
-                  </Tooltip>
-                )
-              })}
-            </div>
-          )}
-
-          {/* Sortable table header */}
-          <div className="sticky top-0 z-10 grid grid-cols-[minmax(0,auto)_1fr_auto_auto] border-b border-border bg-bg-secondary">
-            {[
-              { key: 'type',     label: 'Type' },
-              { key: 'driver',   label: 'Driver(s)' },
-              { key: 'time',     label: 'Time' },
-              { key: 'severity', label: 'Score' },
-            ].map(({ key, label }) => (
-              <button key={key} onClick={() => cycleSort(key)}
-                className="flex items-center gap-0.5 px-2 py-1.5 text-xxs font-semibold
-                           text-text-secondary hover:text-text-primary hover:bg-bg-hover
-                           transition-colors text-left whitespace-nowrap">
-                {label}
-                {eventSort.col === key
-                  ? eventSort.dir === 'asc'
-                    ? <ChevronUp size={9} className="text-accent shrink-0 ml-0.5" />
-                    : <ChevronDown size={9} className="text-accent shrink-0 ml-0.5" />
-                  : null}
-              </button>
-            ))}
-          </div>
-
-          {/* Event rows */}
-          {(() => {
-            const sorted = [...events].sort((a, b) => {
-              const dir = eventSort.dir === 'asc' ? 1 : -1
-              switch (eventSort.col) {
-                case 'type':     return dir * ((a.event_type || '').localeCompare(b.event_type || ''))
-                case 'driver':   return dir * ((a.driver_names?.[0] || '').localeCompare(b.driver_names?.[0] || ''))
-                case 'time':     return dir * ((a.start_time_seconds || 0) - (b.start_time_seconds || 0))
-                case 'severity': return dir * ((a.severity || 0) - (b.severity || 0))
-                default: return 0
-              }
-            })
-            return sorted.map((ev) => {
-              const type = ev.event_type
-              const cfg = EVENT_CONFIG[type] || {}
-              const Icon = cfg.icon || BarChart3
-              const startSec = ev.start_time_seconds
-              const sev = ev.severity
-              const eventId = ev.id
-              const isExpanded = expandedEvent === `sidebar-${eventId}`
-              const driverNames = ev.driver_names || []
-              const override = overrides[String(eventId)] || null
-              return (
-                <div key={`e-${eventId}`}
-                     className="border-b border-border-subtle/30 animate-slide-right">
-                  <div
-                    className={`grid grid-cols-[auto_minmax(0,auto)_1fr_auto_auto_auto]
-                               hover:bg-bg-hover transition-colors
-                               ${isSeeking ? 'cursor-wait opacity-60 pointer-events-none' : 'cursor-pointer'}
-                               ${focusedEvent?.id === ev.id ? 'bg-accent/10 border-l-2 border-accent' : ''}`}
-                    onClick={() => seekToEvent(ev)}
-                  >
-                    {/* Override toggle */}
-                    <div className="flex items-center px-1 py-1.5">
-                      <button
-                        onClick={(e) => { e.stopPropagation(); toggleOverride(eventId) }}
-                        className={`w-4 h-4 rounded border flex items-center justify-center transition-colors
-                          ${override === 'highlight'
-                            ? 'bg-success border-success text-white'
-                            : override === 'full-video'
-                              ? 'bg-info border-info text-white'
-                              : override === 'exclude'
-                                ? 'bg-danger border-danger text-white'
-                                : 'border-border-subtle text-text-disabled hover:border-text-tertiary'
-                          }`}
-                        title={
-                          override === 'highlight' ? 'Force highlight (click for full-video)'
-                          : override === 'full-video' ? 'Force full-video (click to exclude)'
-                          : override === 'exclude' ? 'Force excluded (click for auto)'
-                          : 'Auto (click to force highlight)'
-                        }
-                      >
-                        {override === 'highlight' && <Check className="w-2.5 h-2.5" />}
-                        {override === 'full-video' && <Film className="w-2.5 h-2.5" />}
-                        {override === 'exclude' && <X className="w-2.5 h-2.5" />}
-                        {!override && <Minus className="w-2.5 h-2.5 opacity-30" />}
-                      </button>
-                    </div>
-                    {/* Type */}
-                    <div className="flex items-center gap-1.5 px-2 py-1.5 min-w-0">
-                      <Icon size={11} className={`${cfg.color || 'text-text-tertiary'} shrink-0`} />
-                      <span className="text-xxs text-text-primary truncate">{cfg.label || type}</span>
-                    </div>
-                    {/* Driver(s) */}
-                    <div className="flex items-center px-2 py-1.5 min-w-0">
-                      <span className="text-xxs text-text-secondary truncate">
-                        {driverNames.length > 0 ? driverNames.join(', ') : '—'}
-                      </span>
-                    </div>
-                    {/* Time */}
-                    <div className="flex items-center px-2 py-1.5">
-                      <span className="text-xxs text-text-disabled font-mono whitespace-nowrap">{formatTime(Math.max(0, startSec - raceStart))}</span>
-                    </div>
-                    {/* Score badge */}
-                    <div className="flex items-center gap-0.5 px-2 py-1.5">
-                      <span
-                        className="w-5 h-5 rounded flex items-center justify-center text-xxs font-bold text-white"
-                        style={{ backgroundColor: scoreColor(sev) }}
-                        title={`Score: ${sev}`}
-                      >
-                        {sev}
-                      </span>
-                    </div>
-                    {/* Expand */}
-                    <div className="flex items-center px-1 py-1.5">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setExpandedEvent(prev => prev === `sidebar-${eventId}` ? null : `sidebar-${eventId}`)
-                        }}
-                        className="w-4 h-4 flex items-center justify-center rounded hover:bg-surface-active
-                                   text-text-disabled hover:text-text-secondary transition-colors shrink-0"
-                      >
-                        <ChevronDown size={10}
-                          className={`transition-transform duration-150 ${isExpanded ? 'rotate-180' : ''}`} />
-                      </button>
-                    </div>
-                  </div>
-                  {isExpanded && (
-                    <div className="px-3 pt-2 pb-2 bg-bg-secondary/50 border-t border-border-subtle animate-fade-in">
-                      <EventDetail event={ev} />
-                    </div>
-                  )}
-                </div>
-              )
-            })
-          })()}
-
-          {events.length === 0 && (
-            <div className="flex items-center justify-center py-8 text-text-disabled text-xs">
-              No events detected
-            </div>
-          )}
-          <div ref={eventsEndRef} />
-        </div>
-      )}
-    </div>
-  )
-}

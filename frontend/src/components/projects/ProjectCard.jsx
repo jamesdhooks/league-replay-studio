@@ -161,8 +161,12 @@ function ProjectCard({ project, viewMode = 'grid', onOpen, onDuplicate, onDelete
  */
 function ContextMenu({ onDuplicate, onDelete }) {
   return (
-    <div className="absolute right-0 top-full mt-1 z-20 w-40 bg-bg-tertiary border border-border
-                    rounded-lg shadow-xl py-1 animate-fade-in">
+    <div
+      className="absolute right-0 top-full mt-1 z-20 w-40 bg-bg-tertiary border border-border
+                    rounded-lg shadow-xl py-1 animate-fade-in"
+      onClick={e => e.stopPropagation()}
+      onMouseDown={e => e.stopPropagation()}
+    >
       <button
         onClick={onDuplicate}
         className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-text-secondary

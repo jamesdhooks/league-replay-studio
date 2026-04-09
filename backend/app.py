@@ -55,6 +55,7 @@ from server.routes.api_youtube import router as youtube_router
 from server.routes.api_pipeline import router as pipeline_router
 from server.routes.api_wizard import router as wizard_router
 from server.routes.api_llm import router as llm_router
+from server.routes.api_collection import router as collection_router
 
 # Services
 from server.services.iracing_bridge import bridge as iracing_bridge
@@ -227,6 +228,7 @@ app.include_router(youtube_router)
 app.include_router(pipeline_router)
 app.include_router(wizard_router)
 app.include_router(llm_router)
+app.include_router(collection_router)
 
 
 # ── WebSocket endpoint ──────────────────────────────────────────────────────
@@ -453,7 +455,7 @@ def _apply_app_user_model_id() -> None:
 
 # ── Server runner ────────────────────────────────────────────────────────────
 
-def start_server(port: int = 7175, reload_enabled: bool = False) -> None:
+def start_server(port: int = 6176, reload_enabled: bool = False) -> None:
     """Start the FastAPI server with uvicorn."""
     import uvicorn
     logger.info("[App] Starting FastAPI on http://127.0.0.1:%d (reload=%s)", port, reload_enabled)
@@ -479,7 +481,7 @@ def start_server(port: int = 7175, reload_enabled: bool = False) -> None:
 
 def main() -> None:
     """Launch the application — pywebview window or browser."""
-    port = int(os.environ.get("LRS_PORT", "7175"))
+    port = int(os.environ.get("LRS_PORT", "6176"))
     argv = sys.argv[1:]
     web_only = (os.environ.get("WEB_ONLY", "0") == "1") or ("--web" in argv)
     reload_requested = (os.environ.get("LRS_RELOAD", "0") == "1") or ("--reload" in argv)

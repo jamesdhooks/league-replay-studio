@@ -1,62 +1,24 @@
 import {
   BarChart3, Loader2, ChevronDown, ChevronUp,
-  SlidersHorizontal, Minus, Check, Film, X,
+  Minus, Check, Film, X,
 } from 'lucide-react'
 import Tooltip from '../ui/Tooltip'
 import EventDetail from './EventDetail'
-import TuningPanel from './TuningPanel'
 import { EVENT_CONFIG, formatTime, scoreColor } from './analysisConstants'
 
 export default function EventsTabContent({
-  showTuning, setShowTuning,
   isAnalyzing, isScanning, isRedetecting, progress,
   events, eventSummary, eventSort, activeFilter,
   expandedEvent, focusedEvent, raceStart, isSeeking,
-  overrides, tuningParams,
-  handleFilterChange, handleReanalyze, cycleSort, seekToEvent,
-  setExpandedEvent, toggleOverride, updateTuning,
+  overrides,
+  handleFilterChange, cycleSort, seekToEvent,
+  setExpandedEvent, toggleOverride,
   eventsEndRef,
 }) {
   return (
     <div className="flex flex-col h-full">
-      {/* Sub-navigation: Events list ↔ Tuning */}
-      <div className="shrink-0 flex items-center gap-1 px-3 py-1.5 border-b border-border-subtle bg-bg-secondary/50">
-        <button
-          onClick={() => setShowTuning(false)}
-          className={`px-2 py-0.5 text-xxs rounded transition-colors
-            ${!showTuning ? 'bg-accent/15 text-accent' : 'text-text-disabled hover:text-text-secondary'}`}
-        >
-          Events
-        </button>
-        <button
-          onClick={() => setShowTuning(true)}
-          className={`flex items-center gap-1 px-2 py-0.5 text-xxs rounded transition-colors
-            ${showTuning ? 'bg-accent/15 text-accent' : 'text-text-disabled hover:text-text-secondary'}`}
-        >
-          <SlidersHorizontal size={9} />
-          Detection
-        </button>
-        {showTuning && (
-          <button
-            onClick={handleReanalyze}
-            disabled={isRedetecting}
-            className="ml-auto flex items-center gap-1 px-2 py-0.5 text-xxs font-medium
-                       text-white bg-gradient-to-r from-gradient-from to-gradient-to
-                       rounded transition-all duration-150 shadow-glow-sm disabled:opacity-50"
-          >
-            {isRedetecting
-              ? <Loader2 size={9} className="animate-spin" />
-              : <SlidersHorizontal size={9} />}
-            {isRedetecting ? 'Running…' : 'Re-analyze'}
-          </button>
-        )}
-      </div>
 
-      {showTuning ? (
-        <div className="flex-1 overflow-y-auto px-3 py-2 space-y-3">
-          <TuningPanel params={tuningParams} onChange={updateTuning} />
-        </div>
-      ) : isAnalyzing ? (
+      {isAnalyzing ? (
         <div className="flex-1 flex flex-col items-center justify-center gap-3 px-4 py-10">
           <Loader2 size={22} className="animate-spin text-text-disabled" />
           <span className="text-xs text-text-disabled text-center">

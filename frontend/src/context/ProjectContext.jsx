@@ -135,6 +135,13 @@ export function ProjectProvider({ children }) {
     return await apiGet(`/replays/discover${qs}`)
   }, [])
 
+  const suggestReplay = useCallback(async (name, directory = '') => {
+    if (!name?.trim()) return null
+    const qs = new URLSearchParams({ name })
+    if (directory) qs.set('directory', directory)
+    const result = await apiGet(`/replays/suggest?${qs}`)
+    return result?.suggestion || null
+  }, [])
   const value = useMemo(() => ({
     projects,
     activeProject,
@@ -151,12 +158,13 @@ export function ProjectProvider({ children }) {
     advanceStep,
     getProjectFiles,
     discoverReplays,
+    suggestReplay,
   }), [
     projects, activeProject, loading,
     fetchProjects, createProject, openProject, closeProject,
     updateProject, deleteProject, duplicateProject,
     getStepStatus, setStep, advanceStep,
-    getProjectFiles, discoverReplays,
+    getProjectFiles, discoverReplays, suggestReplay,
   ])
 
   return (

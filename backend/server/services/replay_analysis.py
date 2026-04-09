@@ -78,6 +78,7 @@ class TelemetryWriter:
         self._total_ticks = 0
         self._last_laps: dict[int, int] = {}  # car_idx → last known lap
         self._prev_lap_pct: dict[int, tuple[float, float]] = {}  # car_idx → (lap_pct, session_time)
+        self._prev_incident_counts: dict[int, int] = {}  # car_idx → last known incident count
 
     @property
     def total_ticks(self) -> int:
@@ -152,6 +153,36 @@ class TelemetryWriter:
                     car.get("position", 0),
                 ))
             self._last_laps[car_idx] = cur_lap
+
+        # ── Incident count deltas → incident_log ─────────────────────────
+        # CarIdxIncidentCount IS updated per-frame during replay, unlike
+        # ResultsPositions.Incidents which shows the final total from the start.
+        incident_counts = data.get("incident_counts", [])
+        # Debug: log the raw array on the first tick so we can confirm what iRacing returns
+        if self._total_ticks == 1:
+            logger.debug("[Analysis][IncidentCounts] First tick raw CarIdxIncidentCount: %s", incident_counts)
+            logger.info("[Analysis][IncidentCounts] First tick — %d cars, max count=%s",
+                        len(incident_counts), max(incident_counts) if incident_counts else "N/A")
+        lap_for_car = {cs.get("car_idx"): cs.get("lap", 0) for cs in data.get("car_states", [])}
+        for car_idx, count in enumerate(incident_counts):
+            if count is None:
+                continue
+            prev = self._prev_incident_counts.get(car_idx)
+            if prev is None:
+                # First observation — set baseline of 0 so any future increment is caught
+                self._prev_incident_counts[car_idx] = 0
+                prev = 0
+            delta = count - prev
+            if delta > 0:
+                self._conn.execute(
+                    "INSERT INTO incident_log "
+                    "(car_idx, session_time, lap, description, incident_points, session_num, user_name) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (car_idx, data.get("session_time", 0.0),
+                     lap_for_car.get(car_idx, 0),
+                     f"+{delta}x", delta, 0, ""),
+                )
+            self._prev_incident_counts[car_idx] = count
 
         if len(self._tick_batch) >= BATCH_SIZE:
             self.flush()
@@ -340,6 +371,10 @@ class ReplayAnalyzer:
                 self._finish_run(conn, run_id, "scan_cancelled", total_ticks, 0, scan_duration)
                 return {"status": "cancelled"}
 
+            # iRacing API incident pre-pass (same pass as in full analyze())
+            if iracing_bridge.is_connected:
+                await self._scan_incidents_prepass(conn)
+
             self._finish_run(conn, run_id, "scan_complete", total_ticks, 0, scan_duration)
 
             self.on_progress("completed", {
@@ -352,8 +387,10 @@ class ReplayAnalyzer:
                 "detail": "Ready for event detection. Adjust tuning parameters and click Re-analyze.",
             })
 
+            incident_rows = conn.execute("SELECT COUNT(*) FROM incident_log").fetchone()[0]
             logger.info(
-                "[Analysis] Scan-only complete: %d ticks in %.1fs", total_ticks, scan_duration,
+                "[Analysis] Scan-only complete: %d ticks in %.1fs, %d incident_log rows",
+                total_ticks, scan_duration, incident_rows,
             )
 
             return {
@@ -417,6 +454,14 @@ class ReplayAnalyzer:
             if self._cancelled:
                 self._finish_run(conn, run_id, "cancelled", total_ticks, 0, scan_duration)
                 return {"status": "cancelled"}
+
+            # Pass 0.5: iRacing API incident pre-pass.
+            # Runs after Pass 1 because it needs race_start_frame from analysis_meta.
+            # Uses iRacing's own MoveToNextIncident command — the most accurate way
+            # to find incidents in a replay.  Populates incidents_api table so the
+            # IncidentDetector can use ground-truth frames instead of heuristics.
+            if iracing_bridge.is_connected:
+                await self._scan_incidents_prepass(conn)
 
             # Pass 2: Detect events (run in a thread pool — CPU-bound; must not block the event loop)
             num_detectors = len(ALL_DETECTORS)
@@ -680,45 +725,13 @@ class ReplayAnalyzer:
             fingerprint["track_name"], fingerprint["subsession_id"], fingerprint["driver_count"],
         )
 
-        # ── Persist SessionLog incidents (ground-truth for IncidentLogDetector) ──
-        # Filter to only the race session so the incident_log table contains
-        # exclusively race incidents (avoids session_time collisions with
-        # practice / qualifying events that share the 0–N seconds range).
+        # ── Incident detection note ──────────────────────────────────────────
+        # iRacing's SessionLog.Messages is only populated during live sessions,
+        # NOT in replay mode.  ResultsPositions.Incidents shows the race-end
+        # total immediately and never increments as we scrub forward.
+        # Instead, we watch CarIdxIncidentCount per-frame inside write_tick():
+        # each time a car's count rises, a row is inserted into incident_log.
         race_session_num = session_data.get("race_session_num")
-        raw_incidents = session_data.get("incident_log", [])
-        incident_rows = []
-        for m in raw_incidents:
-            if race_session_num is not None and m.get("SessionNum") != race_session_num:
-                continue
-            car_idx = m.get("CarIdx")
-            if car_idx is None:
-                continue
-            incident_rows.append((
-                int(car_idx),
-                float(m.get("SessionTime", 0)),
-                int(m.get("Lap", 0)),
-                str(m.get("Description", "")),
-                int(m.get("Incident", 0)),
-                int(m.get("SessionNum", 0)),
-                str(m.get("UserName", "")),
-            ))
-        if incident_rows:
-            conn.executemany(
-                "INSERT INTO incident_log "
-                "(car_idx, session_time, lap, description, incident_points, session_num, user_name) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                incident_rows,
-            )
-            conn.commit()
-            logger.info(
-                "[Analysis] Stored %d incident_log entries (race session #%s)",
-                len(incident_rows), race_session_num,
-            )
-        else:
-            logger.info(
-                "[Analysis] No incident_log entries to store "
-                "(SessionLog empty or no race session match)"
-            )
 
         if all_sessions:
             session_names = ", ".join(
@@ -1019,6 +1032,7 @@ class ReplayAnalyzer:
         last_session_time = 0.0
         first_session_time = race_start_session_time
         last_lap_num = 0
+        estimated_race_duration = 3600.0  # conservative fallback; refined once lap data is available
 
         self.on_progress("step_completed", {
             "project_id": self.project_id,
@@ -1043,6 +1057,8 @@ class ReplayAnalyzer:
 
             session_state = snapshot.get("session_state", 0)
             session_time = snapshot.get("session_time", 0.0)
+
+            # CarIdxIncidentCount deltas are detected inside writer.write_tick().
 
             # Track progress
             if session_time > last_session_time:
@@ -1209,6 +1225,195 @@ class ReplayAnalyzer:
         writer.flush()
         return writer.total_ticks
 
+    async def _scan_incidents_prepass(self, conn: sqlite3.Connection) -> int:
+        """Pass 0.5 — iRacing API incident pre-pass.
+
+        After the main telemetry scan, pauses the replay at the race start frame
+        and navigates sequentially through every incident iRacing has logged using
+        ``replay_search(RpySrchMode.next_incident = 9)`` — the same mechanism as
+        iRacingReplayDirector's ``MoveToNextIncident``.
+
+        At each settled frame records (frame, session_time, cam_car_idx, race_laps)
+        into ``incidents_api``.  The IncidentDetector switches to reading from this
+        table instead of surface-transition heuristics when it is non-empty.
+
+        Filtering (mirrors iRacingReplayDirector ``Incidents.Process``):
+          - Pace car (CamCarIdx == 0 → iRacing signals "no more incidents")
+          - Pit stall / approaching pits / not-in-world surface
+          - Same car within 15 seconds (dedup)
+
+        Returns the number of incidents recorded.
+        """
+        if not iracing_bridge.is_connected:
+            logger.info("[Analysis][Prepass] iRacing not connected — skipping incident pre-pass")
+            return 0
+
+        # ── Constants (mirrored from iRacingReplayDirector) ──────────────────
+        SETTLE_COUNT   = 8      # consecutive identical frames → "paused at incident"
+        SETTLE_INTERVAL = 0.08  # seconds between settle polls
+        SETTLE_TIMEOUT  = 12.0  # max seconds to wait per incident
+        DEDUP_SECONDS   = 15.0  # min inter-incident gap per car (same car merging)
+        MAX_INCIDENTS   = 600   # hard cap
+        SURFACE_IN_PIT        = 1
+        SURFACE_APPROACHING   = 2
+        SURFACE_NOT_IN_WORLD  = -1
+
+        self.on_progress("step_completed", {
+            "project_id": self.project_id,
+            "stage": "analysis_scan",
+            "description": "Running iRacing incident API scan...",
+            "detail": (
+                "Pausing replay and navigating each incident via iRacing's built-in "
+                "incident log (more accurate than surface-transition heuristics)"
+            ),
+            "progress_percent": 51,
+        })
+
+        # Read race_start_frame written by _scan_telemetry
+        row = conn.execute(
+            "SELECT value FROM analysis_meta WHERE key = 'race_start_frame'"
+        ).fetchone()
+        race_start_frame = int(row["value"]) if row else 0
+        logger.info("[Analysis][Prepass] Race start frame: %d", race_start_frame)
+
+        # ── Pause and seek to race start ─────────────────────────────────────
+        iracing_bridge.set_replay_speed(0)
+        await asyncio.sleep(0.4)
+
+        iracing_bridge.seek_to_frame(race_start_frame)
+        for _ in range(60):  # up to 6 s for seek to land
+            await asyncio.sleep(0.1)
+            f = iracing_bridge.get_replay_frame()
+            if f >= 0 and abs(f - race_start_frame) <= 300:
+                break
+        await asyncio.sleep(0.3)
+
+        # ── Main loop ─────────────────────────────────────────────────────────
+        incidents_found     = 0
+        last_incident_frame = race_start_frame
+        last_time_per_car: dict[int, float] = {}
+
+        for attempt in range(MAX_INCIDENTS):
+            if self._cancelled:
+                break
+
+            # Send next_incident command (RpySrchMode.next_incident = 9)
+            iracing_bridge.replay_search(9)
+
+            # Poll until ReplayFrameNum stops changing (= iRacing paused on incident)
+            consecutive = 0
+            last_seen   = -1
+            settled_at  = -1
+            deadline    = time.monotonic() + SETTLE_TIMEOUT
+
+            while time.monotonic() < deadline:
+                await asyncio.sleep(SETTLE_INTERVAL)
+                cur = iracing_bridge.get_replay_frame()
+                if cur == last_seen:
+                    consecutive += 1
+                    if consecutive >= SETTLE_COUNT:
+                        settled_at = cur
+                        break
+                else:
+                    consecutive = 0
+                    last_seen   = cur
+
+            if settled_at < 0:
+                logger.warning(
+                    "[Analysis][Prepass] Settle timeout at attempt %d — stopping", attempt
+                )
+                break
+
+            # Frame didn't advance → no more incidents
+            if settled_at <= last_incident_frame:
+                logger.info(
+                    "[Analysis][Prepass] Frame stable (settled=%d last=%d) — exhausted",
+                    settled_at, last_incident_frame,
+                )
+                break
+
+            # Read telemetry at the settled frame
+            snapshot = self._capture_snapshot()
+            if not snapshot:
+                logger.debug("[Analysis][Prepass] No snapshot at attempt %d", attempt)
+                last_incident_frame = settled_at
+                continue
+
+            cam_car_idx  = snapshot.get("cam_car_idx", 0)
+            session_time = snapshot.get("session_time", 0.0)
+            race_laps    = snapshot.get("race_laps", 0)
+
+            # Pace car (idx 0) → iRacing has run out of incidents
+            if cam_car_idx == 0:
+                logger.info("[Analysis][Prepass] CamCarIdx=0 (pace car) — incidents exhausted")
+                break
+
+            # Filter: pit stall / approaching pits / not-in-world
+            cam_surface: int | None = None
+            for cs in snapshot.get("car_states", []):
+                if cs.get("car_idx") == cam_car_idx:
+                    cam_surface = cs.get("surface")
+                    break
+
+            if cam_surface in (SURFACE_IN_PIT, SURFACE_APPROACHING, SURFACE_NOT_IN_WORLD):
+                logger.debug(
+                    "[Analysis][Prepass] Skip pit/OOW: car=%d surface=%s t=%.1fs",
+                    cam_car_idx, cam_surface, session_time,
+                )
+                last_incident_frame = settled_at
+                continue
+
+            # Dedup: same car within 15 s
+            prev_t = last_time_per_car.get(cam_car_idx, -999.0)
+            if session_time - prev_t < DEDUP_SECONDS:
+                logger.debug(
+                    "[Analysis][Prepass] Dedup car=%d gap=%.1fs", cam_car_idx, session_time - prev_t,
+                )
+                last_incident_frame = settled_at
+                continue
+
+            # Write to incidents_api
+            user_name = self._driver_map.get(cam_car_idx, f"car_{cam_car_idx}")
+            conn.execute(
+                "INSERT INTO incidents_api (frame, session_time, car_idx, lap, user_name) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (settled_at, session_time, cam_car_idx, race_laps, user_name),
+            )
+            conn.commit()
+
+            incidents_found             += 1
+            last_incident_frame          = settled_at
+            last_time_per_car[cam_car_idx] = session_time
+
+            logger.info(
+                "[Analysis][Prepass] #%d  frame=%d  t=%.1fs  car=%d (%s)  lap=%d",
+                incidents_found, settled_at, session_time, cam_car_idx, user_name, race_laps,
+            )
+
+            if incidents_found % 5 == 0 or incidents_found == 1:
+                self.on_progress("step_completed", {
+                    "project_id": self.project_id,
+                    "stage": "analysis_scan",
+                    "description": f"Incident API scan: {incidents_found} found...",
+                    "detail": f"Latest: {user_name} — lap {race_laps}, {_format_time(session_time)}",
+                    "progress_percent": 51,
+                })
+
+        self.on_progress("step_completed", {
+            "project_id": self.project_id,
+            "stage": "analysis_scan",
+            "description": f"Incident API scan complete — {incidents_found} incidents",
+            "detail": (
+                f"{incidents_found} incidents recorded from iRacing's own incident log."
+                if incidents_found > 0 else
+                "No incidents via iRacing API — surface-transition fallback will be used."
+            ),
+            "progress_percent": 53,
+        })
+
+        logger.info("[Analysis][Prepass] Complete: %d incidents recorded", incidents_found)
+        return incidents_found
+
     def _run_detect_in_thread(self) -> int:
         """Thread-pool entry: open a fresh DB connection and run event detection.
 
@@ -1260,6 +1465,7 @@ class ReplayAnalyzer:
             "SpinoutDetector": ("Spinouts", "Detecting brief off-track moments with moderate time loss"),
             "ContactDetector": ("Contacts", "Identifying multi-car off-track incidents at same location"),
             "CloseCallDetector": ("Close Calls", "Finding near-misses with proximity and brief off-track"),
+            "IncidentLogDetector": ("Incidents (SessionLog)", "Classifying incidents from iRacing incident data"),
         }
 
         # Get avg_lap_time from session data or estimate from telemetry

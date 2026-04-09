@@ -239,9 +239,13 @@ Tailwind CSS dark-first design system — color tokens, typography scale, spacin
 
 Core race event detection: incidents, battles, overtakes, pit stops, fastest laps, leader changes, first/last laps, crashes, spinouts, contacts, close calls, pace laps. Auto-generated severity scores (0–10), frame-accurate timestamps. Scans replay at 16× speed. Streams results to frontend via WebSocket and persists to SQLite.
 
-**v2 Enhancement (highlight_plan_v2):** Extended telemetry capture (speed_ms, f2_time, last_lap_time, steer_angle, parsed flag bits). BattleDetector extended with N-car chain detection via union-find graph. Speed-based severity for IncidentDetector and CrashDetector. 14 total detectors.
+**v2 Enhancement (highlight_plan_v2):** Extended telemetry capture (speed_ms, f2_time, last_lap_time, steer_angle, parsed flag bits). BattleDetector extended with N-car chain detection via union-find graph. Speed-based severity for IncidentDetector. 14 total detectors.
 
 **v3 Enhancement — Two-Phase Split:** Analysis is now explicitly split into two independently-triggerable phases. Phase ① (Telemetry Collection) scans at 16× speed and requires iRacing; Phase ② (Event Detection) re-runs all detectors from cached SQLite with no iRacing needed. Detection thresholds are user-tunable per project and persisted to `analysis_meta`. Control bar exposes "Re-collect Telemetry" and "Re-analyze" buttons with phase status badges and an inline collapsible tuning panel.
+
+**v4 — Incident Detection Rewrite:** `CrashDetector`, `SpinoutDetector`, and `ContactDetector` removed (355 lines). `IncidentDetector` rewritten with two-path routing: (1) **iRacing API pre-pass** — a Phase ①b step that calls `replay_search(RpySrchMode.next_incident = 9)` (MoveToNextIncident) to walk iRacing's built-in incident log, storing results in a new `incidents_api` table; (2) **surface-transition fallback** — `CarIdxTrackSurface` ON→OFF SQL query used when `incidents_api` is empty (re-detect without iRacing). `IncidentLogDetector` added to read iRacing's `SessionInfo` YAML `SessionLog` section, emitting typed events (`car_contact`, `contact`, `lost_control`, `off_track`, `turn_cutting`). All incident events store `incident_time` anchor in metadata for post-detection clip window resizing in the Event Inspector.
+
+**v5 — Collect Tab & Live Telemetry Explorer:** A dedicated **Collect** step tab added to the app shell. Features: `CollectionControl` for start/stop recording of live iRacing variables; `DataStreamViz` — a canvas-based particle animation showing 5 colour-coded variable categories (Motion, Engine, Lap, Tyres, Session) with labeled particles, oscilloscope lanes, and HUD; `TelemetryExplorer` for reviewing recorded `.parquet`/JSON variable files.
 
 **Acceptance Criteria**
 - [x] Analysis connects to iRacing and scans the replay at 16× speed
@@ -264,7 +268,7 @@ Core race event detection: incidents, battles, overtakes, pit stops, fastest lap
 - [x] "Re-collect Telemetry" button in control bar re-runs Phase ① (requires iRacing connection)
 - [x] "Re-analyze" button in control bar re-runs Phase ② instantly from cached telemetry (no iRacing needed)
 - [x] Phase status badges (① Telemetry, ② Analysis) show done/active/pending states in control bar
-- [x] All 9 detection thresholds are tunable per project (battle gap, crash/spinout time loss, contact window, etc.)
+- [x] All 6 detection thresholds are tunable per project: `incident_lead_in`, `incident_follow_out`, `incident_dedup_seconds`, `battle_gap_threshold`, `close_call_proximity_pct`, `close_call_max_time_loss`
 - [x] Tuning parameters are persisted to `analysis_meta` SQLite table and loaded on project open
 - [x] Inline "Tuning ▾" panel in control bar exposes all tuning controls without leaving the analysis step
 - [x] `GET/PUT /api/projects/{id}/analysis/tuning` endpoints support read/write of saved tuning params

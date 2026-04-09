@@ -744,30 +744,48 @@ This is the same mechanism the legacy `CameraControl.cs` used — it calls `iRac
 
 #### 4.3.5 Incident Detection: How iRacing Signals Incidents
 
-iRacing does **not** provide a direct "incident occurred" flag in the telemetry variables. Instead, when iRacing's auto-director detects an incident, it **switches the directed camera** to the incident car. The legacy app exploits this:
+iRacing exposes its own **built-in incident log** through the replay control API. The primary detection method is `replay_search(RpySrchMode.next_incident)` (mode 9 = `MoveToNextIncident`), which causes iRacing to jump the replay playhead to the next logged incident frame. This is the same mechanism used by iRacingReplayDirector (`replay_search(RpySrchMode.next_incident = 9)` in `Phases/AnalyseRace.cs`).
 
-1. Call `iRacing.GetDataFeed().RaceIncidents2(...)` — this is a custom extension method in the C# SDK that monitors `CamCarIdx` changes
-2. When `CamCarIdx` jumps to a car that is `OffTrack` or in a spin, that's an incident
-3. The legacy app filters out pit-stall incidents and applies a 15-second deduplication window per car
+**Primary path — iRacing API Pre-Pass (Phase ①b)**
 
-In Python:
-```python
-prev_cam_car = None
+After the 16× telemetry scan, a dedicated incident pre-pass runs with iRacing still connected:
 
-ir.freeze_var_buffer_latest()
-cam_car_idx     = ir['CamCarIdx']
-track_surface   = ir['CarIdxTrackSurface']
-session_time    = ir['SessionTime']
+1. Call `replay_search(9)` — iRacing pauses at the next incident frame
+2. Wait for `ReplayFrameNum` to stabilise (8 consecutive identical values = settled)
+3. Read `CamCarIdx` — the car involved in the incident
+4. Filter out: pace car (idx 0), pit surface, cars not in `racing` or `checkered` state
+5. Apply 15-second deduplication per car
+6. Store to `incidents_api` table: `(frame, session_time, car_idx, lap, user_name)`
+7. Repeat until 12-second timeout with no new incident, or `MAX_INCIDENTS` (600) reached
 
-# iRacing switched camera to a car that's off-track = incident
-if cam_car_idx != prev_cam_car:
-    surface = track_surface[cam_car_idx]
-    if surface not in (TrackSurface.ON_TRACK, TrackSurface.IN_PIT_STALL,
-                       TrackSurface.APPROACHING_PITS, TrackSurface.NOT_IN_WORLD):
-        # This is an incident — record session_time as start time
-        record_incident(cam_car_idx, session_time)
-    prev_cam_car = cam_car_idx
+This produces ground-truth incident positions directly from iRacing's own incident log — no heuristics required.
+
+**Fallback path — CarIdxTrackSurface transitions**
+
+When `incidents_api` is empty (pre-pass was skipped, e.g. re-detect without iRacing), `IncidentDetector` falls back to SQL-based surface transition detection:
+
+```sql
+-- Find on-track → off-track transitions (LAG window function)
+SELECT car_idx, session_time, replay_frame, speed_ms
+FROM transitions
+WHERE surface = 0          -- now OffTrack
+  AND prev_surface = 3     -- was OnTrack
+  AND speed_ms > 8.0       -- filter slow pit-entry moves
 ```
+
+**IncidentLogDetector — SessionLog ground truth**
+
+A separate `IncidentLogDetector` reads iRacing's `SessionInfo` YAML `SessionLog` section, which records every logged race incident with type string ("Car Contact", "Lost Control", "Off Track", "Turn Cutting"). These map to dedicated event types: `car_contact`, `lost_control`, `off_track`, `turn_cutting`. This runs as part of Phase ② and requires no iRacing connection (SessionLog data is saved during Phase ①).
+
+**Routing logic in `IncidentDetector.detect()`:**
+```python
+api_count = db.execute("SELECT COUNT(*) FROM incidents_api").fetchone()[0]
+if api_count > 0:
+    return self._detect_from_api(db, session_info)   # ground-truth API path
+return self._detect_from_surface(db, session_info)   # surface-transition fallback
+```
+
+All incident events store `incident_time` in their metadata — the raw anchor moment before lead-in/follow-out offsets are applied. This allows the clip window to be resized in the Event Inspector post-detection without losing the original anchor.
 
 #### 4.3.6 The Analysis Loop Pattern
 
@@ -1037,19 +1055,18 @@ PUT  /api/projects/{id}/analysis/tuning  — Save tuning parameters (without re-
 
 #### 4.4.2 Tuning Parameters
 
-Detection thresholds are user-tunable per project and persisted to `analysis_meta`:
+Detection thresholds are user-tunable per project and persisted to `analysis_meta`. The tuning panel in the Analysis step exposes these controls; they are also settable via `PUT /api/projects/{id}/analysis/tuning`.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
+| `incident_lead_in` | 2.0s | Seconds of footage before the incident anchor moment |
+| `incident_follow_out` | 8.0s | Seconds of footage after the incident anchor moment |
+| `incident_dedup_seconds` | 15.0s | Minimum gap between two incidents for the same car to be separate events |
 | `battle_gap_threshold` | 0.5s | Max time gap between adjacent-position cars to be in a battle |
-| `crash_min_time_loss` | 10s | Min estimated time lost for an off-track event to classify as crash |
-| `crash_min_off_track_duration` | 3s | Min duration off-track for crash classification |
-| `spinout_min_time_loss` | 2s | Min time loss for spinout (below crash threshold) |
-| `spinout_max_time_loss` | 10s | Max time loss for spinout (above = crash) |
-| `contact_time_window` | 2s | Max time window to group multiple off-track cars as a contact event |
-| `contact_proximity` | 0.05 | Max lap-fraction distance between cars counted as contact |
-| `close_call_proximity` | 0.02 | Max lap-fraction distance for near-miss detection |
-| `close_call_max_off_track` | 3s | Max off-track time for a close call (longer = spinout/crash) |
+| `close_call_proximity_pct` | 0.02 | Max lap-fraction gap between the off-track car and a nearby on-track car |
+| `close_call_max_time_loss` | 2.0s | Max `est_time` degradation during a single off-track frame for a close-call |
+
+> **Note:** `incident_lead_in` and `incident_follow_out` are also adjustable **post-detection** in the Event Inspector panel for individual events. The `incident_time` anchor is stored in each incident event's `metadata` JSON, so the clip window can be resized without re-running detection.
 
 #### Telemetry Data Model
 
@@ -1303,19 +1320,24 @@ class BattleDetector:
 
 #### Full Detector List
 
-| Detector | DB query pattern | Legacy equivalent |
-|----------|-----------------|-------------------|
-| `IncidentDetector` | `race_ticks.cam_car_idx` change + `car_states.surface = 0` JOIN | `Incident.cs` + `RaceIncidents2()` |
-| `BattleDetector` | Self-JOIN `car_states` on adjacent positions, gap calc | `Battle.cs`, `RuleBattle.cs` |
-| `OvertakeDetector` | `LAG(position) OVER` window on `car_states` per car_idx | (inferred from position change) |
-| `PitStopDetector` | `car_states.surface IN (1, 2)` duration grouping | `RecordPitStops.cs` |
-| `FastestLapDetector` | `car_states.best_lap_time` delta between ticks | `RecordFastestLaps.cs` |
-| `LeaderChangeDetector` | `car_states.position = 1` car_idx change over time | (new in V2) |
-| `FirstLapDetector` | `race_ticks.session_state = 4 AND race_laps = 1` | `RuleFirstLapPeriod.cs` |
-| `LastLapDetector` | `race_ticks.race_laps >= results_laps_complete` | `RuleLastLapPeriod.cs` |
-| `RestartDetector` | `race_ticks.session_state` transition `3 → 4` | `RulePaceLaps.cs` |
-| `PaceCarDetector` | `race_ticks.flags` bitfield check for pace car | `RulePaceLaps.cs` |
-| `LapCompletionDetector` | `lap_completions` table direct query | (new in V2) |
+| Detector | Primary signal | Notes |
+|----------|---------------|-------|
+| `IncidentDetector` | `incidents_api` table (iRacing API pre-pass); falls back to `CarIdxTrackSurface` ON→OFF transitions | Two-path routing; stores `incident_time` anchor in metadata |
+| `IncidentLogDetector` | `SessionInfo` YAML `SessionLog` section | Emits `car_contact`, `contact`, `lost_control`, `off_track`, `turn_cutting` event types |
+| `BattleDetector` | Self-JOIN `car_states` on adjacent positions, gap calc using `lap_pct` | N-car chain detection via union-find; pair-level windows |
+| `OvertakeDetector` | `LAG(position) OVER` window on `car_states` per `car_idx` | Requires position-change + proximity confirmation |
+| `CloseCallDetector` | Single-frame off-track (prev=on, curr=off, next=on) + nearby car proximity | Suppresses if `incident_log` records nearby incident |
+| `PitStopDetector` | `car_states.surface IN (1, 2)` duration grouping | Tracks in/out times, deduplicates multi-sample pit dwell |
+| `FastestLapDetector` | `car_states.best_lap_time` minimum change per car | Per-car personal-best tracking |
+| `LeaderChangeDetector` | `car_states.position = 1` car_idx change over ticks | Deduplicates short leadership changes |
+| `FirstLapDetector` | `race_ticks.session_state = 4 AND race_laps = 1` time window | Emits one event spanning the full first-lap period |
+| `LastLapDetector` | `race_ticks.race_laps >= results_laps_complete` | Emits one event from the last lap start to finish |
+| `PaceLapDetector` | `race_ticks.session_state` in pace-lap states before racing | Emits a pace-lap event covering the formation period |
+| `RaceStartDetector` | First `session_state = 4` (Racing) transition | Single event at the green flag moment |
+| `RaceFinishDetector` | `session_state = 5` (Checkered) + last car finishes | Covers the finish window through final car crossing |
+| `UndercutDetector` | Pit timing cross-reference: car that pits earlier emerges ahead | Requires `PitStopDetector` data |
+| `OvercutDetector` | Pit timing cross-reference: car that stays out emerges ahead | Requires `PitStopDetector` data |
+| `PitBattleDetector` | Position battles that start or end in the pit window | Combines PitStop + Battle data |
 
 ### 4.5 Camera Direction Engine
 

@@ -222,3 +222,15 @@ async def discover_replays(
 ) -> list[dict]:
     """Auto-discover .rpy replay files."""
     return project_service.discover_replay_files(directory=directory)
+
+
+@router.get("/replays/suggest")
+async def suggest_replay(
+    name: str = Query(..., description="Project name to fuzzy-match against replay filenames"),
+    directory: str = Query("", description="Directory to scan (default: iRacing replays dir)"),
+) -> dict:
+    """Suggest the best replay file for a project name via fuzzy matching."""
+    from server.services.project_service import fuzzy_match_replay
+    files = project_service.discover_replay_files(directory=directory)
+    match = fuzzy_match_replay(name, files)
+    return {"suggestion": match}

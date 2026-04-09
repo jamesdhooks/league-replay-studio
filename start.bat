@@ -162,7 +162,7 @@ set "PYTHON_EXIT_CODE=%ERRORLEVEL%"
 echo.
 echo [5/6] Cleaning up after exit...
 
-REM Force-kill any remaining LRS processes on ports 7175 and 3174
+REM Force-kill any remaining LRS processes on ports 6176 and 3174
 REM (in case Python didn't terminate or Ctrl+C orphaned child processes)
 powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%lrs-cleanup.ps1"
 

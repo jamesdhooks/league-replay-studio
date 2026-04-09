@@ -147,26 +147,36 @@ export default function HighlightPanel({ projectId }) {
 
         {/* Right side: tuning + histogram */}
         <div className="flex-1 flex min-w-0 min-h-0 overflow-hidden">
-          {/* Replay tuning pane (resizable) */}
+          {/* Editing Controls collapsed icon bar */}
+          {tuningCollapsed && (
+            <button
+              onClick={() => setTuningCollapsed(false)}
+              className="shrink-0 w-9 border-r border-border bg-bg-secondary flex flex-col items-center py-2 gap-3
+                         hover:bg-bg-primary/50 transition-colors cursor-pointer"
+              title="Expand Editing Controls"
+            >
+              <Sparkles className="w-4 h-4 text-accent" />
+            </button>
+          )}
+
+          {/* Editing Controls pane (resizable) */}
+          {!tuningCollapsed && (
           <div
             ref={tuningRef}
             className="shrink-0 border-r border-border bg-bg-secondary flex flex-col min-h-0"
-            style={{ width: tuningCollapsed ? 'auto' : tuningWidth }}
+            style={{ width: tuningWidth }}
           >
             {/* Section header */}
             <button
-              onClick={() => setTuningCollapsed(v => !v)}
+              onClick={() => setTuningCollapsed(true)}
               className="flex items-center gap-2 px-3 py-2 border-b border-border shrink-0 w-full text-left hover:bg-bg-primary/50 transition-colors"
             >
-              {tuningCollapsed ? <ChevronRight className="w-3 h-3 text-text-tertiary" /> : <ChevronDown className="w-3 h-3 text-text-tertiary" />}
               <Sparkles className="w-4 h-4 text-accent" />
-              <h3 className="text-xs font-semibold text-text-primary uppercase tracking-wider">
-                {tuningCollapsed ? '' : 'Replay Tuning'}
+              <h3 className="text-xs font-semibold text-text-primary uppercase tracking-wider flex-1">
+                Editing Controls
               </h3>
+              <ChevronRight className="w-3 h-3 text-text-tertiary" />
             </button>
-
-            {!tuningCollapsed && (
-              <>
             {/* Replay mode toggle */}
             <div className="px-3 py-2 border-b border-border-subtle shrink-0">
               <div className="flex items-center gap-1 p-0.5 bg-bg-primary rounded-lg border border-border">
@@ -218,11 +228,11 @@ export default function HighlightPanel({ projectId }) {
               <HighlightWeightSliders />
               <HighlightMetrics />
             </div>
-              </>
-            )}
           </div>
+          )}
 
           {/* Resize handle for tuning pane */}
+          {!tuningCollapsed && (
           <div
             className="shrink-0 cursor-col-resize group/divider relative"
             style={{ width: 1, marginLeft: -1 }}
@@ -231,6 +241,7 @@ export default function HighlightPanel({ projectId }) {
             <div className="absolute inset-y-0 -left-2 -right-2 z-20" />
             <div className="absolute inset-y-0 left-0 w-px bg-border transition-colors group-hover/divider:bg-accent group-active/divider:bg-accent" />
           </div>
+          )}
 
           {/* Right column: histogram (top) + timeline (bottom) */}
           <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">

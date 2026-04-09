@@ -27,6 +27,7 @@ STATIC_DIR = APP_DIR / "static"
 CONFIG_PATH = APP_DIR / "config.json"
 DATA_DIR = APP_DIR / "data"
 PROJECTS_DIR = DATA_DIR / "projects"
+COLLECTIONS_DIR = DATA_DIR / "collections"
 LOG_DIR = APP_DIR / "logs"
 
 
@@ -88,5 +89,5 @@ def save_config(config: dict) -> None:
 
 def ensure_directories() -> None:
     """Create required data directories on startup."""
-    for d in (DATA_DIR, PROJECTS_DIR, LOG_DIR):
+    for d in (DATA_DIR, PROJECTS_DIR, COLLECTIONS_DIR, LOG_DIR):
         d.mkdir(parents=True, exist_ok=True)

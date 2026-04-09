@@ -55,6 +55,9 @@ export default memo(function PlaybackTimeline({
               <Clock size={9} />
               {evStartRel} – {evEndRel} ({evDuration.toFixed(1)}s)
             </span>
+            {focusedEvent.severity != null && (
+              <span className="text-xxs text-white/40 font-mono">Severity {focusedEvent.severity}</span>
+            )}
             <button onClick={() => seekToEvent(focusedEvent)} disabled={isSeeking}
               className="flex items-center gap-1 px-1.5 py-0.5 rounded text-xxs bg-white/10 hover:bg-white/20 text-white/80 border border-white/15 transition-colors disabled:opacity-40"
               title="Rewind to event start">
@@ -124,6 +127,34 @@ export default memo(function PlaybackTimeline({
             const markerEvents = !focusedEvent ? filteredEvents : []
 
             return (
+              <>
+              {/* Event dot timeline — separate strip above the scrub bar */}
+              {markerEvents.length > 0 && (
+                <div className="relative h-3 mb-1">
+                  <div className="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-px bg-white/10" />
+                  {markerEvents.map((ev, i) => {
+                    const time = ev.startTime ?? ev.start_time_seconds ?? 0
+                    if (time <= 0) return null
+                    const pct = toPct(time) * 100
+                    const markerColor = EVENT_COLORS[ev.event_type] || '#ffffff'
+                    return (
+                      <div key={`dot-${i}`}
+                        className="absolute top-1/2 w-2 h-2 rounded-full cursor-pointer
+                                   hover:w-2.5 hover:h-2.5 transition-all duration-150 z-10
+                                   hover:shadow-[0_0_6px_rgba(255,255,255,0.5)]"
+                        style={{ left: `${pct}%`, backgroundColor: markerColor, opacity: 0.85, transform: 'translate(-50%, -50%)' }}
+                        onClick={(e) => { e.stopPropagation(); setTooltipEvent(null); seekToEvent(ev) }}
+                        onMouseEnter={(e) => {
+                          const rect = e.currentTarget.getBoundingClientRect()
+                          setTooltipEvent(ev)
+                          setTooltipPos({ x: rect.left + rect.width / 2, y: rect.top })
+                        }}
+                        onMouseLeave={() => setTooltipEvent(null)}
+                      />
+                    )
+                  })}
+                </div>
+              )}
               <div ref={scrubberRef} className="relative h-5 group cursor-pointer select-none"
                 onMouseDown={(e) => {
                   const rect = e.currentTarget.getBoundingClientRect()
@@ -168,32 +199,11 @@ export default memo(function PlaybackTimeline({
                       style={{ width: `${toPct(optimisticTime) * 100}%` }} />
                   )}
                 </div>
-                {/* Color-coded event markers */}
-                {markerEvents.map((ev, i) => {
-                  const time = ev.startTime ?? ev.start_time_seconds ?? 0
-                  if (time <= 0) return null
-                  const pct = toPct(time) * 100
-                  const markerColor = EVENT_COLORS[ev.event_type] || '#ffffff'
-                  return (
-                    <div key={`marker-${i}`}
-                      className="absolute top-1/2 -translate-y-1/2 w-1.5 h-4 rounded-full cursor-pointer
-                                 hover:w-4 hover:h-9 hover:!bg-white transition-all duration-150 z-10
-                                 hover:shadow-[0_0_10px_rgba(255,255,255,0.8),0_0_20px_rgba(255,255,255,0.4),0_0_30px_rgba(255,255,255,0.2)]"
-                      style={{ left: `${pct}%`, backgroundColor: markerColor, opacity: 0.85 }}
-                      onClick={(e) => { e.stopPropagation(); seekToEvent(ev) }}
-                      onMouseEnter={(e) => {
-                        const rect = e.currentTarget.getBoundingClientRect()
-                        setTooltipEvent(ev)
-                        setTooltipPos({ x: rect.left + rect.width / 2, y: rect.top })
-                      }}
-                      onMouseLeave={() => setTooltipEvent(null)}
-                    />
-                  )
-                })}
                 <div className={`absolute top-1/2 w-3 h-3 rounded-full bg-accent border-2 border-white shadow-md
                   ${scrubbing ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-opacity pointer-events-none`}
                   style={{ left: `${toPct(displayTime) * 100}%`, transform: 'translate(-50%, -50%)' }} />
               </div>
+              </>
             )
           })()}
           <div className="flex justify-between -mt-0.5">
@@ -214,7 +224,7 @@ export default memo(function PlaybackTimeline({
       {/* Event marker tooltip */}
       {tooltipEvent && tooltipPos && (
         <div className="fixed z-50 px-2.5 py-1.5 bg-black/95 border border-white/20 rounded-lg shadow-elevated text-xxs pointer-events-none"
-          style={{ left: tooltipPos.x, top: tooltipPos.y - 50, transform: 'translateX(-50%)' }}>
+          style={{ left: tooltipPos.x, top: tooltipPos.y - 8, transform: 'translate(-50%, -100%)' }}>
           <div className="flex items-center gap-1.5">
             <div className="w-2 h-2 rounded-full" style={{ backgroundColor: EVENT_COLORS[tooltipEvent.event_type] || '#fff' }} />
             <span className="text-white font-semibold">{(EVENT_CONFIG[tooltipEvent.event_type] || {}).label || tooltipEvent.event_type}</span>

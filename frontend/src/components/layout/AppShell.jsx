@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, lazy, Suspense, useTransition } from 'react'
-import { Loader2, BarChart3 } from 'lucide-react'
+import { Loader2, BarChart3, FolderOpen, Radio } from 'lucide-react'
 import Toolbar from './Toolbar'
 import { useProject } from '../../context/ProjectContext'
 import { useAnalysis } from '../../context/AnalysisContext'
@@ -12,6 +12,7 @@ const ProjectLibrary = lazy(() => import('../projects/ProjectLibrary'))
 const ProjectView = lazy(() => import('../projects/ProjectView'))
 const SettingsPanel = lazy(() => import('../settings/SettingsPanel'))
 const HelpPanel = lazy(() => import('../help/HelpPanel'))
+const CollectPage = lazy(() => import('../collect/CollectPage'))
 
 /** Inline fallback for Suspense boundaries */
 function PanelFallback() {
@@ -27,7 +28,14 @@ function PanelFallback() {
  * Main application layout shell.
  * Renders: toolbar (top), sidebar (left), main area (center), status bar (bottom).
  */
+// ── Top-level nav tabs (shown on the home screen, no active project) ─────────
+const HOME_TABS = [
+  { id: 'projects', label: 'Projects', icon: FolderOpen },
+  { id: 'collect',  label: 'Collect',  icon: Radio },
+]
+
 function AppShell() {
+  const [activeTab, setActiveTab] = useState('projects')
   const { activeProject, openProject, closeProject, setStep } = useProject()
   const { events, eventSummary, isAnalyzing, progress: analysisProgress } = useAnalysis()
   const { loading: settingsLoading } = useSettings()
@@ -155,7 +163,28 @@ function AppShell() {
       />
 
       {/* Main content area */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 flex-col overflow-hidden">
+        {/* Tab bar — only shown on home screen (no active project, no settings) */}
+        {!activeProject && !showSettings && (
+          <nav className="flex shrink-0 border-b border-border bg-bg-secondary px-4">
+            {HOME_TABS.map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                onClick={() => setActiveTab(id)}
+                className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium
+                            border-b-2 transition-all duration-150
+                  ${activeTab === id
+                    ? 'border-accent text-accent'
+                    : 'border-transparent text-text-secondary hover:text-text-primary hover:border-border'
+                  }`}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                {label}
+              </button>
+            ))}
+          </nav>
+        )}
+
         {/* Main area */}
         <main className="flex-1 flex flex-col overflow-hidden bg-bg-primary">
           <Suspense fallback={<PanelFallback />}>
@@ -166,6 +195,8 @@ function AppShell() {
                 project={activeProject}
                 isLoading={projectLoading}
               />
+            ) : activeTab === 'collect' ? (
+              <CollectPage />
             ) : (
               <ProjectLibrary onOpenProject={handleOpenProject} />
             )}

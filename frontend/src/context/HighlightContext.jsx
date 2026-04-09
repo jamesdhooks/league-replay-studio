@@ -34,9 +34,6 @@ const DEFAULT_WEIGHTS = {
   lost_control: 50,    // "Lost Control" (spin)
   off_track: 25,       // "Off Track"
   turn_cutting: 15,    // "Turn Cutting"
-  // Legacy inferred types kept for backward-compat with older recordings
-  crash: 80,
-  spinout: 60,
   close_call: 40,
   race_start: 100,
   race_finish: 100,
@@ -80,12 +77,8 @@ export const EVENT_TYPE_LABELS = {
   lost_control: 'Lost Control',
   off_track: 'Off Track',
   turn_cutting: 'Turn Cutting',
-  // Legacy
-  crash: 'Crashes',
-  spinout: 'Spinouts',
   close_call: 'Close Calls',
   pace_lap: 'Pace Lap',
-  restart: 'Restart',
   race_start: 'Race Start',
   race_finish: 'Race Finish',
   overcut: 'Overcut',

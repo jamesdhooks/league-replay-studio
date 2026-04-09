@@ -17,6 +17,7 @@ export default forwardRef(function ResizableSidebar({
   storageKey,
   defaultWidth = 384,
   defaultTab,
+  headerContent,
 }, ref) {
   const firstTab = defaultTab || tabs[0]?.id || ''
 
@@ -137,6 +138,9 @@ export default forwardRef(function ResizableSidebar({
       className={`flex flex-col overflow-hidden bg-bg-primary/50 shrink-0 relative${dragging ? ' select-none' : ''}`}
       style={{ width }}
     >
+      {/* Optional header content above tabs */}
+      {headerContent}
+
       {/* Tab bar */}
       <div className="flex shrink-0 border-b border-border">
         {tabs.map(({ id, label, icon: Icon, count }) => (

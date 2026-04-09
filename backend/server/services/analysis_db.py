@@ -130,6 +130,18 @@ CREATE TABLE IF NOT EXISTS incident_log (
     user_name       TEXT    NOT NULL DEFAULT ''
 );
 
+-- Ground-truth incidents from iRacing's own MoveToNextIncident API (prepass)
+-- Populated during Pass 0.5 of replay_analysis.  IncidentDetector prefers
+-- this table when it is non-empty, falling back to surface-transition heuristics.
+CREATE TABLE IF NOT EXISTS incidents_api (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    frame        INTEGER NOT NULL,
+    session_time REAL    NOT NULL,
+    car_idx      INTEGER NOT NULL,
+    lap          INTEGER NOT NULL DEFAULT 0,
+    user_name    TEXT    NOT NULL DEFAULT ''
+);
+
 -- ── Indexes ─────────────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_car_states_tick ON car_states(tick_id);
 CREATE INDEX IF NOT EXISTS idx_car_states_car  ON car_states(car_idx);
@@ -139,6 +151,8 @@ CREATE INDEX IF NOT EXISTS idx_race_events_type ON race_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_lap_completions_car ON lap_completions(car_idx, lap_number);
 CREATE INDEX IF NOT EXISTS idx_incident_log_time ON incident_log(session_time);
 CREATE INDEX IF NOT EXISTS idx_incident_log_car  ON incident_log(car_idx);
+CREATE INDEX IF NOT EXISTS idx_incidents_api_time ON incidents_api(session_time);
+CREATE INDEX IF NOT EXISTS idx_incidents_api_car  ON incidents_api(car_idx);
 """
 
 
@@ -213,6 +227,25 @@ def init_analysis_db(project_dir: str) -> None:
             except sqlite3.OperationalError as exc:
                 logger.debug("incident_log migration failed: %s", exc)
 
+        # Migration: create incidents_api table if not present (older DBs)
+        if "incidents_api" not in existing_tables:
+            try:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS incidents_api (
+                        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                        frame        INTEGER NOT NULL,
+                        session_time REAL    NOT NULL,
+                        car_idx      INTEGER NOT NULL,
+                        lap          INTEGER NOT NULL DEFAULT 0,
+                        user_name    TEXT    NOT NULL DEFAULT ''
+                    )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_incidents_api_time ON incidents_api(session_time)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_incidents_api_car  ON incidents_api(car_idx)")
+                logger.info("[AnalysisDB] Created incidents_api table (migration)")
+            except sqlite3.OperationalError as exc:
+                logger.debug("incidents_api migration failed: %s", exc)
+
         conn.commit()
         logger.info("[AnalysisDB] Initialised project database at %s", project_dir)
     finally:
@@ -229,6 +262,7 @@ def clear_analysis_data(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM race_ticks")
     conn.execute("DELETE FROM race_events")
     conn.execute("DELETE FROM incident_log")
+    conn.execute("DELETE FROM incidents_api")
     conn.execute("DELETE FROM drivers")
     conn.commit()
     logger.info("[AnalysisDB] Cleared previous analysis data")
