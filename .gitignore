@@ -32,8 +32,11 @@ backend/build/
 
 # SQLite
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
+backend/data/collections/
 
 # Logs
 *.log
