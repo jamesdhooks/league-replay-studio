@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useHighlight, EVENT_TYPE_LABELS } from '../../context/HighlightContext'
 import { EVENT_COLORS } from '../../context/TimelineContext'
+import { useAnalysis } from '../../context/AnalysisContext'
 import { Wand2, SlidersHorizontal, Info, ListOrdered, Target, Clock, Sliders } from 'lucide-react'
 import Tooltip from '../ui/Tooltip'
 import CollapsibleSection from '../ui/CollapsibleSection'
@@ -21,7 +22,14 @@ export default function HighlightWeightSliders() {
     params, setParams,
   } = useHighlight()
 
-  const eventTypes = Object.keys(EVENT_TYPE_LABELS)
+  const { events } = useAnalysis()
+
+  // Only show types that exist in the loaded events; fall back to full list when empty
+  const eventTypes = useMemo(() => {
+    if (!events || events.length === 0) return Object.keys(EVENT_TYPE_LABELS)
+    const present = new Set(events.map(e => e.type).filter(Boolean))
+    return Object.keys(EVENT_TYPE_LABELS).filter(t => present.has(t))
+  }, [events])
 
   const [collapsed, setCollapsed] = useState({})
   const toggle = (key) => setCollapsed(p => ({ ...p, [key]: !p[key] }))

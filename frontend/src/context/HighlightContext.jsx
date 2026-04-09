@@ -37,6 +37,10 @@ const DEFAULT_WEIGHTS = {
   close_call: 40,
   race_start: 100,
   race_finish: 100,
+  pace_lap: 50,
+  overcut: 50,
+  undercut: 50,
+  pit_battle: 50,
 }
 
 /** Default detection/camera tuning parameters (inspired by iRacingReplayDirector) */
