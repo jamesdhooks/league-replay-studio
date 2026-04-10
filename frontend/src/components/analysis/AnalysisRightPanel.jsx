@@ -11,6 +11,7 @@ import CollapsibleSection from '../ui/CollapsibleSection'
  */
 export default memo(function AnalysisRightPanel({
   isConnected,
+  isAnalyzing,
   replayState,
   cameraGroups, drivers,
   rightPanelWidth, setRightPanelWidth, isPortrait,
@@ -89,7 +90,7 @@ export default memo(function AnalysisRightPanel({
         </button>
 
         {/* Scrollable content */}
-        <div className="flex-1 overflow-y-auto flex flex-col min-h-0">
+        <div className={`flex-1 overflow-y-auto flex flex-col min-h-0 transition-opacity duration-300 ${isAnalyzing ? 'opacity-40 pointer-events-none select-none' : ''}`}>
           {/* Cameras section */}
           <div className="border-b border-border overflow-hidden flex flex-col"
                  style={{ maxHeight: camerasOpen ? '40%' : 'auto' }}>

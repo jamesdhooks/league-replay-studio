@@ -3,6 +3,7 @@ import { apiGet, apiPut, apiPost, apiDelete } from '../services/api'
 import { useAnalysis } from './AnalysisContext'
 import { useTimeline } from './TimelineContext'
 import { useUndoRedo } from './UndoRedoContext'
+import { useLocalStorage } from '../hooks/useLocalStorage'
 import {
   TIER_COLORS,
   tierColor,
@@ -63,6 +64,13 @@ const DEFAULT_PARAMS = {
   lateRaceThreshold: 0.9,       // Race fraction after which late-race bonus activates
   lateRaceMultiplier: 1.2,      // Multiplier applied to events beyond lateRaceThreshold
   pipThreshold: 7.0,            // Min score for two overlapping events to use Picture-in-Picture
+  maxRaceFinishes: 0,           // Max race_finish events to include in highlights (0 = all)
+  paddingBefore: 2.0,           // Default seconds before event start to include in each clip
+  paddingAfter: 5.0,            // Default seconds after event end to include in each clip
+  paddingByType: {},            // Per event-type padding overrides: { type: { before, after } }
+  cameraWeights: {},            // Per-camera weight overrides: { group_name: 0–100 } — empty = all equal (50)
+  cameraRecencyPenalty: 0.5,    // 0 = no recency penalty, 1 = maximum penalty for recently-used cameras
+  cameraRecencyDecay: 30.0,     // Seconds for recency penalty to decay back to zero
 }
 
 /** Event type labels for UI display */
@@ -98,13 +106,28 @@ export const EVENT_TYPE_LABELS = {
  * persists config to backend, supports A/B compare and presets.
  */
 export function HighlightProvider({ children }) {
-  // ── Weight configuration ────────────────────────────────────────────────
-  const [weights, setWeights] = useState({ ...DEFAULT_WEIGHTS })
-  const [targetDuration, setTargetDuration] = useState(null)
-  const [minSeverity, setMinSeverity] = useState(0)
-  const [overrides, setOverrides] = useState({})    // { eventId: 'include'|'exclude' }
-  const [params, setParams] = useState({ ...DEFAULT_PARAMS })
-  const [replayMode, setReplayMode] = useState('highlights')  // 'highlights' | 'full'
+  // ── Weight configuration (auto-persisted to localStorage) ────────────────
+    const WEIGHTS_KEY = 'lrs:highlights:weights'
+    const TARGET_KEY = 'lrs:highlights:targetDuration'
+    const MIN_SEVERITY_KEY = 'lrs:highlights:minSeverity'
+    const [weights, setWeights] = useLocalStorage(WEIGHTS_KEY, { ...DEFAULT_WEIGHTS })
+    const [targetDuration, setTargetDuration] = useLocalStorage(TARGET_KEY, 12 * 60)
+    const [minSeverity, setMinSeverity] = useLocalStorage(MIN_SEVERITY_KEY, 0)
+  const [overrides, setOverrides] = useState({})    // { eventId: 'include'|'exclude' } — per-project, loaded from backend
+    const PARAMS_KEY = 'lrs:highlights:params'
+    const SECTION_CONFIG_KEY = 'lrs:highlights:sectionConfig'
+    const CLIP_PADDING_KEY = 'lrs:highlights:clipPadding'
+    const [params, setParams] = useLocalStorage(PARAMS_KEY, { ...DEFAULT_PARAMS })
+  const [replayMode, setReplayMode] = useLocalStorage('lrs:highlights:replayMode', 'highlights')
+
+  // ── One-time version migration: merge any new default keys into stored objects ──
+  // This ensures newly-added default fields (e.g. new camera/padding params) appear
+  // even when an older stored value is found in localStorage.
+  useEffect(() => {
+    setWeights(w => ({ ...DEFAULT_WEIGHTS, ...w }))
+    setParams(p => ({ ...DEFAULT_PARAMS, ...p }))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // ── A/B compare mode ────────────────────────────────────────────────────
   const [abMode, setAbMode] = useState(false)
@@ -114,6 +137,8 @@ export function HighlightProvider({ children }) {
 
   // ── Presets ─────────────────────────────────────────────────────────────
   const [presets, setPresets] = useState([])
+  const [currentPresetId, setCurrentPresetId] = useState(null)  // Track which preset (if any) is loaded
+  const [presetSnapshot, setPresetSnapshot] = useState(null)    // Snapshot of state when preset was loaded
 
   // ── Drivers ─────────────────────────────────────────────────────────────
   const [drivers, setDrivers] = useState([])
@@ -194,13 +219,29 @@ export function HighlightProvider({ children }) {
   const loadConfig = useCallback(async (projectId) => {
     try {
       const config = await apiGet(`/projects/${projectId}/highlights/config`)
-      if (config.weights && Object.keys(config.weights).length > 0) {
+      
+      // If localStorage already has user edits, keep local values authoritative.
+      // This prevents stale backend config from "resetting" controls on refresh.
+      const hasLocalWeights = localStorage.getItem(WEIGHTS_KEY) !== null
+      const hasLocalTarget = localStorage.getItem(TARGET_KEY) !== null
+      const hasLocalMinSeverity = localStorage.getItem(MIN_SEVERITY_KEY) !== null
+      const hasLocalParams = localStorage.getItem(PARAMS_KEY) !== null
+      
+      if (!hasLocalWeights && config.weights && Object.keys(config.weights).length > 0) {
         setWeights({ ...DEFAULT_WEIGHTS, ...config.weights })
       }
-      if (config.target_duration !== undefined) setTargetDuration(config.target_duration)
-      if (config.min_severity !== undefined) setMinSeverity(config.min_severity)
-      if (config.overrides && typeof config.overrides === 'object') setOverrides(config.overrides)
-      if (config.params && typeof config.params === 'object') setParams({ ...DEFAULT_PARAMS, ...config.params })
+      if (!hasLocalTarget && config.target_duration !== undefined) {
+        setTargetDuration(config.target_duration)
+      }
+      if (!hasLocalMinSeverity && config.min_severity !== undefined) {
+        setMinSeverity(config.min_severity)
+      }
+      if (config.overrides && typeof config.overrides === 'object') {
+        setOverrides(config.overrides)
+      }
+      if (!hasLocalParams && config.params && typeof config.params === 'object') {
+        setParams({ ...DEFAULT_PARAMS, ...config.params })
+      }
     } catch (err) {
       console.error('[Highlights] Config load error:', err)
     }
@@ -235,7 +276,7 @@ export function HighlightProvider({ children }) {
       console.error('[Highlights] Apply error:', err)
       throw err
     }
-  }, [selection.selectedIds, selection.excludedIds, saveConfig])
+  }, [selection.selectedIds, selection.fullVideoIds, selection.excludedIds, saveConfig])
 
   // ── Server-side reprocessing (v2 pipeline) ────────────────────────────────
   const [serverScoring, setServerScoring] = useState(false)
@@ -245,8 +286,8 @@ export function HighlightProvider({ children }) {
   // ── Video Script state ─────────────────────────────────────────────────
   const [videoScript, setVideoScript] = useState(null)    // Full script segment array
   const [videoSections, setVideoSections] = useState([])  // Section summaries
-  const [sectionConfig, setSectionConfig] = useState({})  // Per-section overrides
-  const [clipPadding, setClipPadding] = useState(0.5)     // Seconds of pre-roll
+  const [sectionConfig, setSectionConfig] = useLocalStorage(SECTION_CONFIG_KEY, {})  // Per-section overrides
+  const [clipPadding, setClipPadding] = useLocalStorage(CLIP_PADDING_KEY, 0.5)       // Seconds of pre-roll
 
   const reprocessHighlights = useCallback(async (projectId, opts = {}) => {
     try {
@@ -300,7 +341,12 @@ export function HighlightProvider({ children }) {
           max_driver_exposure: opts.maxDriverExposure || 0.25,
         },
         section_config: sectionConfig,
-        clip_padding: clipPadding,
+        clip_padding: params.paddingBefore,
+        clip_padding_after: params.paddingAfter,
+          padding_by_type: params.paddingByType || {},
+        camera_weights: params.cameraWeights || {},
+        camera_recency_penalty: params.cameraRecencyPenalty ?? 0.5,
+        camera_recency_decay: params.cameraRecencyDecay ?? 30.0,
       })
       if (result.script) {
         setVideoScript(result.script)
@@ -317,7 +363,7 @@ export function HighlightProvider({ children }) {
     } finally {
       setServerScoring(false)
     }
-  }, [weights, targetDuration, minSeverity, sectionConfig, clipPadding])
+  }, [weights, targetDuration, minSeverity, sectionConfig, params])
 
   const updateSectionConfig = useCallback((sectionName, updates) => {
     setSectionConfig(prev => ({
@@ -504,19 +550,56 @@ export function HighlightProvider({ children }) {
         weights,
         target_duration: targetDuration,
         min_severity: minSeverity,
+        params,
+        section_config: sectionConfig,
+        replay_mode: replayMode,
+      })
+      // After saving, update the current preset and snapshot
+      setCurrentPresetId(name)
+      setPresetSnapshot({
+        weights,
+        target_duration: targetDuration,
+        min_severity: minSeverity,
+        params,
+        section_config: sectionConfig,
+        replay_mode: replayMode,
       })
       await loadPresets()
     } catch (err) {
       console.error('[Highlights] Preset save error:', err)
       throw err
     }
-  }, [weights, targetDuration, minSeverity, loadPresets])
+  }, [weights, targetDuration, minSeverity, params, sectionConfig, replayMode, loadPresets])
 
   const loadPreset = useCallback((preset) => {
     if (preset.weights) setWeights({ ...DEFAULT_WEIGHTS, ...preset.weights })
     if (preset.target_duration !== undefined) setTargetDuration(preset.target_duration)
     if (preset.min_severity !== undefined) setMinSeverity(preset.min_severity)
-  }, [])
+    const nextParams = (preset.params && typeof preset.params === 'object')
+      ? { ...DEFAULT_PARAMS, ...preset.params }
+      : params
+    const nextSectionConfig = (preset.section_config && typeof preset.section_config === 'object')
+      ? preset.section_config
+      : sectionConfig
+    const nextReplayMode = (preset.replay_mode === 'highlights' || preset.replay_mode === 'full')
+      ? preset.replay_mode
+      : replayMode
+
+    if (preset.params && typeof preset.params === 'object') setParams(nextParams)
+    if (preset.section_config && typeof preset.section_config === 'object') setSectionConfig(nextSectionConfig)
+    if (preset.replay_mode === 'highlights' || preset.replay_mode === 'full') setReplayMode(nextReplayMode)
+    
+    // Save snapshot of preset state for unsaved changes detection
+    setCurrentPresetId(preset.name || preset.id)
+    setPresetSnapshot({
+      weights: { ...DEFAULT_WEIGHTS, ...(preset.weights || {}) },
+      target_duration: preset.target_duration,
+      min_severity: preset.min_severity,
+      params: nextParams,
+      section_config: nextSectionConfig,
+      replay_mode: nextReplayMode,
+    })
+  }, [params, sectionConfig, replayMode, setParams, setSectionConfig, setReplayMode])
 
   const deletePreset = useCallback(async (name) => {
     try {
@@ -545,6 +628,31 @@ export function HighlightProvider({ children }) {
       return column
     })
   }, [])
+
+  // ── Unsaved changes detection ──────────────────────────────────────────
+  const hasUnsavedChanges = useMemo(() => {
+    // If a preset is loaded, check if current state differs from snapshot
+    if (presetSnapshot) {
+      return (
+        JSON.stringify(weights) !== JSON.stringify(presetSnapshot.weights) ||
+        targetDuration !== presetSnapshot.target_duration ||
+        minSeverity !== presetSnapshot.min_severity ||
+        JSON.stringify(params) !== JSON.stringify(presetSnapshot.params || DEFAULT_PARAMS) ||
+        JSON.stringify(sectionConfig) !== JSON.stringify(presetSnapshot.section_config || {}) ||
+        replayMode !== (presetSnapshot.replay_mode || 'highlights')
+      )
+    }
+    
+    // If no preset is loaded, check if any values differ from defaults
+    return (
+      JSON.stringify(weights) !== JSON.stringify(DEFAULT_WEIGHTS) ||
+      targetDuration !== (12 * 60) ||
+      minSeverity !== 0 ||
+      JSON.stringify(params) !== JSON.stringify(DEFAULT_PARAMS) ||
+      JSON.stringify(sectionConfig) !== JSON.stringify({}) ||
+      replayMode !== 'highlights'
+    )
+  }, [weights, targetDuration, minSeverity, params, sectionConfig, replayMode, presetSnapshot])
 
   // ── Context value ─────────────────────────────────────────────────────
   const value = useMemo(() => ({
@@ -608,6 +716,8 @@ export function HighlightProvider({ children }) {
 
     // Presets
     presets,
+    currentPresetId,
+    hasUnsavedChanges,
     loadPresets,
     savePreset,
     loadPreset,
@@ -636,7 +746,7 @@ export function HighlightProvider({ children }) {
     serverScoring, serverScoredEvents, serverMetrics,
     videoScript, videoSections, sectionConfig, clipPadding,
     abMode, activeConfig, startABCompare, stopABCompare, switchABConfig,
-    presets, loadPresets, savePreset, loadPreset, deletePreset,
+    presets, currentPresetId, hasUnsavedChanges, loadPresets, savePreset, loadPreset, deletePreset,
     sortColumn, sortDirection, handleSort,
     filterType, filterInclusion, filterSeverityRange,
     drivers,

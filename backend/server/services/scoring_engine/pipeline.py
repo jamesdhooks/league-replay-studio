@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import random
 from typing import Optional
 
 from .constants import (
@@ -81,8 +83,8 @@ def generate_highlights(
     pip_threshold = constraints.get("pip_threshold", DEFAULT_PIP_THRESHOLD)
     timeline = resolve_conflicts(timeline, pip_threshold)
 
-    # Stage 5: Insert b-roll for gaps
-    timeline = insert_broll(timeline)
+    # Stage 5: Insert contextual bridge fillers for gaps
+    timeline = insert_broll(timeline, gap_threshold=0.05, contextual_events=scored)
 
     # Stage 6: Insert transitions
     timeline = insert_transitions(timeline)
@@ -113,12 +115,17 @@ def generate_video_script(
     race_info: Optional[dict] = None,
     section_config: Optional[dict] = None,
     clip_padding: float = DEFAULT_CLIP_PADDING,
+    clip_padding_after: float = 5.0,
+        padding_by_type: Optional[dict] = None,
     tuning: Optional[dict] = None,
+    camera_weights: Optional[dict[str, float]] = None,
+    camera_recency_penalty: float = 0.5,
+    camera_recency_decay: float = 30.0,
 ) -> dict:
     """Generate a full Video Composition Script with four sections.
 
     The script contains ordered segments for:
-      1. **intro** — Static B-roll with scenic/blimp cam for title card overlay
+    1. **intro** — Static TV-cam section for title card overlay
       2. **qualifying_results** — Pit-lane / static cam for grid graphics
       3. **race** — Event-driven highlight timeline (from generate_highlights)
       4. **race_results** — Static cam for finishing order graphics
@@ -146,7 +153,27 @@ def generate_video_script(
     """
     race_info = race_info or {}
     section_config = section_config or {}
+    camera_weights = camera_weights or {}
+    padding_by_type = padding_by_type or {}
+    overrides = overrides or {}
     race_duration = race_info.get("duration", 0)
+
+    # If highlights were already applied to DB, honor those flags when building
+    # the final script so selected events are not dropped by a fresh re-allocation.
+    # included_in_highlight == 1 -> highlight, == 0 -> exclude.
+    applied_overrides: dict[str, str] = {}
+    for evt in events:
+        eid = evt.get("id")
+        if eid is None:
+            continue
+        flag = evt.get("included_in_highlight")
+        if flag == 1:
+            applied_overrides[str(eid)] = "highlight"
+        elif flag == 0:
+            applied_overrides[str(eid)] = "exclude"
+
+    # Applied flags are authoritative for "apply to timeline" behavior.
+    effective_overrides = {**overrides, **applied_overrides}
 
     # ── Build race section via existing pipeline ────────────────────────────
     hl_result = generate_highlights(
@@ -154,7 +181,7 @@ def generate_video_script(
         target_duration=target_duration,
         weights=weights,
         constraints=constraints,
-        overrides=overrides,
+        overrides=effective_overrides,
         race_info=race_info,
         tuning=tuning,
     )
@@ -180,13 +207,54 @@ def generate_video_script(
                 "overlay_template_id",
                 DEFAULT_SECTION_TEMPLATES.get("race", "broadcast"),
             )
+            # Prepare probabilistic camera state (only if camera_weights are configured)
+            _cam_last_used: dict[str, float] = {}  # camera_name -> session_time last chosen
+            _use_cam_selection = bool(camera_weights)
+            _cam_names = sorted(camera_weights.keys())
             for seg in race_timeline:
                 seg_entry: dict = {
                     **seg,
                     "section": "race",
-                    "clip_padding": clip_padding,
+                        "clip_padding": padding_by_type.get(seg.get("event_type"), {}).get("before", clip_padding),
+                        "clip_padding_after": padding_by_type.get(seg.get("event_type"), {}).get("after", clip_padding_after),
                     "overlay_template_id": seg.get("overlay_template_id") or race_template,
                 }
+                # Assign camera_preferences for non-transition, non-broll segments
+                if _use_cam_selection and seg.get("type") not in ("transition", "broll"):
+                    seg_time = seg.get("start_time_seconds", 0.0)
+                    # Compute effective weight for each camera using recency penalty
+                    effective: dict[str, float] = {}
+                    for cam in _cam_names:
+                        base = max(0.0, camera_weights[cam])
+                        last_t = _cam_last_used.get(cam)
+                        if last_t is not None and camera_recency_decay > 0:
+                            elapsed = max(0.0, seg_time - last_t)
+                            penalty_factor = 1.0 - camera_recency_penalty * math.exp(-elapsed / camera_recency_decay)
+                        else:
+                            penalty_factor = 1.0
+                        effective[cam] = base * max(0.0, penalty_factor)
+                    total_weight = sum(effective.values())
+                    if total_weight > 0:
+                        # Weighted random camera selection
+                        r = random.uniform(0.0, total_weight)
+                        cumulative = 0.0
+                        chosen = _cam_names[0]
+                        for cam in _cam_names:
+                            cumulative += effective[cam]
+                            if r <= cumulative:
+                                chosen = cam
+                                break
+                        # Build camera_preferences: chosen first, then rest sorted by effective weight
+                        others = sorted(
+                            (c for c in _cam_names if c != chosen),
+                            key=lambda c: effective[c],
+                            reverse=True,
+                        )
+                        seg_entry["camera_preferences"] = [chosen, *others]
+                        _cam_last_used[chosen] = seg_time
+                    elif _cam_names:
+                        # All weights zero — use first camera as fallback
+                        seg_entry["camera_preferences"] = list(_cam_names)
                 # Battle camera choreography hints (iRD-inspired)
                 if seg.get("event_type") == "battle":
                     drivers = seg.get("involved_drivers") or []
@@ -242,6 +310,7 @@ def generate_video_script(
             "duration": duration,
             "purpose": section_name,
             "clip_padding": clip_padding,
+            "clip_padding_after": clip_padding_after,
             "editable": True,
             "overlay_template_id": overlay_template_id,
         })
@@ -268,4 +337,5 @@ def generate_video_script(
         "metrics": hl_result["metrics"],
         "sections": sections_summary,
         "clip_padding": clip_padding,
+        "clip_padding_after": clip_padding_after,
     }

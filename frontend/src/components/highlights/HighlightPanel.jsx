@@ -9,11 +9,13 @@ import HighlightWeightSliders from './HighlightWeightSliders'
 import HighlightEventTable from './HighlightEventTable'
 import HighlightMetrics from './HighlightMetrics'
 import HighlightHistogram from './HighlightHistogram'
+import HighlightPreview from './HighlightPreview'
 import HighlightTimeline from './HighlightTimeline'
 import EventInspectorPanel from '../inspector/EventInspectorPanel'
 import EditHistoryPanel from '../history/EditHistoryPanel'
 import ProjectFileBrowser from '../projects/ProjectFileBrowser'
 import ResizableSidebar from '../layout/ResizableSidebar'
+import CollapsibleSection from '../ui/CollapsibleSection'
 import { Sparkles, List, Search, History, Folder, Film, Scissors, Clapperboard, ChevronDown, ChevronRight, AlertCircle } from 'lucide-react'
 
 /**
@@ -26,13 +28,13 @@ import { Sparkles, List, Search, History, Folder, Film, Scissors, Clapperboard, 
  * @param {number} props.projectId - Active project ID
  */
 export default function HighlightPanel({ projectId }) {
-  const { loadConfig, loadDrivers, loadPresets, replayMode, setReplayMode, presets, loadPreset, savePreset, deletePreset, videoSections, sectionConfig, updateSectionConfig, metrics } = useHighlight()
+  const { loadConfig, loadDrivers, loadPresets, replayMode, setReplayMode, presets, loadPreset, savePreset, deletePreset, videoSections, sectionConfig, updateSectionConfig, metrics, currentPresetId, hasUnsavedChanges } = useHighlight()
   const { loadRaceDuration } = useTimeline()
   const { fetchEvents, events } = useAnalysis()
   const { history } = useUndoRedo()
   const { setStep } = useProject()
   const sidebarRef = useRef(null)
-  const [tuningCollapsed, setTuningCollapsed] = useState(false)
+  const [tuningCollapsed, setTuningCollapsed] = useLocalStorage('lrs:editing:tuningCollapsed', false)
   const hasAnalysis = events?.length > 0
 
   // Resizable tuning pane width
@@ -78,10 +80,35 @@ export default function HighlightPanel({ projectId }) {
     document.addEventListener('mouseup', onUp)
   }, [setTimelineHeight])
 
+  // Histogram + Preview: collapsed state (mutually exclusive — only one expands at a time)
+  const [histogramCollapsed, setHistogramCollapsed] = useLocalStorage('lrs:editing:histogramCollapsed', false)
+  const [previewCollapsed, setPreviewCollapsed] = useLocalStorage('lrs:editing:previewCollapsed', true)
+
+  const toggleHistogram = useCallback(() => {
+    if (histogramCollapsed) {
+      setHistogramCollapsed(false)
+      setPreviewCollapsed(true)
+    } else {
+      setHistogramCollapsed(true)
+    }
+  }, [histogramCollapsed, setHistogramCollapsed, setPreviewCollapsed])
+
+  const togglePreview = useCallback(() => {
+    if (previewCollapsed) {
+      setPreviewCollapsed(false)
+      setHistogramCollapsed(true)
+    } else {
+      setPreviewCollapsed(true)
+    }
+  }, [previewCollapsed, setPreviewCollapsed, setHistogramCollapsed])
+
+  const [eventsLoaded, setEventsLoaded] = useState(false)
+
   // Load highlight data on mount
   useEffect(() => {
     if (projectId) {
-      fetchEvents(projectId, { limit: 50000 })
+      setEventsLoaded(false)
+      fetchEvents(projectId, { limit: 50000 }).then(() => setEventsLoaded(true))
       loadConfig(projectId)
       loadDrivers(projectId)
       loadPresets()
@@ -119,7 +146,7 @@ export default function HighlightPanel({ projectId }) {
   ], [projectId, events.length, history.length])
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
+    <div className="flex-1 flex flex-col overflow-hidden">
       {/* No-analysis banner */}
       {!hasAnalysis && (
         <div className="flex items-center gap-3 px-4 py-2.5 bg-amber-500/10 border-b border-amber-500/20 shrink-0">
@@ -211,22 +238,24 @@ export default function HighlightPanel({ projectId }) {
             {/* Presets — inline below mode toggle */}
             <PresetSelector
               presets={presets}
+              currentPresetId={currentPresetId}
+              hasUnsavedChanges={hasUnsavedChanges}
               onLoad={loadPreset}
               onSave={savePreset}
               onDelete={deletePreset}
             />
 
-            {/* Race segments breakdown */}
-            <SegmentBreakdown
-              sections={videoSections}
-              config={sectionConfig}
-              onUpdate={updateSectionConfig}
-              metrics={metrics}
-            />
-
             <div className="flex-1 overflow-y-auto">
-              <HighlightWeightSliders />
+              {/* Race segments breakdown */}
+              <SegmentBreakdown
+                sections={videoSections}
+                config={sectionConfig}
+                onUpdate={updateSectionConfig}
+                metrics={metrics}
+              />
+
               <HighlightMetrics />
+              <HighlightWeightSliders />
             </div>
           </div>
           )}
@@ -243,17 +272,30 @@ export default function HighlightPanel({ projectId }) {
           </div>
           )}
 
-          {/* Right column: histogram (top) + timeline (bottom) */}
+          {/* Right column: shared top zone (histogram OR preview) + timeline */}
           <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
-            {/* Histogram fills remaining space */}
+
+            {/* Top zone — always flex-1; histogram and preview share this space.
+                The active panel fills the zone; the collapsed one shows header only. */}
             <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-              <HighlightHistogram
-                onInspect={() => sidebarRef.current?.switchTab('inspector')}
-                projectId={projectId}
-              />
+              <div className={!histogramCollapsed ? 'flex-1 flex flex-col min-h-0 overflow-hidden' : 'shrink-0'}>
+                <HighlightHistogram
+                  onInspect={() => sidebarRef.current?.switchTab('inspector')}
+                  projectId={projectId}
+                  collapsed={histogramCollapsed}
+                  onToggle={toggleHistogram}
+                  eventsLoaded={eventsLoaded}
+                />
+              </div>
+              <div className={!previewCollapsed ? 'flex-1 flex flex-col min-h-0 overflow-hidden' : 'shrink-0'}>
+                <HighlightPreview
+                  collapsed={previewCollapsed}
+                  onToggle={togglePreview}
+                />
+              </div>
             </div>
 
-            {/* Resize handle for timeline pane */}
+            {/* Resize handle — splits top zone from timeline */}
             <div
               className="shrink-0 cursor-row-resize group/divider relative"
               style={{ height: 1, marginTop: -1 }}
@@ -263,7 +305,7 @@ export default function HighlightPanel({ projectId }) {
               <div className="absolute inset-x-0 top-0 h-px bg-border transition-colors group-hover/divider:bg-accent group-active/divider:bg-accent" />
             </div>
 
-            {/* Timeline strip (bottom) */}
+            {/* Timeline strip (bottom, fixed height) */}
             <div
               className="shrink-0 overflow-hidden"
               style={{ height: timelineHeight }}
@@ -281,7 +323,7 @@ export default function HighlightPanel({ projectId }) {
 /**
  * PresetSelector — Compact inline preset picker for the tuning pane.
  */
-function PresetSelector({ presets, onLoad, onSave, onDelete }) {
+function PresetSelector({ presets, onLoad, onSave, onDelete, currentPresetId, hasUnsavedChanges }) {
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [name, setName] = useState('')
@@ -305,7 +347,14 @@ function PresetSelector({ presets, onLoad, onSave, onDelete }) {
             className="w-full flex items-center justify-between px-2 py-1 text-xxs bg-bg-primary border border-border
                        rounded text-text-primary hover:border-accent transition-colors"
           >
-            <span className="truncate">Select preset...</span>
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="truncate">
+                {currentPresetId && !hasUnsavedChanges ? currentPresetId : 'Select preset...'}
+              </span>
+              {hasUnsavedChanges && (
+                <span title="Unsaved changes" className="w-1.5 h-1.5 rounded-full bg-red-500 flex-shrink-0"></span>
+              )}
+            </div>
             <Folder className="w-3 h-3 text-text-disabled shrink-0" />
           </button>
           {open && (
@@ -363,7 +412,7 @@ const SEGMENT_TYPES = [
  * Total video duration = sum of all enabled segments.
  */
 function SegmentBreakdown({ sections, config, onUpdate, metrics }) {
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useLocalStorage('lrs:editing:segments:expanded', false)
 
   // Calculate total duration across enabled segments
   const totalSegmentDuration = SEGMENT_TYPES.reduce((sum, seg) => {
@@ -374,68 +423,62 @@ function SegmentBreakdown({ sections, config, onUpdate, metrics }) {
   }, 0)
 
   return (
-    <div className="px-3 py-2 border-b border-border-subtle shrink-0">
-      <button
-        onClick={() => setExpanded(v => !v)}
-        className="flex items-center gap-1.5 w-full text-left"
-      >
-        <Clapperboard className="w-3 h-3 text-text-tertiary" />
-        <span className="text-xxs font-semibold text-text-tertiary uppercase tracking-wider flex-1">
-          Race Segments
-        </span>
+    <CollapsibleSection
+      icon={Clapperboard}
+      label="Race Segments"
+      open={expanded}
+      onToggle={() => setExpanded(v => !v)}
+      right={
         <span className="text-[9px] text-text-disabled font-mono">
           {totalSegmentDuration > 0 ? `${Math.round(totalSegmentDuration / 60)}m` : '—'}
         </span>
-        <span className="text-xxs text-text-disabled">{expanded ? '▾' : '▸'}</span>
-      </button>
+      }
+    >
+      <div className="mt-2 space-y-1.5">
+        {SEGMENT_TYPES.map(seg => {
+          const cfg = config[seg.id] || {}
+          const enabled = cfg.enabled !== false
+          const section = sections.find(s => s.name === seg.id || s.type === seg.id)
+          const clipCount = section?.clip_count || cfg.clipCount || 0
+          const segDuration = cfg.duration || section?.duration || 0
 
-      {expanded && (
-        <div className="mt-2 space-y-1.5">
-          {SEGMENT_TYPES.map(seg => {
-            const cfg = config[seg.id] || {}
-            const enabled = cfg.enabled !== false
-            const section = sections.find(s => s.name === seg.id || s.type === seg.id)
-            const clipCount = section?.clip_count || cfg.clipCount || 0
-            const segDuration = cfg.duration || section?.duration || 0
+          return (
+            <div key={seg.id} className={`flex items-center gap-2 py-1 px-1.5 rounded transition-colors
+              ${enabled ? 'bg-bg-primary/50' : 'opacity-40'}`}>
+              <button
+                onClick={() => onUpdate(seg.id, { enabled: !enabled })}
+                className={`w-4 h-4 rounded border text-center text-[10px] leading-4 transition-colors
+                  ${enabled
+                    ? 'bg-accent border-accent text-white'
+                    : 'border-border text-transparent hover:border-accent/50'}`}
+              >
+                ✓
+              </button>
+              <span className="text-xxs" style={{ width: 14 }}>{seg.icon}</span>
+              <span className="text-xxs text-text-primary flex-1 truncate">{seg.label}</span>
+              {enabled && (
+                <>
+                  <span className="text-[9px] text-text-disabled font-mono">
+                    {clipCount > 0 ? `${clipCount} clips` : '—'}
+                  </span>
+                  <span className="text-[9px] text-text-disabled font-mono w-8 text-right">
+                    {segDuration > 0 ? `${Math.round(segDuration)}s` : '—'}
+                  </span>
+                </>
+              )}
+            </div>
+          )
+        })}
 
-            return (
-              <div key={seg.id} className={`flex items-center gap-2 py-1 px-1.5 rounded transition-colors
-                ${enabled ? 'bg-bg-primary/50' : 'opacity-40'}`}>
-                <button
-                  onClick={() => onUpdate(seg.id, { enabled: !enabled })}
-                  className={`w-4 h-4 rounded border text-center text-[10px] leading-4 transition-colors
-                    ${enabled
-                      ? 'bg-accent border-accent text-white'
-                      : 'border-border text-transparent hover:border-accent/50'}`}
-                >
-                  ✓
-                </button>
-                <span className="text-xxs" style={{ width: 14 }}>{seg.icon}</span>
-                <span className="text-xxs text-text-primary flex-1 truncate">{seg.label}</span>
-                {enabled && (
-                  <>
-                    <span className="text-[9px] text-text-disabled font-mono">
-                      {clipCount > 0 ? `${clipCount} clips` : '—'}
-                    </span>
-                    <span className="text-[9px] text-text-disabled font-mono w-8 text-right">
-                      {segDuration > 0 ? `${Math.round(segDuration)}s` : '—'}
-                    </span>
-                  </>
-                )}
-              </div>
-            )
-          })}
-
-          <div className="flex items-center justify-between pt-1 border-t border-border-subtle">
-            <span className="text-[9px] text-text-disabled">Total video duration</span>
-            <span className="text-xxs text-text-primary font-semibold font-mono">
-              {totalSegmentDuration > 0
-                ? `${Math.floor(totalSegmentDuration / 60)}:${String(Math.floor(totalSegmentDuration % 60)).padStart(2, '0')}`
-                : '—'}
-            </span>
-          </div>
+        <div className="flex items-center justify-between pt-1 border-t border-border-subtle">
+          <span className="text-[9px] text-text-disabled">Total video duration</span>
+          <span className="text-xxs text-text-primary font-semibold font-mono">
+            {totalSegmentDuration > 0
+              ? `${Math.floor(totalSegmentDuration / 60)}:${String(Math.floor(totalSegmentDuration % 60)).padStart(2, '0')}`
+              : '—'}
+          </span>
         </div>
-      )}
-    </div>
+      </div>
+    </CollapsibleSection>
   )
 }

@@ -1,13 +1,17 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useTimeline, EVENT_COLORS } from '../../context/TimelineContext'
 import { useHighlight } from '../../context/HighlightContext'
 import { useToast } from '../../context/ToastContext'
+import { useIRacing } from '../../context/IRacingContext'
 import { EVENT_TYPE_LABELS } from '../../context/HighlightContext'
+import { apiPost } from '../../services/api'
 import { formatTimePrecise } from '../../utils/time'
+import EventControlsBar from '../ui/EventControlsBar'
 import {
   Info, X, Save, RotateCcw, Scissors, Trash2,
   ChevronDown, Users, Clock, Star, Camera, Zap,
   ToggleLeft, ToggleRight, BarChart2, AlertTriangle,
+  Loader2, WifiOff, Play, Film,
 } from 'lucide-react'
 
 /** All event types available for the dropdown — must match live detectors */
@@ -35,8 +39,16 @@ export default function EventInspectorPanel({ projectId }) {
     updateEvent, deleteEvent, splitEvent,
     playheadTime, seekTo,
   } = useTimeline()
-  const { drivers } = useHighlight()
+  const { drivers, params, overrides, toggleOverride } = useHighlight()
   const { showSuccess, showError } = useToast()
+  const { isConnected } = useIRacing()
+
+  // ── Preview stream state ─────────────────────────────────────────────────
+  const [previewSeeking, setPreviewSeeking] = useState(false)
+  const [previewError, setPreviewError] = useState(null)
+  const [streamKey, setStreamKey] = useState(0)
+  const imgRef = useRef(null)
+  const seekAbortRef = useRef(null)
 
   // ── Find the selected event ──────────────────────────────────────────────
   const selectedEvent = useMemo(
@@ -62,6 +74,8 @@ export default function EventInspectorPanel({ projectId }) {
         involved_drivers: Array.isArray(selectedEvent.involved_drivers)
           ? [...selectedEvent.involved_drivers]
           : [],
+        padding_before: selectedEvent.metadata?.padding_before ?? null,
+        padding_after: selectedEvent.metadata?.padding_after ?? null,
       })
       setIsDirty(false)
     } else {
@@ -69,6 +83,45 @@ export default function EventInspectorPanel({ projectId }) {
       setIsDirty(false)
     }
   }, [selectedEvent])
+
+  // ── Auto-seek + stream on event focus ────────────────────────────────────
+  useEffect(() => {
+    if (!selectedEvent || !projectId || !isConnected) {
+      setPreviewError(null)
+      return
+    }
+
+    // Cancel any in-flight seek
+    if (seekAbortRef.current) seekAbortRef.current.abort()
+    const ac = new AbortController()
+    seekAbortRef.current = ac
+
+    setPreviewSeeking(true)
+    setPreviewError(null)
+
+    const carIdx = Array.isArray(selectedEvent.involved_drivers) && selectedEvent.involved_drivers.length > 0
+      ? selectedEvent.involved_drivers[0]
+      : null
+
+    apiPost(`/projects/${projectId}/analysis/seek-event`, {
+      start_time_seconds: selectedEvent.start_time_seconds ?? 0,
+      car_idx: carIdx,
+    })
+      .then(() => {
+        if (ac.signal.aborted) return
+        setStreamKey(k => k + 1)
+      })
+      .catch(err => {
+        if (ac.signal.aborted) return
+        setPreviewError(err?.detail ?? err?.message ?? 'Seek failed')
+      })
+      .finally(() => {
+        if (!ac.signal.aborted) setPreviewSeeking(false)
+      })
+
+    return () => { ac.abort() }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedEvent?.id, projectId, isConnected])
 
   // ── Check if local state differs from original ──────────────────────────
   const checkDirty = useCallback((newState) => {
@@ -81,7 +134,9 @@ export default function EventInspectorPanel({ projectId }) {
       newState.start_frame !== selectedEvent.start_frame ||
       newState.end_frame !== selectedEvent.end_frame ||
       newState.included_in_highlight !== !!selectedEvent.included_in_highlight ||
-      JSON.stringify(newState.involved_drivers) !== JSON.stringify(selectedEvent.involved_drivers)
+      JSON.stringify(newState.involved_drivers) !== JSON.stringify(selectedEvent.involved_drivers) ||
+      (newState.padding_before ?? null) !== (selectedEvent.metadata?.padding_before ?? null) ||
+      (newState.padding_after ?? null) !== (selectedEvent.metadata?.padding_after ?? null)
     )
   }, [selectedEvent])
 
@@ -98,7 +153,15 @@ export default function EventInspectorPanel({ projectId }) {
   const handleApply = useCallback(async () => {
     if (!editState || !selectedEvent) return
     try {
-      await updateEvent(projectId, selectedEvent.id, editState)
+      const { padding_before, padding_after, ...coreFields } = editState
+      // Build metadata patch for padding (null = remove override key)
+      const paddingChanged =
+        (padding_before ?? null) !== (selectedEvent.metadata?.padding_before ?? null) ||
+        (padding_after ?? null) !== (selectedEvent.metadata?.padding_after ?? null)
+      const payload = paddingChanged
+        ? { ...coreFields, metadata: { padding_before, padding_after } }
+        : coreFields
+      await updateEvent(projectId, selectedEvent.id, payload)
       setIsDirty(false)
       showSuccess('Event updated')
     } catch {
@@ -120,6 +183,8 @@ export default function EventInspectorPanel({ projectId }) {
       involved_drivers: Array.isArray(selectedEvent.involved_drivers)
         ? [...selectedEvent.involved_drivers]
         : [],
+      padding_before: selectedEvent.metadata?.padding_before ?? null,
+      padding_after: selectedEvent.metadata?.padding_after ?? null,
     })
     setIsDirty(false)
   }, [selectedEvent])
@@ -205,6 +270,85 @@ export default function EventInspectorPanel({ projectId }) {
         </button>
       </div>
 
+      {/* ── Live Preview Stream ───────────────────────────────────────── */}
+      <div className="shrink-0 relative bg-black overflow-hidden" style={{ aspectRatio: '16/9' }}>
+        {isConnected ? (
+          <>
+            <img
+              key={streamKey}
+              ref={imgRef}
+              src={`/api/iracing/stream?fps=15&quality=65&max_width=640`}
+              alt="Live preview"
+              className="w-full h-full object-cover"
+              onLoad={() => setPreviewError(null)}
+              onError={() => setPreviewError('Stream unavailable')}
+            />
+            {/* Seeking overlay */}
+            {previewSeeking && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 gap-2">
+                <Loader2 className="w-5 h-5 text-accent animate-spin" />
+                <span className="text-xxs text-text-disabled">Seeking…</span>
+              </div>
+            )}
+            {/* Error overlay */}
+            {!previewSeeking && previewError && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 gap-1.5 px-3 text-center">
+                <AlertTriangle className="w-4 h-4 text-warning" />
+                <span className="text-xxs text-text-disabled">{previewError}</span>
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
+            <WifiOff className="w-5 h-5 text-text-disabled/40" />
+            <span className="text-xxs text-text-disabled">iRacing not connected</span>
+          </div>
+        )}
+      </div>
+
+      {/* Event controls bar */}
+      {selectedEvent && (
+        <div className="shrink-0 border-b border-border bg-bg-secondary px-3 py-2">
+          <EventControlsBar
+            event={selectedEvent}
+            raceStart={0}
+            raceDuration={0}
+            replayState={null}
+            onSeekToEvent={(event) => {
+              const carIdx = Array.isArray(event.involved_drivers) && event.involved_drivers.length > 0
+                ? event.involved_drivers[0]
+                : null
+              setPreviewSeeking(true)
+              setPreviewError(null)
+              const ac = new AbortController()
+              seekAbortRef.current = ac
+              apiPost(`/projects/${projectId}/analysis/seek-event`, {
+                start_time_seconds: event.start_time_seconds ?? 0,
+                car_idx: carIdx,
+              }, { signal: ac.signal }).then(() => {
+                setStreamKey(k => k + 1)
+              }).catch((err) => {
+                if (err?.name !== 'AbortError') {
+                  setPreviewError('Failed to seek')
+                }
+              }).finally(() => {
+                setPreviewSeeking(false)
+              })
+            }}
+            onToggleOverride={toggleOverride}
+            onSwitchDriver={() => {}}
+            onToggleAutoLoop={() => {}}
+            onClose={() => setSelectedEventId(null)}
+            overrides={overrides}
+            autoLoop={false}
+            isSeeking={previewSeeking}
+            showClose={true}
+            compact={true}
+            className="bg-bg-secondary"
+          />
+        </div>
+      )}
+
       {/* Scrollable content */}
       <div className="flex-1 overflow-y-auto">
         {/* ── Event Type ───────────────────────────────────────────────── */}
@@ -268,54 +412,84 @@ export default function EventInspectorPanel({ projectId }) {
           </div>
         </Section>
 
-        {/* ── Incident Clip Window (incident events only) ───────────────── */}
-        {editState.event_type === 'incident' &&
-         selectedEvent.metadata?.incident_time != null && (() => {
-          const anchorTime = selectedEvent.metadata.incident_time
-          const currentLeadIn = Math.max(0, anchorTime - editState.start_time_seconds)
-          const currentFollowOut = Math.max(0, editState.end_time_seconds - anchorTime)
-          return (
-            <Section icon={AlertTriangle} label="Incident Clip Window">
+        {/* ── Clip Padding ─────────────────────────────────────────── */}
+        <Section icon={Film} label="Clip Padding">
+          {(() => {
+            const typeBefore = params.paddingByType?.[editState.event_type]?.before ?? null
+            const typeAfter  = params.paddingByType?.[editState.event_type]?.after ?? null
+            const effectiveBefore = editState.padding_before ?? typeBefore ?? params.paddingBefore
+            const effectiveAfter  = editState.padding_after  ?? typeAfter  ?? params.paddingAfter
+            const sourceBefore = editState.padding_before != null ? 'event'
+              : typeBefore != null ? 'type' : 'global'
+            const sourceAfter  = editState.padding_after != null ? 'event'
+              : typeAfter  != null ? 'type' : 'global'
+            return (
               <div className="space-y-2.5">
+                {/* Lead-in */}
                 <div className="space-y-1">
                   <div className="flex items-center justify-between text-xxs">
                     <span className="text-text-secondary">Lead-in</span>
-                    <span className="font-mono text-text-primary">{currentLeadIn.toFixed(1)}s</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-mono text-text-primary">{effectiveBefore.toFixed(1)}s</span>
+                      {sourceBefore === 'event' ? (
+                        <button
+                          onClick={() => updateField('padding_before', null)}
+                          className="text-xxs text-accent hover:underline leading-none"
+                          title="Remove per-event override"
+                        >reset</button>
+                      ) : (
+                        <span className="text-xxs text-text-disabled italic">{sourceBefore}</span>
+                      )}
+                    </div>
                   </div>
                   <input
                     type="range"
-                    min={0.5} max={10} step={0.5}
-                    value={currentLeadIn}
-                    onChange={e => {
-                      const li = parseFloat(e.target.value)
-                      updateField('start_time_seconds', Math.max(0, anchorTime - li))
-                    }}
+                    min={0} max={15} step={0.5}
+                    value={effectiveBefore}
+                    onChange={e => updateField('padding_before', parseFloat(e.target.value))}
                     className="w-full h-1.5 accent-accent cursor-pointer"
                   />
                 </div>
+                {/* Follow-out */}
                 <div className="space-y-1">
                   <div className="flex items-center justify-between text-xxs">
                     <span className="text-text-secondary">Follow-out</span>
-                    <span className="font-mono text-text-primary">{currentFollowOut.toFixed(1)}s</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-mono text-text-primary">{effectiveAfter.toFixed(1)}s</span>
+                      {sourceAfter === 'event' ? (
+                        <button
+                          onClick={() => updateField('padding_after', null)}
+                          className="text-xxs text-accent hover:underline leading-none"
+                          title="Remove per-event override"
+                        >reset</button>
+                      ) : (
+                        <span className="text-xxs text-text-disabled italic">{sourceAfter}</span>
+                      )}
+                    </div>
                   </div>
                   <input
                     type="range"
-                    min={2} max={30} step={0.5}
-                    value={currentFollowOut}
-                    onChange={e => {
-                      const fo = parseFloat(e.target.value)
-                      updateField('end_time_seconds', anchorTime + fo)
-                    }}
+                    min={0} max={30} step={0.5}
+                    value={effectiveAfter}
+                    onChange={e => updateField('padding_after', parseFloat(e.target.value))}
                     className="w-full h-1.5 accent-accent cursor-pointer"
                   />
                 </div>
+                {/* Effective capture window */}
                 <div className="text-xxs text-text-disabled">
-                  Anchor: {formatTimePrecise(anchorTime)}
+                  Capture:&nbsp;
+                  <span className="font-mono">
+                    {formatTimePrecise(Math.max(0, editState.start_time_seconds - effectiveBefore))}
+                  </span>
+                  &nbsp;→&nbsp;
+                  <span className="font-mono">
+                    {formatTimePrecise(editState.end_time_seconds + effectiveAfter)}
+                  </span>
                 </div>
               </div>
-            </Section>
-          )
-        })()}
+            )
+          })()}
+        </Section>
 
         {/* ── Include in Highlight ──────────────────────────────────────── */}
         <Section icon={editState.included_in_highlight ? ToggleRight : ToggleLeft} label="Highlight">

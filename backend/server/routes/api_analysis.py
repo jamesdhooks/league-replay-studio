@@ -45,6 +45,8 @@ from server.services.analysis_db import (
     get_project_db,
     init_analysis_db,
     clear_analysis_data,
+    clear_telemetry_data,
+    clear_events_data,
     get_events,
     count_events,
     insert_events_batch,
@@ -457,6 +459,62 @@ async def clear_analysis(project_id: int):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@router.delete("/projects/{project_id}/analysis/telemetry")
+async def clear_analysis_telemetry(project_id: int):
+    """Clear telemetry (and dependent event) data for a project, leaving analysis runs intact."""
+    project = get_project_or_404(project_id)
+
+    if analysis_manager.is_running(project_id):
+        analysis_manager.cancel(project_id)
+
+    project_dir = project["project_dir"]
+    try:
+        conn, _ = get_project_db_or_404(project_id)
+        try:
+            clear_telemetry_data(conn)
+            conn.execute("DELETE FROM analysis_runs")
+            conn.commit()
+        finally:
+            conn.close()
+
+        from pathlib import Path
+        log_path = Path(project_dir) / "analysis_log.json"
+        if log_path.exists():
+            log_path.unlink()
+
+        logger.info("[Analysis API] Cleared telemetry for project #%d", project_id)
+        return {"status": "cleared", "scope": "telemetry", "project_id": project_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("[Analysis API] Clear telemetry error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.delete("/projects/{project_id}/analysis/events")
+async def clear_analysis_events(project_id: int):
+    """Clear only event (detect-phase) data for a project, leaving telemetry intact."""
+    get_project_or_404(project_id)
+
+    if analysis_manager.is_running(project_id):
+        analysis_manager.cancel(project_id)
+
+    try:
+        conn, _ = get_project_db_or_404(project_id)
+        try:
+            clear_events_data(conn)
+        finally:
+            conn.close()
+
+        logger.info("[Analysis API] Cleared events for project #%d", project_id)
+        return {"status": "cleared", "scope": "events", "project_id": project_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("[Analysis API] Clear events error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.get("/projects/{project_id}/analysis/status")
 async def get_analysis_status(project_id: int):
     """Get the current analysis status for a project.
@@ -489,6 +547,170 @@ async def get_analysis_status(project_id: int):
         logger.warning("[Analysis API] Status check error: %s", exc)
         return {"status": "none", "project_id": project_id,
                 "has_telemetry": False, "has_events": False}
+
+
+# ── Tick explorer ──────────────────────────────────────────────────────────────
+
+# Human-readable descriptions for race_ticks columns
+_TICK_COL_META: dict[str, dict] = {
+    "session_time":   {"desc": "Session timestamp",     "unit": "s",    "group": "Session"},
+    "replay_frame":   {"desc": "Replay frame number",   "unit": None,   "group": "Session"},
+    "session_state":  {"desc": "Session state (0–6)",   "unit": None,   "group": "Session"},
+    "race_laps":      {"desc": "Race laps completed",   "unit": None,   "group": "Session"},
+    "cam_car_idx":    {"desc": "Camera car index",      "unit": None,   "group": "Session"},
+    "flags":          {"desc": "Race flags (bitmask)",  "unit": None,   "group": "Flags"},
+    "flag_yellow":    {"desc": "Yellow flag active",    "unit": None,   "group": "Flags"},
+    "flag_red":       {"desc": "Red flag active",       "unit": None,   "group": "Flags"},
+    "flag_checkered": {"desc": "Checkered flag active", "unit": None,   "group": "Flags"},
+}
+
+# Human-readable descriptions for car_states columns
+_CAR_STATE_COL_META: dict[str, dict] = {
+    "position":       {"desc": "Race position",                "unit": None,  "group": "Per Car"},
+    "class_position": {"desc": "Class position",               "unit": None,  "group": "Per Car"},
+    "lap":            {"desc": "Current lap",                  "unit": None,  "group": "Per Car"},
+    "lap_pct":        {"desc": "Lap distance (0–1)",           "unit": None,  "group": "Per Car"},
+    "surface":        {"desc": "Track surface (0=off, 1=pit, 2=apron, 3=on)", "unit": None, "group": "Per Car"},
+    "est_time":       {"desc": "Estimated lap time",           "unit": "s",   "group": "Per Car"},
+    "best_lap_time":  {"desc": "Personal best lap time",       "unit": "s",   "group": "Per Car"},
+    "speed_ms":       {"desc": "Speed",                        "unit": "m/s", "group": "Per Car"},
+}
+
+
+@router.get("/projects/{project_id}/analysis/ticks/catalog")
+async def get_analysis_ticks_catalog(project_id: int):
+    """Return explorable columns from race_ticks (Session/Flags) and car_states (Per Car)."""
+    conn, _ = get_project_db_or_404(project_id)
+    try:
+        catalog = []
+
+        # race_ticks columns
+        for row in conn.execute("PRAGMA table_info(race_ticks)").fetchall():
+            col = row[1]
+            if col == "id":
+                continue
+            meta = _TICK_COL_META.get(col, {})
+            catalog.append({
+                "name":  col,
+                "desc":  meta.get("desc", col),
+                "unit":  meta.get("unit"),
+                "group": meta.get("group", "Session"),
+                "table": "race_ticks",
+            })
+
+        # car_states columns (skip id/tick_id/car_idx — those are JOINkeys, not values)
+        _cs_skip = {"id", "tick_id", "car_idx"}
+        for row in conn.execute("PRAGMA table_info(car_states)").fetchall():
+            col = row[1]
+            if col in _cs_skip:
+                continue
+            meta = _CAR_STATE_COL_META.get(col, {})
+            catalog.append({
+                "name":  col,
+                "desc":  meta.get("desc", col),
+                "unit":  meta.get("unit"),
+                "group": "Per Car",
+                "table": "car_states",
+            })
+
+        return {"catalog": catalog}
+    finally:
+        conn.close()
+
+
+@router.get("/projects/{project_id}/analysis/cars")
+async def get_analysis_cars(project_id: int):
+    """Return the list of drivers captured during analysis."""
+    conn, _ = get_project_db_or_404(project_id)
+    try:
+        rows = conn.execute(
+            "SELECT car_idx, car_number, user_name, car_class_name "
+            "FROM drivers WHERE is_spectator = 0 ORDER BY car_idx"
+        ).fetchall()
+        return {
+            "cars": [
+                {
+                    "car_idx":        r["car_idx"],
+                    "car_number":     r["car_number"],
+                    "user_name":      r["user_name"],
+                    "car_class_name": r["car_class_name"],
+                }
+                for r in rows
+            ]
+        }
+    finally:
+        conn.close()
+
+
+@router.get("/projects/{project_id}/analysis/ticks")
+async def get_analysis_ticks(
+    project_id: int,
+    col: str = "session_time",
+    table: str = "race_ticks",
+    car_idx: int | None = None,
+    offset: int = 0,
+    limit: int = 100,
+):
+    """Return paginated tick rows.  When `table=car_states`, joins car_states
+    for the given `car_idx` so results include per-car values alongside the
+    session timestamp and frame.  `col` is validated against the actual schema
+    to prevent SQL injection.
+    """
+    conn, _ = get_project_db_or_404(project_id)
+    try:
+        limit  = max(1, min(500, limit))
+        offset = max(0, offset)
+
+        if table == "car_states":
+            if car_idx is None:
+                raise HTTPException(status_code=400,
+                                    detail="car_idx is required for car_states columns")
+            # Validate col against car_states schema
+            cs_cols = {row[1] for row in conn.execute("PRAGMA table_info(car_states)").fetchall()}
+            cs_cols -= {"id", "tick_id", "car_idx"}
+            if col not in cs_cols:
+                raise HTTPException(status_code=400, detail=f"Unknown car_states column: {col!r}")
+
+            total = conn.execute(
+                "SELECT COUNT(*) FROM car_states WHERE car_idx = ?", (car_idx,)
+            ).fetchone()[0]
+
+            rows = conn.execute(
+                f"SELECT t.id, t.session_time, t.replay_frame, t.session_state, cs.{col} "
+                "FROM car_states cs "
+                "JOIN race_ticks t ON cs.tick_id = t.id "
+                "WHERE cs.car_idx = ? "
+                "ORDER BY t.id LIMIT ? OFFSET ?",
+                (car_idx, limit, offset),
+            ).fetchall()
+        else:
+            # race_ticks
+            rt_cols = {row[1] for row in conn.execute("PRAGMA table_info(race_ticks)").fetchall()}
+            rt_cols -= {"id"}
+            if col not in rt_cols:
+                raise HTTPException(status_code=400, detail=f"Unknown race_ticks column: {col!r}")
+
+            total = conn.execute("SELECT COUNT(*) FROM race_ticks").fetchone()[0]
+
+            rows = conn.execute(
+                f"SELECT id, session_time, replay_frame, session_state, {col} "
+                "FROM race_ticks ORDER BY id LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+
+        ticks = [
+            {
+                "id":            r[0],
+                "session_time":  r[1],
+                "replay_frame":  r[2],
+                "session_state": r[3],
+                "value":         r[4],
+            }
+            for r in rows
+        ]
+        return {"ticks": ticks, "total": total, "offset": offset, "col": col}
+    finally:
+        conn.close()
 
 
 @router.get("/projects/{project_id}/analysis/session-match")
@@ -909,6 +1131,7 @@ class EventUpdateRequest(BaseModel):
     event_type: Optional[str] = None
     included_in_highlight: Optional[bool] = None
     involved_drivers: Optional[list[int]] = None
+    metadata: Optional[dict] = None  # Partial metadata patch — keys are merged; None values remove the key
 
 
 class EventSplitRequest(BaseModel):
@@ -961,6 +1184,23 @@ async def update_event(project_id: int, event_id: int, body: EventUpdateRequest)
             if body.involved_drivers is not None:
                 updates.append("involved_drivers = ?")
                 params.append(json.dumps(body.involved_drivers))
+            if body.metadata is not None:
+                # Merge patch: read existing metadata, apply keys (None values = remove key)
+                existing_meta_row = conn.execute(
+                    "SELECT metadata FROM race_events WHERE id = ?", (event_id,)
+                ).fetchone()
+                try:
+                    existing_meta = json.loads(existing_meta_row["metadata"] or "{}") if existing_meta_row else {}
+                except (json.JSONDecodeError, TypeError):
+                    existing_meta = {}
+                merged_meta = dict(existing_meta)
+                for k, v in body.metadata.items():
+                    if v is None:
+                        merged_meta.pop(k, None)
+                    else:
+                        merged_meta[k] = v
+                updates.append("metadata = ?")
+                params.append(json.dumps(merged_meta))
 
             if not updates:
                 raise HTTPException(status_code=400, detail="No fields to update")
@@ -1289,6 +1529,9 @@ class PresetSaveRequest(BaseModel):
     weights: dict[str, int]
     target_duration: Optional[float] = None
     min_severity: int = 0
+    params: dict = {}
+    section_config: dict = {}
+    replay_mode: str = "highlights"
 
 
 @router.get("/projects/{project_id}/highlights/config")
@@ -1515,8 +1758,13 @@ class VideoScriptRequest(BaseModel):
     weights: dict = {}
     constraints: dict = {}
     section_config: dict = {}
-    clip_padding: float = 0.5
+    clip_padding: float = 2.0        # Seconds of pre-roll before each clip
+    clip_padding_after: float = 5.0  # Seconds of post-roll after each clip
+    padding_by_type: dict = {}        # Per-event-type overrides: { type: { "before": s, "after": s } }
     tuning: dict = {}  # iRD-inspired scoring tuning knobs
+    camera_weights: dict = {}   # { group_name: weight (0–100) } — empty = all equal
+    camera_recency_penalty: float = 0.5  # 0 = none, 1 = maximum recency penalty
+    camera_recency_decay: float = 30.0   # Seconds for recency penalty to decay to zero
 
 
 @router.post("/projects/{project_id}/highlights/video-script")
@@ -1570,7 +1818,12 @@ async def generate_video_script_endpoint(project_id: int, body: VideoScriptReque
                 race_info=race_info,
                 section_config=body.section_config,
                 clip_padding=body.clip_padding,
+                clip_padding_after=body.clip_padding_after,
+                    padding_by_type=body.padding_by_type,
                 tuning=body.tuning,
+                camera_weights=body.camera_weights,
+                camera_recency_penalty=body.camera_recency_penalty,
+                camera_recency_decay=body.camera_recency_decay,
             )
 
             logger.info(
@@ -1693,6 +1946,9 @@ async def save_preset(body: PresetSaveRequest):
         "weights": body.weights,
         "target_duration": body.target_duration,
         "min_severity": body.min_severity,
+        "params": body.params,
+        "section_config": body.section_config,
+        "replay_mode": body.replay_mode,
     }
     _save_presets(presets)
     logger.info("[Highlights API] Saved preset '%s'", body.name)

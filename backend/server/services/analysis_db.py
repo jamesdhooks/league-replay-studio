@@ -268,6 +268,29 @@ def clear_analysis_data(conn: sqlite3.Connection) -> None:
     logger.info("[AnalysisDB] Cleared previous analysis data")
 
 
+def clear_telemetry_data(conn: sqlite3.Connection) -> None:
+    """Delete telemetry (scan-phase) data and dependent event data."""
+    conn.execute("DELETE FROM car_states")
+    conn.execute("DELETE FROM lap_completions")
+    conn.execute("DELETE FROM race_ticks")
+    # Events depend on telemetry, so clear them too
+    conn.execute("DELETE FROM race_events")
+    conn.execute("DELETE FROM incident_log")
+    conn.execute("DELETE FROM incidents_api")
+    conn.execute("DELETE FROM drivers")
+    conn.commit()
+    logger.info("[AnalysisDB] Cleared telemetry and dependent event data")
+
+
+def clear_events_data(conn: sqlite3.Connection) -> None:
+    """Delete event (detect-phase) data only, leaving telemetry intact."""
+    conn.execute("DELETE FROM race_events")
+    conn.execute("DELETE FROM incident_log")
+    conn.execute("DELETE FROM incidents_api")
+    conn.commit()
+    logger.info("[AnalysisDB] Cleared event data")
+
+
 def insert_event(
     conn: sqlite3.Connection,
     event_type: str,

@@ -57,6 +57,7 @@ VALID_TRANSITIONS = frozenset({"cut", "fade", "crossfade", "whip", "zoom"})
 
 # B-roll gap threshold in seconds
 BROLL_GAP_THRESHOLD = 8.0
+MAX_BROLL_FILLER_DURATION = 15.0  # Cap b-roll gap fillers to avoid inflating total edit duration
 
 # Default PIP threshold score
 DEFAULT_PIP_THRESHOLD = 7.0

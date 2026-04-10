@@ -4,35 +4,49 @@ import {
 } from 'lucide-react'
 import { H264StreamPlayer, HlsStreamPlayer } from './StreamPlayers'
 import { EVENT_CONFIG, severityColorCard } from './analysisConstants'
+import { useStream } from '../../hooks/useStream'
+import { useIRacing } from '../../context/IRacingContext'
 
 /**
- * PreviewPlayer — the 16:9 preview stream area with overlays, badges,
- * quality settings dropdown, window picker, and particle event cards.
+ * PreviewPlayer — self-contained 16:9 preview stream.
+ *
+ * All stream state is managed internally via useStream() and useIRacing().
+ * Caller only provides context-specific props:
+ *   - isAnalyzing   — disables click-to-play during live analysis
+ *   - isPlaying     — current playback state for click-to-play hint
+ *   - sessionMatch  — session fingerprint match badge
+ *   - feedEvents    — particle event cards during analysis
+ *   - onPlayPause   — caller's play/pause handler
+ *   - isPortrait    — layout mode
  */
 export default memo(function PreviewPlayer({
-  isConnected, isAnalyzing, isPlaying,
-  streamFormat, streamKey, activeStreamUrl, streamUrl,
-  streamLoaded, setStreamLoaded, streamError, setStreamError,
-  streamResetting, handleStreamReset,
-  streamVisible, setStreamVisible,
+  isAnalyzing, isPlaying,
   sessionMatch,
   feedEvents,
-  // Stream quality
-  showQualitySettings, setShowQualitySettings,
-  streamFps, setStreamFps,
-  mjpegQuality, setMjpegQuality, mjpegMaxWidth, setMjpegMaxWidth,
-  h264Crf, setH264Crf,
-  streamHlsCrf, setStreamHlsCrf,
-  setStreamKey,
-  setStreamFormat,
-  // Window picker
-  showWindowPicker, setShowWindowPicker,
-  captureTarget, windowList, loadingWindows,
-  fetchWindows, selectWindow, resetToAuto,
-  // Click handler
   onPlayPause,
   isPortrait,
 }) {
+  const { isConnected } = useIRacing()
+  const {
+    streamFormat,   setStreamFormat,
+    streamFps,      setStreamFps,
+    mjpegQuality,   setMjpegQuality,
+    mjpegMaxWidth,  setMjpegMaxWidth,
+    h264Crf,        setH264Crf,
+    streamHlsCrf,   setStreamHlsCrf,
+    streamKey,      setStreamKey,
+    streamLoaded,   setStreamLoaded,
+    streamError,    setStreamError,
+    streamResetting, handleStreamReset,
+    activeStreamUrl, streamUrl,
+    captureTarget, windowList, loadingWindows,
+    fetchWindows, selectWindow, resetToAuto,
+  } = useStream()
+
+  const [streamVisible,        setStreamVisible]        = useState(true)
+  const [showQualitySettings,  setShowQualitySettings]  = useState(false)
+  const [showWindowPicker,     setShowWindowPicker]     = useState(false)
+
   return (
     <div className={`flex items-center justify-center min-w-0 ${isPortrait ? 'shrink-0' : 'flex-1 min-h-0'}`}>
       <div className={`relative overflow-hidden bg-black ${isPortrait ? 'hidden' : ''}`}
@@ -185,8 +199,9 @@ export default memo(function PreviewPlayer({
         {showWindowPicker && (
           <WindowPickerDropdown
             captureTarget={captureTarget} windowList={windowList}
-            loadingWindows={loadingWindows} selectWindow={selectWindow}
-            resetToAuto={resetToAuto}
+            loadingWindows={loadingWindows}
+            selectWindow={(hwnd) => selectWindow(hwnd, () => setShowWindowPicker(false))}
+            resetToAuto={() => resetToAuto(() => setShowWindowPicker(false))}
           />
         )}
 

@@ -60,6 +60,8 @@ export default function TimelineCanvas() {
 
   // Video script sections (may be null if not generated yet)
   const videoScript = useVideoScript()
+  // Global padding defaults (for timeline block extension overlay)
+  const hlParams = useHighlightParams()
 
   // ── Interaction state (refs to avoid re-renders during drag) ───────────
   const dragRef = useRef({
@@ -276,7 +278,36 @@ export default function TimelineCanvas() {
         const ex = timeToX(evt.start_time_seconds)
         const ew = Math.max(2, (evt.end_time_seconds - evt.start_time_seconds) * pixelsPerSecond)
 
-        // Skip events off-screen
+        // Resolve padding: per-event override → per-type default → global default
+        const pb = evt.metadata?.padding_before
+          ?? hlParams.paddingByType?.[evt.event_type]?.before
+          ?? hlParams.paddingBefore ?? 0
+        const pa = evt.metadata?.padding_after
+          ?? hlParams.paddingByType?.[evt.event_type]?.after
+          ?? hlParams.paddingAfter ?? 0
+
+        // Skip events (and their padding) entirely off-screen
+        const padStartX = timeToX(evt.start_time_seconds - pb)
+        const padEndX = timeToX(evt.end_time_seconds + pa)
+        if (padEndX < TRACK_HEADER_WIDTH || padStartX > canvasWidth) continue
+
+        const color = EVENT_COLORS[evt.event_type] || '#666'
+        const isSelected = evt.id === selectedEventId
+        const radius = 3
+
+        // ── Padding extension (translucent region before/after core block) ──
+        if (pb > 0 || pa > 0) {
+          const clipPadX = Math.max(TRACK_HEADER_WIDTH, padStartX)
+          const clipPadW = Math.min(padEndX, canvasWidth) - clipPadX
+          if (clipPadW > 0) {
+            ctx.fillStyle = color
+            ctx.globalAlpha = isSelected ? 0.3 : 0.18
+            roundRect(ctx, clipPadX, blockY, clipPadW, blockH, radius)
+            ctx.fill()
+          }
+        }
+
+        // Skip core block if entirely off-screen
         if (ex + ew < TRACK_HEADER_WIDTH || ex > canvasWidth) continue
 
         // Clip to content area
@@ -284,13 +315,9 @@ export default function TimelineCanvas() {
         const clipW = Math.min(ex + ew, canvasWidth) - clipX
         if (clipW <= 0) continue
 
-        const color = EVENT_COLORS[evt.event_type] || '#666'
-        const isSelected = evt.id === selectedEventId
-
-        // Event block
+        // ── Core event block ──
         ctx.fillStyle = color
         ctx.globalAlpha = isSelected ? 1.0 : 0.75
-        const radius = 3
         roundRect(ctx, clipX, blockY, clipW, blockH, radius)
         ctx.fill()
 
@@ -459,7 +486,7 @@ export default function TimelineCanvas() {
   }, [
     canvasWidth, canvasHeight, pixelsPerSecond, scrollLeft, raceDuration,
     events, playheadTime, selectedEventId, inPoint, outPoint,
-    timeToX, getTrackLayout, videoScript,
+    timeToX, getTrackLayout, videoScript, hlParams,
   ])
 
   // ── Render on state change ────────────────────────────────────────────
@@ -669,4 +696,13 @@ function roundRect(ctx, x, y, w, h, r) {
 function useVideoScript() {
   const ctx = useContext(HighlightContext)
   return ctx?.videoScript || null
+}
+
+/**
+ * Hook to safely read highlight params (including padding defaults) from HighlightContext.
+ * Returns defaults if HighlightProvider is not mounted above us.
+ */
+function useHighlightParams() {
+  const ctx = useContext(HighlightContext)
+  return ctx?.params || { paddingBefore: 0, paddingAfter: 0 }
 }

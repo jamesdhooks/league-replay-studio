@@ -100,6 +100,7 @@ export function AnalysisProvider({ children }) {
             percent: data.progress_percent ?? prev?.percent ?? 0,
             message: data.message || data.description || 'Analyzing...',
             detail: data.detail || prev?.detail || '',
+            stage: data.stage ?? prev?.stage,
             currentTime: data.current_time ?? prev?.currentTime ?? 0,
             totalTicks: data.total_ticks ?? prev?.totalTicks ?? 0,
             currentLap: data.current_lap ?? prev?.currentLap,
@@ -232,6 +233,45 @@ export function AnalysisProvider({ children }) {
     }
   }, [])
 
+  // ── Clear telemetry only (events cleared too, since they depend on it) ──
+  const clearTelemetry = useCallback(async (projectId) => {
+    try {
+      const result = await apiDelete(`/projects/${projectId}/analysis/telemetry`)
+      setIsAnalyzing(false)
+      setIsScanning(false)
+      setProgress(null)
+      setEvents([])
+      setEventSummary(null)
+      setAnalysisLog([])
+      setDiscoveredEvents([])
+      setAnalysisStatus(null)
+      setError(null)
+      logIdRef.current = 0
+      return result
+    } catch (err) {
+      setError(err.message)
+      throw err
+    }
+  }, [])
+
+  // ── Clear events only (leaves telemetry intact) ─────────────────────────
+  const clearEvents = useCallback(async (projectId) => {
+    try {
+      const result = await apiDelete(`/projects/${projectId}/analysis/events`)
+      setEvents([])
+      setEventSummary(null)
+      setDiscoveredEvents([])
+      setError(null)
+      // Re-fetch status so hasTelemetry/hasEvents reflect reality
+      const status = await apiGet(`/projects/${projectId}/analysis/status`)
+      setAnalysisStatus(status)
+      return result
+    } catch (err) {
+      setError(err.message)
+      throw err
+    }
+  }, [])
+
   // ── Fetch analysis status ───────────────────────────────────────────────
   const fetchAnalysisStatus = useCallback(async (projectId) => {
     try {
@@ -327,6 +367,8 @@ export function AnalysisProvider({ children }) {
     startRescan,
     cancelAnalysis,
     clearAnalysis,
+    clearTelemetry,
+    clearEvents,
     fetchAnalysisStatus,
     fetchEvents,
     fetchEventSummary,
@@ -336,7 +378,8 @@ export function AnalysisProvider({ children }) {
   }), [
     isAnalyzing, isScanning, progress, events, eventSummary, analysisStatus, error,
     analysisLog, discoveredEvents,
-    startAnalysis, startRescan, cancelAnalysis, clearAnalysis, fetchAnalysisStatus, fetchEvents, fetchEventSummary,
+    startAnalysis, startRescan, cancelAnalysis, clearAnalysis, clearTelemetry, clearEvents,
+    fetchAnalysisStatus, fetchEvents, fetchEventSummary,
     loadAnalysisLog, clearDiscoveredEvents, clearLog,
   ])
 

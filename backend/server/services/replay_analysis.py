@@ -656,10 +656,25 @@ class ReplayAnalyzer:
 
         writer = TelemetryWriter(conn)
 
-        # ── Step 0: Rewind to frame 0 before doing anything else ─────────
-        # Must happen first. When iRacing is paused at the end of the race
-        # the replay engine is in an "ended" state — replay_search_session_time
-        # and set_replay_speed will silently do nothing until we unstick it.
+        # ── Step 0: Pause then rewind to frame 0 before doing anything else ──
+        # iRacing ignores seek commands while the replay is playing or when the
+        # replay engine is in an "ended" state.  We must pause FIRST, confirm it,
+        # then issue the seek.
+        self.on_progress("step_completed", {
+            "project_id": self.project_id,
+            "stage": "analysis_scan",
+            "description": "Pausing replay before rewind...",
+            "detail": "Setting replay speed to 0 and confirming before seeking to frame 0",
+            "progress_percent": 0,
+        })
+        pause_ok = await self._verified_set_speed(0, label="pre-rewind-pause")
+        if not pause_ok:
+            # Still attempt the rewind — but log that the pause wasn't confirmed
+            logger.warning(
+                "[Analysis] Pre-rewind pause not confirmed — iRacing may be unresponsive. "
+                "Attempting frame-0 seek anyway."
+            )
+
         self.on_progress("step_completed", {
             "project_id": self.project_id,
             "stage": "analysis_scan",
@@ -667,18 +682,26 @@ class ReplayAnalyzer:
             "detail": "Seeking to frame 0 before reading session data",
             "progress_percent": 0,
         })
-        rewind_ok = await self._verified_seek(0, label="rewind", tolerance=60)
+        # Use replay_search(to_start=0) as the PRIMARY rewind — unlike
+        # replay_set_play_position, it works even when the replay is in
+        # the "ended" state (last frame reached).  Then verify with a brief
+        # brief playing period, as the frame counter can momentarily show 0
+        # before a seek completes.
+        iracing_bridge.set_replay_speed(1)   # exit paused/ended state first
+        await asyncio.sleep(0.2)
+        iracing_bridge.replay_search(0)       # to_start
+        await asyncio.sleep(0.3)
+        rewind_ok = await self._verified_seek(0, label="rewind", tolerance=120)
         if not rewind_ok:
-            logger.warning("[Analysis] Frame-0 seek not confirmed — trying replay_search to_start (mode=0)")
+            logger.warning("[Analysis] to_start seek not confirmed — retrying with seek_to_frame(0) fallback")
             self.on_progress("step_completed", {
                 "project_id": self.project_id,
                 "stage": "analysis_scan",
-                "description": "Rewind failed — trying alternate seek method...",
-                "detail": "ReplayFrameNum did not reach 0. Attempting to_start search as fallback.",
+                "description": "Rewind not confirmed — retrying...",
+                "detail": "ReplayFrameNum did not reach 0. Trying replay_set_play_position as secondary fallback.",
                 "progress_percent": 0,
             })
-            iracing_bridge.replay_search(0)  # RpySrchMode.to_start = 0
-            rewind_ok = await self._verified_seek(0, label="rewind-fallback", max_retries=2, tolerance=300)
+            rewind_ok = await self._verified_seek(0, label="rewind-fallback", max_retries=3, tolerance=300)
             if not rewind_ok:
                 logger.error("[Analysis] Could not rewind replay to frame 0 — iRacing may not be in replay mode")
                 self.on_progress("error", {
@@ -751,6 +774,12 @@ class ReplayAnalyzer:
             })
 
             # Jump directly to the start of the race session.
+            # IMPORTANT: replay_search_session_time() is SILENTLY IGNORED when the
+            # replay is paused (speed=0).  We must start playing first (speed=1),
+            # send the seek, then poll for confirmation.
+            iracing_bridge.set_replay_speed(1)
+            await asyncio.sleep(0.3)   # give iRacing time to leave paused state
+
             # replay_search_session_time() is asynchronous — iRacing updates the
             # ReplaySessionNum telemetry var only after the seek is processed
             # (can take 1-3 seconds).  We MUST verify this instead of sleeping

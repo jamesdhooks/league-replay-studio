@@ -1,11 +1,11 @@
-import { useState, useEffect, useRef, useCallback, memo } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react'
 import { useAnalysis } from '../../context/AnalysisContext'
 import { useProject } from '../../context/ProjectContext'
 import { useIRacing } from '../../context/IRacingContext'
 import { useToast } from '../../context/ToastContext'
 import { useHighlight } from '../../context/HighlightContext'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
-import { apiPost, apiGet, apiDelete } from '../../services/api'
+import { apiPost, apiGet } from '../../services/api'
 import {
   Play, BarChart3, Loader2,
   XCircle, Terminal, ChevronDown,
@@ -18,22 +18,24 @@ import PreviewPlayer from './PreviewPlayer'
 import PlaybackTimeline from './PlaybackTimeline'
 import AnalysisRightPanel from './AnalysisRightPanel'
 import AnalysisTuningColumn from './AnalysisTuningColumn'
+import AnalysisTelemetryExplorer from './AnalysisTelemetryExplorer'
 import TuningPanel from './TuningPanel'
 import LogTabContent from './LogTabContent'
 import EventsTabContent from './EventsTabContent'
+import DataStreamViz from '../collect/DataStreamViz'
 
 export default memo(function AnalysisPanel() {
   // ── Context ────────────────────────────────────────────────────────────
   const {
     isAnalyzing, isScanning, progress, events, eventSummary, error,
     analysisLog, discoveredEvents, hasTelemetry, hasEvents, analysisStatus,
-    startAnalysis, startRescan, cancelAnalysis, clearAnalysis,
+    startAnalysis, startRescan, cancelAnalysis, clearAnalysis, clearTelemetry, clearEvents,
     fetchEvents, fetchEventSummary, fetchAnalysisStatus,
     loadAnalysisLog, clearDiscoveredEvents, clearLog,
   } = useAnalysis()
   const { activeProject, advanceStep } = useProject()
   const { isConnected } = useIRacing()
-  const { overrides, toggleOverride } = useHighlight()
+  const { overrides, toggleOverride, params } = useHighlight()
   const { showError, showWarning } = useToast()
 
   // ── Local state ────────────────────────────────────────────────────────
@@ -77,11 +79,7 @@ export default memo(function AnalysisPanel() {
   // Event table sort
   const [eventSort, setEventSort] = useState({ col: 'time', dir: 'asc' })
 
-  // Window picker
-  const [showWindowPicker, setShowWindowPicker] = useState(false)
-  const [windowList, setWindowList] = useState([])
-  const [captureTarget, setCaptureTarget] = useState({ mode: 'auto', hwnd: null })
-  const [loadingWindows, setLoadingWindows] = useState(false)
+  // Window picker state now lives inside PreviewPlayer via useStream().
 
   // Replay controls
   const [replaySpeed, setReplaySpeed] = useState(1)
@@ -92,20 +90,7 @@ export default memo(function AnalysisPanel() {
   const [sessionMatch, setSessionMatch] = useState(null)
   const [isSeeking, setIsSeeking] = useState(false)
 
-  // Stream settings
-  const [streamFps, setStreamFps] = useLocalStorage('lrs:analysis:streamFps', 15)
-  const [streamFormat, setStreamFormat] = useLocalStorage('lrs:analysis:streamFormat', 'mjpeg')
-  const [mjpegQuality, setMjpegQuality] = useLocalStorage('lrs:analysis:mjpegQuality', 85)
-  const [mjpegMaxWidth, setMjpegMaxWidth] = useLocalStorage('lrs:analysis:mjpegMaxWidth', 1280)
-  const [h264Crf, setH264Crf] = useLocalStorage('lrs:analysis:h264Crf', 23)
-  const [h264MaxWidth, setH264MaxWidth] = useLocalStorage('lrs:analysis:h264MaxWidth', 1280)
-  const [streamHlsCrf, setStreamHlsCrf] = useLocalStorage('lrs:analysis:streamHlsCrf', 23)
-  const [showQualitySettings, setShowQualitySettings] = useState(false)
-  const [streamKey, setStreamKey] = useState(0)
-  const [streamLoaded, setStreamLoaded] = useState(false)
-  const [streamError, setStreamError] = useState(null)
-  const [streamResetting, setStreamResetting] = useState(false)
-  const [streamVisible, setStreamVisible] = useState(true)
+  // Stream settings now live inside PreviewPlayer via useStream().
 
   // Tuning parameters
   const [tuningParams, setTuningParams] = useLocalStorage('lrs:analysis:tuningParams', {
@@ -116,6 +101,7 @@ export default memo(function AnalysisPanel() {
     close_call_max_time_loss: 2.0,
   })
   const [showTuningPanel, setShowTuningPanel] = useState(false)
+  const [showTelemetryExplorer, setShowTelemetryExplorer] = useState(false)
   const [showTuning, setShowTuning] = useState(false)
   const [isRedetecting, setIsRedetecting] = useState(false)
 
@@ -146,8 +132,7 @@ export default memo(function AnalysisPanel() {
   const [cameraGroups, setCameraGroups] = useState([])
 
   // ── Effects ────────────────────────────────────────────────────────────
-  useEffect(() => { setStreamLoaded(false); setStreamError(null) }, [streamKey])
-
+  // Stream lifecycle now managed inside PreviewPlayer / useStream.
   useEffect(() => {
     if (!isConnected) return
     const fetchSession = () => {
@@ -262,68 +247,52 @@ export default memo(function AnalysisPanel() {
   // ── Derived values ─────────────────────────────────────────────────────
   const hasEventsLocal = events.length > 0 || hasEvents
 
-  const streamUrl = `/api/iracing/stream?fps=${streamFps}&quality=${mjpegQuality}&max_width=${mjpegMaxWidth}&_k=${streamKey}`
-  const h264Url   = `/api/iracing/stream/h264?fps=${streamFps}&crf=${h264Crf}&max_width=${h264MaxWidth}&_k=${streamKey}`
-  const hlsUrl    = `/api/iracing/stream/hls/playlist.m3u8?fps=${streamFps}&crf=${streamHlsCrf}&max_width=${h264MaxWidth}&_k=${streamKey}`
-  const activeStreamUrl = streamFormat === 'h264' ? h264Url : streamFormat === 'hls' ? hlsUrl : streamUrl
-
-  const filteredEvents = (() => {
+  // Analysis-phase rendering uses effective clip windows so operators preview
+  // what capture will actually use: per-event override → per-type → global.
+  const paddedEvents = useMemo(() => {
     if (!events?.length) return []
+
+    return events.map((event) => {
+      const typePad = params?.paddingByType?.[event.event_type] || {}
+      const padBefore = event.metadata?.padding_before
+        ?? typePad.before
+        ?? params?.paddingBefore
+        ?? 0
+      const padAfter = event.metadata?.padding_after
+        ?? typePad.after
+        ?? params?.paddingAfter
+        ?? 0
+
+      const coreStart = event.start_time_seconds ?? event.startTime ?? 0
+      const coreEndRaw = event.end_time_seconds ?? event.endTime ?? coreStart
+      const coreEnd = Math.max(coreStart, coreEndRaw)
+
+      const start = Math.max(0, coreStart - Math.max(0, padBefore))
+      const end = Math.max(start, coreEnd + Math.max(0, padAfter))
+
+      return {
+        ...event,
+        start_time_seconds: start,
+        end_time_seconds: end,
+        core_start_time_seconds: coreStart,
+        core_end_time_seconds: coreEnd,
+        padding_before_effective: padBefore,
+        padding_after_effective: padAfter,
+        // Ensure driver_names is preserved (fallback if not in original event)
+        driver_names: event.driver_names || [],
+      }
+    })
+  }, [events, params])
+
+  const filteredEvents = useMemo(() => {
+    if (!paddedEvents.length) return []
     const list = activeFilter
-      ? events.filter(e => e.event_type === activeFilter)
-      : events
+      ? paddedEvents.filter(e => e.event_type === activeFilter)
+      : paddedEvents
     return [...list].sort((a, b) => (a.start_time_seconds ?? 0) - (b.start_time_seconds ?? 0))
-  })()
+  }, [paddedEvents, activeFilter])
 
   // ── Handlers ───────────────────────────────────────────────────────────
-  const handleStreamReset = async () => {
-    if (streamResetting) return
-    setStreamResetting(true)
-    setStreamLoaded(false)
-    setStreamError(null)
-    try {
-      await apiPost('/iracing/stream/reset', {
-        fps: streamFps,
-        quality: mjpegQuality,
-        max_width: mjpegMaxWidth,
-      })
-    } catch {
-    } finally {
-      setStreamKey(k => k + 1)
-      setStreamResetting(false)
-    }
-  }
-
-  const fetchWindows = useCallback(async () => {
-    setLoadingWindows(true)
-    try {
-      const [windows, target] = await Promise.all([
-        apiGet('/iracing/windows'),
-        apiGet('/iracing/capture-target'),
-      ])
-      setWindowList(windows)
-      setCaptureTarget(target)
-    } catch {} finally {
-      setLoadingWindows(false)
-    }
-  }, [])
-
-  const selectWindow = async (hwnd) => {
-    try {
-      await apiPost('/iracing/capture-target', { hwnd })
-      setCaptureTarget({ mode: 'manual', hwnd })
-      setShowWindowPicker(false)
-    } catch {}
-  }
-
-  const resetToAuto = async () => {
-    try {
-      await apiDelete('/iracing/capture-target')
-      setCaptureTarget({ mode: 'auto', hwnd: null })
-      setShowWindowPicker(false)
-    } catch {}
-  }
-
   const handleStart = async () => {
     setSidebarTab('log')
     try { await startAnalysis(activeProject.id, tuningParams) } catch {}
@@ -342,6 +311,15 @@ export default memo(function AnalysisPanel() {
     try { await clearAnalysis(activeProject.id) } catch {}
   }
 
+  const handleClearTelemetry = async () => {
+    try { await clearTelemetry(activeProject.id) } catch {}
+  }
+
+  const handleClearEvents = async () => {
+    try { await clearEvents(activeProject.id) } catch {}
+  }
+
+  const handleExploreTelemetry = () => setShowTelemetryExplorer(true)
   const handleFilterChange = (type) => {
     setActiveFilter(prev => prev === type ? '' : type)
   }
@@ -479,8 +457,10 @@ export default memo(function AnalysisPanel() {
     )
   }
 
-  // ── Idle state: no analysis running, no events ────────────────────────
-  if (!isAnalyzing && !hasEventsLocal && discoveredEvents.length === 0) {
+  // ── Idle state: no analysis running, no telemetry, no events ─────────
+  // Once telemetry exists, fall through to the full editor so the user can
+  // run event detection via the phase cards in the tuning column.
+  if (!isAnalyzing && !hasTelemetry && !hasEventsLocal && discoveredEvents.length === 0) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center p-8">
         <div className="flex flex-col items-center gap-3 text-center max-w-sm">
@@ -490,78 +470,26 @@ export default memo(function AnalysisPanel() {
           </div>
           <h2 className="text-lg font-bold text-text-primary">Replay Analysis</h2>
 
-          {hasTelemetry ? (
-            <>
-              <p className="text-sm text-text-tertiary leading-relaxed">
-                Telemetry collected. Adjust tuning parameters and run event detection — no iRacing connection required.
-              </p>
-              <div className="w-full mt-2">
-                <button
-                  onClick={() => setShowTuningPanel(v => !v)}
-                  className="w-full flex items-center justify-between px-3 py-2 text-xs
-                             border border-border rounded-lg hover:bg-bg-hover transition-colors text-text-secondary"
-                >
-                  <span className="flex items-center gap-1.5">
-                    <SlidersHorizontal size={13} className="text-accent" />
-                    Tuning Parameters
-                  </span>
-                  <ChevronDown size={13} className={`transition-transform ${showTuningPanel ? 'rotate-180' : ''}`} />
-                </button>
-                {showTuningPanel && (
-                  <TuningPanel params={tuningParams} onChange={updateTuning} className="mt-2" />
-                )}
-              </div>
-              <div className="flex gap-2 mt-1">
-                <button
-                  onClick={handleReanalyze}
-                  disabled={isRedetecting}
-                  className="flex items-center gap-2 px-6 py-3 text-sm font-semibold
-                             text-white bg-gradient-to-r from-gradient-from to-gradient-to
-                             rounded-xl hover:from-gradient-via hover:to-gradient-from
-                             transition-all duration-200 shadow-glow-sm hover:shadow-glow disabled:opacity-50"
-                >
-                  {isRedetecting
-                    ? <Loader2 size={16} className="animate-spin" />
-                    : <SlidersHorizontal size={16} />}
-                  {isRedetecting ? 'Analyzing...' : 'Re-analyze'}
-                </button>
-                {isConnected && (
-                  <button
-                    onClick={handleRescan}
-                    className="flex items-center gap-2 px-4 py-3 text-sm font-medium
-                               text-text-secondary border border-border rounded-xl
-                               hover:bg-bg-hover transition-colors"
-                  >
-                    <RefreshCw size={14} />
-                    Re-collect Telemetry
-                  </button>
-                )}
-              </div>
-            </>
-          ) : (
-            <>
-              <p className="text-sm text-text-tertiary leading-relaxed">
-                Scan the replay at 16× speed to detect battles, incidents, overtakes, and key moments.
-              </p>
-              <button
-                onClick={handleStart}
-                disabled={!isConnected}
-                title={!isConnected ? 'iRacing must be connected and a replay loaded' : undefined}
-                className="flex items-center gap-2 px-6 py-3 text-sm font-semibold
-                           text-white bg-gradient-to-r from-gradient-from to-gradient-to
-                           rounded-xl hover:from-gradient-via hover:to-gradient-from
-                           transition-all duration-200 shadow-glow-sm hover:shadow-glow mt-2
-                           disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                <Play size={16} />
-                Analyze Replay
-              </button>
-              {!isConnected && (
-                <p className="text-xs text-text-disabled flex items-center gap-1">
-                  <WifiOff size={12} /> iRacing must be running with a replay loaded
-                </p>
-              )}
-            </>
+          <p className="text-sm text-text-tertiary leading-relaxed">
+            Scans the replay at 16× to collect telemetry, then automatically detects battles, incidents, overtakes, and key moments.
+          </p>
+          <button
+            onClick={handleStart}
+            disabled={!isConnected}
+            title={!isConnected ? 'iRacing must be connected and a replay loaded' : undefined}
+            className="flex items-center gap-2 px-6 py-3 text-sm font-semibold
+                       text-white bg-gradient-to-r from-gradient-from to-gradient-to
+                       rounded-xl hover:from-gradient-via hover:to-gradient-from
+                       transition-all duration-200 shadow-glow-sm hover:shadow-glow mt-2
+                       disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Play size={16} />
+            Collect &amp; Analyze
+          </button>
+          {!isConnected && (
+            <p className="text-xs text-text-disabled flex items-center gap-1">
+              <WifiOff size={12} /> iRacing must be running with a replay loaded
+            </p>
           )}
 
           {error && (
@@ -655,96 +583,91 @@ export default memo(function AnalysisPanel() {
           handleRescan={handleRescan}
           handleReanalyze={handleReanalyze}
           handleClear={handleClear}
+          handleClearTelemetry={handleClearTelemetry}
+          handleClearEvents={handleClearEvents}
+          handleExploreTelemetry={handleExploreTelemetry}
           advanceStep={advanceStep}
           activeProjectId={activeProject.id}
         />
 
         {/* Center + right column */}
         <div className={`flex-1 flex min-w-0 bg-bg-primary overflow-hidden ${isPortrait ? 'flex-col' : ''}`}>
-          {/* Center column: preview + timeline */}
-          <div className="flex-1 flex flex-col min-w-0 min-h-0">
-            <PreviewPlayer
-              isConnected={isConnected}
-              isAnalyzing={isAnalyzing}
-              isPlaying={isPlaying}
-              streamFormat={streamFormat}
-              streamKey={streamKey}
-              activeStreamUrl={activeStreamUrl}
-              streamUrl={streamUrl}
-              streamLoaded={streamLoaded}
-              setStreamLoaded={setStreamLoaded}
-              streamError={streamError}
-              setStreamError={setStreamError}
-              streamResetting={streamResetting}
-              handleStreamReset={handleStreamReset}
-              streamVisible={streamVisible}
-              setStreamVisible={setStreamVisible}
-              sessionMatch={sessionMatch}
-              feedEvents={feedEvents}
-              showQualitySettings={showQualitySettings}
-              setShowQualitySettings={setShowQualitySettings}
-              streamFps={streamFps}
-              setStreamFps={setStreamFps}
-              mjpegQuality={mjpegQuality}
-              setMjpegQuality={setMjpegQuality}
-              mjpegMaxWidth={mjpegMaxWidth}
-              setMjpegMaxWidth={setMjpegMaxWidth}
-              h264Crf={h264Crf}
-              setH264Crf={setH264Crf}
-              streamHlsCrf={streamHlsCrf}
-              setStreamHlsCrf={setStreamHlsCrf}
-              setStreamKey={setStreamKey}
-              setStreamFormat={setStreamFormat}
-              showWindowPicker={showWindowPicker}
-              setShowWindowPicker={setShowWindowPicker}
-              captureTarget={captureTarget}
-              windowList={windowList}
-              loadingWindows={loadingWindows}
-              fetchWindows={fetchWindows}
-              selectWindow={selectWindow}
-              resetToAuto={resetToAuto}
-              onPlayPause={handlePlayPause}
-              isPortrait={isPortrait}
-            />
 
-            <PlaybackTimeline
-              isConnected={isConnected}
-              isAnalyzing={isAnalyzing}
-              raceDuration={raceDuration}
-              raceStart={raceStart}
-              raceSessionNum={raceSessionNum}
-              replayState={replayState}
-              replaySpeed={replaySpeed}
-              isPlaying={isPlaying}
-              isSeeking={isSeeking}
-              focusedEvent={focusedEvent}
-              setFocusedEvent={setFocusedEvent}
-              autoLoop={autoLoop}
-              setAutoLoop={setAutoLoop}
-              filteredEvents={filteredEvents}
-              seekToEvent={seekToEvent}
-              navigateEvent={navigateEvent}
-              handlePlayPause={handlePlayPause}
-              handleSetSpeed={handleSetSpeed}
-              handleReplaySearch={handleReplaySearch}
-              handleSwitchDriver={handleSwitchDriver}
-              overrides={overrides}
-              toggleOverride={toggleOverride}
+          {/* Telemetry explorer — replaces preview + right panel when open */}
+          {showTelemetryExplorer ? (
+            <AnalysisTelemetryExplorer
+              projectId={activeProject.id}
+              analysisStatus={analysisStatus}
+              onClose={() => setShowTelemetryExplorer(false)}
             />
-          </div>
+          ) : (
+            <>
+              {/* Center column: preview + timeline */}
+              <div className="flex-1 flex flex-col min-w-0 min-h-0">
+                {/* Preview — DataStreamViz overlaid during telemetry scan */}
+                <div className="relative flex-1 min-h-0 min-w-0 flex flex-col">
+                  <PreviewPlayer
+                    isAnalyzing={isAnalyzing}
+                    isPlaying={isPlaying}
+                    sessionMatch={sessionMatch}
+                    feedEvents={feedEvents}
+                    onPlayPause={handlePlayPause}
+                    isPortrait={isPortrait}
+                  />
+                  {/* Particle overlay during telemetry scan */}
+                  {isAnalyzing && isScanning && (
+                    <div className="absolute inset-0 z-10 pointer-events-none">
+                      <DataStreamViz
+                        isCollecting={true}
+                        tickCount={progress?.totalTicks ?? 0}
+                        hz={4}
+                        label={activeProject?.name ?? ''}
+                      />
+                    </div>
+                  )}
+                </div>
 
-          {/* Right panel: Cameras / Drivers */}
-          <AnalysisRightPanel
-            isConnected={isConnected}
-            replayState={replayState}
-            cameraGroups={cameraGroups}
-            drivers={drivers}
-            rightPanelWidth={rightPanelWidth}
-            setRightPanelWidth={setRightPanelWidth}
-            isPortrait={isPortrait}
-            handleSwitchCamera={handleSwitchCamera}
-            handleSwitchDriver={handleSwitchDriver}
-          />
+                <PlaybackTimeline
+                  isConnected={isConnected}
+                  isAnalyzing={isAnalyzing}
+                  raceDuration={raceDuration}
+                  raceStart={raceStart}
+                  raceSessionNum={raceSessionNum}
+                  replayState={replayState}
+                  replaySpeed={replaySpeed}
+                  isPlaying={isPlaying}
+                  isSeeking={isSeeking}
+                  focusedEvent={focusedEvent}
+                  setFocusedEvent={setFocusedEvent}
+                  autoLoop={autoLoop}
+                  setAutoLoop={setAutoLoop}
+                  filteredEvents={filteredEvents}
+                  seekToEvent={seekToEvent}
+                  navigateEvent={navigateEvent}
+                  handlePlayPause={handlePlayPause}
+                  handleSetSpeed={handleSetSpeed}
+                  handleReplaySearch={handleReplaySearch}
+                  handleSwitchDriver={handleSwitchDriver}
+                  overrides={overrides}
+                  toggleOverride={toggleOverride}
+                />
+              </div>
+
+              {/* Right panel: Cameras / Drivers */}
+              <AnalysisRightPanel
+                isConnected={isConnected}
+                isAnalyzing={isAnalyzing}
+                replayState={replayState}
+                cameraGroups={cameraGroups}
+                drivers={drivers}
+                rightPanelWidth={rightPanelWidth}
+                setRightPanelWidth={setRightPanelWidth}
+                isPortrait={isPortrait}
+                handleSwitchCamera={handleSwitchCamera}
+                handleSwitchDriver={handleSwitchDriver}
+              />
+            </>
+          )}
         </div>
       </div>
     </div>

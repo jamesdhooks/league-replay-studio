@@ -1,7 +1,7 @@
 """
 timeline.py
 -----------
-Timeline allocation, conflict resolution, transitions, and b-roll insertion.
+Timeline allocation, conflict resolution, transitions, and gap-filler insertion.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 from .constants import (
     BROLL_GAP_THRESHOLD,
+    MAX_BROLL_FILLER_DURATION,
     BUCKET_BOUNDARIES,
     DEFAULT_PIP_THRESHOLD,
     MANDATORY_TYPES,
@@ -136,6 +137,10 @@ def _smooth_timeline(timeline: list[dict], pip_threshold: float,
         prev = smoothed[-1]
         if (evt.get("event_type") == prev.get("event_type")
                 and abs(evt.get("score", 0) - prev.get("score", 0)) <= threshold):
+            # Never collapse away force-included events.
+            if evt.get("force_included") or prev.get("force_included"):
+                smoothed.append(evt)
+                continue
             # Would removing the lower-scored one drop us below target?
             loser = prev if evt.get("score", 0) > prev.get("score", 0) else evt
             loser_dur = _evt_duration(loser)
@@ -192,7 +197,7 @@ def _compute_metrics(scored: list[dict], timeline: list[dict],
                      target_duration: float, race_duration: float,
                      num_drivers: int) -> dict:
     """Compute highlight quality metrics."""
-    event_segments = [s for s in timeline if s.get("type") not in ("transition", "broll")]
+    event_segments = [s for s in timeline if s.get("type") not in ("transition", "broll", "bridge")]
     highlight_duration = sum(_evt_duration(e) for e in event_segments)
 
     # Event counts by type
@@ -282,17 +287,28 @@ def allocate_timeline(
     max_driver_exposure = constraints.get("max_driver_exposure", 0.25)
     min_severity = constraints.get("min_severity", 0)
 
-    # Filter by minimum severity
-    candidates = [e for e in scored_events if e.get("severity", 0) >= min_severity or e.get("tier") == "S"]
+    # Filter by minimum severity. Force-included events always remain candidates.
+    # force_full_video events are intentionally excluded from highlight allocation.
+    candidates = [
+        e for e in scored_events
+        if (
+            e.get("force_included")
+            or e.get("severity", 0) >= min_severity
+            or e.get("tier") == "S"
+        ) and not e.get("force_full_video")
+    ]
 
     # Sort by score descending within each tier
     candidates.sort(key=lambda e: (-_tier_priority(e["tier"]), -e["score"]))
 
-    # Pass 1 — Must-have events (mandatory types always included regardless of score)
+    # Pass 1 — Must-have events
+    # Always include:
+    # - mandatory event types
+    # - force-included events (manual highlight override)
     must_have = []
     remaining = []
     for evt in candidates:
-        if evt.get("event_type") in MANDATORY_TYPES:
+        if evt.get("event_type") in MANDATORY_TYPES or evt.get("force_included"):
             must_have.append(evt)
         else:
             remaining.append(evt)
@@ -367,6 +383,10 @@ def resolve_conflicts(timeline: list[dict], pip_threshold: float = DEFAULT_PIP_T
         conflict = _find_overlap(seg, resolved)
         if conflict is None:
             resolved.append(seg)
+        elif seg.get("force_included") and not conflict.get("force_included"):
+            _replace_in_list(resolved, conflict, seg)
+        elif conflict.get("force_included") and not seg.get("force_included"):
+            continue
         elif _share_drivers(seg, conflict):
             merged = _merge_clips(seg, conflict)
             _replace_in_list(resolved, conflict, merged)
@@ -402,14 +422,131 @@ def insert_transitions(timeline: list[dict]) -> list[dict]:
     return result
 
 
-def insert_broll(timeline: list[dict], gap_threshold: float = BROLL_GAP_THRESHOLD) -> list[dict]:
-    """Insert b-roll gap filler segments where gaps are ≥ threshold.
+def insert_broll(
+    timeline: list[dict],
+    gap_threshold: float = BROLL_GAP_THRESHOLD,
+    contextual_events: Optional[list[dict]] = None,
+) -> list[dict]:
+    """Insert gap fillers where gaps are ≥ threshold.
 
-    Each b-roll segment includes camera_preferences from TV_CAM_PREFERENCES
-    so the capture engine can select an appropriate iRacing TV cam.
+    Strategy:
+      1) Prefer contextual race events from unselected candidates in the gap.
+      2) Fall back to scenic b-roll only for remaining uncovered gap.
+
+    This keeps the edit focused on actual race action and improves field coverage.
     """
     if len(timeline) < 2:
         return list(timeline)
+
+    def _drivers_from(evt: dict) -> set:
+        return _get_drivers(evt)
+
+    def _choose_context_events(
+        gap_start: float,
+        gap_end: float,
+        selected_source_ids: set,
+        seen_drivers: set,
+        type_counts: dict,
+    ) -> list[dict]:
+        if not contextual_events:
+            return []
+
+        # Candidate event overlaps this gap and is not already selected in timeline.
+        pool = []
+        for evt in contextual_events:
+            evt_id = evt.get("id")
+            if evt_id in selected_source_ids:
+                continue
+            if evt.get("score", 0) <= 0:
+                continue
+            s = evt.get("start_time_seconds", 0)
+            e = evt.get("end_time_seconds", 0)
+            if e <= gap_start or s >= gap_end:
+                continue
+            pool.append(evt)
+
+        if not pool:
+            return []
+
+        chosen = []
+        cursor = gap_start
+        used_ids = set()
+
+        # Greedy fill: up to 3 clips per gap to avoid over-fragmentation.
+        for _ in range(3):
+            if cursor >= gap_end - 0.5:
+                break
+
+            best = None
+            best_rank = -1e9
+            for evt in pool:
+                evt_id = evt.get("id")
+                if evt_id in used_ids:
+                    continue
+                s = evt.get("start_time_seconds", 0)
+                e = evt.get("end_time_seconds", 0)
+                if e <= cursor or s >= gap_end:
+                    continue
+
+                clip_start = max(cursor, s)
+                clip_end = min(gap_end, e)
+                clip_dur = max(0.0, clip_end - clip_start)
+                if clip_dur < 1.0:
+                    continue
+
+                drivers = _drivers_from(evt)
+                new_driver_count = len(drivers - seen_drivers)
+                etype = evt.get("event_type", "unknown")
+                rarity_bonus = 1.0 / (1.0 + type_counts.get(etype, 0))
+                score_term = min(6.0, max(0.0, evt.get("score", 0))) / 6.0
+                fit_term = clip_dur / max(1.0, min(gap_end - cursor, MAX_BROLL_FILLER_DURATION))
+
+                # Prefer clips that reduce representation gaps over raw score alone.
+                rank = (new_driver_count * 1.6) + (rarity_bonus * 1.2) + (fit_term * 1.0) + (score_term * 0.4)
+                if rank > best_rank:
+                    best_rank = rank
+                    best = (evt, clip_start, clip_end)
+
+            if not best:
+                break
+
+            evt, clip_start, clip_end = best
+            evt_id = evt.get("id")
+            used_ids.add(evt_id)
+            selected_source_ids.add(evt_id)
+
+            etype = evt.get("event_type", "unknown")
+            type_counts[etype] = type_counts.get(etype, 0) + 1
+            seen_drivers.update(_drivers_from(evt))
+
+            chosen.append({
+                **evt,
+                "type": "context",
+                "source_event_id": evt_id,
+                "start_time": clip_start,
+                "end_time": clip_end,
+                "start_time_seconds": clip_start,
+                "end_time_seconds": clip_end,
+                "duration": clip_end - clip_start,
+                "purpose": "context_gap_fill",
+            })
+            cursor = clip_end
+
+        return chosen
+
+    # Build context about already-selected content for balancing priorities.
+    selected_source_ids = set()
+    seen_drivers = set()
+    type_counts: dict[str, int] = defaultdict(int)
+    for seg in timeline:
+        if seg.get("type") in ("transition", "broll"):
+            continue
+        src = seg.get("source_event_id", seg.get("id"))
+        if src is not None:
+            selected_source_ids.add(src)
+        seen_drivers.update(_drivers_from(seg))
+        et = seg.get("event_type", "unknown")
+        type_counts[et] += 1
 
     result = []
     broll_idx = 0
@@ -421,17 +558,44 @@ def insert_broll(timeline: list[dict], gap_threshold: float = BROLL_GAP_THRESHOL
                 cur_start = seg.get("start_time_seconds", 0)
                 gap = cur_start - prev_end
                 if gap >= gap_threshold:
-                    broll_idx += 1
-                    result.append({
-                        "id": f"broll_{broll_idx:03d}",
-                        "type": "broll",
-                        "source": "track_side_camera",
-                        "camera_preferences": TV_CAM_PREFERENCES.get("gap_filler", []),
-                        "start_time": prev_end,
-                        "end_time": cur_start,
-                        "start_time_seconds": prev_end,
-                        "end_time_seconds": cur_start,
-                        "purpose": "gap_filler",
-                    })
+                    # 1) Prefer contextual race-event clips in this gap.
+                    context_clips = _choose_context_events(
+                        prev_end,
+                        cur_start,
+                        selected_source_ids,
+                        seen_drivers,
+                        type_counts,
+                    )
+                    for c in context_clips:
+                        result.append(c)
+
+                    # Recompute remaining gap after context clips.
+                    prev_end = result[-1].get("end_time_seconds", prev_end) if result else prev_end
+                    gap = cur_start - prev_end
+
+                if gap >= gap_threshold:
+                    # 2) Fallback bridge filler only for unresolved remainder.
+                    # Fill the ENTIRE remaining gap in capped chunks to guarantee
+                    # a continuous, no-dead-air timeline.
+                    fill_cursor = prev_end
+                    while (cur_start - fill_cursor) >= gap_threshold:
+                        broll_idx += 1
+                        broll_end = min(cur_start, fill_cursor + MAX_BROLL_FILLER_DURATION)
+                        broll_dur = max(0.0, broll_end - fill_cursor)
+                        if broll_dur <= 0:
+                            break
+                        result.append({
+                            "id": f"bridge_{broll_idx:03d}",
+                            "type": "bridge",
+                            "source": "track_side_camera",
+                            "camera_preferences": TV_CAM_PREFERENCES.get("gap_filler", []),
+                            "start_time": fill_cursor,
+                            "end_time": broll_end,
+                            "start_time_seconds": fill_cursor,
+                            "end_time_seconds": broll_end,
+                            "duration": broll_dur,
+                            "purpose": "bridge_gap_fill",
+                        })
+                        fill_cursor = broll_end
         result.append(seg)
     return result

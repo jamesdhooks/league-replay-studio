@@ -61,12 +61,12 @@ export default function RangeSlider({ rangeStart, rangeEnd, onChange, totalDurat
   const isZoomed = rangeStart > 0.001 || rangeEnd < 0.999
 
   return (
-    <div className="shrink-0 border-t border-border bg-bg-secondary px-3 py-1.5">
+    <div className="shrink-0 border-t-2 border-border bg-bg-secondary px-3 py-2">
       <div className="flex items-center gap-2">
-        <span className="text-[9px] text-text-disabled font-mono w-12">
+        <span className="text-[10px] text-text-secondary font-mono w-14">
           {formatTime(totalDuration * rangeStart)}
         </span>
-        <div ref={trackRef} className="relative flex-1 h-5 bg-bg-primary border border-border-subtle rounded-sm select-none">
+        <div ref={trackRef} className="relative flex-1 h-7 bg-bg-primary border border-border rounded select-none">
           {/* Event bars with width */}
           {miniEvents.map((ev, i) => (
             <div key={i} className="absolute top-0 bottom-0 rounded-[1px]"
@@ -78,16 +78,14 @@ export default function RangeSlider({ rangeStart, rangeEnd, onChange, totalDurat
           ))}
 
           {/* Dimmed regions outside range */}
-          <div className="absolute inset-y-0 left-0 bg-black/40 rounded-l-sm pointer-events-none" style={{ width: `${leftPct}%` }} />
-          <div className="absolute inset-y-0 right-0 bg-black/40 rounded-r-sm pointer-events-none" style={{ width: `${100 - leftPct - widthPct}%` }} />
+          <div className="absolute inset-y-0 left-0 bg-black/55 rounded-l pointer-events-none" style={{ width: `${leftPct}%` }} />
+          <div className="absolute inset-y-0 right-0 bg-black/55 rounded-r pointer-events-none" style={{ width: `${100 - leftPct - widthPct}%` }} />
 
           {/* Active region highlight */}
-          {isZoomed && (
-            <div
-              className="absolute inset-y-0 border-y border-accent/20 bg-accent/5 pointer-events-none"
-              style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
-            />
-          )}
+          <div
+            className="absolute inset-y-0 border-y-2 border-accent/60 bg-accent/10 pointer-events-none"
+            style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+          />
 
           {/* Center pan region */}
           <div
@@ -98,29 +96,36 @@ export default function RangeSlider({ rangeStart, rangeEnd, onChange, totalDurat
 
           {/* Left handle */}
           <div
-            className="absolute top-0 bottom-0 w-2 cursor-ew-resize bg-accent/70 hover:bg-accent z-10 rounded-l-sm"
+            className="absolute top-0 bottom-0 w-3 cursor-ew-resize bg-accent hover:bg-accent-hover z-10 rounded-l flex items-center justify-center"
             style={{ left: `${leftPct}%` }}
             onMouseDown={(e) => startDrag('start', e)}
-          />
+          >
+            <div className="w-px h-3 bg-white/50" />
+          </div>
 
           {/* Right handle */}
           <div
-            className="absolute top-0 bottom-0 w-2 cursor-ew-resize bg-accent/70 hover:bg-accent z-10 rounded-r-sm"
-            style={{ left: `calc(${leftPct + widthPct}% - 8px)` }}
+            className="absolute top-0 bottom-0 w-3 cursor-ew-resize bg-accent hover:bg-accent-hover z-10 rounded-r flex items-center justify-center"
+            style={{ left: `calc(${leftPct + widthPct}% - 12px)` }}
             onMouseDown={(e) => startDrag('end', e)}
-          />
+          >
+            <div className="w-px h-3 bg-white/50" />
+          </div>
         </div>
-        <span className="text-[9px] text-text-disabled font-mono w-12 text-right">
+        <span className="text-[10px] text-text-secondary font-mono w-14 text-right">
           {formatTime(totalDuration * rangeEnd)}
         </span>
-        {isZoomed && (
-          <button
-            onClick={() => onChange(0, 1)}
-            className="text-[9px] text-accent hover:text-accent-hover"
-          >
-            Reset
-          </button>
-        )}
+        <button
+          onClick={() => onChange(0, 1)}
+          disabled={!isZoomed}
+          className={`text-xs px-2 py-0.5 rounded border transition-colors ${
+            isZoomed
+              ? 'text-accent border-accent/40 hover:bg-accent/10 cursor-pointer'
+              : 'text-text-disabled border-border-subtle cursor-not-allowed opacity-40'
+          }`}
+        >
+          Reset
+        </button>
       </div>
     </div>
   )

@@ -33,6 +33,9 @@ const MIN_HEIGHT_PX = 900  // fallback height before container is measured
 const BUCKET_COL_WIDTH = 44 // column width in vertical mode
 const BUCKET_ROW_H = 32     // row height in horizontal mode
 const CHOSEN_ROW_H = 56     // result row height in horizontal mode
+const V_GUTTER_W = 52
+const V_PIP_COL_W = 72
+const V_COMPRESS_TIME_W = 48
 
 /** Map a score (0–10) to bucket index 0–9 */
 function scoreToBucket(score) {
@@ -42,14 +45,16 @@ function scoreToBucket(score) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HighlightHistogram({ onInspect, projectId }) {
-  const { selection, metrics, toggleOverride, jumpToEvent, applyHighlights, generateVideoScript } = useHighlight()
+export default function HighlightHistogram({ onInspect, projectId, collapsed, onToggle, eventsLoaded = false }) {
+  const { selection, metrics, toggleOverride, jumpToEvent, applyHighlights, generateVideoScript, params } = useHighlight()
   const { raceDuration, selectedEventId, setSelectedEventId, playheadTime, seekTo } = useTimeline()
   const { addToast } = useToast()
   const [hoveredId, setHoveredId] = useState(null)
   const [compress, setCompress] = useState(false)
   const [horizontal, setHorizontal] = useState(false)
-  const [histogramCollapsed, setHistogramCollapsed] = useState(false)
+  // Support controlled mode (collapsed/onToggle props from HighlightPanel) with local fallback
+  const [_localCollapsed, _setLocalCollapsed] = useState(false)
+  const histogramCollapsed = collapsed !== undefined ? collapsed : _localCollapsed
   const [showReport, setShowReport] = useState(false)
   const [activeTypes, setActiveTypes] = useState(null)  // null = all types visible
   const scrollRef = useRef(null)
@@ -200,22 +205,24 @@ export default function HighlightHistogram({ onInspect, projectId }) {
   const contentSize = useMemo(() => {
     if (!horizontal && compress && compressState) return compressState.totalHeight
     if (horizontal && compress && compressState) return compressState.totalWidth || MIN_HEIGHT_PX
-    if (containerSize <= 0) return MIN_HEIGHT_PX
-    return containerSize / Math.max(0.001, rangeWidth)
-  }, [containerSize, rangeWidth, horizontal, compress, compressState])
+    // Always divide by rangeWidth — even when containerSize isn't measured yet,
+    // use MIN_HEIGHT_PX as base so zoom works before the ResizeObserver fires.
+    const base = containerSize > 0 ? containerSize : MIN_HEIGHT_PX
+    return base / Math.max(0.001, rangeWidth)
+  }, [containerSize, rangeStart, rangeEnd, horizontal, compress, compressState])
 
   // Sync: range slider → scroll position (axis-aware)
   useEffect(() => {
     if (compress) return // compressed mode manages its own layout
     const el = scrollRef.current
-    if (!el || containerSize <= 0) return
+    if (!el) return
     const target = Math.round(rangeStart * contentSize)
     const current = horizontal ? el.scrollLeft : el.scrollTop
     if (Math.abs(current - target) < 1) return
     syncingRef.current = true
     if (horizontal) el.scrollLeft = target
     else el.scrollTop = target
-  }, [rangeStart, contentSize, containerSize, compress, horizontal])
+  }, [rangeStart, rangeEnd, contentSize, compress, horizontal])
 
   // Sync: scroll → range (keep zoom constant, pan only)
   const handleScroll = useCallback(() => {
@@ -259,7 +266,7 @@ export default function HighlightHistogram({ onInspect, projectId }) {
     return (playheadTime / totalDuration) * 100
   }, [playheadTime, totalDuration, compress])
 
-  if (totalDuration <= 0 && allEvents.length === 0) {
+  if (eventsLoaded && totalDuration <= 0 && allEvents.length === 0) {
     return (
       <div className="flex items-center justify-center h-full text-text-disabled text-xs gap-2">
         <Columns3 size={16} className="opacity-40" />
@@ -273,13 +280,16 @@ export default function HighlightHistogram({ onInspect, projectId }) {
 
       {/* ── Header bar ─────────────────────────────────────────────────── */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-bg-secondary shrink-0">
-        <button onClick={() => setHistogramCollapsed(v => !v)} className="shrink-0">
+        <button
+          onClick={() => onToggle ? onToggle() : _setLocalCollapsed(v => !v)}
+          className="flex items-center gap-2 shrink-0 hover:text-text-primary transition-colors"
+        >
           {histogramCollapsed ? <ChevronRight className="w-3 h-3 text-text-tertiary" /> : <ChevronDown className="w-3 h-3 text-text-tertiary" />}
+          <Columns3 size={13} className="text-accent shrink-0" />
+          <span className="text-xs font-semibold text-text-primary uppercase tracking-wider whitespace-nowrap">
+            Score Histogram
+          </span>
         </button>
-        <Columns3 size={13} className="text-accent shrink-0" />
-        <span className="text-xs font-semibold text-text-primary uppercase tracking-wider whitespace-nowrap">
-          Score Histogram
-        </span>
         {!histogramCollapsed && (
           <>
         <span className="text-xs text-text-disabled">
@@ -380,30 +390,41 @@ export default function HighlightHistogram({ onInspect, projectId }) {
 
       {/* ── Column headers — vertical mode only ───────────────────────── */}
       {!horizontal && (
-        <div className="flex shrink-0 border-b border-border-subtle bg-bg-secondary select-none">
+        <div className="flex shrink-0 border-b border-border-subtle bg-bg-secondary select-none overflow-hidden">
           <div className="shrink-0 border-r border-border-subtle text-center text-xs text-text-disabled py-1.5"
-               style={{ width: 52 }}>
+               style={{ width: V_GUTTER_W }}>
             Time
           </div>
-          {BUCKET_LABELS.map(label => (
-            <div key={label}
-                 className="text-center text-xs font-semibold text-text-tertiary py-1.5 border-r border-border-subtle last:border-r-0 min-w-0"
-                 style={{ width: BUCKET_COL_WIDTH }}>
-              {label}
-            </div>
-          ))}
-          <div className="shrink-0 bg-border" style={{ width: 1 }} />
+          {/* Bucket headers fill remaining space via flexbox — no JS width calc needed */}
+          <div className="flex flex-1 min-w-0">
+            {BUCKET_LABELS.map(label => (
+              <div key={label}
+                   className="flex-1 min-w-0 text-center text-xs font-semibold text-text-tertiary py-1.5 border-r border-border-subtle last:border-r-0">
+                {label}
+              </div>
+            ))}
+          </div>
+          {/* Drag handle — 5px wide, easy to grab, visual line centered */}
+          <div
+            className="shrink-0 cursor-col-resize group/divider relative"
+            style={{ width: 5 }}
+            onMouseDown={startChosenResize}
+          >
+            <div className="absolute inset-y-0 -left-2 -right-2 z-20" />
+            <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-px bg-border transition-colors group-hover/divider:bg-accent group-active/divider:bg-accent" />
+          </div>
           {compress && (
             <div className="shrink-0 text-center text-xs text-text-disabled py-1.5 border-r border-border-subtle"
-                 style={{ width: 48 }}>
+                 style={{ width: V_COMPRESS_TIME_W }}>
               Time
             </div>
           )}
-          <div className="flex-1 text-center text-xs text-text-disabled py-1.5 border-r border-border-subtle min-w-0">
+          <div className="shrink-0 text-center text-xs text-text-disabled py-1.5 border-r border-border-subtle"
+               style={{ width: chosenWidth }}>
             Chosen Events
           </div>
           <div className="shrink-0 text-center text-xs text-text-disabled py-1.5"
-               style={{ width: 72 }}>
+               style={{ width: V_PIP_COL_W }}>
             PIP
           </div>
         </div>
@@ -438,15 +459,22 @@ export default function HighlightHistogram({ onInspect, projectId }) {
                 <div key={idx}
                      className={`relative${idx < BUCKET_COUNT - 1 ? ' border-b border-border-subtle' : ''}`}
                      style={{ height: BUCKET_ROW_H }}>
-                  {bucketEvents.map(evt => (
+                  {bucketEvents.map(evt => {
+                    const typeSettings = params.paddingByType?.[evt.event_type] || {}
+                    const paddingBefore = typeSettings.before != null ? typeSettings.before : params.paddingBefore
+                    const paddingAfter = typeSettings.after != null ? typeSettings.after : params.paddingAfter
+                    return (
                     <EventTile
                       key={evt.id} event={evt} totalDuration={totalDuration}
                       isHovered={hoveredId === evt.id} isSelected={selectedEventId === evt.id}
                       onClick={() => handleClick(evt)} onEnter={() => setHoveredId(evt.id)}
                       onLeave={() => setHoveredId(null)} onRightClick={() => toggleOverride(evt.id)}
                       horizontal
+                      paddingBefore={paddingBefore}
+                      paddingAfter={paddingAfter}
                     />
-                  ))}
+                  )
+                })}
                 </div>
               ))}
 
@@ -481,9 +509,17 @@ export default function HighlightHistogram({ onInspect, projectId }) {
                         <div className="px-0.5 truncate" style={{ fontSize: 8, lineHeight: '10px' }}>
                           <span className="text-white/60">{formatTime(evt.start_time_seconds)}</span>
                         </div>
+                        {evt.driver_names?.length > 0 && (
+                          <div className="px-0.5 truncate" style={{ fontSize: 7, lineHeight: '9px' }}>
+                            <span className="text-white/55">{evt.driver_names.slice(0, 2).join('/')}</span>
+                          </div>
+                        )}
                       </div>
                     )
                   }
+                  const typeSettings = params.paddingByType?.[evt.event_type] || {}
+                  const paddingBefore = typeSettings.before != null ? typeSettings.before : params.paddingBefore
+                  const paddingAfter = typeSettings.after != null ? typeSettings.after : params.paddingAfter
                   return (
                     <EventTile
                       key={evt.id} event={evt} totalDuration={totalDuration}
@@ -491,6 +527,8 @@ export default function HighlightHistogram({ onInspect, projectId }) {
                       onClick={() => handleClick(evt)} onEnter={() => setHoveredId(evt.id)}
                       onLeave={() => setHoveredId(null)} onRightClick={() => toggleOverride(evt.id)}
                       horizontal
+                      paddingBefore={paddingBefore}
+                      paddingAfter={paddingAfter}
                     />
                   )
                 })}
@@ -512,7 +550,7 @@ export default function HighlightHistogram({ onInspect, projectId }) {
 
         /* VERTICAL: time flows top→bottom, score buckets are columns */
         <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={scrollRef} onScroll={handleScroll}>
-          <div className="flex" style={{ height: `${contentSize}px`, position: 'relative' }}>
+          <div className="flex" style={{ height: `${contentSize}px`, position: 'relative', minWidth: '100%' }}>
             <TimeGutter
               totalDuration={totalDuration}
               contentHeight={contentSize}
@@ -523,17 +561,23 @@ export default function HighlightHistogram({ onInspect, projectId }) {
             {filteredBuckets.map((bucketEvents, idx) => (
               <div
                 key={idx}
-                className={`relative ${idx < BUCKET_COUNT - 1 ? 'border-r border-border-subtle' : ''}`}
-                style={{ width: BUCKET_COL_WIDTH }}
+                className={`flex-1 min-w-0 relative ${idx < BUCKET_COUNT - 1 ? 'border-r border-border-subtle' : 'border-r border-border'}`}
               >
-                {bucketEvents.map(evt => (
+                {bucketEvents.map(evt => {
+                  const typeSettings = params.paddingByType?.[evt.event_type] || {}
+                  const paddingBefore = typeSettings.before != null ? typeSettings.before : params.paddingBefore
+                  const paddingAfter = typeSettings.after != null ? typeSettings.after : params.paddingAfter
+                  return (
                   <EventTile
                     key={evt.id} event={evt} totalDuration={totalDuration}
                     isHovered={hoveredId === evt.id} isSelected={selectedEventId === evt.id}
                     onClick={() => handleClick(evt)} onEnter={() => setHoveredId(evt.id)}
                     onLeave={() => setHoveredId(null)} onRightClick={() => toggleOverride(evt.id)}
+                    paddingBefore={paddingBefore}
+                    paddingAfter={paddingAfter}
                   />
-                ))}
+                )
+                })}
               </div>
             ))}
 
@@ -568,7 +612,8 @@ export default function HighlightHistogram({ onInspect, projectId }) {
               compress={compress} compressPositions={compressState?.map}
               hoveredId={hoveredId} selectedId={selectedEventId}
               onClick={handleClick} onEnter={id => setHoveredId(id)}
-              onLeave={() => setHoveredId(null)} flex
+              onLeave={() => setHoveredId(null)} width={chosenWidth}
+              paddingParams={params}
             />
 
             <ResultColumn
@@ -577,6 +622,7 @@ export default function HighlightHistogram({ onInspect, projectId }) {
               hoveredId={hoveredId} selectedId={selectedEventId}
               onClick={handleClick} onEnter={id => setHoveredId(id)}
               onLeave={() => setHoveredId(null)} width={72} isPip
+              paddingParams={params}
             />
           </div>
         </div>

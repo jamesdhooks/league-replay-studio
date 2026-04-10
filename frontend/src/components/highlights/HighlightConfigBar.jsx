@@ -14,12 +14,14 @@ export default function HighlightConfigBar({ projectId }) {
   const {
     abMode, activeConfig, startABCompare, stopABCompare, switchABConfig,
     applyHighlights,
+    generateVideoScript,
   } = useHighlight()
   const { addToast } = useToast()
 
   const handleApply = async () => {
     try {
       await applyHighlights(projectId)
+      await generateVideoScript(projectId)
       addToast('success', 'Highlights applied to timeline')
     } catch {
       addToast('error', 'Failed to apply highlights')

@@ -247,7 +247,7 @@ function Step2_Replay({ replayFile, setReplayFile, discoveredFiles, discovering,
           <div className="font-medium truncate">{suggestedReplay.name}</div>
           <div className="text-xxs text-text-tertiary mt-0.5 flex items-center gap-2">
             <span>{formatFileSize(suggestedReplay.size_bytes)}</span>
-            <span>Â·</span>
+            <span>·</span>
             <span>{new Date(suggestedReplay.modified_at).toLocaleDateString()}</span>
           </div>
         </button>
@@ -298,7 +298,7 @@ function Step2_Replay({ replayFile, setReplayFile, discoveredFiles, discovering,
               <div className="font-medium truncate">{file.name}</div>
               <div className="text-xxs text-text-tertiary mt-0.5 flex items-center gap-2">
                 <span>{formatFileSize(file.size_bytes)}</span>
-                <span>Â·</span>
+                <span>·</span>
                 <span>{new Date(file.modified_at).toLocaleDateString()}</span>
               </div>
             </button>

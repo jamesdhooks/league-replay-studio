@@ -1,8 +1,10 @@
-import { memo } from 'react'
+import { memo, useState } from 'react'
 import { useHighlight, tierColor } from '../../context/HighlightContext'
 import { useTimeline } from '../../context/TimelineContext'
+import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { Clock, BarChart3, Activity, Users, Target, Info } from 'lucide-react'
 import Tooltip from '../ui/Tooltip'
+import CollapsibleSection from '../ui/CollapsibleSection'
 
 /**
  * HighlightMetrics — Live metrics dashboard.
@@ -13,100 +15,104 @@ import Tooltip from '../ui/Tooltip'
 export default memo(function HighlightMetrics() {
   const { metrics, targetDuration } = useHighlight()
   const { raceDuration } = useTimeline()
+  const [metricsExpanded, setMetricsExpanded] = useLocalStorage('lrs:editing:metrics:expanded', true)
 
   const overTarget = targetDuration && metrics.duration > targetDuration
   const underTarget = targetDuration && metrics.duration < targetDuration * 0.9
 
   return (
-    <div className="p-3 border-t border-border-subtle space-y-2">
-      <h4 className="text-xxs font-semibold text-text-tertiary uppercase tracking-wider">
-        Highlight Metrics
-      </h4>
+    <CollapsibleSection
+      icon={BarChart3}
+      label="Highlight Metrics"
+      open={metricsExpanded}
+      onToggle={() => setMetricsExpanded(v => !v)}
+    >
+      <div className="mt-2 space-y-2">
+          {/* Duration */}
+          <MetricRow
+            icon={Clock}
+            label="Duration"
+            tooltip="Total duration of all selected highlight clips combined"
+            value={formatDuration(metrics.duration)}
+            suffix={targetDuration ? ` / ${formatDuration(targetDuration)}` : ''}
+            warning={overTarget ? 'Over target' : underTarget ? 'Under target' : null}
+            warningColor={overTarget ? 'text-danger' : 'text-warning'}
+          />
 
-      {/* Duration */}
-      <MetricRow
-        icon={Clock}
-        label="Duration"
-        tooltip="Total duration of all selected highlight clips combined"
-        value={formatDuration(metrics.duration)}
-        suffix={targetDuration ? ` / ${formatDuration(targetDuration)}` : ''}
-        warning={overTarget ? 'Over target' : underTarget ? 'Under target' : null}
-        warningColor={overTarget ? 'text-danger' : 'text-warning'}
-      />
+          {/* Event count */}
+          <MetricRow
+            icon={Target}
+            label="Events"
+            tooltip="Number of events selected as highlights vs total detected events"
+            value={`${metrics.eventCount} / ${metrics.totalEvents}`}
+          />
 
-      {/* Event count */}
-      <MetricRow
-        icon={Target}
-        label="Events"
-        tooltip="Number of events selected as highlights vs total detected events"
-        value={`${metrics.eventCount} / ${metrics.totalEvents}`}
-      />
+          {/* Coverage */}
+          <MetricRow
+            icon={BarChart3}
+            label="Coverage"
+            tooltip="Percentage of the race timeline covered by selected highlights"
+            value={`${metrics.coveragePct}%`}
+          />
 
-      {/* Coverage */}
-      <MetricRow
-        icon={BarChart3}
-        label="Coverage"
-        tooltip="Percentage of the race timeline covered by selected highlights"
-        value={`${metrics.coveragePct}%`}
-      />
+          {/* Balance */}
+          <MetricBar
+            icon={Activity}
+            label="Balance"
+            tooltip="How evenly highlights are distributed across the race timeline (higher = more balanced)"
+            value={metrics.balance}
+            color={metrics.balance >= 60 ? 'bg-success' : metrics.balance >= 30 ? 'bg-warning' : 'bg-danger'}
+          />
 
-      {/* Balance */}
-      <MetricBar
-        icon={Activity}
-        label="Balance"
-        tooltip="How evenly highlights are distributed across the race timeline (higher = more balanced)"
-        value={metrics.balance}
-        color={metrics.balance >= 60 ? 'bg-success' : metrics.balance >= 30 ? 'bg-warning' : 'bg-danger'}
-      />
+          {/* Pacing */}
+          <MetricBar
+            icon={Activity}
+            label="Pacing"
+            tooltip="Variety and tempo of event types — higher means better pacing with mixed event types"
+            value={metrics.pacing}
+            color={metrics.pacing >= 60 ? 'bg-success' : metrics.pacing >= 30 ? 'bg-warning' : 'bg-danger'}
+          />
 
-      {/* Pacing */}
-      <MetricBar
-        icon={Activity}
-        label="Pacing"
-        tooltip="Variety and tempo of event types — higher means better pacing with mixed event types"
-        value={metrics.pacing}
-        color={metrics.pacing >= 60 ? 'bg-success' : metrics.pacing >= 30 ? 'bg-warning' : 'bg-danger'}
-      />
+          {/* Driver coverage */}
+          <MetricRow
+            icon={Users}
+            label="Drivers"
+            tooltip="Number of unique drivers featured in highlights vs total drivers in the race"
+            value={`${metrics.driverCount} / ${metrics.totalDrivers}`}
+            suffix={` (${metrics.driverCoverage}%)`}
+          />
 
-      {/* Driver coverage */}
-      <MetricRow
-        icon={Users}
-        label="Drivers"
-        tooltip="Number of unique drivers featured in highlights vs total drivers in the race"
-        value={`${metrics.driverCount} / ${metrics.totalDrivers}`}
-        suffix={` (${metrics.driverCoverage}%)`}
-      />
-
-      {/* Tier distribution */}
-      {metrics.tierCounts && (
-        <div className="pt-1 border-t border-border-subtle">
-          <div className="flex items-center gap-2 mb-1">
-            <BarChart3 className="w-3 h-3 text-text-tertiary shrink-0" />
-            <span className="text-xxs text-text-secondary">Tier Distribution</span>
-          </div>
-          <div className="flex gap-1.5 ml-5">
-            {['S', 'A', 'B', 'C'].map(tier => (
-              <div key={tier} className="flex items-center gap-0.5">
-                <span
-                  className="inline-block w-4 h-4 rounded text-white font-bold flex items-center justify-center"
-                  style={{
-                    backgroundColor: tierColor(tier),
-                    fontSize: '8px',
-                  }}
-                >
-                  {tier}
-                </span>
-                <span className="text-xxs text-text-secondary font-mono">
-                  {metrics.tierCounts[tier] || 0}
-                </span>
+          {/* Tier distribution */}
+          {metrics.tierCounts && (
+            <div className="pt-1 border-t border-border-subtle">
+              <div className="flex items-center gap-2 mb-1">
+                <BarChart3 className="w-3 h-3 text-text-tertiary shrink-0" />
+                <span className="text-xxs text-text-secondary">Tier Distribution</span>
               </div>
-            ))}
-          </div>
+              <div className="flex gap-1.5 ml-5">
+                {['S', 'A', 'B', 'C'].map(tier => (
+                  <div key={tier} className="flex items-center gap-0.5">
+                    <span
+                      className="inline-block w-4 h-4 rounded text-white font-bold flex items-center justify-center"
+                      style={{
+                        backgroundColor: tierColor(tier),
+                        fontSize: '8px',
+                      }}
+                    >
+                      {tier}
+                    </span>
+                    <span className="text-xxs text-text-secondary font-mono">
+                      {metrics.tierCounts[tier] || 0}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
-      )}
-    </div>
-  )
-})
+      </CollapsibleSection>
+    )
+  })
 
 
 /** Single metric row with icon, label, value and optional tooltip */

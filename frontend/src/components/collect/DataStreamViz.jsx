@@ -95,11 +95,11 @@ function makePulse(cx, cy, W, H, large = false) {
 
 // ── Draw helpers ───────────────────────────────────────────────────────────────
 function drawBackground(ctx, W, H) {
-  ctx.fillStyle = '#07070c'
-  ctx.fillRect(0, 0, W, H)
+  // Clear to transparent — lets whatever is beneath show through
+  ctx.clearRect(0, 0, W, H)
 
-  // Dot grid
-  ctx.fillStyle = 'rgba(255,255,255,0.030)'
+  // Very subtle dot grid
+  ctx.fillStyle = 'rgba(255,255,255,0.016)'
   for (let gx = 25; gx < W; gx += 30) {
     for (let gy = 20; gy < H; gy += 30) {
       ctx.beginPath()
@@ -108,12 +108,163 @@ function drawBackground(ctx, W, H) {
     }
   }
 
-  // Radial vignette
+  // Light edge vignette to help text and particles pop
   const grad = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H) * 0.8)
   grad.addColorStop(0, 'rgba(0,0,0,0)')
-  grad.addColorStop(1, 'rgba(0,0,0,0.55)')
+  grad.addColorStop(1, 'rgba(0,0,0,0.30)')
   ctx.fillStyle = grad
   ctx.fillRect(0, 0, W, H)
+}
+
+// ── Rounded-rect helper ────────────────────────────────────────────────────────
+function pathRoundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath()
+  ctx.moveTo(x + r, y)
+  ctx.lineTo(x + w - r, y)
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r)
+  ctx.lineTo(x + w, y + h - r)
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h)
+  ctx.lineTo(x + r, y + h)
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r)
+  ctx.lineTo(x, y + r)
+  ctx.quadraticCurveTo(x, y, x + r, y)
+  ctx.closePath()
+}
+
+// ── Animated phase-progress track ─────────────────────────────────────────────
+// Shown while collecting (or briefly after, during savingFrames countdown).
+const PHASE_LABELS  = ['CONNECT', 'CAPTURE', 'SAVE']
+const PHASE_COLORS  = [
+  [34,  211, 238],   // cyan    — connect
+  [74,  222, 128],   // green   — capture
+  [250, 204,  21],   // yellow  — save
+]
+
+function drawPhaseTrack(ctx, W, H, isCollecting, tickCount, frame, savingFrames) {
+  if (!isCollecting && savingFrames <= 0) return
+
+  const totalNodes = PHASE_LABELS.length
+  const BAR_W  = Math.min(440, W * 0.58)
+  const TRACK_H = 3.5
+  const NODE_R  = 4.5
+  const cx = W / 2
+  const trackY = H - 44
+
+  // Determine which node is currently active
+  let activeIdx = 0
+  if (savingFrames > 0)        activeIdx = 2
+  else if (tickCount > 0)      activeIdx = 1
+
+  const nodeX = Array.from({ length: totalNodes }, (_, i) =>
+    cx - BAR_W / 2 + (BAR_W / (totalNodes - 1)) * i
+  )
+
+  // ── Background track ────────────────────────────────────────────────────────
+  ctx.save()
+  ctx.fillStyle = 'rgba(255,255,255,0.07)'
+  pathRoundRect(ctx, cx - BAR_W / 2, trackY - TRACK_H / 2, BAR_W, TRACK_H, TRACK_H / 2)
+  ctx.fill()
+
+  // ── Completed fill up to activeIdx ──────────────────────────────────────────
+  if (activeIdx > 0) {
+    const fillEnd  = nodeX[activeIdx]
+    const fillW    = fillEnd - (cx - BAR_W / 2)
+    const [r, g, b] = PHASE_COLORS[activeIdx - 1]
+    const grad = ctx.createLinearGradient(cx - BAR_W / 2, 0, fillEnd, 0)
+    grad.addColorStop(0, `rgba(${PHASE_COLORS[0].join(',')},0.55)`)
+    grad.addColorStop(1, `rgba(${r},${g},${b},0.9)`)
+    ctx.fillStyle = grad
+    pathRoundRect(ctx, cx - BAR_W / 2, trackY - TRACK_H / 2, fillW, TRACK_H, TRACK_H / 2)
+    ctx.fill()
+  }
+
+  // ── Animated shimmer sweep across active-phase segment ──────────────────────
+  if (activeIdx < totalNodes) {
+    const segStart = nodeX[activeIdx]
+    const segEnd   = activeIdx + 1 < totalNodes ? nodeX[activeIdx + 1] : nodeX[activeIdx] + 60
+    const segW     = segEnd - segStart
+    const shimmerPx = ((frame * 2) % (segW + 80)) - 40
+    const sg = ctx.createLinearGradient(
+      segStart + shimmerPx - 35, 0,
+      segStart + shimmerPx + 35, 0
+    )
+    sg.addColorStop(0,   'rgba(255,255,255,0)')
+    sg.addColorStop(0.5, 'rgba(255,255,255,0.55)')
+    sg.addColorStop(1,   'rgba(255,255,255,0)')
+
+    // Also pulse the track in the active segment
+    const [ar, ag, ab] = PHASE_COLORS[activeIdx]
+    const pulse = 0.18 + Math.sin(frame * 0.06) * 0.10
+    ctx.fillStyle = `rgba(${ar},${ag},${ab},${pulse})`
+    pathRoundRect(ctx, segStart, trackY - TRACK_H / 2, Math.min(segW, BAR_W - (segStart - (cx - BAR_W/2))), TRACK_H, TRACK_H / 2)
+    ctx.fill()
+
+    // Shimmer clip to segment
+    ctx.save()
+    pathRoundRect(ctx, segStart, trackY - TRACK_H / 2 - 3, segW + 10, TRACK_H + 6, TRACK_H / 2)
+    ctx.clip()
+    ctx.fillStyle = sg
+    ctx.fillRect(segStart + shimmerPx - 35, trackY - TRACK_H / 2 - 4, 70, TRACK_H + 8)
+    ctx.restore()
+  }
+
+  // ── Phase nodes ─────────────────────────────────────────────────────────────
+  nodeX.forEach((nx, i) => {
+    const isDone   = i < activeIdx
+    const isActive = i === activeIdx
+    const [r, g, b] = PHASE_COLORS[i]
+
+    // Outer pulse ring on active node
+    if (isActive) {
+      const pr = NODE_R + 3 + Math.sin(frame * 0.06) * 2.5
+      ctx.strokeStyle = `rgba(${r},${g},${b},${0.2 + Math.sin(frame * 0.06) * 0.1})`
+      ctx.lineWidth = 1.5
+      ctx.beginPath(); ctx.arc(nx, trackY, pr, 0, Math.PI * 2); ctx.stroke()
+      // Second, faster ring
+      const pr2 = NODE_R + 7 + Math.sin(frame * 0.04 + 1) * 3.5
+      ctx.strokeStyle = `rgba(${r},${g},${b},${0.08 + Math.sin(frame * 0.04 + 1) * 0.04})`
+      ctx.lineWidth = 1
+      ctx.beginPath(); ctx.arc(nx, trackY, pr2, 0, Math.PI * 2); ctx.stroke()
+    }
+
+    // Node fill
+    ctx.fillStyle = isDone
+      ? `rgba(${r},${g},${b},0.9)`
+      : isActive
+        ? `rgba(${r},${g},${b},1.0)`
+        : 'rgba(255,255,255,0.12)'
+    ctx.beginPath(); ctx.arc(nx, trackY, isActive ? NODE_R + 1 : NODE_R, 0, Math.PI * 2); ctx.fill()
+
+    // Check mark for completed nodes
+    if (isDone) {
+      ctx.strokeStyle = 'rgba(7,7,12,0.95)'
+      ctx.lineWidth = 1.5
+      ctx.lineCap = 'round'
+      ctx.lineJoin = 'round'
+      ctx.beginPath()
+      ctx.moveTo(nx - 2.2, trackY + 0.2)
+      ctx.lineTo(nx - 0.4, trackY + 2.2)
+      ctx.lineTo(nx + 2.5, trackY - 2)
+      ctx.stroke()
+    }
+
+    // Label above node
+    ctx.font = `${isActive ? 'bold ' : ''}8px "Courier New",monospace`
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'bottom'
+    ctx.shadowColor = 'rgba(0,0,0,0.8)'
+    ctx.shadowBlur  = 4
+    ctx.fillStyle = isDone
+      ? `rgba(${r},${g},${b},0.65)`
+      : isActive
+        ? `rgba(${r},${g},${b},1.0)`
+        : 'rgba(255,255,255,0.18)'
+    ctx.fillText(PHASE_LABELS[i], nx, trackY - NODE_R - 5)
+    ctx.shadowBlur = 0
+    ctx.textBaseline = 'alphabetic'
+  })
+
+  ctx.restore()
 }
 
 function drawWaves(ctx, W, H, isCollecting, frame) {
@@ -226,29 +377,58 @@ function drawHUD(ctx, W, H, isCollecting, tickCount, hz, label) {
 
   if (isCollecting) {
     // Large ghosted tick counter
-    ctx.font      = `bold 88px 'Courier New',monospace`
-    ctx.fillStyle = 'rgba(34,211,238,0.042)'
+    ctx.font        = `bold 88px 'Courier New',monospace`
+    ctx.fillStyle   = 'rgba(34,211,238,0.038)'
     ctx.textBaseline = 'middle'
     ctx.fillText(tickCount.toLocaleString(), W / 2, H / 2)
     ctx.textBaseline = 'bottom'
 
-    // Status bar
-    ctx.font      = '11px "Courier New",monospace'
-    ctx.fillStyle = 'rgba(34,211,238,0.9)'
-    const status  = `● REC  ${tickCount.toLocaleString()} ticks  ·  ${hz} Hz${label ? `  ·  "${label}"` : ''}`
-    ctx.fillText(status, W / 2, H - 10)
+    // Status line — above phase track
+    ctx.font        = '10px "Courier New",monospace'
+    ctx.fillStyle   = 'rgba(34,211,238,0.88)'
+    ctx.shadowColor = 'rgba(0,0,0,0.9)'
+    ctx.shadowBlur  = 8
+    // Draw REC dot manually instead of unicode char
+    const statusTxt = `REC  ${tickCount.toLocaleString()} ticks  ·  ${hz} Hz${label ? `  ·  "${label}"` : ''}`
+    const txtMetrics = ctx.measureText(statusTxt)
+    const statusX    = W / 2 - (txtMetrics.width + 12) / 2
+    ctx.fillStyle = 'rgba(239,68,68,0.9)'
+    ctx.shadowColor = 'rgba(239,68,68,0.6)'
+    ctx.shadowBlur  = 6
+    ctx.beginPath()
+    ctx.arc(statusX + 6, H - 72 - 4, 3.5, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.shadowBlur  = 0
+    ctx.fillStyle   = 'rgba(34,211,238,0.88)'
+    ctx.shadowColor = 'rgba(0,0,0,0.9)'
+    ctx.shadowBlur  = 8
+    ctx.textAlign   = 'left'
+    ctx.fillText(statusTxt, statusX + 14, H - 72)
+    ctx.textAlign   = 'center'
+    ctx.shadowBlur  = 0
 
-    // Category legend  (bottom-right)
-    ctx.font      = '9px "Courier New",monospace'
-    ctx.textAlign = 'right'
+    // Category legend (bottom-right, above phase track)
+    ctx.font = '9px "Courier New",monospace'
+    ctx.shadowColor = 'rgba(0,0,0,0.8)'
+    ctx.shadowBlur  = 5
     CAT_NAMES.forEach((name, i) => {
-      ctx.fillStyle = rgba(i, 0.6)
-      ctx.fillText(`■ ${name}`, W - 12, H - 86 + i * 15)
+      const ly = H - 100 + i * 14
+      const tx = W - 12 - ctx.measureText(name).width
+      // Draw small filled square instead of ■
+      ctx.fillStyle = rgba(i, 0.55)
+      ctx.fillRect(tx - 10, ly - 7, 7, 7)
+      ctx.textAlign = 'left'
+      ctx.fillText(name, tx, ly)
     })
+    ctx.textAlign = 'right'
+    ctx.shadowBlur = 0
   } else {
-    ctx.font      = '11px "Courier New",monospace'
-    ctx.fillStyle = 'rgba(255,255,255,0.09)'
-    ctx.fillText('CONNECT IRACING  ·  PRESS RECORD', W / 2, H - 10)
+    ctx.font        = '11px "Courier New",monospace'
+    ctx.fillStyle   = 'rgba(255,255,255,0.07)'
+    ctx.shadowColor = 'rgba(0,0,0,0.7)'
+    ctx.shadowBlur  = 6
+    ctx.fillText('CONNECT IRACING  ·  PRESS RECORD', W / 2, H - 16)
+    ctx.shadowBlur  = 0
   }
 
   ctx.restore()
@@ -264,6 +444,7 @@ export default function DataStreamViz({ isCollecting = false, tickCount = 0, hz 
     frame:          0,
     lastTickCount:  -1,
     wasCollecting:  false,
+    savingFrames:   0,
   })
 
   // Keep latest props accessible inside rAF without restarting the loop
@@ -305,6 +486,11 @@ export default function DataStreamViz({ isCollecting = false, tickCount = 0, hz 
         state.pulses.push(makePulse(cx, cy, W, H, true))
         state.lastTickCount = tickCount
       }
+      // ── Transition: collecting → done (brief save-phase flash) ─────
+      if (!isCollecting && state.wasCollecting) {
+        if (state.savingFrames === 0) state.savingFrames = 160
+      }
+      if (state.savingFrames > 0) state.savingFrames--
       state.wasCollecting = isCollecting
 
       // ── New tick burst ────────────────────────────────────────────────
@@ -362,6 +548,7 @@ export default function DataStreamViz({ isCollecting = false, tickCount = 0, hz 
         return true
       })
 
+      drawPhaseTrack(ctx, W, H, isCollecting, tickCount, state.frame, state.savingFrames)
       drawHUD(ctx, W, H, isCollecting, tickCount, hz, label)
 
       animId = requestAnimationFrame(tick)
@@ -382,7 +569,6 @@ export default function DataStreamViz({ isCollecting = false, tickCount = 0, hz 
     <canvas
       ref={canvasRef}
       className="w-full h-full block"
-      style={{ background: '#07070c' }}
     />
   )
 }

@@ -503,19 +503,6 @@ def seed_events(project_dir: str) -> list[dict]:
                 "position": 1,
                 "metadata": {"pit_duration_seconds": 28.0, "positions_lost": 1},
             },
-            # ── Fastest lap ──────────────────────────────────────────────────
-            {
-                "event_type": "fastest_lap",
-                "start_time": 2150.0,
-                "end_time": 2242.0,
-                "start_frame": _t_to_frame(2150),
-                "end_frame": _t_to_frame(2242),
-                "lap_number": 13,
-                "severity": 6,
-                "involved_drivers": [2],
-                "position": 1,
-                "metadata": {"lap_time": 90.851, "previous_best": 91.012, "driver_name": "Max Verstappen"},
-            },
         ]
 
         insert_events_batch(conn, events)
@@ -550,7 +537,6 @@ def seed_highlight_config(project_dir: str) -> None:
                 "leader_change": 90,
                 "overtake": 85,
                 "battle": 70,
-                "fastest_lap": 60,
                 "close_call": 40,
                 "pit_stop": 30,
                 "first_lap": 100,
@@ -588,7 +574,7 @@ def build_highlight_script(project_dir: str, events: list[dict]) -> dict:
     BASE = {
         "car_contact": 1.5, "incident": 1.5, "battle": 1.3,
         "lost_control": 1.2, "contact": 1.1,
-        "leader_change": 0.9, "overtake": 1.0, "fastest_lap": 0.7,
+        "leader_change": 0.9, "overtake": 1.0,
         "off_track": 0.4, "close_call": 0.8, "pit_stop": 0.5,
         "first_lap": 10.0, "last_lap": 10.0,
         # Legacy
@@ -775,7 +761,7 @@ def seed_pipeline_preset(project_dir: str) -> None:
                 "weights": {
                     "car_contact": 95, "leader_change": 90, "overtake": 85,
                     "incident": 80, "spinout": 75, "battle": 70,
-                    "fastest_lap": 60, "contact": 55, "close_call": 45,
+                    "contact": 55, "close_call": 45,
                     "pit_stop": 30,
                 },
             },

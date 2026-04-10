@@ -57,18 +57,23 @@ export default function LabeledSlider({
             onChange={(e) => onChange(parseFloat(e.target.value))}
             className="w-full h-1 accent-accent cursor-pointer block"
           />
-          {/* Tick marks: absolutely positioned below slider, outside flex row height */}
+          {/* Tick marks: absolutely positioned below slider, outside flex row height.
+              The browser positions the range thumb so its CENTER is at
+              calc(pct * (100% - thumbWidth) + thumbWidth/2), not at raw pct%.
+              We correct for a 16px thumb so ticks align with the thumb center. */}
           <div className="absolute left-0 right-0 pointer-events-none" style={{ top: '100%', marginTop: 2, height: 12 }}>
             {ticks.map(v => {
-              const pct = range > 0 ? ((v - min) / range) * 100 : 0
+              const pct = range > 0 ? ((v - min) / range) : 0
               return (
-                <div key={v} className="absolute flex flex-col items-center" style={{ left: `${pct}%`, transform: 'translateX(-50%)' }}>
+                <div key={v} className="absolute flex flex-col items-center"
+                     style={{ left: `calc(${pct} * (100% - 16px) + 8px)`, transform: 'translateX(-50%)' }}>
                   <div className="w-px h-1 bg-text-disabled/40" />
                   <span className="text-[8px] text-text-disabled font-mono leading-none mt-px">{format(v)}</span>
                 </div>
               )
             })}
-            <div className="absolute flex flex-col items-center" style={{ left: `${valuePct}%`, transform: 'translateX(-50%)', top: -2 }}>
+            <div className="absolute flex flex-col items-center"
+                 style={{ left: `calc(${valuePct / 100} * (100% - 16px) + 8px)`, transform: 'translateX(-50%)', top: -2 }}>
               <div className="w-px h-1.5 bg-accent" />
             </div>
           </div>

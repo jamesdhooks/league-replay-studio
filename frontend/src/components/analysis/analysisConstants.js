@@ -1,5 +1,5 @@
 import {
-  AlertTriangle, Swords, ArrowUpDown, Fuel, Zap, Crown, Flag, FlagTriangleRight,
+  AlertTriangle, Swords, ArrowUpDown, Fuel, Crown, Flag, FlagTriangleRight,
   Flame, RotateCcw, CircleDot, ShieldAlert, CarFront,
 } from 'lucide-react'
 
@@ -11,7 +11,6 @@ export const EVENT_CONFIG = {
   battle:        { icon: Swords,            label: 'Battle',           color: 'text-event-battle',    bg: 'bg-event-battle/10' },
   overtake:      { icon: ArrowUpDown,       label: 'Overtake',         color: 'text-event-overtake',  bg: 'bg-event-overtake/10' },
   pit_stop:      { icon: Fuel,              label: 'Pit Stop',         color: 'text-event-pit',       bg: 'bg-event-pit/10' },
-  fastest_lap:   { icon: Zap,              label: 'Fastest Lap',      color: 'text-event-fastest',   bg: 'bg-event-fastest/10' },
   leader_change: { icon: Crown,            label: 'Leader Change',    color: 'text-event-leader',    bg: 'bg-event-leader/10' },
   pace_lap:      { icon: CarFront,         label: 'Pace Lap',         color: 'text-event-firstlap',  bg: 'bg-event-firstlap/10' },
   first_lap:     { icon: FlagTriangleRight, label: 'First Lap',       color: 'text-event-firstlap',  bg: 'bg-event-firstlap/10' },

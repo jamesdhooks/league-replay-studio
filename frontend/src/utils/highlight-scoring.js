@@ -31,7 +31,6 @@ export const BASE_SCORES = {
   battle: 1.3,
   overtake: 1.0,
   leader_change: 0.9,
-  fastest_lap: 0.7,
   pit_stop: 0.5,
   close_call: 0.8,
   undercut: 1.1,
@@ -383,7 +382,7 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
   // should be excluded. last_lap (P2-P10 finish crossings) is exempt.
   const _POST_RACE_EXCLUDED = new Set([
     'battle', 'overtake', 'incident', 'crash', 'spinout', 'contact', 'close_call',
-    'leader_change', 'pit_stop', 'fastest_lap', 'undercut', 'overcut', 'pit_battle',
+    'leader_change', 'pit_stop', 'undercut', 'overcut', 'pit_battle',
     'first_lap',
   ])
   let raceFinishCutoff = null
@@ -391,6 +390,21 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     if (evt.event_type === 'race_finish') {
       const t = evt.end_time_seconds || 0
       if (raceFinishCutoff === null || t < raceFinishCutoff) raceFinishCutoff = t
+    }
+  }
+
+  // Pass 1c: Enforce maxRaceFinishes cap (0 = all)
+  if (params.maxRaceFinishes > 0) {
+    const raceFinishEvts = [...scored]
+      .filter(e => e.event_type === 'race_finish' && highlightIds.has(e.id))
+      .sort((a, b) => b.score - a.score)
+    if (raceFinishEvts.length > params.maxRaceFinishes) {
+      for (const evt of raceFinishEvts.slice(params.maxRaceFinishes)) {
+        highlightIds.delete(evt.id)
+        highlightDuration -= evt.duration
+        bucketUsed[evt.bucket] = (bucketUsed[evt.bucket] || 0) - evt.duration
+        fullVideoIds.add(evt.id)
+      }
     }
   }
 
@@ -462,19 +476,20 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
 
   const coveragePct = raceDuration > 0 ? (totalHighlightDuration / raceDuration) * 100 : 0
 
-  // Balance
-  const typeCounts = {}
-  for (const evt of includedEvents) {
-    typeCounts[evt.event_type] = (typeCounts[evt.event_type] || 0) + 1
-  }
-  const typeValues = Object.values(typeCounts)
-  const mean = typeValues.length > 0 ? typeValues.reduce((a, b) => a + b, 0) / typeValues.length : 0
-  const variance = typeValues.length > 0
-    ? typeValues.reduce((sum, v) => sum + (v - mean) ** 2, 0) / typeValues.length
+  // Balance (timeline allocation): how evenly selected highlight duration is
+  // distributed across intro/early/mid/late race buckets.
+  const bucketDurations = Object.values(bucketUsed)
+  const bucketMean = bucketDurations.length > 0
+    ? bucketDurations.reduce((a, b) => a + b, 0) / bucketDurations.length
     : 0
-  const balanceScore = typeValues.length > 1
-    ? Math.max(0, Math.round(100 - Math.sqrt(variance) * 20))
-    : (typeValues.length === 1 ? 50 : 0)
+  const bucketVariance = bucketDurations.length > 0
+    ? bucketDurations.reduce((sum, v) => sum + (v - bucketMean) ** 2, 0) / bucketDurations.length
+    : 0
+  const bucketStdDev = Math.sqrt(bucketVariance)
+  const bucketCv = bucketMean > 0 ? (bucketStdDev / bucketMean) : 0
+  const balanceScore = includedEvents.length > 0
+    ? Math.max(0, Math.round(100 - bucketCv * 100))
+    : 0
 
   // Pacing
   let pacingScore = 0
@@ -501,6 +516,12 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
   }
   const totalDrivers = drivers.length || 1
   const driverCoveragePct = Math.round((allDriverIds.size / totalDrivers) * 100)
+
+  // Event type distribution (selected highlights)
+  const typeCounts = {}
+  for (const evt of includedEvents) {
+    typeCounts[evt.event_type] = (typeCounts[evt.event_type] || 0) + 1
+  }
 
   // Tier distribution
   const tierCounts = { S: 0, A: 0, B: 0, C: 0 }

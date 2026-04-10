@@ -1,7 +1,7 @@
 ﻿import { useState, useRef, useEffect, useCallback, memo } from 'react'
 import {
   Loader2, CheckCircle2, XCircle, Square, RefreshCw, SlidersHorizontal,
-  Trash2, ChevronRight, Activity, Sliders,
+  Trash2, ChevronRight, Activity, Sliders, Table2,
 } from 'lucide-react'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { useProject } from '../../context/ProjectContext'
@@ -22,6 +22,8 @@ export default memo(function AnalysisTuningColumn({
   isConnected, isRedetecting,
   // Handlers
   handleCancel, handleRescan, handleReanalyze, handleClear,
+  handleClearTelemetry, handleClearEvents,
+  handleExploreTelemetry,
   advanceStep, activeProjectId,
 }) {
   const [collapsed, setCollapsed] = useState(false)
@@ -112,8 +114,15 @@ export default memo(function AnalysisTuningColumn({
                           if (analysisStatus?.total_ticks) parts.push(`${(analysisStatus.total_ticks / 1000).toFixed(1)}k`)
                           if (analysisStatus?.db_size_bytes >= 1_048_576) parts.push(`${(analysisStatus.db_size_bytes / 1_048_576).toFixed(1)} MB`)
                           else if (analysisStatus?.db_size_bytes > 0) parts.push(`${Math.round(analysisStatus.db_size_bytes / 1024)} KB`)
-                          return parts.join(' Â· ') || null
+                          return parts.join(' · ') || null
                         })()
+                      : null
+                  }
+                  subPhase={
+                    isScanning
+                      ? (progress?.stage === 'analysis_scan' && (progress?.percent ?? 0) >= 50
+                          ? 'Incident scan'
+                          : 'Telemetry scan')
                       : null
                   }
                   progressMsg={isScanning ? (progress?.message || null) : null}
@@ -124,6 +133,9 @@ export default memo(function AnalysisTuningColumn({
                   primaryDanger={isAnalyzing && isScanning}
                   primaryDisabled={!isAnalyzing && !isConnected}
                   primaryTooltip={!isConnected && !(isAnalyzing && isScanning) ? 'iRacing must be running' : null}
+                  onClear={(hasTelemetry || hasEventsLocal) && !isAnalyzing ? handleClearTelemetry : null}
+                  clearTooltip="Clear telemetry and events"
+                  onExplore={(hasTelemetry || hasEventsLocal) && !isAnalyzing ? handleExploreTelemetry : null}
                 />
                 <PhaseCard
                   title="Events"
@@ -134,6 +146,7 @@ export default memo(function AnalysisTuningColumn({
                       ? `${eventSummary.total_events} events`
                       : null
                   }
+                  subPhase={isAnalyzing && !isScanning ? 'Event detection' : null}
                   progressMsg={!isScanning && isAnalyzing ? (progress?.message || null) : null}
                   progressPct={!isScanning && isAnalyzing ? Math.min(100, Math.max(0, ((progress?.percent || 55) - 55) / 40 * 100)) : null}
                   primaryLabel={hasEventsLocal ? 'Re-analyze' : 'Analyze'}
@@ -142,6 +155,8 @@ export default memo(function AnalysisTuningColumn({
                   primaryDanger={isAnalyzing && !isScanning}
                   primaryDisabled={isRedetecting || (!isAnalyzing && !hasTelemetry && !hasEventsLocal)}
                   primaryTooltip={!hasTelemetry && !hasEventsLocal && !isAnalyzing ? 'Collect telemetry first' : null}
+                  onClear={hasEventsLocal && !isAnalyzing ? handleClearEvents : null}
+                  clearTooltip="Clear detected events"
                 />
               </div>
               {error && (
@@ -168,7 +183,7 @@ export default memo(function AnalysisTuningColumn({
         </div>
 
         {/* Detection tuning */}
-        <div className="flex-1 overflow-y-auto px-3 py-2">
+        <div className={`flex-1 overflow-y-auto px-3 py-2 relative transition-opacity duration-300 ${isAnalyzing ? 'opacity-40 pointer-events-none select-none' : ''}`}>
           <CollapsibleSection
             icon={Sliders}
             label="Detection Tuning"
@@ -201,39 +216,61 @@ export default memo(function AnalysisTuningColumn({
 /**
  * PhaseCard — combined status + action for a single analysis phase.
  */
+// Sub-phase label colour map
+const SUBPHASE_COLORS = {
+  'Telemetry scan': 'text-accent bg-accent/10',
+  'Incident scan':  'text-amber-400 bg-amber-400/10',
+  'Event detection': 'text-violet-400 bg-violet-400/10',
+}
+
 function PhaseCard({
   title, active, done,
-  detail, progressMsg, progressPct,
+  detail, subPhase, progressMsg, progressPct,
   primaryLabel, primaryIcon, onPrimary,
   primaryDanger, primaryDisabled, primaryTooltip,
+  onClear, clearTooltip,
+  onExplore,
 }) {
   const btn = (
     <button
       onClick={onPrimary}
       disabled={primaryDisabled}
-      className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md
+      className={`flex items-center gap-1 px-2 py-0.5 text-xxs font-medium rounded-md
                   transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed
                   ${primaryDanger
                     ? 'text-danger bg-danger/10 hover:bg-danger/20'
                     : 'text-text-secondary bg-bg-hover border border-border-subtle hover:text-text-primary hover:border-border'}`}
     >
       {primaryDanger
-        ? <Square size={10} />
+        ? <Square size={9} />
         : primaryIcon}
       {primaryDanger ? 'Stop' : primaryLabel}
     </button>
   )
 
+  const clearBtn = onClear ? (
+    <Tooltip content={clearTooltip || 'Clear data'} position="bottom" delay={300}>
+      <button
+        onClick={onClear}
+        className="flex items-center justify-center w-6 h-6 rounded hover:bg-danger/10
+                   text-text-disabled hover:text-danger transition-colors"
+        title={clearTooltip}
+      >
+        <Trash2 size={11} />
+      </button>
+    </Tooltip>
+  ) : null
+
   return (
-    <div className={`flex flex-col gap-2 px-3 py-3 rounded-lg border transition-colors
+    <div className={`flex flex-col gap-1.5 px-3 py-2.5 rounded-lg border transition-colors
       ${active
         ? 'bg-accent/5 border-accent/30 shadow-sm'
         : done
           ? 'bg-success/5 border-success/30'
           : 'bg-surface border-border-subtle'}`}
     >
-      {/* Title row */}
-      <div className="flex items-center gap-2.5">
+      {/* ── Title row ─────────────────────────────────────────────────── */}
+      <div className="flex items-center gap-2">
         <div className="shrink-0">
           {active
             ? <Loader2 size={14} className="text-accent animate-spin" />
@@ -244,22 +281,32 @@ function PhaseCard({
         <span className={`text-xs font-semibold flex-1 ${active ? 'text-accent' : done ? 'text-success' : 'text-text-primary'}`}>
           {title}
         </span>
-        {primaryTooltip
-          ? <Tooltip content={primaryTooltip} position="bottom" delay={300}>{btn}</Tooltip>
-          : btn}
+        {/* Detail inline — only when done and idle */}
+        {done && !active && detail && (
+          <span className="text-xxs text-text-disabled shrink-0">{detail}</span>
+        )}
+        {/* Primary button in title row only when active (Stop) or not yet started (Collect) */}
+        {(!done || active) && (
+          <div className="shrink-0">
+            {primaryTooltip
+              ? <Tooltip content={primaryTooltip} position="bottom" delay={300}>{btn}</Tooltip>
+              : btn}
+          </div>
+        )}
       </div>
 
-      {/* Detail / status info */}
-      {detail && !active && (
-        <span className="text-xxs text-text-tertiary leading-relaxed pl-[22px]">{detail}</span>
+      {/* ── Active sub-state ───────────────────────────────────────────── */}
+      {active && subPhase && (
+        <div className="pl-[22px]">
+          <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xxs font-semibold tracking-wide
+            ${SUBPHASE_COLORS[subPhase] ?? 'text-text-secondary bg-surface'}`}>
+            {subPhase}
+          </span>
+        </div>
       )}
-
-      {/* Progress message */}
       {active && progressMsg && (
         <span className="text-xxs text-text-secondary leading-relaxed pl-[22px] font-medium">{progressMsg}</span>
       )}
-
-      {/* Progress bar */}
       {active && progressPct !== null && progressPct !== undefined && (
         <div className="pl-[22px]">
           <div className="h-1 bg-surface rounded-full overflow-hidden">
@@ -268,6 +315,34 @@ function PhaseCard({
               style={{ width: `${progressPct}%` }}
             />
           </div>
+        </div>
+      )}
+
+      {/* ── Done action row: Explore · Re-collect · (spacer) · Clear ──── */}
+      {!active && done && (onPrimary || onExplore || clearBtn) && (
+        <div className="flex items-center gap-1.5 pl-[22px]">
+          {onExplore && (
+            <Tooltip content="Explore tick data" position="bottom" delay={300}>
+              <button
+                onClick={onExplore}
+                className="flex items-center gap-1 px-2 py-0.5 rounded-md text-xxs font-medium
+                           text-text-disabled border border-border-subtle bg-bg-hover
+                           hover:text-accent hover:border-accent/40 transition-colors"
+              >
+                <Table2 size={10} />
+                Explore
+              </button>
+            </Tooltip>
+          )}
+          {onPrimary && (
+            <div className="shrink-0">
+              {primaryTooltip
+                ? <Tooltip content={primaryTooltip} position="bottom" delay={300}>{btn}</Tooltip>
+                : btn}
+            </div>
+          )}
+          <div className="flex-1" />
+          {clearBtn}
         </div>
       )}
     </div>

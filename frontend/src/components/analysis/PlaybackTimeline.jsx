@@ -1,11 +1,9 @@
 import { useState, useRef, memo } from 'react'
-import {
-  Play, Pause, SkipBack, SkipForward, Rewind, FastForward,
-  Users, Repeat, X, Check, Film, Minus, Plus, BarChart3, Clock,
-} from 'lucide-react'
+import { Minus, Plus, SkipBack, Rewind, Play, Pause, FastForward, SkipForward } from 'lucide-react'
 import { EVENT_COLORS } from '../../context/TimelineContext'
 import { apiPost } from '../../services/api'
 import { EVENT_CONFIG, formatTime } from './analysisConstants'
+import EventControlsBar from '../ui/EventControlsBar'
 
 /**
  * PlaybackTimeline — scrubber + event markers + transport controls + focused event header.
@@ -34,73 +32,32 @@ export default memo(function PlaybackTimeline({
 
   return (
     <div className="shrink-0 bg-[#0f0f13] border-t border-white/10 px-4 py-3">
-      {/* Focused event header */}
-      {focusedEvent && (() => {
-        const cfg = EVENT_CONFIG[focusedEvent.event_type] || {}
-        const EvIcon = cfg.icon || BarChart3
-        const names = focusedEvent.driver_names || []
-        const evDrivers = (focusedEvent.involved_drivers || []).slice(0, 5)
-        const ov = overrides[String(focusedEvent.id)] || null
-        const evStartRel = formatTime(Math.max(0, focusedEvent.start_time_seconds - raceStart))
-        const evEndRel = formatTime(Math.max(0, focusedEvent.end_time_seconds - raceStart))
-        const evDuration = Math.max(0, focusedEvent.end_time_seconds - focusedEvent.start_time_seconds)
-        return (
-          <div className="flex items-center gap-2 mb-2 pb-2 border-b border-white/10 flex-wrap">
-            <EvIcon size={12} className={cfg.color || 'text-white/70'} />
-            <span className="text-white text-xxs font-semibold">{cfg.label || focusedEvent.event_type}</span>
-            {names.length > 0 && (
-              <span className="text-white/40 text-xxs">{names.join(' · ')}</span>
-            )}
-            <span className="flex items-center gap-1 text-xxs text-white/30 font-mono">
-              <Clock size={9} />
-              {evStartRel} – {evEndRel} ({evDuration.toFixed(1)}s)
-            </span>
-            {focusedEvent.severity != null && (
-              <span className="text-xxs text-white/40 font-mono">Severity {focusedEvent.severity}</span>
-            )}
-            <button onClick={() => seekToEvent(focusedEvent)} disabled={isSeeking}
-              className="flex items-center gap-1 px-1.5 py-0.5 rounded text-xxs bg-white/10 hover:bg-white/20 text-white/80 border border-white/15 transition-colors disabled:opacity-40"
-              title="Rewind to event start">
-              <SkipBack size={9} /><span>Rewind</span>
-            </button>
-            <button onClick={() => toggleOverride(focusedEvent.id)}
-              className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-xxs border transition-colors
-                ${ov === 'highlight' ? 'bg-success/25 text-success border-success/40'
-                  : ov === 'full-video' ? 'bg-info/25 text-info border-info/40'
-                  : ov === 'exclude' ? 'bg-danger/25 text-danger border-danger/40'
-                  : 'bg-white/8 hover:bg-white/15 text-white/50 border-white/15'}`}
-              title={ov ? `Override: ${ov}` : 'Auto'}>
-              {ov === 'highlight' && <><Check size={8} /> Incl</>}
-              {ov === 'full-video' && <><Film size={8} /> Full</>}
-              {ov === 'exclude' && <><X size={8} /> Excl</>}
-              {!ov && <><Minus size={8} /> Auto</>}
-            </button>
-            {evDrivers.map((carIdx, i) => {
-              const name = names[i] || `Car ${carIdx}`
-              const isActive = replayState?.cam_car_idx === carIdx
-              return (
-                <button key={carIdx} onClick={() => handleSwitchDriver(carIdx)}
-                  className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-xxs border transition-colors
-                    ${isActive ? 'bg-accent/25 text-accent border-accent/40' : 'bg-white/8 hover:bg-white/15 text-white/70 border-white/15'}`}
-                  title={`Switch to ${name}'s POV`}>
-                  <Users size={8} /><span>{name}</span>
-                </button>
-              )
-            })}
-            <button onClick={() => setAutoLoop(v => !v)}
-              className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-xxs border transition-colors
-                ${autoLoop ? 'bg-accent/25 text-accent border-accent/40' : 'bg-white/8 hover:bg-white/15 text-white/50 border-white/15'}`}
-              title={autoLoop ? 'Auto-loop on — click to disable' : 'Enable auto-loop'}>
-              <Repeat size={8} /><span>Loop</span>
-            </button>
-            <button onClick={() => { setFocusedEvent(null); setAutoLoop(false) }}
-              className="ml-auto flex items-center gap-1 px-2 py-0.5 rounded text-xxs bg-white/8 hover:bg-white/15 text-white/50 hover:text-white/90 border border-white/15 transition-colors"
-              title="Back to full timeline">
-              <span>Close</span><X size={10} />
-            </button>
-          </div>
-        )
-      })()}
+      {/* Focused event controls bar */}
+      {focusedEvent && (
+        <div className="mb-2 pb-2 border-b border-white/10">
+          <EventControlsBar
+            event={focusedEvent}
+            raceStart={raceStart}
+            raceDuration={raceDuration}
+            replayState={replayState}
+            onSeekToEvent={seekToEvent}
+            onToggleOverride={toggleOverride}
+            onSwitchDriver={handleSwitchDriver}
+            onToggleAutoLoop={() => setAutoLoop(v => !v)}
+            onClose={() => {
+              setFocusedEvent(null)
+              setAutoLoop(false)
+            }}
+            overrides={overrides}
+            autoLoop={autoLoop}
+            isSeeking={isSeeking}
+            showClose={true}
+            compact={false}
+            theme="timeline"
+            className="mb-0"
+          />
+        </div>
+      )}
 
       {/* Timeline scrubber */}
       {raceDuration > 0 && replayState && (
@@ -120,7 +77,7 @@ export default memo(function PlaybackTimeline({
             }
             const viewSpan = viewEnd - viewStart || 1
             const toPct = (t) => Math.max(0, Math.min(1, (t - viewStart) / viewSpan))
-            const displayTime = scrubbing && optimisticTime != null ? optimisticTime : replayState.session_time
+            const displayTime = scrubbing && optimisticTime !== null ? optimisticTime : replayState.session_time
             const evLeftPct = focusedEvent ? toPct(focusedEvent.start_time_seconds) * 100 : 0
             const evWidthPct = focusedEvent ? (toPct(focusedEvent.end_time_seconds) - toPct(focusedEvent.start_time_seconds)) * 100 : 0
             const focusedCfg = focusedEvent ? (EVENT_CONFIG[focusedEvent.event_type] || {}) : {}
@@ -194,7 +151,7 @@ export default memo(function PlaybackTimeline({
                   )}
                   <div className={`h-full bg-gradient-to-r from-gradient-from via-gradient-via to-gradient-to rounded-full transition-all duration-200 ${scrubbing ? 'opacity-30' : ''}`}
                     style={{ width: `${toPct(replayState.session_time) * 100}%` }} />
-                  {scrubbing && optimisticTime != null && (
+                  {scrubbing && optimisticTime !== null && (
                     <div className="absolute top-0 left-0 h-full bg-gradient-to-r from-gradient-from via-gradient-via to-gradient-to rounded-full opacity-70"
                       style={{ width: `${toPct(optimisticTime) * 100}%` }} />
                   )}
@@ -210,7 +167,7 @@ export default memo(function PlaybackTimeline({
             <span className="text-xxs text-white/30 font-mono">
               {focusedEvent
                 ? formatTime(Math.max(0, focusedEvent.start_time_seconds - raceStart))
-                : formatTime(Math.max(0, (scrubbing && optimisticTime != null ? optimisticTime : replayState.session_time) - raceStart))}
+                : formatTime(Math.max(0, (scrubbing && optimisticTime !== null ? optimisticTime : replayState.session_time) - raceStart))}
             </span>
             <span className="text-xxs text-white/30 font-mono">
               {focusedEvent
@@ -229,9 +186,10 @@ export default memo(function PlaybackTimeline({
             <div className="w-2 h-2 rounded-full" style={{ backgroundColor: EVENT_COLORS[tooltipEvent.event_type] || '#fff' }} />
             <span className="text-white font-semibold">{(EVENT_CONFIG[tooltipEvent.event_type] || {}).label || tooltipEvent.event_type}</span>
           </div>
-          {tooltipEvent.driver_names?.length > 0 && (
-            <div className="text-white/50 mt-0.5">{tooltipEvent.driver_names.join(' · ')}</div>
-          )}
+          {/* Drivers — always show, "—" if empty */}
+          <div className="text-white/50 mt-0.5">
+            {tooltipEvent.driver_names?.length > 0 ? tooltipEvent.driver_names.join(' · ') : '—'}
+          </div>
           <div className="text-white/40 mt-0.5">{formatTime(Math.max(0, (tooltipEvent.start_time_seconds ?? 0) - raceStart))} · Severity {tooltipEvent.severity ?? '?'}</div>
         </div>
       )}
