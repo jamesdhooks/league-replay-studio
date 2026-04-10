@@ -91,6 +91,10 @@ def score_events(
     last_lap_weight: float = float(tuning.get("lastLapWeight", 1.0))
     late_race_threshold: float = float(tuning.get("lateRaceThreshold", 0.9))
     late_race_multiplier: float = float(tuning.get("lateRaceMultiplier", 1.2))
+    overtake_boost: float = float(tuning.get("overtakeBoost", 1.5))
+    preferred_driver_boost: float = float(tuning.get("preferredDriverBoost", 1.3))
+    incident_position_cutoff: int = int(tuning.get("incidentPositionCutoff", 0))
+    max_race_finishes: int = int(tuning.get("maxRaceFinishes", 0))
 
     _INCIDENT_TYPES = frozenset({"incident", "crash", "spinout", "contact", "close_call"})
     _FIRST_LAP_BUCKET_END = BUCKET_BOUNDARIES["intro"][1]  # 0.15 of race
@@ -190,7 +194,33 @@ def score_events(
         score += narrative_bonus
         components["narrative_bonus"] = round(narrative_bonus, 3)
 
+        # ── Overtake boost ───────────────────────────────────────────────
+        if overtake_boost != 1.0 and metadata.get("with_overtake"):
+            score *= overtake_boost
+            components["overtake_boost"] = overtake_boost
+
+        # ── Preferred driver boost (non-exclusive) ───────────────────────
+        if preferred_driver_boost != 1.0 and preferred_names and event_type not in MANDATORY_TYPES:
+            driver_names = event.get("driver_names") or []
+            if isinstance(driver_names, str):
+                try:
+                    driver_names = json.loads(driver_names)
+                except (json.JSONDecodeError, TypeError):
+                    driver_names = []
+            if any(
+                any(p in name.lower() for p in preferred_names)
+                for name in driver_names
+            ):
+                score *= preferred_driver_boost
+                components["preferred_driver_boost"] = preferred_driver_boost
+
         # ── Tuning filters (applied before exposure stage) ───────────────
+        # Incident position cutoff: zero-score incidents from low-position cars
+        if incident_position_cutoff > 0 and event_type in _INCIDENT_TYPES:
+            if position > incident_position_cutoff:
+                score = 0.0
+                components["filtered"] = "incident_position_cutoff"
+
         # Ignore incidents during the first-lap window
         if ignore_incidents_first_lap and event_type in _INCIDENT_TYPES:
             if race_duration > 0:
@@ -313,6 +343,18 @@ def score_events(
                 r["tier"] = "B"
             else:
                 r["tier"] = "C"
+
+    # ── Max race-finish cap ────────────────────────────────────────────
+    if max_race_finishes > 0:
+        finish_events = sorted(
+            [r for r in results if r.get("event_type") == "race_finish" and r["score"] > 0],
+            key=lambda r: r["score"],
+            reverse=True,
+        )
+        for excess in finish_events[max_race_finishes:]:
+            excess["score"] = 0.0
+            excess["tier"] = "C"
+            excess["score_components"]["filtered"] = "max_race_finishes"
 
     tier_counts = defaultdict(int)
     for r in results:

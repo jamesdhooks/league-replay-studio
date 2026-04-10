@@ -207,8 +207,20 @@ def generate_video_script(
                 "overlay_template_id",
                 DEFAULT_SECTION_TEMPLATES.get("race", "broadcast"),
             )
+            # Extract tuning params that affect timeline/camera behaviour
+            _camera_sticky = float((tuning or {}).get("cameraStickyPeriod", 20))
+            _battle_sticky = float((tuning or {}).get("battleStickyPeriod", 15))
+
+            # Enforce minimum battle clip duration (battleStickyPeriod)
+            for seg in race_timeline:
+                if seg.get("event_type") == "battle" and _battle_sticky > 0:
+                    seg_dur = seg.get("end_time_seconds", 0) - seg.get("start_time_seconds", 0)
+                    if seg_dur < _battle_sticky:
+                        seg["end_time_seconds"] = seg["start_time_seconds"] + _battle_sticky
+
             # Prepare probabilistic camera state (only if camera_weights are configured)
             _cam_last_used: dict[str, float] = {}  # camera_name -> session_time last chosen
+            _cam_last_chosen: str | None = None  # name of last camera picked
             _use_cam_selection = bool(camera_weights)
             _cam_names = sorted(camera_weights.keys())
             for seg in race_timeline:
@@ -222,6 +234,39 @@ def generate_video_script(
                 # Assign camera_preferences for non-transition, non-broll segments
                 if _use_cam_selection and seg.get("type") not in ("transition", "broll"):
                     seg_time = seg.get("start_time_seconds", 0.0)
+
+                    # Camera sticky period: reuse last camera if within hold window
+                    if (
+                        _cam_last_chosen is not None
+                        and _cam_last_chosen in _cam_names
+                        and _camera_sticky > 0
+                    ):
+                        last_t = _cam_last_used.get(_cam_last_chosen)
+                        if last_t is not None and (seg_time - last_t) < _camera_sticky:
+                            others = sorted(
+                                (c for c in _cam_names if c != _cam_last_chosen),
+                                key=lambda c: camera_weights.get(c, 0),
+                                reverse=True,
+                            )
+                            seg_entry["camera_preferences"] = [_cam_last_chosen, *others]
+                            _cam_last_used[_cam_last_chosen] = seg_time
+                            # Still record battle hints below, then append
+                            if seg.get("event_type") == "battle":
+                                drivers = seg.get("involved_drivers") or []
+                                if isinstance(drivers, str):
+                                    try:
+                                        drivers = json.loads(drivers)
+                                    except (json.JSONDecodeError, TypeError):
+                                        drivers = []
+                                seg_entry["camera_hints"] = {
+                                    "establishing_angle": "TV1",
+                                    "cycle_angles": ["cockpit", "bumper", "TV1"],
+                                    "reverse_on_behind": True,
+                                    "preferred_car_idx": drivers[0] if drivers else None,
+                                }
+                            script.append(seg_entry)
+                            continue
+
                     # Compute effective weight for each camera using recency penalty
                     effective: dict[str, float] = {}
                     for cam in _cam_names:
@@ -252,9 +297,11 @@ def generate_video_script(
                         )
                         seg_entry["camera_preferences"] = [chosen, *others]
                         _cam_last_used[chosen] = seg_time
+                        _cam_last_chosen = chosen
                     elif _cam_names:
                         # All weights zero — use first camera as fallback
                         seg_entry["camera_preferences"] = list(_cam_names)
+                        _cam_last_chosen = _cam_names[0]
                 # Battle camera choreography hints (iRD-inspired)
                 if seg.get("event_type") == "battle":
                     drivers = seg.get("involved_drivers") or []
