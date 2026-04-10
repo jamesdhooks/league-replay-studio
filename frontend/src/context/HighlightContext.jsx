@@ -46,7 +46,6 @@ const DEFAULT_WEIGHTS = {
 
 /** Default detection/camera tuning parameters (inspired by iRacingReplayDirector) */
 const DEFAULT_PARAMS = {
-  battleGap: 1.0,               // Max gap (seconds) between cars to be "in battle"
   battleStickyPeriod: 15,       // Seconds to track one battle before switching
   cameraStickyPeriod: 20,       // Seconds to hold one camera angle
   overtakeBoost: 1.5,           // Score multiplier for events with overtakes
@@ -316,7 +315,6 @@ export function HighlightProvider({ children }) {
           incidentPositionCutoff: params.incidentPositionCutoff,
           maxRaceFinishes: params.maxRaceFinishes,
           battleStickyPeriod: params.battleStickyPeriod,
-          battleGap: params.battleGap,
           cameraStickyPeriod: params.cameraStickyPeriod,
         },
       })
@@ -363,7 +361,6 @@ export function HighlightProvider({ children }) {
           incidentPositionCutoff: params.incidentPositionCutoff,
           maxRaceFinishes: params.maxRaceFinishes,
           battleStickyPeriod: params.battleStickyPeriod,
-          battleGap: params.battleGap,
           cameraStickyPeriod: params.cameraStickyPeriod,
         },
         section_config: sectionConfig,

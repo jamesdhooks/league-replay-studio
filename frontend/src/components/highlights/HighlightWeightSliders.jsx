@@ -162,17 +162,6 @@ export default function HighlightWeightSliders() {
           labelWidth="7rem"
         />
 
-        {/* Battle gap threshold */}
-        <LabeledSlider
-          label="Battle Gap"
-          tooltip="Max estimated-time gap between adjacent cars to qualify as a battle"
-          value={params.battleGap}
-          min={0.3} max={3.0} step={0.1}
-          format={v => `${v.toFixed(1)}s`}
-          onChange={v => setParams(p => ({ ...p, battleGap: v }))}
-          labelWidth="7rem"
-        />
-
         {/* Battle front bias */}
         <LabeledSlider
           label="Front Bias"
