@@ -1,9 +1,8 @@
 import { useState, memo } from 'react'
 import {
-  Loader2, AlertCircle, WifiOff, Eye, EyeOff, RefreshCw, Settings, Monitor, AlertTriangle, XCircle, BarChart3,
+  Loader2, AlertCircle, WifiOff, Eye, EyeOff, RefreshCw, Settings, Monitor, AlertTriangle, XCircle,
 } from 'lucide-react'
 import { H264StreamPlayer, HlsStreamPlayer } from './StreamPlayers'
-import { EVENT_CONFIG, severityColorCard } from './analysisConstants'
 import { useStream } from '../../hooks/useStream'
 import { useIRacing } from '../../context/IRacingContext'
 
@@ -22,7 +21,6 @@ import { useIRacing } from '../../context/IRacingContext'
 export default memo(function PreviewPlayer({
   isAnalyzing, isPlaying,
   sessionMatch,
-  feedEvents,
   onPlayPause,
   isPortrait,
 }) {
@@ -203,37 +201,6 @@ export default memo(function PreviewPlayer({
             selectWindow={(hwnd) => selectWindow(hwnd, () => setShowWindowPicker(false))}
             resetToAuto={() => resetToAuto(() => setShowWindowPicker(false))}
           />
-        )}
-
-        {/* Particle event cards */}
-        {feedEvents.length > 0 && (
-          <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex flex-col-reverse items-center gap-1.5 pointer-events-none"
-               style={{ maxHeight: 'calc(100% - 80px)' }}>
-            {feedEvents.slice(-5).reverse().map((ev, i) => {
-              const cfg = EVENT_CONFIG[ev.type] || {}
-              const Icon = cfg.icon || BarChart3
-              const names = ev.driverNames || []
-              const ageOpacity = [1, 0.9, 0.7, 0.5, 0.3][i] ?? 0.3
-              return (
-                <div key={ev.id} onClick={e => e.stopPropagation()}
-                  className="flex items-center gap-2 px-3 py-2 rounded-lg bg-black/80 backdrop-blur-md border border-white/15 text-xs animate-slide-up pointer-events-auto shadow-elevated"
-                  style={{ opacity: ageOpacity }}>
-                  <div className={`w-6 h-6 rounded-md flex items-center justify-center ${cfg.bg || 'bg-white/10'}`}>
-                    <Icon size={13} className={cfg.color || 'text-white'} />
-                  </div>
-                  <div className="flex flex-col min-w-0">
-                    <span className="text-white font-semibold text-xs leading-tight">{cfg.label || ev.type}</span>
-                    {names.length > 0 && (
-                      <span className="text-white/60 truncate text-xxs max-w-[120px]">{names.join(' vs ')}</span>
-                    )}
-                  </div>
-                  <span className={`w-5 h-5 rounded-full flex items-center justify-center font-bold text-xxs ${severityColorCard(ev.severity)}`}>
-                    {ev.severity}
-                  </span>
-                </div>
-              )
-            })}
-          </div>
         )}
       </div>
     </div>

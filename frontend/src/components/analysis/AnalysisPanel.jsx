@@ -221,10 +221,12 @@ export default memo(function AnalysisPanel() {
   }, [activeProject?.id, events])
 
   useEffect(() => {
-    if (sidebarTab === 'events' && eventsEndRef.current) {
+    // Only auto-scroll to the bottom while analysis is actively running —
+    // not after it completes, so the slide-in animation starts at the top.
+    if (isAnalyzing && sidebarTab === 'events' && eventsEndRef.current) {
       eventsEndRef.current.scrollIntoView({ behavior: 'smooth' })
     }
-  }, [discoveredEvents, sidebarTab])
+  }, [discoveredEvents, sidebarTab, isAnalyzing])
 
   useEffect(() => {
     if (wasAnalyzingRef.current && !isAnalyzing) {
@@ -553,6 +555,7 @@ export default memo(function AnalysisPanel() {
                   setExpandedEvent={setExpandedEvent}
                   toggleOverride={toggleOverride}
                   eventsEndRef={eventsEndRef}
+                  feedEvents={feedEvents}
                 />
               ),
             },
@@ -610,7 +613,6 @@ export default memo(function AnalysisPanel() {
                     isAnalyzing={isAnalyzing}
                     isPlaying={isPlaying}
                     sessionMatch={sessionMatch}
-                    feedEvents={feedEvents}
                     onPlayPause={handlePlayPause}
                     isPortrait={isPortrait}
                   />

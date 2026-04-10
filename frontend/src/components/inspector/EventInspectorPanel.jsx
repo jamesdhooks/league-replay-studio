@@ -245,7 +245,22 @@ export default function EventInspectorPanel({ projectId }) {
   }
 
   const eventColor = EVENT_COLORS[editState.event_type] || '#6b7280'
-  const duration = Math.max(0, editState.end_time_seconds - editState.start_time_seconds)
+  const typeBefore = params.paddingByType?.[editState.event_type]?.before ?? null
+  const typeAfter = params.paddingByType?.[editState.event_type]?.after ?? null
+  const effectiveBefore = editState.padding_before ?? typeBefore ?? params.paddingBefore
+  const effectiveAfter = editState.padding_after ?? typeAfter ?? params.paddingAfter
+  const sourceBefore = editState.padding_before != null ? 'event'
+    : typeBefore != null ? 'type' : 'global'
+  const sourceAfter = editState.padding_after != null ? 'event'
+    : typeAfter != null ? 'type' : 'global'
+  const displayStartTime = Math.max(0, editState.start_time_seconds - effectiveBefore)
+  const displayEndTime = editState.end_time_seconds + effectiveAfter
+  const duration = Math.max(0, displayEndTime - displayStartTime)
+  const displayEvent = {
+    ...selectedEvent,
+    start_time_seconds: displayStartTime,
+    end_time_seconds: displayEndTime,
+  }
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -310,7 +325,7 @@ export default function EventInspectorPanel({ projectId }) {
       {selectedEvent && (
         <div className="shrink-0 border-b border-border bg-bg-secondary px-3 py-2">
           <EventControlsBar
-            event={selectedEvent}
+            event={displayEvent}
             raceStart={0}
             raceDuration={0}
             replayState={null}
@@ -410,85 +425,79 @@ export default function EventInspectorPanel({ projectId }) {
           <div className="mt-1.5 text-xxs text-text-tertiary">
             Duration: {formatTimePrecise(duration)}
           </div>
+          <div className="mt-0.5 text-xxs text-text-disabled">
+            Effective:&nbsp;
+            <span className="font-mono">{formatTimePrecise(displayStartTime)}</span>
+            &nbsp;→&nbsp;
+            <span className="font-mono">{formatTimePrecise(displayEndTime)}</span>
+          </div>
         </Section>
 
         {/* ── Clip Padding ─────────────────────────────────────────── */}
         <Section icon={Film} label="Clip Padding">
-          {(() => {
-            const typeBefore = params.paddingByType?.[editState.event_type]?.before ?? null
-            const typeAfter  = params.paddingByType?.[editState.event_type]?.after ?? null
-            const effectiveBefore = editState.padding_before ?? typeBefore ?? params.paddingBefore
-            const effectiveAfter  = editState.padding_after  ?? typeAfter  ?? params.paddingAfter
-            const sourceBefore = editState.padding_before != null ? 'event'
-              : typeBefore != null ? 'type' : 'global'
-            const sourceAfter  = editState.padding_after != null ? 'event'
-              : typeAfter  != null ? 'type' : 'global'
-            return (
-              <div className="space-y-2.5">
-                {/* Lead-in */}
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between text-xxs">
-                    <span className="text-text-secondary">Lead-in</span>
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-mono text-text-primary">{effectiveBefore.toFixed(1)}s</span>
-                      {sourceBefore === 'event' ? (
-                        <button
-                          onClick={() => updateField('padding_before', null)}
-                          className="text-xxs text-accent hover:underline leading-none"
-                          title="Remove per-event override"
-                        >reset</button>
-                      ) : (
-                        <span className="text-xxs text-text-disabled italic">{sourceBefore}</span>
-                      )}
-                    </div>
-                  </div>
-                  <input
-                    type="range"
-                    min={0} max={15} step={0.5}
-                    value={effectiveBefore}
-                    onChange={e => updateField('padding_before', parseFloat(e.target.value))}
-                    className="w-full h-1.5 accent-accent cursor-pointer"
-                  />
-                </div>
-                {/* Follow-out */}
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between text-xxs">
-                    <span className="text-text-secondary">Follow-out</span>
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-mono text-text-primary">{effectiveAfter.toFixed(1)}s</span>
-                      {sourceAfter === 'event' ? (
-                        <button
-                          onClick={() => updateField('padding_after', null)}
-                          className="text-xxs text-accent hover:underline leading-none"
-                          title="Remove per-event override"
-                        >reset</button>
-                      ) : (
-                        <span className="text-xxs text-text-disabled italic">{sourceAfter}</span>
-                      )}
-                    </div>
-                  </div>
-                  <input
-                    type="range"
-                    min={0} max={30} step={0.5}
-                    value={effectiveAfter}
-                    onChange={e => updateField('padding_after', parseFloat(e.target.value))}
-                    className="w-full h-1.5 accent-accent cursor-pointer"
-                  />
-                </div>
-                {/* Effective capture window */}
-                <div className="text-xxs text-text-disabled">
-                  Capture:&nbsp;
-                  <span className="font-mono">
-                    {formatTimePrecise(Math.max(0, editState.start_time_seconds - effectiveBefore))}
-                  </span>
-                  &nbsp;→&nbsp;
-                  <span className="font-mono">
-                    {formatTimePrecise(editState.end_time_seconds + effectiveAfter)}
-                  </span>
+          <div className="space-y-2.5">
+            {/* Lead-in */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-xxs">
+                <span className="text-text-secondary">Lead-in</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-mono text-text-primary">{effectiveBefore.toFixed(1)}s</span>
+                  {sourceBefore === 'event' ? (
+                    <button
+                      onClick={() => updateField('padding_before', null)}
+                      className="text-xxs text-accent hover:underline leading-none"
+                      title="Remove per-event override"
+                    >reset</button>
+                  ) : (
+                    <span className="text-xxs text-text-disabled italic">{sourceBefore}</span>
+                  )}
                 </div>
               </div>
-            )
-          })()}
+              <input
+                type="range"
+                min={0} max={15} step={0.5}
+                value={effectiveBefore}
+                onChange={e => updateField('padding_before', parseFloat(e.target.value))}
+                className="w-full h-1.5 accent-accent cursor-pointer"
+              />
+            </div>
+            {/* Follow-out */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-xxs">
+                <span className="text-text-secondary">Follow-out</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-mono text-text-primary">{effectiveAfter.toFixed(1)}s</span>
+                  {sourceAfter === 'event' ? (
+                    <button
+                      onClick={() => updateField('padding_after', null)}
+                      className="text-xxs text-accent hover:underline leading-none"
+                      title="Remove per-event override"
+                    >reset</button>
+                  ) : (
+                    <span className="text-xxs text-text-disabled italic">{sourceAfter}</span>
+                  )}
+                </div>
+              </div>
+              <input
+                type="range"
+                min={0} max={30} step={0.5}
+                value={effectiveAfter}
+                onChange={e => updateField('padding_after', parseFloat(e.target.value))}
+                className="w-full h-1.5 accent-accent cursor-pointer"
+              />
+            </div>
+            {/* Effective capture window */}
+            <div className="text-xxs text-text-disabled">
+              Capture:&nbsp;
+              <span className="font-mono">
+                {formatTimePrecise(displayStartTime)}
+              </span>
+              &nbsp;→&nbsp;
+              <span className="font-mono">
+                {formatTimePrecise(displayEndTime)}
+              </span>
+            </div>
+          </div>
         </Section>
 
         {/* ── Include in Highlight ──────────────────────────────────────── */}

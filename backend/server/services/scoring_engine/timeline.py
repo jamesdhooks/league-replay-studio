@@ -37,6 +37,37 @@ def _evt_duration(event: dict) -> float:
     return max(0, event.get("end_time_seconds", 0) - event.get("start_time_seconds", 0))
 
 
+def _evt_selection_duration(event: dict, constraints: Optional[dict] = None) -> float:
+    """Get selection duration including per-event lead-in/follow-out padding.
+
+    This mirrors frontend selection budgeting so point events (0s core duration)
+    still consume timeline budget based on capture padding.
+    """
+    constraints = constraints or {}
+    core = _evt_duration(event)
+
+    metadata = event.get("metadata") or {}
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (json.JSONDecodeError, TypeError):
+            metadata = {}
+
+    event_type = event.get("event_type")
+    by_type = constraints.get("padding_by_type") or {}
+    type_cfg = by_type.get(event_type) or {}
+
+    default_before = max(0.0, float(constraints.get("padding_before", 0.0)))
+    default_after = max(0.0, float(constraints.get("padding_after", 0.0)))
+
+    before = metadata.get("padding_before", type_cfg.get("before", default_before))
+    after = metadata.get("padding_after", type_cfg.get("after", default_after))
+
+    before = max(0.0, float(before or 0.0))
+    after = max(0.0, float(after or 0.0))
+    return core + before + after
+
+
 def _find_overlap(seg: dict, resolved: list[dict]) -> Optional[dict]:
     """Find any segment in resolved that overlaps with seg."""
     s_start = seg.get("start_time_seconds", 0)
@@ -111,7 +142,8 @@ def _replace_in_list(lst: list, old: Any, new: Any) -> None:
 
 def _smooth_timeline(timeline: list[dict], pip_threshold: float,
                      max_driver_exposure: float,
-                     target_duration: float = 0) -> list[dict]:
+                     target_duration: float = 0,
+                     constraints: Optional[dict] = None) -> list[dict]:
     """Pass 3 — Smoothing: repetition, spacing, exposure rebalance.
 
     Will not remove events if doing so would drop total duration below
@@ -129,7 +161,7 @@ def _smooth_timeline(timeline: list[dict], pip_threshold: float,
     threshold = max(score_range * 0.15, 0.5)  # Minimum 0.5 for narrow score distributions
 
     # Track total duration to avoid dropping below target
-    current_duration = sum(_evt_duration(e) for e in timeline)
+    current_duration = sum(_evt_selection_duration(e, constraints) for e in timeline)
 
     # Remove back-to-back same-type events unless score differential is significant
     smoothed = [timeline[0]]
@@ -143,7 +175,7 @@ def _smooth_timeline(timeline: list[dict], pip_threshold: float,
                 continue
             # Would removing the lower-scored one drop us below target?
             loser = prev if evt.get("score", 0) > prev.get("score", 0) else evt
-            loser_dur = _evt_duration(loser)
+            loser_dur = _evt_selection_duration(loser, constraints)
             if target_duration > 0 and (current_duration - loser_dur) < target_duration:
                 # Keep both — can't afford to lose duration
                 smoothed.append(evt)
@@ -314,7 +346,7 @@ def allocate_timeline(
             remaining.append(evt)
 
     timeline = list(must_have)
-    used_duration = sum(_evt_duration(e) for e in timeline)
+    used_duration = sum(_evt_selection_duration(e, constraints) for e in timeline)
 
     # Pass 2 — Bucket fill
     bucket_budgets = {
@@ -323,7 +355,7 @@ def allocate_timeline(
     }
     bucket_used: dict[str, float] = defaultdict(float)
     for evt in timeline:
-        bucket_used[evt.get("bucket", "mid")] += _evt_duration(evt)
+        bucket_used[evt.get("bucket", "mid")] += _evt_selection_duration(evt, constraints)
 
     selected_ids = {id(e) for e in timeline}
     for evt in remaining:
@@ -333,7 +365,7 @@ def allocate_timeline(
         budget = bucket_budgets.get(bucket, target_duration * 0.3)
         if bucket_used[bucket] >= budget:
             continue
-        evt_dur = _evt_duration(evt)
+        evt_dur = _evt_selection_duration(evt, constraints)
         timeline.append(evt)
         selected_ids.add(id(evt))
         used_duration += evt_dur
@@ -346,21 +378,24 @@ def allocate_timeline(
                 break
             if id(evt) in selected_ids:
                 continue
-            evt_dur = _evt_duration(evt)
+            evt_dur = _evt_selection_duration(evt, constraints)
             timeline.append(evt)
             selected_ids.add(id(evt))
             used_duration += evt_dur
 
     # Pass 3 — Smoothing
-    timeline = _smooth_timeline(timeline, pip_threshold, max_driver_exposure, target_duration)
+    timeline = _smooth_timeline(
+        timeline,
+        pip_threshold,
+        max_driver_exposure,
+        target_duration,
+        constraints,
+    )
 
     # Sort by time
     timeline.sort(key=lambda e: e.get("start_time_seconds", 0))
 
-    total_dur = sum(
-        e.get("end_time_seconds", 0) - e.get("start_time_seconds", 0)
-        for e in timeline
-    )
+    total_dur = sum(_evt_selection_duration(e, constraints) for e in timeline)
     logger.info(
         "allocate_timeline: selected %d segments (%.1fs total) for %.1fs target",
         len(timeline), total_dur, target_duration,
@@ -426,17 +461,30 @@ def insert_broll(
     timeline: list[dict],
     gap_threshold: float = BROLL_GAP_THRESHOLD,
     contextual_events: Optional[list[dict]] = None,
+    target_duration: float = 0,
 ) -> list[dict]:
     """Insert gap fillers where gaps are ≥ threshold.
 
     Strategy:
       1) Prefer contextual race events from unselected candidates in the gap.
       2) Fall back to scenic b-roll only for remaining uncovered gap.
+      3) Stop inserting once total timeline duration reaches *target_duration*
+         (with a small tolerance) so the final script isn't bloated.
 
     This keeps the edit focused on actual race action and improves field coverage.
     """
     if len(timeline) < 2:
         return list(timeline)
+
+    # Compute baseline timeline duration (selected events only, no broll yet).
+    _base_duration = sum(
+        max(0.0, s.get("end_time_seconds", 0) - s.get("start_time_seconds", 0))
+        for s in timeline
+        if s.get("type") not in ("transition",)
+    )
+    # Budget for gap-filler content.  0 or negative means no limit.
+    _broll_budget = max(0.0, target_duration - _base_duration) if target_duration > 0 else float("inf")
+    _broll_used = 0.0
 
     def _drivers_from(evt: dict) -> set:
         return _get_drivers(evt)
@@ -567,22 +615,29 @@ def insert_broll(
                         type_counts,
                     )
                     for c in context_clips:
+                        c_dur = max(0.0, c.get("end_time_seconds", 0) - c.get("start_time_seconds", 0))
+                        if _broll_used + c_dur > _broll_budget:
+                            break
                         result.append(c)
+                        _broll_used += c_dur
 
                     # Recompute remaining gap after context clips.
                     prev_end = result[-1].get("end_time_seconds", prev_end) if result else prev_end
                     gap = cur_start - prev_end
 
-                if gap >= gap_threshold:
+                if gap >= gap_threshold and _broll_used < _broll_budget:
                     # 2) Fallback bridge filler only for unresolved remainder.
-                    # Fill the ENTIRE remaining gap in capped chunks to guarantee
-                    # a continuous, no-dead-air timeline.
+                    # Insert brief bridge clips (capped to budget) so the final
+                    # script stays near the target duration.
                     fill_cursor = prev_end
                     while (cur_start - fill_cursor) >= gap_threshold:
+                        if _broll_used >= _broll_budget:
+                            break
                         broll_idx += 1
-                        broll_end = min(cur_start, fill_cursor + MAX_BROLL_FILLER_DURATION)
+                        remaining_budget = _broll_budget - _broll_used
+                        broll_end = min(cur_start, fill_cursor + min(MAX_BROLL_FILLER_DURATION, remaining_budget))
                         broll_dur = max(0.0, broll_end - fill_cursor)
-                        if broll_dur <= 0:
+                        if broll_dur < 1.0:
                             break
                         result.append({
                             "id": f"bridge_{broll_idx:03d}",
@@ -596,6 +651,7 @@ def insert_broll(
                             "duration": broll_dur,
                             "purpose": "bridge_gap_fill",
                         })
+                        _broll_used += broll_dur
                         fill_cursor = broll_end
         result.append(seg)
     return result

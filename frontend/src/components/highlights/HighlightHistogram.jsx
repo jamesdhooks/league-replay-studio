@@ -4,7 +4,7 @@ import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { useTimeline, EVENT_COLORS } from '../../context/TimelineContext'
 import { useToast } from '../../context/ToastContext'
 import { formatTime, formatDuration } from '../../utils/time'
-import { Columns3, ArrowRight, RotateCw, ChevronDown, ChevronRight, Download, FileText } from 'lucide-react'
+import { Columns3, ArrowRight, RotateCw, ChevronDown, ChevronRight, Download, FileText, Loader2 } from 'lucide-react'
 import ScoringReportModal from './ScoringReportModal'
 import EventTile from './EventTile'
 import ResultColumn from './ResultColumn'
@@ -46,9 +46,9 @@ function scoreToBucket(score) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function HighlightHistogram({ onInspect, projectId, collapsed, onToggle, eventsLoaded = false }) {
-  const { selection, metrics, toggleOverride, jumpToEvent, applyHighlights, generateVideoScript, params } = useHighlight()
+  const { selection, metrics, toggleOverride, jumpToEvent, applyHighlights, generateVideoScript, params, serverScoring } = useHighlight()
   const { raceDuration, selectedEventId, setSelectedEventId, playheadTime, seekTo } = useTimeline()
-  const { addToast } = useToast()
+  const { showInfo, showSuccess, showError } = useToast()
   const [hoveredId, setHoveredId] = useState(null)
   const [compress, setCompress] = useState(false)
   const [horizontal, setHorizontal] = useState(false)
@@ -62,13 +62,14 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
   const handleApply = useCallback(async () => {
     if (!projectId) return
     try {
+      showInfo('Generating race script...')
       await applyHighlights(projectId)
       await generateVideoScript(projectId)
-      addToast('success', 'Highlights applied to timeline')
+      showSuccess('Race script generated')
     } catch {
-      addToast('error', 'Failed to apply highlights')
+      showError('Failed to generate race script')
     }
-  }, [projectId, applyHighlights, generateVideoScript, addToast])
+  }, [projectId, applyHighlights, generateVideoScript, showInfo, showSuccess, showError])
 
   // Resizable split between histogram and chosen events
   const [chosenWidth, setChosenWidth] = useLocalStorage('lrs:editing:chosenWidth', 200)
@@ -335,11 +336,12 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
         </button>
         <button
           onClick={handleApply}
+          disabled={serverScoring}
           className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium
-                     bg-accent hover:bg-accent-hover text-white rounded transition-colors"
+                     bg-accent hover:bg-accent-hover disabled:opacity-60 text-white rounded transition-colors"
         >
-          <Download className="w-3.5 h-3.5" />
-          Apply to Timeline
+          {serverScoring ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+          {serverScoring ? 'Generating...' : 'Generate Script'}
         </button>
           </>
         )}

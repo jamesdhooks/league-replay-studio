@@ -190,7 +190,12 @@ export default memo(function PlaybackTimeline({
           <div className="text-white/50 mt-0.5">
             {tooltipEvent.driver_names?.length > 0 ? tooltipEvent.driver_names.join(' · ') : '—'}
           </div>
-          <div className="text-white/40 mt-0.5">{formatTime(Math.max(0, (tooltipEvent.start_time_seconds ?? 0) - raceStart))} · Severity {tooltipEvent.severity ?? '?'}</div>
+          <div className="text-white/40 mt-0.5">
+            {formatTime(Math.max(0, (tooltipEvent.start_time_seconds ?? 0) - raceStart))}
+            &nbsp;→&nbsp;
+            {formatTime(Math.max(0, (tooltipEvent.end_time_seconds ?? 0) - raceStart))}
+            &nbsp;·&nbsp;Severity {tooltipEvent.severity ?? '?'}
+          </div>
         </div>
       )}
 

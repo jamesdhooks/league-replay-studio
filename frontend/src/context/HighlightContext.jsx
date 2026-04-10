@@ -66,7 +66,9 @@ const DEFAULT_PARAMS = {
   maxRaceFinishes: 0,           // Max race_finish events to include in highlights (0 = all)
   paddingBefore: 2.0,           // Default seconds before event start to include in each clip
   paddingAfter: 5.0,            // Default seconds after event end to include in each clip
-  paddingByType: {},            // Per event-type padding overrides: { type: { before, after } }
+  paddingByType: {              // Per event-type padding overrides: { type: { before, after } }
+    incident: { before: 2.0, after: 8.0 },
+  },
   cameraWeights: {},            // Per-camera weight overrides: { group_name: 0–100 } — empty = all equal (50)
   cameraRecencyPenalty: 0.5,    // 0 = no recency penalty, 1 = maximum penalty for recently-used cameras
   cameraRecencyDecay: 30.0,     // Seconds for recency penalty to decay back to zero
@@ -201,7 +203,7 @@ export function HighlightProvider({ children }) {
       switch (sortColumn) {
         case 'score':    av = a.score;    bv = b.score;    break
         case 'severity': av = a.severity; bv = b.severity; break
-        case 'duration': av = a.duration; bv = b.duration; break
+        case 'duration': av = a.selectionDuration ?? a.duration; bv = b.selectionDuration ?? b.duration; break
         case 'type':     av = a.event_type; bv = b.event_type; break
         case 'time':     av = a.start_time_seconds; bv = b.start_time_seconds; break
         default:         av = a.score;    bv = b.score;
@@ -287,6 +289,13 @@ export function HighlightProvider({ children }) {
   const [videoSections, setVideoSections] = useState([])  // Section summaries
   const [sectionConfig, setSectionConfig] = useLocalStorage(SECTION_CONFIG_KEY, {})  // Per-section overrides
   const [clipPadding, setClipPadding] = useLocalStorage(CLIP_PADDING_KEY, 0.5)       // Seconds of pre-roll
+  // ── Script execution action log ────────────────────────────────────────
+  // Each entry: { id, ts, eventType, section, cameraLabel, driverName, raceTime }
+  const [scriptActionLog, setScriptActionLog] = useState([])
+  const pushScriptAction = useCallback((action) => {
+    setScriptActionLog(prev => [...prev.slice(-19), action])
+  }, [])
+  const clearScriptActionLog = useCallback(() => setScriptActionLog([]), [])
 
   const reprocessHighlights = useCallback(async (projectId, opts = {}) => {
     try {
@@ -729,6 +738,10 @@ export function HighlightProvider({ children }) {
     setClipPadding,
     generateVideoScript,
     updateSectionConfig,
+    // Script execution log
+    scriptActionLog,
+    pushScriptAction,
+    clearScriptActionLog,
 
     // A/B compare
     abMode,

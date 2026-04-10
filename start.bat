@@ -15,6 +15,7 @@ set "HAS_WEB=0"
 set "HAS_RELOAD=0"
 set "BUILD_NATIVE=0"
 set "SKIP_NATIVE=0"
+set "DEV_WEB_HMR=0"
 set "RUN_ARGS="
 
 for %%A in (%*) do (
@@ -33,6 +34,9 @@ for %%A in (%*) do (
 
 if "%HAS_WEB%"=="1" if "%HAS_RELOAD%"=="0" (
     set "RUN_ARGS=!RUN_ARGS! --reload"
+)
+if "%HAS_WEB%"=="1" if "%HAS_RELOAD%"=="1" (
+    set "DEV_WEB_HMR=1"
 )
 
 echo.
@@ -143,11 +147,16 @@ if not exist "node_modules" (
 REM ── Build frontend ─────────────────────────────────────────
 echo [4/6] Building frontend...
 
-call npm run build --silent
-if errorlevel 1 (
-    echo ERROR: Frontend build failed.
-    pause
-    exit /b 1
+if "%DEV_WEB_HMR%"=="1" (
+    echo       Dev mode detected (^--web ^--reload^) - starting Vite HMR server on 3174...
+    start "LRS Frontend Dev Server" cmd /k "cd /d "%FRONTEND%" && npm run dev -- --host 127.0.0.1 --port 3174"
+) else (
+    call npm run build --silent
+    if errorlevel 1 (
+        echo ERROR: Frontend build failed.
+        pause
+        exit /b 1
+    )
 )
 
 REM ── Launch application ─────────────────────────────────────
@@ -155,6 +164,10 @@ echo [5/6] Launching League Replay Studio...
 echo.
 
 cd /d "%BACKEND%"
+if "%DEV_WEB_HMR%"=="1" (
+    set "LRS_FRONTEND_URL=http://127.0.0.1:3174"
+    echo       Opening frontend via Vite dev server: %LRS_FRONTEND_URL%
+)
 python app.py %RUN_ARGS%
 
 REM Capture Python exit code and clean up remaining processes

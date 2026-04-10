@@ -84,7 +84,7 @@ def generate_highlights(
     timeline = resolve_conflicts(timeline, pip_threshold)
 
     # Stage 5: Insert contextual bridge fillers for gaps
-    timeline = insert_broll(timeline, gap_threshold=0.05, contextual_events=scored)
+    timeline = insert_broll(timeline, gap_threshold=0.05, contextual_events=scored, target_duration=target_duration)
 
     # Stage 6: Insert transitions
     timeline = insert_transitions(timeline)
@@ -176,11 +176,18 @@ def generate_video_script(
     effective_overrides = {**overrides, **applied_overrides}
 
     # ── Build race section via existing pipeline ────────────────────────────
+    script_constraints = {
+        **(constraints or {}),
+        "padding_before": clip_padding,
+        "padding_after": clip_padding_after,
+        "padding_by_type": padding_by_type,
+    }
+
     hl_result = generate_highlights(
         events=events,
         target_duration=target_duration,
         weights=weights,
-        constraints=constraints,
+        constraints=script_constraints,
         overrides=effective_overrides,
         race_info=race_info,
         tuning=tuning,
@@ -224,11 +231,12 @@ def generate_video_script(
             _use_cam_selection = bool(camera_weights)
             _cam_names = sorted(camera_weights.keys())
             for seg in race_timeline:
+                _is_filler = seg.get("type") in ("bridge", "broll", "context")
                 seg_entry: dict = {
                     **seg,
                     "section": "race",
-                        "clip_padding": padding_by_type.get(seg.get("event_type"), {}).get("before", clip_padding),
-                        "clip_padding_after": padding_by_type.get(seg.get("event_type"), {}).get("after", clip_padding_after),
+                        "clip_padding": 0 if _is_filler else padding_by_type.get(seg.get("event_type"), {}).get("before", clip_padding),
+                        "clip_padding_after": 0 if _is_filler else padding_by_type.get(seg.get("event_type"), {}).get("after", clip_padding_after),
                     "overlay_template_id": seg.get("overlay_template_id") or race_template,
                 }
                 # Assign camera_preferences for non-transition, non-broll segments

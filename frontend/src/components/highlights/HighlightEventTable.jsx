@@ -161,7 +161,7 @@ export default function HighlightEventTable({ onInspect }) {
 
                   {/* Duration */}
                   <td className="px-2 py-1 font-mono text-text-secondary text-right">
-                    {evt.duration.toFixed(1)}s
+                    {(evt.selectionDuration ?? evt.duration ?? 0).toFixed(1)}s
                   </td>
 
                   {/* Type */}

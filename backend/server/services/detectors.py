@@ -126,8 +126,12 @@ class IncidentDetector(BaseDetector):
     """
 
     event_type = EVENT_INCIDENT
-    DEDUP_SECONDS = 15.0
-    MIN_SPEED_MS = 8.0  # ~30 km/h — ignore crawling pit-entry moves
+    DEDUP_SECONDS   = 15.0
+    MIN_SPEED_MS    = 8.0   # ~30 km/h — ignore crawling pit-entry moves
+    # Multi-car proximity window: cars off-track within this time AND lap-fraction
+    # gap are considered co-incident (involved in the same incident).
+    NEARBY_TIME_WINDOW = 3.0   # seconds
+    NEARBY_LAP_PCT     = 0.06  # track-position fraction (~5-6 s on a 90 s lap)
 
     def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
         # Prefer ground-truth incidents from the iRacing API pre-pass when available.
@@ -207,7 +211,7 @@ class IncidentDetector(BaseDetector):
             seen[car_idx] = time_s
 
         logger.info("[Detector:Incident] Found %d incidents (iRacing API)", len(events))
-        return events
+        return self._enrich_with_nearby_cars(events, db)
 
     def _detect_from_surface(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
         """Fallback: detect incidents from CarIdxTrackSurface on→off-track transitions."""
@@ -283,6 +287,129 @@ class IncidentDetector(BaseDetector):
             seen[car_idx] = time_s
 
         logger.info("[Detector:Incident] Found %d incidents (surface transition)", len(events))
+        return self._enrich_with_nearby_cars(events, db)
+
+    def _enrich_with_nearby_cars(
+        self, events: list[dict], db: sqlite3.Connection
+    ) -> list[dict]:
+        """Discover co-incident cars and record multi-car involvement.
+
+        For each incident event, checks whether any *other* car was also
+        off-track within NEARBY_TIME_WINDOW seconds AND within NEARBY_LAP_PCT
+        of lap position.  Qualifying nearby cars are:
+
+        - Added to ``involved_drivers``
+        - Contribute a +1 severity bonus per car (capped at 10)
+        - Recorded as ``car_count`` and ``multi_car`` in metadata
+
+        A single bulk query pre-loads all off-track moments so we avoid N
+        per-event round-trips.  Cars that are already in ``involved_drivers``
+        (e.g. merged via dedup) are not double-counted.
+        """
+        if not events:
+            return events
+
+        # Pre-load every off-track moment for all cars during racing
+        off_track_rows = db.execute("""
+            SELECT cs.car_idx, t.session_time, cs.lap_pct
+            FROM car_states cs
+            JOIN race_ticks t ON cs.tick_id = t.id
+            WHERE t.session_state IN (?, ?)
+              AND cs.surface = ?
+              AND cs.position > 0
+              AND cs.lap_pct IS NOT NULL
+            ORDER BY cs.car_idx, t.session_time
+        """, (SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
+              SURFACE_OFF_TRACK)).fetchall()
+
+        # Index: car_idx → sorted list of (session_time, lap_pct)
+        off_track: dict[int, list[tuple[float, float]]] = defaultdict(list)
+        for row in off_track_rows:
+            off_track[int(row["car_idx"])].append(
+                (float(row["session_time"]), float(row["lap_pct"]))
+            )
+
+        for event in events:
+            primary_car = event["involved_drivers"][0] if event["involved_drivers"] else None
+            if primary_car is None:
+                continue
+
+            inc_time = event["start_time"]
+
+            # Resolve primary car's lap_pct at incident time from off-track data
+            primary_lap_pct: float | None = None
+            for ot_time, ot_pct in off_track.get(primary_car, []):
+                if abs(ot_time - inc_time) <= self.NEARBY_TIME_WINDOW:
+                    primary_lap_pct = ot_pct
+                    break
+
+            if primary_lap_pct is None:
+                # Fallback: nearest car_state (may be on-track — still valid)
+                row = db.execute("""
+                    SELECT cs.lap_pct
+                    FROM car_states cs
+                    JOIN race_ticks t ON cs.tick_id = t.id
+                    WHERE cs.car_idx = ?
+                      AND t.session_state IN (?, ?)
+                    ORDER BY ABS(t.session_time - ?)
+                    LIMIT 1
+                """, (primary_car, SESSION_STATE_RACING, SESSION_STATE_CHECKERED,
+                      inc_time)).fetchone()
+                primary_lap_pct = float(row["lap_pct"]) if row and row["lap_pct"] is not None else None
+
+            if primary_lap_pct is None:
+                event["metadata"]["car_count"] = len(event["involved_drivers"])
+                event["metadata"]["multi_car"] = len(event["involved_drivers"]) > 1
+                continue
+
+            already_involved: set[int] = set(event["involved_drivers"])
+            # Store (car_idx, best_lap_diff) so we can weight the severity bonus
+            nearby_cars_with_gap: list[tuple[int, float]] = []
+
+            for other_car, moments in off_track.items():
+                if other_car in already_involved:
+                    continue
+                best_gap = None
+                for ot_time, ot_pct in moments:
+                    if abs(ot_time - inc_time) > self.NEARBY_TIME_WINDOW:
+                        continue
+                    lap_diff = min(
+                        abs(ot_pct - primary_lap_pct),
+                        1.0 - abs(ot_pct - primary_lap_pct),
+                    )
+                    if lap_diff <= self.NEARBY_LAP_PCT:
+                        if best_gap is None or lap_diff < best_gap:
+                            best_gap = lap_diff
+                if best_gap is not None:
+                    nearby_cars_with_gap.append((other_car, best_gap))
+
+            if nearby_cars_with_gap:
+                event["involved_drivers"] = list(already_involved) + [c for c, _ in nearby_cars_with_gap]
+                # Per-car bonus: +3 when lap_diff ≈ 0 (right on top of each other),
+                # scales down to +1 at the edge of the detection window.
+                # proximity_factor = 1 − (lap_diff / NEARBY_LAP_PCT)  →  [0, 1]
+                bonus = 0
+                for _, gap in nearby_cars_with_gap:
+                    proximity = 1.0 - gap / self.NEARBY_LAP_PCT
+                    bonus += round(1 + proximity * 2)   # 1–3 per car
+                event["severity"] = min(10, event["severity"] + bonus)
+                # Store the closest gap for reference
+                min_gap = min(g for _, g in nearby_cars_with_gap)
+                event["metadata"]["closest_gap_lap_pct"] = round(min_gap, 5)
+            else:
+                # Solo incident — slight reduction so multi-car events rank above
+                # equivalent-speed solo crashes.
+                event["severity"] = max(1, round(event["severity"] * 0.9))
+
+            event["metadata"]["car_count"] = len(event["involved_drivers"])
+            event["metadata"]["multi_car"] = len(event["involved_drivers"]) > 1
+
+        multi_count = sum(1 for e in events if e["metadata"].get("multi_car"))
+        if multi_count:
+            logger.info(
+                "[Detector:Incident] %d/%d incidents identified as multi-car",
+                multi_count, len(events),
+            )
         return events
 
 
@@ -461,8 +588,96 @@ class BattleDetector(BaseDetector):
                 severity = min(10, 4 + pos_bonus + dur_bonus + lc_bonus)
                 events.append(self._make_event(seg, severity, pair, lead_changes, closest_gaps, tick_frames))
 
+        events = self._merge_overlapping_battles(events)
         events.sort(key=lambda e: e["start_time"])
         logger.info("[Detector:Battle] Found %d battles", len(events))
+        return events
+
+    @staticmethod
+    def _merge_overlapping_battles(events: list[dict]) -> list[dict]:
+        """Merge battle events that overlap in time and share at least one driver.
+
+        Example: A-B (0:56–1:17) and B-C (0:56–1:26) both contain driver B and
+        overlap → merged into one A-B-C event spanning 0:56–1:26.
+        """
+        if len(events) <= 1:
+            return events
+
+        changed = True
+        while changed:
+            changed = False
+            used = [False] * len(events)
+            result: list[dict] = []
+            for i, ev in enumerate(events):
+                if used[i]:
+                    continue
+                group = [ev]
+                used[i] = True
+                # Grow the group transitively: any event sharing a driver with
+                # any group member AND overlapping the current merged window joins.
+                j = 0
+                while j < len(events):
+                    if used[j]:
+                        j += 1
+                        continue
+                    other = events[j]
+                    g_start = min(g["start_time"] for g in group)
+                    g_end   = max(g["end_time"]   for g in group)
+                    g_drivers: set[int] = set()
+                    for g in group:
+                        g_drivers.update(g.get("involved_drivers") or [])
+                    o_drivers = set(other.get("involved_drivers") or [])
+                    overlaps      = other["start_time"] <= g_end and other["end_time"] >= g_start
+                    shares_driver = bool(g_drivers & o_drivers)
+                    if overlaps and shares_driver:
+                        group.append(other)
+                        used[j] = True
+                        changed = True
+                        j = 0  # restart scan — new group member may enable further merges
+                        continue
+                    j += 1
+
+                if len(group) == 1:
+                    result.append(group[0])
+                else:
+                    all_drivers: list[int] = list(
+                        dict.fromkeys(d for g in group for d in (g.get("involved_drivers") or []))
+                    )
+                    merged_start  = min(g["start_time"]  for g in group)
+                    merged_end    = max(g["end_time"]    for g in group)
+                    anchor_start  = min(group, key=lambda g: g["start_time"])
+                    anchor_end    = max(group, key=lambda g: g["end_time"])
+                    total_lc      = sum(g.get("metadata", {}).get("lead_changes", 0) for g in group)
+                    min_gaps      = [g.get("metadata", {}).get("min_gap_laps") for g in group
+                                     if g.get("metadata", {}).get("min_gap_laps") is not None]
+                    # Preserve the original pairwise windows so downstream code
+                    # can determine which drivers are active at any point in time.
+                    driver_windows = [
+                        {
+                            "start_time": g["start_time"],
+                            "end_time":   g["end_time"],
+                            "drivers":    list(g.get("involved_drivers") or []),
+                        }
+                        for g in sorted(group, key=lambda x: x["start_time"])
+                    ]
+                    result.append({
+                        "event_type":       EVENT_BATTLE,
+                        "start_time":       merged_start,
+                        "end_time":         merged_end,
+                        "start_frame":      anchor_start.get("start_frame"),
+                        "end_frame":        anchor_end.get("end_frame"),
+                        "lap_number":       anchor_start.get("lap_number"),
+                        "severity":         max(g["severity"] for g in group),
+                        "involved_drivers": all_drivers,
+                        "position":         min(g.get("position", 99) for g in group),
+                        "metadata": {
+                            "duration_seconds": round(merged_end - merged_start, 1),
+                            "lead_changes":     total_lc,
+                            "min_gap_laps":     round(min(min_gaps), 5) if min_gaps else None,
+                            "driver_windows":   driver_windows,
+                        },
+                    })
+            events = result
         return events
 
     def _make_event(self, b, severity, pair, lead_changes, closest_gaps, tick_frames):

@@ -1,5 +1,5 @@
 import {
-  Swords, Flame, ShieldAlert, AlertTriangle,
+  Swords, Flame, ShieldAlert,
 } from 'lucide-react'
 import LabeledSlider from '../ui/LabeledSlider'
 
@@ -13,30 +13,6 @@ export default function TuningPanel({ params, onChange, horizontal = false, clas
 
   return (
     <div className={containerClass}>
-      {/* Incident clip window */}
-      <div>
-        <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">
-          <AlertTriangle size={11} className="text-event-incident" /> Incident Clip Window
-        </span>
-        <div className="space-y-2.5">
-          <LabeledSlider
-            label="Lead-in"
-            tooltip="Seconds of footage to include before the incident moment. More lead-in captures the build-up."
-            value={params.incident_lead_in ?? 2.0}
-            onChange={v => onChange('incident_lead_in', v || 2.0)}
-            step={0.5} min={0.5} max={10}
-            format={v => `${v.toFixed(1)}s`}
-          />
-          <LabeledSlider
-            label="Follow-out"
-            tooltip="Seconds of footage to include after the incident moment. More follow-out shows the recovery."
-            value={params.incident_follow_out ?? 8.0}
-            onChange={v => onChange('incident_follow_out', v || 8.0)}
-            step={0.5} min={2} max={30}
-            format={v => `${v.toFixed(1)}s`}
-          />
-        </div>
-      </div>
       {/* Battle */}
       <div>
         <span className="text-xxs font-semibold text-text-primary flex items-center gap-1 mb-1.5">

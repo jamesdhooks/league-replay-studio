@@ -16,7 +16,7 @@ function generateReportText(allEvents, chosenEvents, pipEvents, metrics, totalDu
   lines.push(`Total Events Scored: ${allEvents.length}`)
   lines.push(`Chosen for Highlight: ${chosenEvents.length}`)
   lines.push(`PIP Segments: ${pipEvents.length}`)
-  lines.push(`Target Duration: ${formatDuration(metrics.duration || 0)} actual`)
+  lines.push(`Selected Duration: ${formatDuration(metrics.duration || 0)}`)
   lines.push(`Race Duration: ${formatDuration(totalDuration)}`)
   lines.push('')
 

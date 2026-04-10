@@ -3,7 +3,7 @@ import { useHighlight } from '../../context/HighlightContext'
 import { useToast } from '../../context/ToastContext'
 import {
   Download, GitCompare,
-  ToggleRight,
+  ToggleRight, Loader2,
 } from 'lucide-react'
 
 /**
@@ -15,16 +15,18 @@ export default function HighlightConfigBar({ projectId }) {
     abMode, activeConfig, startABCompare, stopABCompare, switchABConfig,
     applyHighlights,
     generateVideoScript,
+    serverScoring,
   } = useHighlight()
-  const { addToast } = useToast()
+  const { showInfo, showSuccess, showError } = useToast()
 
   const handleApply = async () => {
     try {
+      showInfo('Generating race script...')
       await applyHighlights(projectId)
       await generateVideoScript(projectId)
-      addToast('success', 'Highlights applied to timeline')
+      showSuccess('Race script generated')
     } catch {
-      addToast('error', 'Failed to apply highlights')
+      showError('Failed to generate race script')
     }
   }
 
@@ -79,11 +81,12 @@ export default function HighlightConfigBar({ projectId }) {
       {/* Apply button */}
       <button
         onClick={handleApply}
+        disabled={serverScoring}
         className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium
-                   bg-accent hover:bg-accent-hover text-white rounded transition-colors"
+                   bg-accent hover:bg-accent-hover text-white rounded transition-colors disabled:opacity-60"
       >
-        <Download className="w-3.5 h-3.5" />
-        Apply to Timeline
+        {serverScoring ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+        {serverScoring ? 'Generating...' : 'Generate Script'}
       </button>
     </div>
   )

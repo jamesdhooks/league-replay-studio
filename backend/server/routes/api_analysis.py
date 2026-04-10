@@ -1520,6 +1520,7 @@ class HighlightConfigRequest(BaseModel):
 class HighlightApplyRequest(BaseModel):
     """Batch-apply highlight selections."""
     included_ids: list[int] = []
+    full_video_ids: list[int] = []
     excluded_ids: list[int] = []
 
 
@@ -1590,7 +1591,7 @@ async def update_project_highlight_config(project_id: int, body: HighlightConfig
 async def apply_highlights(project_id: int, body: HighlightApplyRequest):
     """Batch-apply highlight selections to events.
 
-    Sets included_in_highlight=1 for included_ids and 0 for excluded_ids.
+    Sets included_in_highlight=1 for included_ids and 0 for full_video_ids/excluded_ids.
     """
     project = project_service.get_project(project_id)
     if not project:
@@ -1600,10 +1601,17 @@ async def apply_highlights(project_id: int, body: HighlightApplyRequest):
     try:
         conn = get_project_db(project_dir)
         try:
+            # full_video tier is intentionally not part of highlights timeline,
+            # so persist it as included_in_highlight=0 alongside explicit excludes.
+            non_highlight_ids = list(dict.fromkeys([
+                *body.full_video_ids,
+                *body.excluded_ids,
+            ]))
+
             count = batch_update_highlight_flags(
                 conn,
                 included_ids=body.included_ids,
-                excluded_ids=body.excluded_ids,
+                excluded_ids=non_highlight_ids,
             )
             logger.info(
                 "[Highlights API] Applied highlights for project #%d: %d events updated",
@@ -1613,6 +1621,7 @@ async def apply_highlights(project_id: int, body: HighlightApplyRequest):
                 "status": "applied",
                 "project_id": project_id,
                 "included_count": len(body.included_ids),
+                "full_video_count": len(body.full_video_ids),
                 "excluded_count": len(body.excluded_ids),
                 "rows_updated": count,
             }

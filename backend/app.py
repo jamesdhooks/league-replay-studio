@@ -492,13 +492,14 @@ def main() -> None:
         logger.warning("[App] --reload ignored because app is not in --web mode")
 
     url = f"http://127.0.0.1:{port}"
+    frontend_url = os.environ.get("LRS_FRONTEND_URL", "").strip() or url
 
     if web_only and reload_enabled:
-        logger.info("[App] Launching in browser with hot reload")
+        logger.info("[App] Launching in browser with hot reload (%s)", frontend_url)
         import webbrowser
 
         # Open browser shortly after server boot starts.
-        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+        threading.Timer(1.0, lambda: webbrowser.open(frontend_url)).start()
         start_server(port=port, reload_enabled=True)
         return
 

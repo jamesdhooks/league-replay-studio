@@ -8,7 +8,7 @@ import { formatTime } from '../../utils/time'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
 import TimelineToolbar from '../timeline/TimelineToolbar'
 import RangeSlider from '../ui/RangeSlider'
-import { ChevronDown, ChevronRight, Film, Play, Square, SkipBack, SkipForward } from 'lucide-react'
+import { ChevronDown, ChevronRight, Film, Play, Square, SkipBack, SkipForward, FileText, Copy, X, Loader2 } from 'lucide-react'
 
 
 /**
@@ -30,13 +30,14 @@ import { ChevronDown, ChevronRight, Film, Play, Square, SkipBack, SkipForward } 
 // ── Edit-timeline layout constants ──────────────────────────────────────────
 const SECTION_H    = 18   // section label row
 const CAM_H        = 18   // camera track
+const DRIVER_H     = 24   // driver focus track (extra height for sub-window bands)
 const EVT_H        = 46   // events track
 const TICK_H       = 20   // tick ruler
 const TOTAL_TRACK_H = SECTION_H + CAM_H + EVT_H + TICK_H
 const GUTTER_W     = 52
 const EDIT_PX_PER_SEC = 20  // pixels per second in edit time (fixed scale)
 
-const isFillerSegment = (seg) => seg?.type === 'broll' || seg?.type === 'bridge'
+const isFillerSegment = (seg) => seg?.type === 'broll' || seg?.type === 'bridge' || seg?.type === 'context'
 
 // ── Section metadata ─────────────────────────────────────────────────────────
 const SECTION_ORDER = ['intro', 'qualifying_results', 'race', 'race_results']
@@ -64,6 +65,25 @@ function getCameraLabel(seg) {
   return DEFAULT_CAM[seg?.event_type] || 'TV1'
 }
 
+/**
+ * Returns the ordered list of car_idx values that are actually fighting at
+ * `sessionTime` within this segment, using the stored `driver_windows` when
+ * present (merged multi-driver battles).  Falls back to `involved_drivers`.
+ */
+function getActiveDrivers(seg, sessionTime) {
+  const windows = seg?.metadata?.driver_windows
+  const allDrivers = seg?.involved_drivers || []
+  if (!windows || windows.length === 0 || sessionTime == null) return allDrivers
+  const active = new Set()
+  for (const w of windows) {
+    if (sessionTime >= w.start_time && sessionTime <= w.end_time) {
+      for (const d of w.drivers) active.add(d)
+    }
+  }
+  // If the playhead is outside every window (e.g. tail padding), show all
+  return active.size > 0 ? allDrivers.filter(d => active.has(d)) : allDrivers
+}
+
 function fmtDur(sec) {
   if (!sec || sec <= 0) return '0s'
   const m = Math.floor(sec / 60)
@@ -71,11 +91,42 @@ function fmtDur(sec) {
   return m > 0 ? `${m}m ${s}s` : `${s}s`
 }
 
+function buildScriptReportText(scriptReport, totalSegments) {
+  if (!scriptReport) return 'No script data.'
+  const lines = []
+  const hr = '─'.repeat(60)
+  lines.push('RACE SCRIPT REPORT')
+  lines.push(hr)
+  lines.push('')
+  lines.push('## Clip Breakdown')
+  lines.push(`Event clips (race highlights): ${scriptReport.eventClips.length}`)
+  lines.push(`Contextual fills (unselected events): ${scriptReport.contextClips.length}`)
+  lines.push(`Bridge fillers (B-roll): ${scriptReport.bridgeClips.length}`)
+  lines.push(`Static sections (intro/qualifying/results): ${scriptReport.sectionClips.length}`)
+  lines.push(`Total segments: ${totalSegments}`)
+  lines.push('')
+  lines.push('## Duration')
+  lines.push(`Content duration: ${fmtDur(scriptReport.totalContent)}`)
+  lines.push(`Filler/context duration: ${fmtDur(scriptReport.totalFiller)}`)
+  lines.push('')
+  lines.push('## Event Clips by Type')
+  const entries = Object.entries(scriptReport.byType || {}).sort((a, b) => b[1] - a[1])
+  if (entries.length === 0) {
+    lines.push('  (none)')
+  } else {
+    for (const [type, count] of entries) {
+      lines.push(`  ${EVENT_TYPE_LABELS[type] || type}: ${count}`)
+    }
+  }
+  return lines.join('\n')
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 export default function HighlightTimeline() {
-  const { videoScript, metrics } = useHighlight()
+  const { videoScript, metrics, pushScriptAction, clearScriptActionLog, serverScoring } = useHighlight()
   const { isConnected, sessionData } = useIRacing()
   const { activeProject } = useProject()
+  const { setSelectedEventId } = useTimeline()
 
   const [collapsed, setCollapsed] = useLocalStorage('lrs:editing:timeline:collapsed', false)
   const [executing, setExecuting] = useState(false)
@@ -86,7 +137,11 @@ export default function HighlightTimeline() {
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false)
   const [scrubSegId, setScrubSegId] = useState(null)
   const [optimisticEditTime, setOptimisticEditTime] = useState(null)
+  const [showScriptReport, setShowScriptReport] = useState(false)
   const scrollRef = useRef(null)
+  // segId → car_idx override for driver focus; reset whenever script is regenerated
+  const [driverFocusOverrides, setDriverFocusOverrides] = useState({})
+  useEffect(() => { setDriverFocusOverrides({}) }, [videoScript])
 
   // Range slider state (0–1 fractions of total edit duration)
   const [rangeStart, setRangeStart] = useState(0)
@@ -205,8 +260,8 @@ export default function HighlightTimeline() {
   const activeContentW = baseContentW / Math.max(0.02, rangeWidth)
   const activePxPerSec = totalEditDuration > 0 ? activeContentW / totalEditDuration : EDIT_PX_PER_SEC
   // Dynamic height: clips track stretches to fill available height
-  const dynamicEvtH = Math.max(EVT_H, containerH > 0 ? containerH - SECTION_H - CAM_H - TICK_H : EVT_H)
-  const totalTrackH = SECTION_H + CAM_H + dynamicEvtH + TICK_H
+  const dynamicEvtH = Math.max(EVT_H, containerH > 0 ? containerH - SECTION_H - CAM_H - DRIVER_H - TICK_H : EVT_H)
+  const totalTrackH = SECTION_H + CAM_H + DRIVER_H + dynamicEvtH + TICK_H
 
   const toX = useCallback((t) => t * activePxPerSec, [activePxPerSec])
 
@@ -265,6 +320,32 @@ export default function HighlightTimeline() {
     return pct * totalEditDuration
   }, [activeContentW, totalEditDuration])
 
+  // ── Driver focus helpers ────────────────────────────────────────────────────
+  // Returns the car_idx the camera should follow for this segment at sessionTime.
+  // Filters candidates to only drivers active in their battle window at that time.
+  const getFocusCarIdx = useCallback((seg, sessionTime = null) => {
+    const candidates = getActiveDrivers(seg, sessionTime)
+    const override   = driverFocusOverrides[seg.id]
+    // If there's a stored override and it's still a valid candidate, use it
+    if (override != null && candidates.includes(override)) return override
+    // Otherwise default: hint → first active candidate
+    const hint = seg.camera_hints?.preferred_car_idx
+    if (hint != null && candidates.includes(hint)) return hint
+    return candidates[0] ?? null
+  }, [driverFocusOverrides])
+
+  // Advance focus to the next driver that is active at sessionTime.
+  const cycleFocusDriver = useCallback((seg, sessionTime = null) => {
+    const candidates = getActiveDrivers(seg, sessionTime)
+    if (candidates.length <= 1) return
+    const current    = driverFocusOverrides[seg.id]
+      ?? seg.camera_hints?.preferred_car_idx
+      ?? candidates[0]
+    const currentIdx = candidates.indexOf(current)
+    const next       = candidates[(currentIdx >= 0 ? currentIdx + 1 : 1) % candidates.length]
+    setDriverFocusOverrides(prev => ({ ...prev, [seg.id]: next }))
+  }, [driverFocusOverrides])
+
   const seekScriptPosition = useCallback(async (editTime) => {
     const resolved = resolveSegmentAtEditTime(editTime)
     if (!resolved) return
@@ -285,8 +366,7 @@ export default function HighlightTimeline() {
       const camLabel = getCameraLabel(seg)
       const cam = cameras.find(c => c.group_name === camLabel)
       if (cam) {
-        const carIdx = seg.camera_hints?.preferred_car_idx
-          ?? (seg.involved_drivers?.[0] ?? null)
+        const carIdx = getFocusCarIdx(seg, sessionTime)
         await apiPost('/iracing/replay/camera', {
           group_num: cam.group_num,
           ...(carIdx != null ? { car_idx: carIdx } : { position: 1 }),
@@ -295,7 +375,7 @@ export default function HighlightTimeline() {
     } catch { /* non-fatal */ }
 
     try { await apiPost('/iracing/replay/pause') } catch { /* non-fatal */ }
-  }, [resolveSegmentAtEditTime, sessionData, raceSessionNum])
+  }, [resolveSegmentAtEditTime, sessionData, raceSessionNum, getFocusCarIdx])
 
   const handlePlayheadPointerDown = useCallback((e) => {
     if (!hasData || e.button !== 0) return
@@ -405,8 +485,7 @@ export default function HighlightTimeline() {
       const camLabel = getCameraLabel(seg)
       const cam = cameras.find(c => c.group_name === camLabel)
       if (cam) {
-        const carIdx = seg.camera_hints?.preferred_car_idx
-          ?? (seg.involved_drivers?.[0] ?? null)
+        const carIdx = getFocusCarIdx(seg, seg.clipStartTime ?? seg.start_time_seconds ?? 0)
         await apiPost('/iracing/replay/camera', {
           group_num: cam.group_num,
           ...(carIdx != null ? { car_idx: carIdx } : { position: 1 }),
@@ -414,7 +493,7 @@ export default function HighlightTimeline() {
       }
     } catch { /* non-fatal */ }
     try { await apiPost('/iracing/replay/pause') } catch { /* non-fatal */ }
-  }, [editSegments, raceSessionNum, sessionData])
+  }, [editSegments, raceSessionNum, sessionData, getFocusCarIdx])
 
   // ── Execute Script ──────────────────────────────────────────────────────────
   const executeScript = useCallback(async (fromIndex = 0) => {
@@ -423,6 +502,7 @@ export default function HighlightTimeline() {
     const abort = { cancelled: false }
     abortRef.current = abort
     setExecuting(true)
+    clearScriptActionLog()
 
     const cameras = sessionData?.cameras || []
     const speed   = replaySpeed
@@ -441,18 +521,35 @@ export default function HighlightTimeline() {
         })
       } catch { /* iRacing disconnected */ }
 
+      let appliedCamLabel = null
+      let appliedDriverName = null
       try {
         const camLabel = getCameraLabel(seg)
+        appliedCamLabel = camLabel
         const cam = cameras.find(c => c.group_name === camLabel)
         if (cam) {
-          const carIdx = seg.camera_hints?.preferred_car_idx
-            ?? (seg.involved_drivers?.[0] ?? null)
+          const carIdx = getFocusCarIdx(seg, startSec)
+          const drvNames = seg.driver_names || []
+          const drvIdx   = (seg.involved_drivers || []).indexOf(carIdx)
+          appliedDriverName = drvIdx >= 0 ? drvNames[drvIdx] : (drvNames[0] || null)
           await apiPost('/iracing/replay/camera', {
             group_num: cam.group_num,
             ...(carIdx != null ? { car_idx: carIdx } : { position: 1 }),
           })
         }
       } catch { /* non-fatal */ }
+
+      // Push action to preview feed
+      pushScriptAction({
+        id: seg.id,
+        ts: Date.now(),
+        eventType: seg.event_type || seg.type || null,
+        section: seg.section || 'race',
+        cameraLabel: appliedCamLabel,
+        driverName: appliedDriverName,
+        raceTime: startSec,
+        involvedDrivers: seg.driver_names || [],
+      })
 
       try {
         await apiPost('/iracing/replay/speed', { speed })
@@ -473,7 +570,7 @@ export default function HighlightTimeline() {
     }
     setExecuting(false)
     setActiveSegId(null)
-  }, [editSegments, raceSessionNum, sessionData, replaySpeed])
+  }, [editSegments, raceSessionNum, sessionData, replaySpeed, getFocusCarIdx, pushScriptAction, clearScriptActionLog])
 
   const stopExecution = useCallback(() => {
     abortRef.current.cancelled = true
@@ -485,37 +582,101 @@ export default function HighlightTimeline() {
   // ── Clip count summary ──────────────────────────────────────────────────────
   // Count only race section event clips (not intro/qualifying/results static sections, not filler)
   const clipCount = editSegments.filter(s => s.section === 'race' && !isFillerSegment(s)).length
-  const bridgeCount = editSegments.filter(s => isFillerSegment(s)).length
-  // Total edit duration excludes filler gap segments (only counts actual content)
+  const fillCount = editSegments.filter(s => isFillerSegment(s)).length
   const contentDuration = editSegments
     .filter(s => !isFillerSegment(s))
     .reduce((acc, s) => acc + (s.editDur || 0), 0)
+  // Script report data (computed from editSegments for the modal)
+  const scriptReport = useMemo(() => {
+    if (!editSegments.length) return null
+    const eventClips    = editSegments.filter(s => s.section === 'race' && !isFillerSegment(s))
+    const contextClips  = editSegments.filter(s => s.type === 'context')
+    const bridgeClips   = editSegments.filter(s => s.type === 'bridge' || s.type === 'broll')
+    const sectionClips  = editSegments.filter(s => s.section && s.section !== 'race')
+    const totalContent  = editSegments.filter(s => !isFillerSegment(s)).reduce((a, s) => a + (s.editDur || 0), 0)
+    const totalFiller   = [...contextClips, ...bridgeClips].reduce((a, s) => a + (s.editDur || 0), 0)
+    const byType = {}
+    for (const s of eventClips) {
+      const t = s.event_type || s.type || 'unknown'
+      byType[t] = (byType[t] || 0) + 1
+    }
+    return { eventClips, contextClips, bridgeClips, sectionClips, totalContent, totalFiller, byType }
+  }, [editSegments])
+
+  const scriptReportText = useMemo(
+    () => buildScriptReportText(scriptReport, editSegments.length),
+    [scriptReport, editSegments.length],
+  )
+
+  const handleCopyScriptReport = useCallback(() => {
+    navigator.clipboard.writeText(scriptReportText)
+  }, [scriptReportText])
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
 
+      {/* Script Report Modal */}
+      {showScriptReport && scriptReport && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+             onClick={() => setShowScriptReport(false)}>
+          <div className="bg-bg-tertiary border border-border rounded-2xl shadow-float w-full max-w-3xl mx-4 flex flex-col max-h-[85vh]"
+               onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0">
+              <h3 className="text-lg font-semibold text-text-primary">Race Script Report</h3>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleCopyScriptReport}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-border-subtle
+                             text-text-secondary hover:text-text-primary hover:border-border rounded transition-colors"
+                >
+                  <Copy size={12} />
+                  Copy
+                </button>
+                <button onClick={() => setShowScriptReport(false)} className="p-2 rounded-xl hover:bg-surface-hover transition-colors">
+                  <X className="w-5 h-5 text-text-tertiary" />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-auto p-6">
+              <pre className="text-xs text-text-secondary font-mono whitespace-pre-wrap leading-relaxed">
+                {scriptReportText}
+              </pre>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header / collapse toggle */}
-      <button
-        onClick={() => setCollapsed(v => !v)}
-        className="flex items-center gap-2 px-3 py-2 border-b border-border bg-bg-secondary shrink-0 w-full text-left hover:bg-bg-primary/40 transition-colors"
-      >
-        {collapsed
-          ? <ChevronRight className="w-3 h-3 text-text-tertiary shrink-0" />
-          : <ChevronDown  className="w-3 h-3 text-text-tertiary shrink-0" />}
-        <Film className="w-3.5 h-3.5 text-accent shrink-0" />
-        <span className="text-xs font-semibold text-text-primary uppercase tracking-wider whitespace-nowrap">
-          Final Script
-        </span>
-        {!collapsed && hasData && (
-          <>
-            <span className="text-xs text-text-disabled">
-              {clipCount} clips &middot; {bridgeCount} bridge clips &middot; {fmtDur(contentDuration)}
+      <div className="flex items-center border-b border-border bg-bg-secondary shrink-0">
+        <button
+          onClick={() => setCollapsed(v => !v)}
+          className="flex items-center gap-2 px-3 py-2 flex-1 text-left hover:bg-bg-primary/40 transition-colors min-w-0"
+        >
+          {collapsed
+            ? <ChevronRight className="w-3 h-3 text-text-tertiary shrink-0" />
+            : <ChevronDown  className="w-3 h-3 text-text-tertiary shrink-0" />}
+          <Film className="w-3.5 h-3.5 text-accent shrink-0" />
+          <span className="text-xs font-semibold text-text-primary uppercase tracking-wider whitespace-nowrap">
+            Race Script
+          </span>
+          {!collapsed && hasData && (
+            <span className="text-xs text-text-disabled truncate">
+              {clipCount} clips &middot; {fillCount} fills &middot; {fmtDur(contentDuration)}
             </span>
-            <div className="flex-1" />
-          </>
+          )}
+        </button>
+        {!collapsed && hasData && (
+          <button
+            onClick={() => setShowScriptReport(true)}
+            className="shrink-0 flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium border transition-colors
+              text-text-tertiary border-border-subtle hover:text-text-secondary hover:border-border mr-2"
+            title="View script breakdown report"
+          >
+            <FileText size={11} />
+            View Report
+          </button>
         )}
-        {!hasData && !collapsed && <div className="flex-1" />}
-      </button>
+      </div>
 
       {/* Transport control bar */}
       {!collapsed && hasData && (
@@ -597,14 +758,29 @@ export default function HighlightTimeline() {
         <>
           {!hasData ? (
             <div className="flex-1 flex flex-col items-center justify-center gap-1 text-center px-4 bg-bg-secondary">
-              <Film className="w-5 h-5 text-text-disabled opacity-35" />
-              <span className="text-xs text-text-disabled">No script generated yet.</span>
-              <span className="text-xs text-text-disabled/60">
-                Click &ldquo;Apply to Timeline&rdquo; in the Score Histogram header.
-              </span>
+              {serverScoring ? (
+                <>
+                  <Loader2 className="w-5 h-5 text-text-disabled opacity-70 animate-spin" />
+                  <span className="text-xs text-text-disabled">Generating race script...</span>
+                </>
+              ) : (
+                <>
+                  <Film className="w-5 h-5 text-text-disabled opacity-35" />
+                  <span className="text-xs text-text-disabled">No race script generated yet.</span>
+                  <span className="text-xs text-text-disabled/60">
+                    Click &ldquo;Generate Script&rdquo; in the Score Histogram header.
+                  </span>
+                </>
+              )}
             </div>
           ) : (
             <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+            {serverScoring && (
+              <div className="shrink-0 px-3 py-1.5 border-b border-border bg-bg-primary/70 flex items-center gap-1.5">
+                <Loader2 className="w-3 h-3 animate-spin text-text-disabled" />
+                <span className="text-xxs text-text-disabled">Regenerating race script...</span>
+              </div>
+            )}
             <div className="flex-1 flex min-h-0 overflow-hidden bg-bg-secondary">
 
               {/* Gutter labels */}
@@ -619,6 +795,10 @@ export default function HighlightTimeline() {
                 <div className="border-b border-border-subtle flex items-center justify-end pr-2"
                      style={{ height: CAM_H }}>
                   <span className="text-[10px] text-text-disabled uppercase tracking-wider">Cam</span>
+                </div>
+                <div className="border-b border-border-subtle flex items-center justify-end pr-2"
+                     style={{ height: DRIVER_H }}>
+                  <span className="text-[10px] text-text-disabled uppercase tracking-wider">Focus</span>
                 </div>
                 <div className="border-b border-border-subtle flex items-center justify-end pr-2"
                      style={{ height: dynamicEvtH }}>
@@ -693,9 +873,123 @@ export default function HighlightTimeline() {
                     })}
                   </div>
 
-                  {/* ── Events / clips track ──────────────────────────── */}
+                  {/* ── Driver focus track ───────────────────────────────── */}
                   <div className="absolute left-0 right-0 border-b border-border-subtle"
-                       style={{ top: SECTION_H + CAM_H, height: dynamicEvtH }}>
+                       style={{ top: SECTION_H + CAM_H, height: DRIVER_H }}>
+                    {editSegments.map(seg => {
+                      const left     = toX(seg.editStart)
+                      const width    = Math.max(3, toX(seg.editDur))
+                      const drivers  = seg.involved_drivers || []
+                      const drvNames = seg.driver_names || []
+                      if (drivers.length === 0 || isFillerSegment(seg)) return null
+
+                      const currentTime = replayState?.session_time ?? null
+                      const focusCarIdx = getFocusCarIdx(seg, currentTime)
+                      const focusPos    = drivers.indexOf(focusCarIdx)
+                      const focusName   = drvNames[focusPos >= 0 ? focusPos : 0] || `#${focusCarIdx}`
+                      const isActive    = effectiveActiveSegId === seg.id
+
+                      // Sub-window bands (merged multi-driver battles)
+                      const driverWindows = seg.metadata?.driver_windows
+                      const clipStart  = seg.clipStartTime ?? seg.start_time_seconds ?? 0
+                      const clipEnd    = seg.clipEndTime   ?? seg.end_time_seconds   ?? clipStart
+                      const clipDur    = Math.max(0.001, clipEnd - clipStart)
+                      const nameForCar = (carIdx) => {
+                        const p = drivers.indexOf(carIdx)
+                        return p >= 0 && drvNames[p] ? drvNames[p] : `#${carIdx}`
+                      }
+
+                      const WIN_COLORS = [
+                        ['rgba(16,185,129,', 'rgba(167,243,208,'],  // emerald
+                        ['rgba(6,182,212,',  'rgba(103,232,249,'],  // cyan
+                        ['rgba(139,92,246,', 'rgba(196,181,253,'],  // violet
+                        ['rgba(245,158,11,', 'rgba(253,211,77,'],   // amber
+                      ]
+
+                      const hasWindows = driverWindows && driverWindows.length > 1
+                      // Height split: top band = focused driver name, bottom band = window chips
+                      const topH   = hasWindows ? Math.floor(DRIVER_H * 0.52) : DRIVER_H - 4
+                      const chipH  = hasWindows ? DRIVER_H - topH - 2 : 0
+
+                      const canCycle = getActiveDrivers(seg, currentTime).length > 1
+
+                      return (
+                        <div
+                          key={`drv-${seg.id}`}
+                          className="absolute overflow-hidden"
+                          style={{
+                            left, width, top: 0, height: DRIVER_H,
+                            cursor: canCycle ? 'pointer' : 'default',
+                            backgroundColor: isActive ? 'rgba(16,185,129,0.28)' : 'rgba(16,185,129,0.12)',
+                            borderLeft: `2px solid ${isActive ? 'rgba(52,211,153,0.8)' : 'rgba(52,211,153,0.35)'}`,
+                          }}
+                          title={
+                            hasWindows
+                              ? `Merged battle — ${drivers.length} drivers: ${drvNames.join(', ')}\n` +
+                                driverWindows.map((w, i) => {
+                                  const wNames = (w.drivers || []).map(nameForCar).join(' vs ')
+                                  return `Window ${i + 1}: ${wNames} (${formatTime(w.start_time)} – ${formatTime(w.end_time)})`
+                                }).join('\n') +
+                                (canCycle ? '\n⟳ Click to cycle focus' : '')
+                              : canCycle
+                                ? `Focus: ${focusName} • click to cycle (${drvNames.join(', ')})`
+                                : `Focus: ${focusName}`
+                          }
+                          onClick={canCycle ? e => { e.stopPropagation(); cycleFocusDriver(seg, currentTime) } : undefined}
+                        >
+                          {/* Focused driver name row */}
+                          {width > 14 && (
+                            <div className="flex items-center overflow-hidden px-0.5"
+                                 style={{ height: topH, marginTop: hasWindows ? 1 : 2 }}>
+                              <span className="truncate leading-none"
+                                    style={{ fontSize: 9, fontWeight: 600, color: 'rgba(167,243,208,0.95)' }}>
+                                {focusName}
+                                {canCycle && <span style={{ color: 'rgba(167,243,208,0.50)', fontSize: 8 }}> ⟳</span>}
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Sub-window chips — one per original pairwise battle */}
+                          {hasWindows && chipH > 0 && (
+                            <div className="absolute left-0 right-0 overflow-hidden"
+                                 style={{ top: topH + 1, height: chipH }}>
+                              {driverWindows.map((w, wi) => {
+                                const relS = Math.max(0, (w.start_time - clipStart) / clipDur)
+                                const relE = Math.min(1, (w.end_time   - clipStart) / clipDur)
+                                const chipW = Math.max(2, (relE - relS) * width)
+                                const chipL = relS * width
+                                const [bg, fg] = WIN_COLORS[wi % WIN_COLORS.length]
+                                const isWinActive = currentTime != null
+                                  && currentTime >= w.start_time && currentTime <= w.end_time
+                                const wNames = (w.drivers || []).map(nameForCar).join('/')
+                                return (
+                                  <div key={wi}
+                                       className="absolute overflow-hidden"
+                                       style={{
+                                         left: chipL, width: chipW,
+                                         top: 0, height: chipH,
+                                         backgroundColor: bg + (isWinActive ? '0.70)' : '0.35)'),
+                                         borderLeft: `1px solid ${bg + '0.7)'}`,
+                                       }}>
+                                    {chipW > 16 && (
+                                      <span className="px-0.5 leading-none truncate block"
+                                            style={{ fontSize: 7, fontWeight: 700, color: fg + '0.9)', lineHeight: `${chipH}px` }}>
+                                        {wNames}
+                                      </span>
+                                    )}
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  {/* ── Events / clips track ────────────────────────────── */}
+                  <div className="absolute left-0 right-0 border-b border-border-subtle"
+                       style={{ top: SECTION_H + CAM_H + DRIVER_H, height: dynamicEvtH }}>
                     {editSegments.map(seg => {
                       const left   = toX(seg.editStart)
                       const width  = Math.max(3, toX(seg.editDur))
@@ -735,11 +1029,13 @@ export default function HighlightTimeline() {
                           }}
                           title={[
                             label,
+                            seg.driver_names?.length > 0 ? `Drivers: ${seg.driver_names.join(', ')}` : null,
                             raceTimeLabel ? `Race time: ${raceTimeLabel}` : null,
                             `Edit: ${formatTime(seg.editStart)} – ${formatTime(seg.editEnd)}`,
                             `Duration: ${fmtDur(seg.editDur)}`,
                             isBridge ? 'Bridge / gap filler' : null,
                           ].filter(Boolean).join('\n')}
+                          onClick={() => { setActiveSegId(seg.id); setSelectedEventId(seg.id) }}
                         >
                           {/* Hatching for bridge filler */}
                           {isBridge && (
@@ -781,7 +1077,7 @@ export default function HighlightTimeline() {
                     totalW={activeContentW}
                     totalEditDuration={totalEditDuration}
                     pxPerSec={activePxPerSec}
-                    top={SECTION_H + CAM_H + dynamicEvtH}
+                    top={SECTION_H + CAM_H + DRIVER_H + dynamicEvtH}
                     height={TICK_H}
                   />
 
@@ -806,6 +1102,7 @@ export default function HighlightTimeline() {
               onChange={setRange}
               totalDuration={totalEditDuration}
               events={rangeSliderEvents}
+              playheadTime={virtualPlayheadTime}
             />
             </div>
           )}

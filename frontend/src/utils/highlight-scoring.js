@@ -285,6 +285,15 @@ export function buildReason(event, score, overrides, minSeverity, inclusion, tie
  * Returns { scoredEvents, selectedIds, fullVideoIds, excludedIds, metrics }
  */
 export function computeHighlightSelection(events, weights, targetDuration, minSeverity, overrides, raceDuration, drivers, params = {}) {
+  const getSelectionDuration = (evt) => {
+    const coreDuration = Math.max(0, (evt.end_time_seconds || 0) - (evt.start_time_seconds || 0))
+    const typeBefore = params?.paddingByType?.[evt.event_type]?.before
+    const typeAfter = params?.paddingByType?.[evt.event_type]?.after
+    const before = Math.max(0, evt.metadata?.padding_before ?? typeBefore ?? params?.paddingBefore ?? 0)
+    const after = Math.max(0, evt.metadata?.padding_after ?? typeAfter ?? params?.paddingAfter ?? 0)
+    return coreDuration + before + after
+  }
+
   // 1. Score all events using multi-pass pipeline (raw scores)
   const scored = events.map(evt => {
     const { score, tier, bucket, components } = computeEventScore(evt, weights, params, raceDuration)
@@ -297,6 +306,7 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
       score_components: components,
       override: normalizeOverride(overrides[String(evt.id)]),
       duration: Math.max(0, evt.end_time_seconds - evt.start_time_seconds),
+      selectionDuration: getSelectionDuration(evt),
     }
   })
 
@@ -358,8 +368,8 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
   for (const evt of sortedByScore) {
     if (evt.override === 'highlight') {
       highlightIds.add(evt.id)
-      highlightDuration += evt.duration
-      bucketUsed[evt.bucket] = (bucketUsed[evt.bucket] || 0) + evt.duration
+      highlightDuration += evt.selectionDuration
+      bucketUsed[evt.bucket] = (bucketUsed[evt.bucket] || 0) + evt.selectionDuration
     } else if (evt.override === 'full-video') {
       fullVideoIds.add(evt.id)
     } else if (evt.override === 'exclude') {
@@ -372,8 +382,8 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     if (highlightIds.has(evt.id) || fullVideoIds.has(evt.id) || excludedIds.has(evt.id)) continue
     if (MANDATORY_TYPES.has(evt.event_type)) {
       highlightIds.add(evt.id)
-      highlightDuration += evt.duration
-      bucketUsed[evt.bucket] = (bucketUsed[evt.bucket] || 0) + evt.duration
+      highlightDuration += evt.selectionDuration
+      bucketUsed[evt.bucket] = (bucketUsed[evt.bucket] || 0) + evt.selectionDuration
     }
   }
 
@@ -401,8 +411,8 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     if (raceFinishEvts.length > params.maxRaceFinishes) {
       for (const evt of raceFinishEvts.slice(params.maxRaceFinishes)) {
         highlightIds.delete(evt.id)
-        highlightDuration -= evt.duration
-        bucketUsed[evt.bucket] = (bucketUsed[evt.bucket] || 0) - evt.duration
+        highlightDuration -= evt.selectionDuration
+        bucketUsed[evt.bucket] = (bucketUsed[evt.bucket] || 0) - evt.selectionDuration
         fullVideoIds.add(evt.id)
       }
     }
@@ -438,7 +448,7 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     }
 
     if (targetDuration && targetDuration > 0) {
-      if (highlightDuration + evt.duration > targetDuration * TARGET_DURATION_TOLERANCE) {
+      if (highlightDuration + evt.selectionDuration > targetDuration * TARGET_DURATION_TOLERANCE) {
         fullVideoIds.add(evt.id)
         continue
       }
@@ -451,8 +461,8 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     }
 
     highlightIds.add(evt.id)
-    highlightDuration += evt.duration
-    bucketUsed[evt.bucket] = (bucketUsed[evt.bucket] || 0) + evt.duration
+    highlightDuration += evt.selectionDuration
+    bucketUsed[evt.bucket] = (bucketUsed[evt.bucket] || 0) + evt.selectionDuration
   }
 
   // 3. Build scored events with inclusion tier, bucket, and reasons
@@ -471,8 +481,8 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
   // 4. Compute metrics
   const includedEvents = scoredEvents.filter(e => e.inclusion === 'highlight')
   const fullVideoEvts = scoredEvents.filter(e => e.inclusion === 'full-video')
-  const totalHighlightDuration = includedEvents.reduce((sum, e) => sum + e.duration, 0)
-  const totalFullVideoDuration = fullVideoEvts.reduce((sum, e) => sum + e.duration, 0)
+  const totalHighlightDuration = includedEvents.reduce((sum, e) => sum + e.selectionDuration, 0)
+  const totalFullVideoDuration = fullVideoEvts.reduce((sum, e) => sum + e.selectionDuration, 0)
 
   const coveragePct = raceDuration > 0 ? (totalHighlightDuration / raceDuration) * 100 : 0
 

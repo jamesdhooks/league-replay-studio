@@ -108,7 +108,9 @@ export default function HighlightPanel({ projectId }) {
   useEffect(() => {
     if (projectId) {
       setEventsLoaded(false)
-      fetchEvents(projectId, { limit: 50000 }).then(() => setEventsLoaded(true))
+      fetchEvents(projectId, { limit: 50000 })
+        .catch(() => {})
+        .finally(() => setEventsLoaded(true))
       loadConfig(projectId)
       loadDrivers(projectId)
       loadPresets()
@@ -148,7 +150,7 @@ export default function HighlightPanel({ projectId }) {
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* No-analysis banner */}
-      {!hasAnalysis && (
+      {!hasAnalysis && eventsLoaded && (
         <div className="flex items-center gap-3 px-4 py-2.5 bg-amber-500/10 border-b border-amber-500/20 shrink-0">
           <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
           <span className="text-xs text-amber-200 flex-1">

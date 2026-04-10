@@ -8,7 +8,7 @@ import { formatTime } from '../../utils/time'
  * Narrower range = zoomed in, histogram scrolls to show the selected window.
  * The center region is draggable to pan without changing zoom level.
  */
-export default function RangeSlider({ rangeStart, rangeEnd, onChange, totalDuration, events }) {
+export default function RangeSlider({ rangeStart, rangeEnd, onChange, totalDuration, events, playheadTime = null }) {
   const trackRef = useRef(null)
 
   const pctToFraction = useCallback((clientX) => {
@@ -60,6 +60,13 @@ export default function RangeSlider({ rangeStart, rangeEnd, onChange, totalDurat
   const widthPct = (rangeEnd - rangeStart) * 100
   const isZoomed = rangeStart > 0.001 || rangeEnd < 0.999
 
+  const playheadPct = useMemo(() => {
+    if (totalDuration <= 0) return null
+    if (typeof playheadTime !== 'number' || Number.isNaN(playheadTime)) return null
+    const clamped = Math.max(0, Math.min(totalDuration, playheadTime))
+    return (clamped / totalDuration) * 100
+  }, [playheadTime, totalDuration])
+
   return (
     <div className="shrink-0 border-t-2 border-border bg-bg-secondary px-3 py-2">
       <div className="flex items-center gap-2">
@@ -76,6 +83,18 @@ export default function RangeSlider({ rangeStart, rangeEnd, onChange, totalDurat
                           opacity: ev.highlight ? 0.5 : 0.12,
                           pointerEvents: 'none' }} />
           ))}
+
+          {/* Current playhead marker */}
+          {playheadPct != null && (
+            <div
+              className="absolute top-0 bottom-0 z-20 pointer-events-none"
+              style={{ left: `${playheadPct}%` }}
+              title={`Playhead: ${formatTime((playheadPct / 100) * totalDuration)}`}
+            >
+              <div className="h-full w-px bg-red-500" />
+              <div className="absolute -top-1 -left-1 w-2 h-2 rounded-full bg-red-500" />
+            </div>
+          )}
 
           {/* Dimmed regions outside range */}
           <div className="absolute inset-y-0 left-0 bg-black/55 rounded-l pointer-events-none" style={{ width: `${leftPct}%` }} />
