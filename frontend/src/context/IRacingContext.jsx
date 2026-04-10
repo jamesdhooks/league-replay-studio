@@ -39,6 +39,7 @@ const IRacingContext = createContext(null)
  */
 export function IRacingProvider({ children }) {
   const [isConnected, setIsConnected] = useState(false)
+  const [subsessionId, setSubsessionId] = useState(0)
   /** @type {[SessionData, Function]} */
   const [sessionData, setSessionData] = useState({
     track_name: '',
@@ -94,6 +95,7 @@ export function IRacingProvider({ children }) {
 
     const handleDisconnected = () => {
       setIsConnected(false)
+      setSubsessionId(0)
       setSessionData({
         track_name: '',
         session_type: '',
@@ -104,6 +106,7 @@ export function IRacingProvider({ children }) {
     }
 
     const handleSessionInfo = (data) => {
+      setSubsessionId(data.subsession_id || 0)
       setSessionData({
         track_name: data.track_name || '',
         session_type: data.session_type || '',
@@ -125,8 +128,8 @@ export function IRacingProvider({ children }) {
   }, [])
 
   const value = useMemo(
-    () => ({ isConnected, sessionData }),
-    [isConnected, sessionData]
+    () => ({ isConnected, sessionData, subsessionId }),
+    [isConnected, sessionData, subsessionId]
   )
 
   return (

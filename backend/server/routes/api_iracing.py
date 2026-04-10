@@ -48,6 +48,7 @@ from pydantic import BaseModel, Field
 import logging
 
 from server.services.iracing_bridge import bridge
+from server.services.project_service import project_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/iracing", tags=["iracing"])
@@ -505,6 +506,94 @@ async def replay_state() -> dict:
         "cam_group_num": snap.get("cam_group_num", 0),
         "race_laps": snap.get("race_laps", 0),
         "replay_speed": snap.get("replay_speed", 1),
+    }
+
+
+@router.get("/matching-projects")
+async def matching_projects() -> dict:
+    """Return project IDs whose stored session fingerprint matches the current iRacing session.
+
+    Used by the project library to decorate the card for the currently-loaded replay.
+    Returns:
+        {
+          "connected": bool,
+          "subsession_id": int,
+          "replay_playing": bool,
+          "matching_project_ids": [int, ...],
+        }
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    if not bridge.is_connected:
+        return {"connected": False, "subsession_id": 0, "replay_playing": False, "matching_project_ids": []}
+
+    sd = bridge.session_data
+    current_sub = int(sd.get("subsession_id", 0) or 0)
+    current_track_id = int(sd.get("track_id", 0) or 0)
+    current_track_name = (sd.get("track_name") or "").lower().strip()
+    current_ids = set(sd.get("driver_cust_ids") or [])
+
+    # Detect if replay is actively playing from the live telemetry snapshot
+    snap = bridge.capture_snapshot()
+    replay_speed = snap.get("replay_speed", 0) if snap else 0
+    replay_playing = replay_speed != 0
+
+    if not current_sub and not current_track_id:
+        return {"connected": True, "subsession_id": 0, "replay_playing": replay_playing, "matching_project_ids": []}
+
+    all_projects = project_service.list_projects()
+    matching_ids: list[int] = []
+
+    for proj in all_projects:
+        proj_dir = proj.get("project_dir", "")
+        if not proj_dir:
+            continue
+        try:
+            db_path = f"{proj_dir}/analysis.db"
+            conn = _sqlite3.connect(db_path, timeout=1)
+            try:
+                row = conn.execute(
+                    "SELECT value FROM analysis_meta WHERE key = 'session_fingerprint'"
+                ).fetchone()
+            finally:
+                conn.close()
+        except Exception:
+            continue
+
+        if not row:
+            continue
+
+        try:
+            fp = _json.loads(row[0])
+        except Exception:
+            continue
+
+        stored_sub = int(fp.get("subsession_id", 0) or 0)
+        # Exact: subsession ID match
+        if current_sub and stored_sub and current_sub == stored_sub:
+            matching_ids.append(proj["id"])
+            continue
+
+        # Fuzzy: same track + ≥75% driver overlap
+        stored_track_id = int(fp.get("track_id", 0) or 0)
+        stored_track_name = (fp.get("track_name") or "").lower().strip()
+        track_match = (
+            (current_track_id and stored_track_id and current_track_id == stored_track_id)
+            or (current_track_name and stored_track_name and current_track_name == stored_track_name)
+        )
+        if track_match and current_ids:
+            stored_ids = set(fp.get("driver_cust_ids") or [])
+            if stored_ids:
+                overlap = len(current_ids & stored_ids) / max(len(stored_ids), 1)
+                if overlap >= 0.75:
+                    matching_ids.append(proj["id"])
+
+    return {
+        "connected": True,
+        "subsession_id": current_sub,
+        "replay_playing": replay_playing,
+        "matching_project_ids": matching_ids,
     }
 
 

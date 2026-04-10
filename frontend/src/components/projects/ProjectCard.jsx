@@ -1,4 +1,4 @@
-import { Calendar, Users, Flag, MoreVertical, Copy, Trash2, ExternalLink } from 'lucide-react'
+import { Calendar, Users, Flag, MoreVertical, Copy, Trash2, Play } from 'lucide-react'
 import { useState, useRef, useEffect } from 'react'
 import StepIndicator from './StepIndicator'
 
@@ -13,7 +13,7 @@ import StepIndicator from './StepIndicator'
  * @param {(id: number) => void} props.onDuplicate
  * @param {(id: number) => void} props.onDelete
  */
-function ProjectCard({ project, viewMode = 'grid', onOpen, onDuplicate, onDelete }) {
+function ProjectCard({ project, viewMode = 'grid', onOpen, onDuplicate, onDelete, replayActive = false }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const menuRef = useRef(null)
 
@@ -38,11 +38,24 @@ function ProjectCard({ project, viewMode = 'grid', onOpen, onDuplicate, onDelete
   if (viewMode === 'list') {
     return (
       <div
-        className="flex items-center gap-4 px-4 py-3 bg-surface hover:bg-surface-hover
-                   border border-border rounded-lg cursor-pointer transition-all duration-200 group
-                   shadow-card hover:shadow-card-hover hover:border-border-strong"
+        className={`flex items-center gap-4 px-4 py-3 bg-surface hover:bg-surface-hover
+                   border rounded-lg cursor-pointer transition-all duration-200 group
+                   shadow-card hover:shadow-card-hover ${
+                     replayActive
+                       ? 'border-accent shadow-glow-sm'
+                       : 'border-border hover:border-border-strong'
+                   }`}
         onClick={() => onOpen(project.id)}
       >
+        {/* Replay active badge */}
+        {replayActive && (
+          <div className="shrink-0 flex items-center gap-1 px-1.5 py-0.5 rounded-md
+                          bg-accent/15 text-accent text-xxs font-medium">
+            <Play className="w-2.5 h-2.5 fill-current" />
+            Live
+          </div>
+        )}
+
         {/* Name + track */}
         <div className="flex-1 min-w-0">
           <h3 className="text-sm font-medium text-text-primary truncate">
@@ -89,9 +102,13 @@ function ProjectCard({ project, viewMode = 'grid', onOpen, onDuplicate, onDelete
   // Grid view
   return (
     <div
-      className="flex flex-col bg-surface hover:bg-surface-hover border border-border
+      className={`flex flex-col bg-surface hover:bg-surface-hover border
                  rounded-xl cursor-pointer transition-all duration-200 group overflow-hidden
-                 shadow-card hover:shadow-card-hover hover:border-border-strong"
+                 shadow-card hover:shadow-card-hover ${
+                   replayActive
+                     ? 'border-accent shadow-glow-sm'
+                     : 'border-border hover:border-border-strong'
+                 }`}
       onClick={() => onOpen(project.id)}
     >
       {/* Thumbnail area */}
@@ -99,6 +116,15 @@ function ProjectCard({ project, viewMode = 'grid', onOpen, onDuplicate, onDelete
         {/* Subtle gradient band at top */}
         <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-gradient-from via-gradient-via to-gradient-to opacity-60" />
         <Flag className="w-8 h-8 text-text-disabled" />
+
+        {/* Replay-active badge */}
+        {replayActive && (
+          <div className="absolute top-2 left-2 flex items-center gap-1 px-1.5 py-0.5 rounded-md
+                          bg-accent/90 text-white text-xxs font-semibold shadow-sm">
+            <Play className="w-2.5 h-2.5 fill-current" />
+            Replay Playing
+          </div>
+        )}
         {/* Context menu button */}
         <div className="absolute top-2 right-2" ref={menuRef}>
           <button

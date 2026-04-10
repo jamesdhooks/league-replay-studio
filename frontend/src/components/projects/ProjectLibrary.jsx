@@ -5,12 +5,13 @@ import {
   LayoutGrid,
   List,
   SlidersHorizontal,
-  ChevronDown,
 } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext'
 import { useToast } from '../../context/ToastContext'
 import { useModal } from '../../context/ModalContext'
+import { useIRacing } from '../../context/IRacingContext'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
+import { apiGet } from '../../services/api'
 import ProjectCard from './ProjectCard'
 import NewProjectWizard from './NewProjectWizard'
 
@@ -31,6 +32,7 @@ function ProjectLibrary({ onOpenProject }) {
   } = useProject()
   const { showSuccess, showError } = useToast()
   const { openModal } = useModal()
+  const { isConnected, subsessionId } = useIRacing()
 
   const [viewMode, setViewMode] = useLocalStorage('project_view_mode', 'grid')
   const [search, setSearch] = useState('')
@@ -38,11 +40,34 @@ function ProjectLibrary({ onOpenProject }) {
   const [filterTrack, setFilterTrack] = useState('')
   const [showFilters, setShowFilters] = useState(false)
   const [wizardOpen, setWizardOpen] = useState(false)
+  // Set of project IDs whose saved session fingerprint matches the live iRacing session
+  const [replayMatchIds, setReplayMatchIds] = useState(new Set())
+  const [replayPlaying, setReplayPlaying] = useState(false)
 
   // Load projects on mount and when filters change
   useEffect(() => {
     fetchProjects({ search, step: filterStep, track: filterTrack })
   }, [fetchProjects, search, filterStep, filterTrack])
+
+  // Poll for the project whose replay is currently loaded in iRacing (every 5 s)
+  useEffect(() => {
+    if (!isConnected) {
+      setReplayMatchIds(new Set())
+      setReplayPlaying(false)
+      return
+    }
+    const poll = () => {
+      apiGet('/iracing/matching-projects')
+        .then(data => {
+          setReplayMatchIds(new Set(data.matching_project_ids || []))
+          setReplayPlaying(!!data.replay_playing)
+        })
+        .catch(() => {})
+    }
+    poll()
+    const id = setInterval(poll, 5000)
+    return () => clearInterval(id)
+  }, [isConnected, subsessionId])
 
   const handleOpen = useCallback(async (projectId) => {
     try {
@@ -220,6 +245,7 @@ function ProjectLibrary({ onOpenProject }) {
                 onOpen={handleOpen}
                 onDuplicate={handleDuplicate}
                 onDelete={handleDelete}
+                replayActive={replayMatchIds.has(project.id) && replayPlaying}
               />
             ))}
           </div>
@@ -233,6 +259,7 @@ function ProjectLibrary({ onOpenProject }) {
                 onOpen={handleOpen}
                 onDuplicate={handleDuplicate}
                 onDelete={handleDelete}
+                replayActive={replayMatchIds.has(project.id) && replayPlaying}
               />
             ))}
           </div>
