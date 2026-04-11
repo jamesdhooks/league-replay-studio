@@ -70,32 +70,32 @@ function PresetsTab({
       {!showCreateForm && (
         <button
           onClick={() => setShowCreateForm(true)}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-slate-700 text-slate-300 rounded-lg hover:bg-slate-600 hover:text-white transition-colors"
+          className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-bg-secondary text-text-secondary rounded-lg hover:bg-bg-hover hover:text-text-primary border border-border transition-colors text-xs font-medium"
         >
-          <Settings className="w-4 h-4" />
+          <Settings className="w-3.5 h-3.5" />
           Create New Preset
         </button>
       )}
 
       {showCreateForm && (
-        <div className="p-4 bg-slate-800 rounded-lg border border-slate-600 space-y-3">
+        <div className="p-4 bg-bg-secondary rounded-lg border border-border space-y-3">
           <div>
-            <label className="block text-sm text-slate-300 mb-1">Name</label>
+            <label className="block text-xxs text-text-tertiary uppercase tracking-wider font-semibold mb-1">Name</label>
             <input
               type="text"
               value={formData.name}
               onChange={(e) => setFormData(f => ({ ...f, name: e.target.value }))}
-              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:border-blue-500"
+              className="w-full px-3 py-2 bg-bg-primary border border-border rounded-md text-xs text-text-primary focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
               placeholder="My Preset"
             />
           </div>
           <div>
-            <label className="block text-sm text-slate-300 mb-1">Description</label>
+            <label className="block text-xxs text-text-tertiary uppercase tracking-wider font-semibold mb-1">Description</label>
             <input
               type="text"
               value={formData.description}
               onChange={(e) => setFormData(f => ({ ...f, description: e.target.value }))}
-              className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:border-blue-500"
+              className="w-full px-3 py-2 bg-bg-primary border border-border rounded-md text-xs text-text-primary focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
               placeholder="Describe this preset..."
             />
           </div>
@@ -106,30 +106,30 @@ function PresetsTab({
                 type="checkbox"
                 checked={formData.upload_to_youtube}
                 onChange={(e) => setFormData(f => ({ ...f, upload_to_youtube: e.target.checked }))}
-                className="w-4 h-4 rounded border-slate-500 bg-slate-700"
+                className="w-4 h-4 rounded border-border bg-bg-primary text-accent focus:ring-accent"
               />
-              <span className="text-sm text-slate-300">Upload to YouTube</span>
+              <span className="text-xs text-text-secondary">Upload to YouTube</span>
             </label>
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
                 checked={formData.auto_edit}
                 onChange={(e) => setFormData(f => ({ ...f, auto_edit: e.target.checked }))}
-                className="w-4 h-4 rounded border-slate-500 bg-slate-700"
+                className="w-4 h-4 rounded border-border bg-bg-primary text-accent focus:ring-accent"
               />
-              <span className="text-sm text-slate-300">Auto-apply highlights</span>
+              <span className="text-xs text-text-secondary">Auto-apply highlights</span>
             </label>
           </div>
           <div className="flex gap-2">
             <button
               onClick={handleCreate}
-              className="flex-1 px-3 py-2 bg-blue-600 text-white rounded hover:bg-blue-500"
+              className="flex-1 px-3 py-2 bg-accent hover:bg-accent-hover text-white rounded-md text-xs font-medium transition-colors"
             >
               Create
             </button>
             <button
               onClick={() => setShowCreateForm(false)}
-              className="px-3 py-2 bg-slate-600 text-white rounded hover:bg-slate-500"
+              className="px-3 py-2 bg-bg-primary text-text-secondary hover:bg-bg-hover border border-border rounded-md text-xs font-medium transition-colors"
             >
               Cancel
             </button>
@@ -142,40 +142,40 @@ function PresetsTab({
         {presets.map(preset => (
           <div
             key={preset.id}
-            className="p-3 bg-slate-800 rounded-lg border border-slate-700"
+            className="p-3 bg-bg-secondary rounded-lg border border-border"
           >
             <div className="flex items-start justify-between">
               <div>
-                <div className="font-medium text-white">{preset.name}</div>
-                <p className="text-sm text-slate-400">{preset.description}</p>
-                <div className="flex flex-wrap gap-2 mt-2">
+                <div className="text-xs font-medium text-text-primary">{preset.name}</div>
+                <p className="text-xxs text-text-tertiary mt-0.5">{preset.description}</p>
+                <div className="flex flex-wrap gap-1.5 mt-2">
                   {preset.upload_to_youtube && (
-                    <span className="px-2 py-0.5 text-xs bg-red-900/30 text-red-300 rounded">
+                    <span className="px-1.5 py-0.5 text-xxs bg-danger/10 text-danger border border-danger/20 rounded font-medium">
                       YouTube
                     </span>
                   )}
                   {preset.auto_edit && (
-                    <span className="px-2 py-0.5 text-xs bg-blue-900/30 text-blue-300 rounded">
+                    <span className="px-1.5 py-0.5 text-xxs bg-accent/10 text-accent border border-accent/20 rounded font-medium">
                       Auto-edit
                     </span>
                   )}
-                  <span className="px-2 py-0.5 text-xs bg-slate-700 text-slate-300 rounded">
+                  <span className="px-1.5 py-0.5 text-xxs bg-bg-primary text-text-tertiary border border-border rounded">
                     On fail: {preset.failure_action}
                   </span>
                 </div>
               </div>
               <button
                 onClick={() => handleDelete(preset.id)}
-                className="p-1 text-slate-400 hover:text-red-400"
+                className="p-1 text-text-tertiary hover:text-danger transition-colors"
               >
-                <XCircle className="w-4 h-4" />
+                <XCircle className="w-3.5 h-3.5" />
               </button>
             </div>
           </div>
         ))}
 
         {presets.length === 0 && !showCreateForm && (
-          <div className="text-center py-8 text-slate-500">
+          <div className="text-center py-8 text-text-tertiary text-xs">
             No presets yet. Create one to get started.
           </div>
         )}

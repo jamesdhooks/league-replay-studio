@@ -56,20 +56,20 @@ export default function TrashBin({ projectId }) {
   }
 
   return (
-    <div className="rounded-lg border border-amber-500/20 bg-amber-500/5">
+    <div className="rounded-lg border border-warning/20 bg-warning/5">
       {/* Header */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center justify-between px-4 py-3 text-sm hover:bg-amber-500/5 transition-colors"
+        className="w-full flex items-center justify-between px-4 py-3 text-xs hover:bg-warning/5 transition-colors"
       >
-        <div className="flex items-center gap-2 text-amber-400">
-          <Trash2 size={14} />
+        <div className="flex items-center gap-2 text-warning">
+          <Trash2 className="w-3.5 h-3.5" />
           <span className="font-medium">Trash Bin</span>
-          <span className="text-xs bg-amber-500/20 px-1.5 py-0.5 rounded">
+          <span className="text-xxs bg-warning/10 px-1.5 py-0.5 rounded border border-warning/20">
             {trash.length}
           </span>
         </div>
-        {expanded ? <ChevronUp size={14} className="text-zinc-500" /> : <ChevronDown size={14} className="text-zinc-500" />}
+        {expanded ? <ChevronUp className="w-3.5 h-3.5 text-text-tertiary" /> : <ChevronDown className="w-3.5 h-3.5 text-text-tertiary" />}
       </button>
 
       {expanded && (
@@ -79,26 +79,26 @@ export default function TrashBin({ projectId }) {
             {!showConfirm ? (
               <button
                 onClick={() => setShowConfirm(true)}
-                className="flex items-center gap-1 px-2 py-1 text-xs rounded 
-                           bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
+                className="flex items-center gap-1 px-2 py-1 text-xxs font-medium rounded
+                           bg-danger/10 text-danger border border-danger/20 hover:bg-danger/20 transition-colors"
               >
-                <Trash2 size={11} />
+                <Trash2 className="w-3 h-3" />
                 Empty Trash
               </button>
             ) : (
               <div className="flex items-center gap-2">
-                <span className="text-xs text-red-400">Permanently delete all?</span>
+                <span className="text-xxs text-danger">Permanently delete all?</span>
                 <button
                   onClick={handleEmpty}
                   disabled={loading}
-                  className="px-2 py-1 text-xs rounded bg-red-500/30 text-red-400 
-                             hover:bg-red-500/40 transition-colors"
+                  className="px-2 py-1 text-xxs font-medium rounded bg-danger/20 text-danger border border-danger/30
+                             hover:bg-danger/30 transition-colors"
                 >
                   Yes, Delete
                 </button>
                 <button
                   onClick={() => setShowConfirm(false)}
-                  className="px-2 py-1 text-xs rounded bg-zinc-700 text-zinc-300"
+                  className="px-2 py-1 text-xxs font-medium rounded bg-bg-secondary text-text-secondary border border-border transition-colors"
                 >
                   Cancel
                 </button>
@@ -109,12 +109,12 @@ export default function TrashBin({ projectId }) {
           {/* Clip list */}
           <div className="space-y-1 max-h-48 overflow-y-auto">
             {trash.map((entry, i) => (
-              <div key={entry.segment_id + i} className="flex items-center justify-between text-xs bg-zinc-800/50 rounded px-3 py-2">
+              <div key={entry.segment_id + i} className="flex items-center justify-between text-xxs bg-bg-secondary/50 rounded px-3 py-2">
                 <div className="flex items-center gap-2 min-w-0">
-                  <Film size={12} className="text-zinc-500 shrink-0" />
+                  <Film className="w-3 h-3 text-text-disabled shrink-0" />
                   <div className="min-w-0">
-                    <div className="font-mono text-zinc-300 truncate">{entry.segment_id}</div>
-                    <div className="flex items-center gap-2 text-zinc-500">
+                    <div className="font-mono text-text-secondary truncate">{entry.segment_id}</div>
+                    <div className="flex items-center gap-2 text-text-disabled">
                       <span>{REASON_LABELS[entry.reason] || entry.reason}</span>
                       <span>·</span>
                       <span>{formatDate(entry.invalidated_at)}</span>
@@ -124,12 +124,12 @@ export default function TrashBin({ projectId }) {
                 <button
                   onClick={() => handleRestore(entry.segment_id)}
                   disabled={loading}
-                  className="flex items-center gap-1 px-2 py-1 rounded 
-                             bg-green-500/20 text-green-400 hover:bg-green-500/30 
-                             transition-colors shrink-0 ml-2"
+                  className="flex items-center gap-1 px-2 py-1 rounded
+                             bg-success/10 text-success border border-success/20 hover:bg-success/20
+                             transition-colors shrink-0 ml-2 text-xxs font-medium"
                   title="Restore clip"
                 >
-                  <RotateCcw size={11} />
+                  <RotateCcw className="w-3 h-3" />
                   Restore
                 </button>
               </div>

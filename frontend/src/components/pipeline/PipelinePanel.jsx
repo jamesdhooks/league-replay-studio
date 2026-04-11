@@ -152,35 +152,47 @@ function PipelinePanel() {
   }, [steps])
 
   return (
-    <div className="flex flex-col h-full bg-slate-900 rounded-lg border border-slate-700">
-      {/* Header with tabs */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
-        <div className="flex items-center gap-2">
-          <Rocket className="w-5 h-5 text-blue-400" />
-          <span className="font-medium text-white">Automated Pipeline</span>
-        </div>
-        <div className="flex gap-1">
+    <div className="flex flex-col h-full overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-border bg-bg-secondary shrink-0">
+        <Rocket className="w-5 h-5 text-accent" />
+        <h2 className="text-sm font-semibold text-text-primary">Automated Pipeline</h2>
+        <div className="flex-1" />
+        {isRunning && (
+          <span className="px-2 py-0.5 rounded-full text-xxs font-medium border border-accent/30 text-accent bg-accent/5">
+            Running…
+          </span>
+        )}
+        {isPaused && (
+          <span className="px-2 py-0.5 rounded-full text-xxs font-medium border border-warning/30 text-warning bg-warning/5">
+            Paused
+          </span>
+        )}
+        {!isRunning && !isPaused && (
+          <span className="px-2 py-0.5 rounded-full text-xxs font-medium border border-border text-text-tertiary bg-bg-primary">
+            Ready
+          </span>
+        )}
+      </div>
+
+      {/* Tab bar */}
+      <div className="flex border-b border-border shrink-0">
+        {[
+          { id: 'run', label: 'Run' },
+          { id: 'presets', label: 'Presets' },
+        ].map(tab => (
           <button
-            onClick={() => setActiveTab('run')}
-            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
-              activeTab === 'run'
-                ? 'bg-blue-600 text-white'
-                : 'text-slate-400 hover:text-white hover:bg-slate-700'
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={`px-4 py-2 text-xs font-medium transition-colors border-b-2 ${
+              activeTab === tab.id
+                ? 'border-accent text-accent'
+                : 'border-transparent text-text-secondary hover:text-text-primary'
             }`}
           >
-            Run
+            {tab.label}
           </button>
-          <button
-            onClick={() => setActiveTab('presets')}
-            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
-              activeTab === 'presets'
-                ? 'bg-blue-600 text-white'
-                : 'text-slate-400 hover:text-white hover:bg-slate-700'
-            }`}
-          >
-            Presets
-          </button>
-        </div>
+        ))}
       </div>
 
       {/* Content */}
@@ -192,18 +204,18 @@ function PipelinePanel() {
               <div className="space-y-4">
                 {/* Progress bar */}
                 <div className="space-y-2">
-                  <div className="flex justify-between text-sm">
-                    <span className="text-slate-300">
-                      {isRunning ? 'Running...' : isPaused ? 'Paused' : currentRun.state}
+                  <div className="flex justify-between text-xs">
+                    <span className="text-text-secondary font-medium">
+                      {isRunning ? 'Running…' : isPaused ? 'Paused' : currentRun.state}
                     </span>
-                    <span className="text-slate-400">{overallProgress}%</span>
+                    <span className="font-mono text-text-primary">{overallProgress}%</span>
                   </div>
-                  <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
+                  <div className="h-3 bg-bg-primary rounded-full overflow-hidden border border-border">
                     <div
-                      className={`h-full transition-all duration-300 ${
-                        currentRun.state === 'failed' ? 'bg-red-500' :
-                        currentRun.state === 'completed' ? 'bg-green-500' :
-                        'bg-blue-500'
+                      className={`h-full rounded-full transition-all duration-300 ${
+                        currentRun.state === 'failed' ? 'bg-danger' :
+                        currentRun.state === 'completed' ? 'bg-success' :
+                        'bg-accent'
                       }`}
                       style={{ width: `${overallProgress}%` }}
                     />
@@ -222,30 +234,30 @@ function PipelinePanel() {
                         key={id}
                         className={`p-3 rounded-lg border transition-colors ${
                           isCurrentStep
-                            ? 'border-blue-500 bg-slate-800'
-                            : 'border-slate-700 bg-slate-800/50'
+                            ? 'border-accent/40 bg-accent/5'
+                            : 'border-border bg-bg-secondary/50'
                         }`}
                       >
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-3">
-                            <div className={`p-2 rounded-lg bg-slate-700 ${getStepColor(step)}`}>
+                            <div className={`p-2 rounded-lg bg-bg-primary ${getStepColor(step)}`}>
                               <Icon className="w-4 h-4" />
                             </div>
                             <div>
                               <div className="flex items-center gap-2">
-                                <span className="font-medium text-white">{label}</span>
+                                <span className="text-xs font-medium text-text-primary">{label}</span>
                                 <StepIcon
-                                  className={`w-4 h-4 ${getStepColor(step)} ${
+                                  className={`w-3.5 h-3.5 ${getStepColor(step)} ${
                                     step?.state === 'running' ? 'animate-spin' : ''
                                   }`}
                                 />
                               </div>
-                              <p className="text-xs text-slate-400">{description}</p>
+                              <p className="text-xxs text-text-tertiary">{description}</p>
                             </div>
                           </div>
                           <div className="flex items-center gap-2">
                             {step?.state === 'running' && (
-                              <span className="text-sm text-blue-400">
+                              <span className="text-xs font-mono text-accent">
                                 {Math.round(step.progress || 0)}%
                               </span>
                             )}
@@ -253,13 +265,13 @@ function PipelinePanel() {
                               <div className="flex gap-1">
                                 <button
                                   onClick={() => handleRetry(id)}
-                                  className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-500"
+                                  className="px-2 py-1 text-xxs font-medium bg-accent hover:bg-accent-hover text-white rounded transition-colors"
                                 >
                                   Retry
                                 </button>
                                 <button
                                   onClick={() => handleSkip(id)}
-                                  className="px-2 py-1 text-xs bg-slate-600 text-white rounded hover:bg-slate-500"
+                                  className="px-2 py-1 text-xxs font-medium bg-bg-primary text-text-secondary hover:bg-bg-hover border border-border rounded transition-colors"
                                 >
                                   Skip
                                 </button>
@@ -268,15 +280,15 @@ function PipelinePanel() {
                           </div>
                         </div>
                         {step?.error && (
-                          <div className="mt-2 p-2 bg-red-900/30 border border-red-700 rounded text-xs text-red-300">
+                          <div className="mt-2 p-2 bg-danger/5 border border-danger/30 rounded text-xxs text-danger">
                             {step.error}
                           </div>
                         )}
                         {/* Step progress bar */}
                         {step?.state === 'running' && (
-                          <div className="mt-2 h-1 bg-slate-700 rounded-full overflow-hidden">
+                          <div className="mt-2 h-1 bg-bg-primary rounded-full overflow-hidden">
                             <div
-                              className="h-full bg-blue-500 transition-all duration-300"
+                              className="h-full bg-accent transition-all duration-300"
                               style={{ width: `${step.progress || 0}%` }}
                             />
                           </div>
@@ -292,14 +304,14 @@ function PipelinePanel() {
                     <>
                       <button
                         onClick={handlePause}
-                        className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-500 transition-colors"
+                        className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-warning text-white rounded-lg hover:bg-warning/90 transition-colors text-xs font-medium"
                       >
                         <Pause className="w-4 h-4" />
                         Pause
                       </button>
                       <button
                         onClick={handleCancel}
-                        className="flex items-center justify-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-500 transition-colors"
+                        className="flex items-center justify-center gap-2 px-4 py-2 bg-danger text-white rounded-lg hover:bg-danger/90 transition-colors text-xs font-medium"
                       >
                         <Square className="w-4 h-4" />
                         Cancel
@@ -310,14 +322,14 @@ function PipelinePanel() {
                     <>
                       <button
                         onClick={handleResume}
-                        className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-500 transition-colors"
+                        className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-success text-white rounded-lg hover:bg-success/90 transition-colors text-xs font-medium"
                       >
                         <Play className="w-4 h-4" />
                         Resume
                       </button>
                       <button
                         onClick={handleCancel}
-                        className="flex items-center justify-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-500 transition-colors"
+                        className="flex items-center justify-center gap-2 px-4 py-2 bg-danger text-white rounded-lg hover:bg-danger/90 transition-colors text-xs font-medium"
                       >
                         <Square className="w-4 h-4" />
                         Cancel
@@ -330,16 +342,16 @@ function PipelinePanel() {
               /* Start new pipeline */
               <div className="space-y-4">
                 {/* Project indicator */}
-                <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
-                  <div className="text-sm text-slate-400 mb-1">Project</div>
-                  <div className="text-white font-medium">
+                <div className="p-3 bg-bg-secondary rounded-lg border border-border">
+                  <div className="text-xxs text-text-tertiary uppercase tracking-wider mb-1">Project</div>
+                  <div className="text-xs text-text-primary font-medium">
                     {currentProject?.name || 'No project selected'}
                   </div>
                 </div>
 
                 {/* Preset selector */}
                 <div className="space-y-2">
-                  <label className="block text-sm text-slate-300">Pipeline Preset</label>
+                  <label className="block text-xxs text-text-tertiary uppercase tracking-wider font-semibold">Pipeline Preset</label>
                   <div className="relative">
                     <select
                       value={selectedPreset?.id || ''}
@@ -347,7 +359,7 @@ function PipelinePanel() {
                         const preset = presets.find(p => p.id === e.target.value)
                         setSelectedPreset(preset || null)
                       }}
-                      className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white appearance-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                      className="w-full px-3 py-2 bg-bg-primary border border-border rounded-md text-xs text-text-primary appearance-none focus:border-accent focus:ring-1 focus:ring-accent focus:outline-none"
                     >
                       <option value="">Custom Configuration</option>
                       {presets.map(preset => (
@@ -356,10 +368,10 @@ function PipelinePanel() {
                         </option>
                       ))}
                     </select>
-                    <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+                    <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-tertiary pointer-events-none" />
                   </div>
                   {selectedPreset && (
-                    <p className="text-xs text-slate-400">{selectedPreset.description}</p>
+                    <p className="text-xxs text-text-tertiary">{selectedPreset.description}</p>
                   )}
                 </div>
 
@@ -368,23 +380,23 @@ function PipelinePanel() {
                   <div className="space-y-3">
                     <button
                       onClick={() => setShowConfig(!showConfig)}
-                      className="flex items-center gap-2 text-sm text-slate-300 hover:text-white"
+                      className="flex items-center gap-2 text-xs text-text-secondary hover:text-text-primary transition-colors"
                     >
-                      {showConfig ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-                      <Settings className="w-4 h-4" />
+                      {showConfig ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                      <Settings className="w-3.5 h-3.5" />
                       Configuration Options
                     </button>
 
                     {showConfig && (
-                      <div className="space-y-3 p-3 bg-slate-800/50 rounded-lg border border-slate-700">
+                      <div className="space-y-3 p-3 bg-bg-secondary/50 rounded-lg border border-border">
                         <label className="flex items-center gap-3 cursor-pointer">
                           <input
                             type="checkbox"
                             checked={customConfig.skip_capture}
                             onChange={(e) => setCustomConfig(c => ({ ...c, skip_capture: e.target.checked }))}
-                            className="w-4 h-4 rounded border-slate-500 bg-slate-700 text-blue-500 focus:ring-blue-500"
+                            className="w-4 h-4 rounded border-border bg-bg-primary text-accent focus:ring-accent"
                           />
-                          <span className="text-sm text-slate-300">Skip capture (use existing video)</span>
+                          <span className="text-xs text-text-secondary">Skip capture (use existing video)</span>
                         </label>
 
                         <label className="flex items-center gap-3 cursor-pointer">
@@ -392,9 +404,9 @@ function PipelinePanel() {
                             type="checkbox"
                             checked={customConfig.skip_analysis}
                             onChange={(e) => setCustomConfig(c => ({ ...c, skip_analysis: e.target.checked }))}
-                            className="w-4 h-4 rounded border-slate-500 bg-slate-700 text-blue-500 focus:ring-blue-500"
+                            className="w-4 h-4 rounded border-border bg-bg-primary text-accent focus:ring-accent"
                           />
-                          <span className="text-sm text-slate-300">Skip analysis (use existing events)</span>
+                          <span className="text-xs text-text-secondary">Skip analysis (use existing events)</span>
                         </label>
 
                         <label className="flex items-center gap-3 cursor-pointer">
@@ -402,9 +414,9 @@ function PipelinePanel() {
                             type="checkbox"
                             checked={customConfig.auto_edit}
                             onChange={(e) => setCustomConfig(c => ({ ...c, auto_edit: e.target.checked }))}
-                            className="w-4 h-4 rounded border-slate-500 bg-slate-700 text-blue-500 focus:ring-blue-500"
+                            className="w-4 h-4 rounded border-border bg-bg-primary text-accent focus:ring-accent"
                           />
-                          <span className="text-sm text-slate-300">Auto-apply highlight config</span>
+                          <span className="text-xs text-text-secondary">Auto-apply highlight config</span>
                         </label>
 
                         <label className="flex items-center gap-3 cursor-pointer">
@@ -412,18 +424,18 @@ function PipelinePanel() {
                             type="checkbox"
                             checked={customConfig.upload_to_youtube}
                             onChange={(e) => setCustomConfig(c => ({ ...c, upload_to_youtube: e.target.checked }))}
-                            className="w-4 h-4 rounded border-slate-500 bg-slate-700 text-blue-500 focus:ring-blue-500"
+                            className="w-4 h-4 rounded border-border bg-bg-primary text-accent focus:ring-accent"
                           />
-                          <span className="text-sm text-slate-300">Upload to YouTube</span>
+                          <span className="text-xs text-text-secondary">Upload to YouTube</span>
                         </label>
 
                         {customConfig.upload_to_youtube && (
                           <div className="pl-7">
-                            <label className="block text-xs text-slate-400 mb-1">Privacy</label>
+                            <label className="block text-xxs text-text-tertiary mb-1">Privacy</label>
                             <select
                               value={customConfig.youtube_privacy}
                               onChange={(e) => setCustomConfig(c => ({ ...c, youtube_privacy: e.target.value }))}
-                              className="w-full px-2 py-1.5 text-sm bg-slate-700 border border-slate-600 rounded text-white"
+                              className="w-full px-2 py-1.5 text-xs bg-bg-primary border border-border rounded text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
                             >
                               <option value="private">Private</option>
                               <option value="unlisted">Unlisted</option>
@@ -433,11 +445,11 @@ function PipelinePanel() {
                         )}
 
                         <div>
-                          <label className="block text-xs text-slate-400 mb-1">On failure</label>
+                          <label className="block text-xxs text-text-tertiary mb-1">On failure</label>
                           <select
                             value={customConfig.failure_action}
                             onChange={(e) => setCustomConfig(c => ({ ...c, failure_action: e.target.value }))}
-                            className="w-full px-2 py-1.5 text-sm bg-slate-700 border border-slate-600 rounded text-white"
+                            className="w-full px-2 py-1.5 text-xs bg-bg-primary border border-border rounded text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
                           >
                             <option value="pause">Pause (wait for intervention)</option>
                             <option value="skip">Skip failed step</option>
@@ -453,16 +465,21 @@ function PipelinePanel() {
                 <button
                   onClick={handleStart}
                   disabled={loading || !currentProject}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  className={`w-full flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm
+                    font-semibold transition-colors
+                    ${loading || !currentProject
+                      ? 'bg-accent/50 text-white cursor-not-allowed'
+                      : 'bg-accent hover:bg-accent-hover text-white shadow-lg shadow-accent/20'
+                    }`}
                 >
                   {loading ? (
                     <>
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      Starting...
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Starting…
                     </>
                   ) : (
                     <>
-                      <Play className="w-5 h-5" />
+                      <Play className="w-4 h-4" />
                       Start Pipeline
                     </>
                   )}
@@ -472,9 +489,12 @@ function PipelinePanel() {
 
             {/* Error display */}
             {error && (
-              <div className="p-3 bg-red-900/30 border border-red-700 rounded-lg flex items-start gap-2">
-                <AlertTriangle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
-                <div className="text-sm text-red-300">{error}</div>
+              <div className="flex items-start gap-2 px-3 py-2.5 bg-danger/5 border border-danger/30 rounded-md">
+                <AlertTriangle className="w-4 h-4 text-danger shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-xs text-danger font-medium">Error</p>
+                  <p className="text-xxs text-danger/80 mt-0.5">{error}</p>
+                </div>
               </div>
             )}
           </div>

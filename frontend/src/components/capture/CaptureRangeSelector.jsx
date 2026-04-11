@@ -59,7 +59,7 @@ function RangeTimeline({ totalDuration, rangeStart, rangeEnd, segments, onRangeC
   return (
     <div className="space-y-1">
       {/* Timeline track */}
-      <div ref={trackRef} className="relative h-8 bg-zinc-800 rounded cursor-crosshair select-none">
+      <div ref={trackRef} className="relative h-8 bg-bg-primary rounded cursor-crosshair select-none border border-border">
         {/* Segment blocks */}
         {segments.map((seg) => {
           const left = totalDuration > 0 ? (seg.start / totalDuration) * 100 : 0
@@ -69,7 +69,7 @@ function RangeTimeline({ totalDuration, rangeStart, rangeEnd, segments, onRangeC
             qualifying_results: 'bg-cyan-500/40',
             race: 'bg-green-500/40',
             race_results: 'bg-amber-500/40',
-          }[seg.section] || 'bg-zinc-600/40'
+          }[seg.section] || 'bg-text-disabled/40'
           return (
             <div
               key={seg.id}
@@ -82,19 +82,19 @@ function RangeTimeline({ totalDuration, rangeStart, rangeEnd, segments, onRangeC
 
         {/* Selected range overlay */}
         <div
-          className="absolute top-0 bottom-0 bg-blue-500/20 border-x border-blue-400/50"
+          className="absolute top-0 bottom-0 bg-accent/20 border-x border-accent/50"
           style={{ left: `${startPct}%`, width: `${endPct - startPct}%` }}
         />
 
         {/* Handles */}
         <div
-          className="absolute top-0 bottom-0 w-2 bg-blue-400 cursor-ew-resize rounded-l hover:bg-blue-300 transition-colors"
+          className="absolute top-0 bottom-0 w-2 bg-accent cursor-ew-resize rounded-l hover:bg-accent-hover transition-colors"
           style={{ left: `${startPct}%` }}
           onMouseDown={handleMouseDown('start')}
           title={`Start: ${formatTime(rangeStart)}`}
         />
         <div
-          className="absolute top-0 bottom-0 w-2 bg-blue-400 cursor-ew-resize rounded-r hover:bg-blue-300 transition-colors"
+          className="absolute top-0 bottom-0 w-2 bg-accent cursor-ew-resize rounded-r hover:bg-accent-hover transition-colors"
           style={{ left: `calc(${endPct}% - 8px)` }}
           onMouseDown={handleMouseDown('end')}
           title={`End: ${formatTime(rangeEnd)}`}
@@ -102,9 +102,9 @@ function RangeTimeline({ totalDuration, rangeStart, rangeEnd, segments, onRangeC
       </div>
 
       {/* Time labels */}
-      <div className="flex justify-between text-xs text-zinc-500">
+      <div className="flex justify-between text-xxs text-text-tertiary">
         <span>{formatTime(rangeStart)}</span>
-        <span className="text-blue-400">{formatTime(rangeEnd - rangeStart)} selected</span>
+        <span className="text-accent">{formatTime(rangeEnd - rangeStart)} selected</span>
         <span>{formatTime(rangeEnd)}</span>
       </div>
     </div>
@@ -168,19 +168,19 @@ export default function CaptureRangeSelector({
     <div className="space-y-3">
       {/* Mode selector */}
       <div className="flex items-center gap-2">
-        <span className="text-xs text-zinc-500 font-medium">Capture Mode:</span>
+        <span className="text-xxs text-text-tertiary font-semibold uppercase tracking-wider">Capture Mode:</span>
         <div className="flex gap-1">
           {Object.entries(MODE_LABELS).map(([key, { label, icon: Icon }]) => (
             <button
               key={key}
               onClick={() => handleModeChange(key)}
-              className={`flex items-center gap-1 px-2 py-1 text-xs rounded transition-colors
+              className={`flex items-center gap-1 px-2 py-1 text-xxs rounded transition-colors
                 ${mode === key
-                  ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
-                  : 'bg-zinc-800 text-zinc-400 border border-zinc-700 hover:border-zinc-600'
+                  ? 'bg-accent/10 text-accent border border-accent/30'
+                  : 'bg-bg-secondary text-text-tertiary border border-border hover:border-text-tertiary'
                 }`}
             >
-              <Icon size={12} />
+              <Icon className="w-3 h-3" />
               {label}
             </button>
           ))}
@@ -188,7 +188,7 @@ export default function CaptureRangeSelector({
       </div>
 
       {/* Mode description */}
-      <p className="text-xs text-zinc-500">{MODE_LABELS[mode]?.desc}</p>
+      <p className="text-xxs text-text-tertiary">{MODE_LABELS[mode]?.desc}</p>
 
       {/* Time range controls */}
       {mode === CAPTURE_MODES.TIME_RANGE && (
@@ -203,15 +203,15 @@ export default function CaptureRangeSelector({
           <div className="flex gap-2">
             <button
               onClick={handleApplyRange}
-              className="px-3 py-1 text-xs rounded bg-blue-500/20 text-blue-400 
-                         hover:bg-blue-500/30 transition-colors"
+              className="px-3 py-1 text-xxs font-medium rounded bg-accent/10 text-accent border border-accent/30
+                         hover:bg-accent/20 transition-colors"
             >
               Apply Range
             </button>
             <button
               onClick={handleClearRange}
-              className="px-3 py-1 text-xs rounded bg-zinc-700 text-zinc-300 
-                         hover:bg-zinc-600 transition-colors"
+              className="px-3 py-1 text-xxs font-medium rounded bg-bg-secondary text-text-secondary border border-border
+                         hover:bg-bg-hover transition-colors"
             >
               Clear Range
             </button>
@@ -227,8 +227,8 @@ export default function CaptureRangeSelector({
             return (
               <label
                 key={seg.id}
-                className={`flex items-center gap-2 text-xs px-2 py-1 rounded cursor-pointer
-                  ${selected ? 'bg-blue-500/10 text-blue-400' : 'bg-zinc-800/50 text-zinc-400'}`}
+                className={`flex items-center gap-2 text-xxs px-2 py-1 rounded cursor-pointer
+                  ${selected ? 'bg-accent/10 text-accent' : 'bg-bg-secondary/50 text-text-tertiary'}`}
               >
                 <input
                   type="checkbox"
@@ -239,10 +239,10 @@ export default function CaptureRangeSelector({
                       : [...(selectedSegmentIds || []), seg.id]
                     onSegmentIdsChange?.(ids)
                   }}
-                  className="rounded border-zinc-600"
+                  className="rounded border-border"
                 />
                 <span className="font-mono truncate">{seg.id}</span>
-                <span className="text-zinc-600 ml-auto">{seg.section}</span>
+                <span className="text-text-disabled ml-auto">{seg.section}</span>
               </label>
             )
           })}
@@ -251,9 +251,9 @@ export default function CaptureRangeSelector({
 
       {/* Advanced toggle for existing range indicator */}
       {captureRange && mode !== CAPTURE_MODES.TIME_RANGE && (
-        <div className="text-xs text-blue-400 bg-blue-500/10 rounded px-2 py-1 flex items-center justify-between">
+        <div className="text-xxs text-accent bg-accent/5 border border-accent/20 rounded px-2 py-1 flex items-center justify-between">
           <span>Active range: {formatTime(captureRange.start)} – {formatTime(captureRange.end)}</span>
-          <button onClick={handleClearRange} className="text-zinc-400 hover:text-zinc-300">
+          <button onClick={handleClearRange} className="text-text-tertiary hover:text-text-secondary transition-colors">
             Clear
           </button>
         </div>

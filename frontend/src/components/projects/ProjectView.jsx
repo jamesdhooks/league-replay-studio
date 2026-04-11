@@ -10,6 +10,8 @@ import PipConfigurator from '../overlay/PipConfigurator'
 import CapturePanel from '../capture/CapturePanel'
 import EncodingPanel from '../encoding/EncodingPanel'
 import CompositionPanel from '../encoding/CompositionPanel'
+import YouTubePanel from '../youtube/YouTubePanel'
+import PipelinePanel from '../pipeline/PipelinePanel'
 import StepGate from '../common/StepGate'
 
 /**
@@ -102,16 +104,10 @@ function ProjectView({ project, isLoading }) {
         )
 
       case 'upload':
-        return (
-          <div className="flex-1 flex flex-col items-center justify-center p-8">
-            <div className="text-center space-y-4 max-w-md">
-              <h3 className="text-lg font-semibold text-text-primary">Upload</h3>
-              <p className="text-sm text-text-secondary">
-                Upload to YouTube or other platforms.
-              </p>
-            </div>
-          </div>
-        )
+        return <YouTubePanel />
+
+      case 'pipeline':
+        return <PipelinePanel />
 
       default:
         return (
