@@ -762,7 +762,7 @@ class ScriptCaptureEngine:
             result = iracing_bridge.replay_search_session_time(session_num, target_ms)
             if not result:
                 self._log_entry(seg_id, "seek",
-                    f"Seek command returned False (attempt {attempt})",
+                    "Seek command returned False",
                     success=False, attempt=attempt)
                 self._sleep(SEEK_COOLDOWN)
                 continue

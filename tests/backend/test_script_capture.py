@@ -20,6 +20,8 @@ import pytest
 # Ensure the backend package is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
+import server.utils.obs_integration as obs_mod  # imported here to allow monkey-patching in tests
+
 from server.utils.script_capture import (
     ScriptCaptureEngine,
     HotkeyRecorderAdapter,
@@ -757,8 +759,7 @@ class TestHotkeyRecorderAdapter:
         poll_count = [0]
         original_get_recent = None
 
-        import server.utils.obs_integration as obs_mod
-
+        import server.utils.obs_integration as obs_mod  # noqa: F401 (already imported at module level)
         original_fn = obs_mod.get_recent_video_files
 
         def mock_get_recent(directory, since, **kw):
