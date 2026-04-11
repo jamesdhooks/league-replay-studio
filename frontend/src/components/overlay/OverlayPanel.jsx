@@ -172,26 +172,25 @@ export default function OverlayPanel() {
     <div className="flex flex-col h-full bg-bg-primary text-text-primary">
 
       {/* ── Header ──────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-bg-secondary shrink-0">
         <div className="flex items-center gap-2">
-          <Layers className="w-5 h-5 text-blue-400" />
-          <h2 className="text-sm font-semibold">Overlay Templates</h2>
-          <span className="text-xs text-text-tertiary">({templates.length})</span>
+          <Layers className="w-5 h-5 text-accent" />
+          <h2 className="text-sm font-semibold text-text-primary">Overlays</h2>
         </div>
 
         {/* Engine status indicator */}
         <div className="flex items-center gap-2">
           <div className={`w-2 h-2 rounded-full ${
-            engineStatus.engine_initialized ? 'bg-green-400' : 'bg-text-tertiary'
+            engineStatus.engine_initialized ? 'bg-success' : 'bg-text-disabled'
           }`} />
-          <span className="text-xs text-text-tertiary">
+          <span className="text-xxs text-text-tertiary">
             {engineStatus.engine_initialized ? 'Engine Ready' : 'Engine Off'}
           </span>
           {!engineStatus.engine_initialized && (
             <button
               onClick={handleInitEngine}
               disabled={loading}
-              className="text-xs px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50"
+              className="text-xxs px-2 py-0.5 rounded bg-accent hover:bg-accent-hover text-white disabled:opacity-50 font-medium"
             >
               {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Start'}
             </button>
@@ -199,75 +198,104 @@ export default function OverlayPanel() {
         </div>
       </div>
 
-      {/* ── Toolbar ─────────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-2 px-4 py-2 border-b border-border">
-        {/* Filter tabs */}
-        <div className="flex items-center gap-1 text-xs">
-          {['all', 'builtin', 'custom'].map(f => (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`px-2 py-1 rounded capitalize ${
-                filter === f
-                  ? 'bg-blue-600 text-white'
-                  : 'text-text-secondary hover:text-text-primary hover:bg-bg-secondary'
-              }`}
-            >
-              {f}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex-1" />
-
-        {/* Resolution selector */}
-        <select
-          value={resolution}
-          onChange={e => handleResolutionChange(e.target.value)}
-          className="text-xs bg-bg-secondary border border-border rounded px-2 py-1 text-text-secondary"
-        >
-          <option value="1080p">1080p</option>
-          <option value="1440p">1440p</option>
-          <option value="4k">4K</option>
-        </select>
-
-        {/* New template button */}
+      {/* ── Tab bar: Templates / Presets ──────────────────────────────── */}
+      <div className="flex border-b border-border shrink-0">
         <button
-          onClick={() => setShowCreateForm(!showCreateForm)}
-          className="flex items-center gap-1 text-xs px-2 py-1 rounded bg-bg-secondary hover:bg-border text-text-secondary"
+          onClick={() => setFilter('all')}
+          className={`flex-1 px-4 py-2 text-xs font-medium transition-colors border-b-2 ${
+            filter !== 'presets'
+              ? 'border-accent text-accent'
+              : 'border-transparent text-text-secondary hover:text-text-primary'
+          }`}
         >
-          <Plus className="w-3 h-3" /> New
+          Templates
+          <span className="ml-1 text-xxs text-text-disabled">({templates.length})</span>
+        </button>
+        <button
+          onClick={() => setFilter('presets')}
+          className={`flex-1 px-4 py-2 text-xs font-medium transition-colors border-b-2 ${
+            filter === 'presets'
+              ? 'border-accent text-accent'
+              : 'border-transparent text-text-secondary hover:text-text-primary'
+          }`}
+        >
+          <Settings2 className="w-3 h-3 inline mr-1" />
+          Presets
+          <span className="ml-1 text-xxs text-text-disabled">({presets.length})</span>
         </button>
       </div>
 
+      {/* ── Toolbar (templates view only) ────────────────────────────── */}
+      {filter !== 'presets' && (
+        <div className="flex items-center gap-2 px-4 py-2 border-b border-border shrink-0">
+          {/* Sub-filter tabs */}
+          <div className="flex items-center gap-1 text-xxs">
+            {['all', 'builtin', 'custom'].map(f => (
+              <button
+                key={f}
+                onClick={() => setFilter(f)}
+                className={`px-2 py-1 rounded capitalize ${
+                  filter === f
+                    ? 'bg-accent text-white'
+                    : 'text-text-secondary hover:text-text-primary hover:bg-bg-secondary'
+                }`}
+              >
+                {f}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex-1" />
+
+          {/* Resolution selector */}
+          <select
+            value={resolution}
+            onChange={e => handleResolutionChange(e.target.value)}
+            className="text-xxs bg-bg-secondary border border-border rounded px-2 py-1 text-text-secondary focus:outline-none focus:ring-1 focus:ring-accent"
+          >
+            <option value="1080p">1080p</option>
+            <option value="1440p">1440p</option>
+            <option value="4k">4K</option>
+          </select>
+
+          {/* New template button */}
+          <button
+            onClick={() => setShowCreateForm(!showCreateForm)}
+            className="flex items-center gap-1 text-xxs px-2 py-1 rounded bg-bg-secondary hover:bg-bg-hover text-text-secondary border border-border"
+          >
+            <Plus className="w-3 h-3" /> New
+          </button>
+        </div>
+      )}
+
       {/* ── Create form ─────────────────────────────────────────────────── */}
-      {showCreateForm && (
-        <div className="px-4 py-3 border-b border-border bg-bg-secondary/50">
+      {showCreateForm && filter !== 'presets' && (
+        <div className="px-4 py-3 border-b border-border bg-bg-secondary/50 shrink-0">
           <input
             type="text"
             value={newTemplateName}
             onChange={e => setNewTemplateName(e.target.value)}
             placeholder="Template name..."
-            className="w-full bg-bg-primary border border-border rounded px-3 py-1.5 text-sm text-text-primary mb-2 focus:border-blue-500 focus:outline-none"
+            className="w-full bg-bg-primary border border-border rounded px-3 py-1.5 text-xs text-text-primary mb-2 focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
           />
           <input
             type="text"
             value={newTemplateDesc}
             onChange={e => setNewTemplateDesc(e.target.value)}
             placeholder="Description (optional)..."
-            className="w-full bg-bg-primary border border-border rounded px-3 py-1.5 text-sm text-text-primary mb-2 focus:border-blue-500 focus:outline-none"
+            className="w-full bg-bg-primary border border-border rounded px-3 py-1.5 text-xs text-text-primary mb-2 focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
           />
           <div className="flex gap-2">
             <button
               onClick={handleCreate}
               disabled={!newTemplateName.trim()}
-              className="text-xs px-3 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50"
+              className="text-xxs px-3 py-1 rounded bg-accent hover:bg-accent-hover text-white disabled:opacity-50 font-medium"
             >
               Create
             </button>
             <button
               onClick={() => setShowCreateForm(false)}
-              className="text-xs px-3 py-1 rounded bg-bg-secondary hover:bg-border text-text-secondary"
+              className="text-xxs px-3 py-1 rounded bg-bg-secondary hover:bg-bg-hover text-text-secondary border border-border"
             >
               Cancel
             </button>
@@ -277,19 +305,19 @@ export default function OverlayPanel() {
 
       {/* ── Batch render progress ───────────────────────────────────────── */}
       {batchProgress && batchProgress.state === 'rendering' && (
-        <div className="px-4 py-2 border-b border-border bg-bg-secondary/30">
-          <div className="flex items-center justify-between text-xs text-text-tertiary mb-1">
+        <div className="px-4 py-2 border-b border-border bg-bg-secondary/30 shrink-0">
+          <div className="flex items-center justify-between text-xxs text-text-tertiary mb-1">
             <span className="flex items-center gap-1">
               <Loader2 className="w-3 h-3 animate-spin" />
-              Batch rendering...
+              Batch rendering…
             </span>
-            <span className="tabular-nums">
+            <span className="tabular-nums font-mono">
               {batchProgress.rendered_frames}/{batchProgress.total_frames} frames ({batchProgress.percentage}%)
             </span>
           </div>
-          <div className="w-full h-1.5 bg-bg-secondary rounded-full overflow-hidden">
+          <div className="w-full h-1.5 bg-bg-primary rounded-full overflow-hidden border border-border">
             <div
-              className="h-full bg-blue-500 transition-all duration-300"
+              className="h-full bg-accent transition-all duration-300"
               style={{ width: `${batchProgress.percentage}%` }}
             />
           </div>
@@ -304,57 +332,69 @@ export default function OverlayPanel() {
         </div>
       )}
 
-      {/* ── Template grid ───────────────────────────────────────────────── */}
+      {/* ── Main Content ────────────────────────────────────────────────── */}
       <div className="flex-1 overflow-y-auto p-4">
-        {/* ── Preset Design Suite ────────────────────────────────────────── */}
-        {presets.length > 0 && (
-          <div className="mb-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Settings2 className="w-4 h-4 text-purple-400" />
-              <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider">Preset Design Suite</h3>
-            </div>
-            <div className="space-y-1.5">
-              {presets.map(preset => (
+
+        {/* ── Presets View ──────────────────────────────────────────────── */}
+        {filter === 'presets' && (
+          <div className="space-y-2">
+            {presets.length > 0 ? (
+              presets.map(preset => (
                 <div
                   key={preset.id}
-                  className="group flex items-center justify-between px-3 py-2 rounded-lg border border-border hover:border-purple-500/40 bg-bg-secondary/30 hover:bg-purple-500/5 transition-all"
+                  className="group flex items-center justify-between px-3 py-2.5 rounded-lg border border-border hover:border-accent/40 bg-bg-secondary/30 hover:bg-accent/5 transition-all"
                 >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <Layers className="w-4 h-4 text-purple-400 flex-shrink-0" />
-                    <span className="text-sm text-text-primary truncate">{preset.name}</span>
-                    {preset.is_builtin && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-secondary text-text-tertiary uppercase tracking-wider flex-shrink-0">
-                        Built-in
-                      </span>
-                    )}
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center bg-bg-primary text-text-tertiary">
+                      <Layers className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-medium text-text-primary truncate">{preset.name}</span>
+                        {preset.is_builtin && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-secondary text-text-tertiary uppercase tracking-wider border border-border flex-shrink-0">
+                            Built-in
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xxs text-text-tertiary mt-0.5">
+                        {preset.description || `${Object.keys(preset.sections || {}).length} sections configured`}
+                      </p>
+                    </div>
                   </div>
                   <button
                     onClick={() => setDesignerPresetId(preset.id)}
-                    className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-purple-600 hover:bg-purple-500 text-white opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                    className="flex items-center gap-1 text-xxs px-2.5 py-1 rounded bg-accent hover:bg-accent-hover text-white opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 font-medium"
                   >
-                    <Settings2 className="w-3 h-3" /> Edit
+                    <Settings2 className="w-3 h-3" /> Design
                   </button>
                 </div>
-              ))}
-            </div>
+              ))
+            ) : (
+              <div className="text-center text-text-tertiary text-xs py-8">
+                No presets available. Presets control how overlay templates render per-section.
+              </div>
+            )}
           </div>
         )}
 
-        <div className="grid grid-cols-1 gap-3">
+        {/* ── Templates View ────────────────────────────────────────────── */}
+        {filter !== 'presets' && (
+          <div className="grid grid-cols-1 gap-3">
           {filteredTemplates.map(template => (
             <div
               key={template.id}
               onClick={() => setSelectedTemplateId(template.id)}
               className={`group relative rounded-lg border cursor-pointer transition-all ${
                 selectedTemplateId === template.id
-                  ? 'border-blue-500 ring-1 ring-blue-500/50 bg-blue-500/10'
+                  ? 'border-accent ring-1 ring-accent/50 bg-accent/5'
                   : `${styleColor(template.style)} hover:border-text-tertiary`
               }`}
             >
               <div className="flex items-start gap-3 p-3">
                 {/* Icon */}
                 <div className={`flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center ${
-                  selectedTemplateId === template.id ? 'bg-blue-500/20 text-blue-400' : 'bg-bg-secondary text-text-tertiary'
+                  selectedTemplateId === template.id ? 'bg-accent/10 text-accent' : 'bg-bg-secondary text-text-tertiary'
                 }`}>
                   {styleIcon(template.style)}
                 </div>
@@ -362,22 +402,22 @@ export default function OverlayPanel() {
                 {/* Info */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-text-primary truncate">
+                    <span className="text-xs font-medium text-text-primary truncate">
                       {template.name}
                     </span>
                     {template.is_builtin && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-secondary text-text-tertiary uppercase tracking-wider">
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-secondary text-text-tertiary uppercase tracking-wider border border-border">
                         Built-in
                       </span>
                     )}
-                    <span className="text-[10px] text-text-tertiary">v{template.version}</span>
+                    <span className="text-[10px] text-text-disabled">v{template.version}</span>
                   </div>
-                  <p className="text-xs text-text-tertiary mt-0.5 line-clamp-2">
+                  <p className="text-xxs text-text-tertiary mt-0.5 line-clamp-2">
                     {template.description}
                   </p>
                   <div className="flex items-center gap-1 mt-1.5">
                     {(template.resolutions || []).map(res => (
-                      <span key={res} className="text-[10px] px-1 py-0.5 rounded bg-bg-secondary text-text-tertiary">
+                      <span key={res} className="text-[10px] px-1 py-0.5 rounded bg-bg-secondary text-text-tertiary border border-border">
                         {res}
                       </span>
                     ))}
@@ -388,21 +428,21 @@ export default function OverlayPanel() {
                 <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                   <button
                     onClick={e => { e.stopPropagation(); setEditingTemplateId(template.id) }}
-                    className="p-1 rounded hover:bg-blue-700/50 text-text-tertiary hover:text-blue-400"
+                    className="p-1 rounded hover:bg-accent/20 text-text-tertiary hover:text-accent"
                     title="Edit template"
                   >
                     <Code className="w-3.5 h-3.5" />
                   </button>
                   <button
                     onClick={e => { e.stopPropagation(); handleDuplicate(template.id) }}
-                    className="p-1 rounded hover:bg-bg-secondary text-text-tertiary hover:text-text-primary"
+                    className="p-1 rounded hover:bg-bg-hover text-text-tertiary hover:text-text-primary"
                     title="Duplicate"
                   >
                     <Copy className="w-3.5 h-3.5" />
                   </button>
                   <button
                     onClick={e => { e.stopPropagation(); handleExport(template.id) }}
-                    className="p-1 rounded hover:bg-bg-secondary text-text-tertiary hover:text-text-primary"
+                    className="p-1 rounded hover:bg-bg-hover text-text-tertiary hover:text-text-primary"
                     title="Export"
                   >
                     <Download className="w-3.5 h-3.5" />
@@ -410,7 +450,7 @@ export default function OverlayPanel() {
                   {!template.is_builtin && (
                     <button
                       onClick={e => { e.stopPropagation(); handleDelete(template.id) }}
-                      className="p-1 rounded hover:bg-red-700/50 text-text-tertiary hover:text-red-400"
+                      className="p-1 rounded hover:bg-danger/10 text-text-tertiary hover:text-danger"
                       title="Delete"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
@@ -422,14 +462,14 @@ export default function OverlayPanel() {
               {/* Selection indicator */}
               {selectedTemplateId === template.id && (
                 <div className="absolute right-3 top-3">
-                  <Check className="w-4 h-4 text-blue-400" />
+                  <Check className="w-4 h-4 text-accent" />
                 </div>
               )}
             </div>
           ))}
 
           {filteredTemplates.length === 0 && (
-            <div className="text-center text-text-tertiary text-sm py-8">
+            <div className="text-center text-text-tertiary text-xs py-8">
               {filter === 'custom'
                 ? 'No custom templates yet. Create or duplicate one to get started.'
                 : 'No templates found.'
@@ -437,25 +477,26 @@ export default function OverlayPanel() {
             </div>
           )}
         </div>
+        )}
       </div>
 
-      {/* ── Selected template summary ───────────────────────────────────── */}
-      {selectedTemplateId && (
-        <div className="px-4 py-2 border-t border-border bg-bg-secondary/50 flex items-center justify-between">
-          <div className="flex items-center gap-2 text-xs text-text-tertiary">
-            <ChevronRight className="w-3 h-3" />
-            <span>Selected: <span className="text-text-primary font-medium">
+      {/* ── Selected template footer ───────────────────────────────────── */}
+      {selectedTemplateId && filter !== 'presets' && (
+        <div className="px-4 py-2 border-t border-border bg-bg-secondary shrink-0 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-xxs text-text-tertiary">
+            <Check className="w-3 h-3 text-accent" />
+            <span>Active: <span className="text-text-primary font-medium">
               {templates.find(t => t.id === selectedTemplateId)?.name || selectedTemplateId}
             </span></span>
           </div>
           <div className="flex items-center gap-2">
             <button
               onClick={() => setEditingTemplateId(selectedTemplateId)}
-              className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white"
+              className="flex items-center gap-1 text-xxs px-2 py-0.5 rounded bg-accent hover:bg-accent-hover text-white font-medium"
             >
-              <Code className="w-3 h-3" /> Edit
+              <Code className="w-3 h-3" /> Edit Code
             </button>
-            <div className="flex items-center gap-1 text-xs text-text-tertiary">
+            <div className="flex items-center gap-1 text-xxs text-text-disabled">
               <Settings className="w-3 h-3" />
               {resolution}
             </div>
