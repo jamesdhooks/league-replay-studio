@@ -66,7 +66,7 @@ async def create_plugin(body: PluginCreateRequest):
         plugin = data_plugin_service.create_plugin(body.model_dump())
         return {"success": True, "plugin": plugin}
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # ── Single plugin CRUD ──────────────────────────────────────────────────────
@@ -90,7 +90,7 @@ async def update_plugin(plugin_id: str, body: PluginUpdateRequest):
             raise HTTPException(status_code=404, detail="Plugin not found")
         return {"success": True, "plugin": plugin}
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.delete("/{plugin_id}")

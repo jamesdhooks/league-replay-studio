@@ -2,10 +2,9 @@ import { useState, useEffect, useCallback } from 'react'
 import {
   Plug, Plus, Trash2, TestTube, ChevronDown, ChevronRight,
   CheckCircle2, XCircle, Loader2, Shield, Key, Globe,
-  Users, Trophy, Flag, Info, RefreshCw, ExternalLink,
+  Users, Trophy, Flag, Info,
 } from 'lucide-react'
 import { apiGet, apiPost, apiPut, apiDelete } from '../../services/api'
-import CollapsibleSection from '../ui/CollapsibleSection'
 
 const PLUGIN_TYPES = [
   {
@@ -506,7 +505,7 @@ function PluginCard({ plugin, isExpanded, onToggle, onUpdate, onDelete, onTest, 
                   {testResult.validation.fields_found && (
                     <>Fields: {testResult.validation.fields_found.join(', ')}</>
                   )}
-                  {testResult.validation.entry_count != null && (
+                  {testResult.validation.entry_count !== null && testResult.validation.entry_count !== undefined && (
                     <> • {testResult.validation.entry_count} entries</>
                   )}
                 </p>
