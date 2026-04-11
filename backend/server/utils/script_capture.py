@@ -118,13 +118,24 @@ def _format_race_time(seconds: float) -> str:
     return f"{m}:{s:02d}"
 
 
-def _interruptible_sleep(seconds: float, cancelled_fn: Callable[[], bool]) -> None:
-    """Sleep for *seconds*, checking cancellation every 0.25s."""
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
+def _interruptible_sleep(
+    seconds: float,
+    cancelled_fn: Callable[[], bool],
+    *,
+    _now: Callable[[], float] = time.monotonic,
+    _sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Sleep for *seconds*, checking cancellation every 0.25s.
+
+    *_now* and *_sleep* are injectable for testing so that a fake clock
+    can drive the loop without relying on wall-clock time.
+    """
+    deadline = _now() + seconds
+    while _now() < deadline:
         if cancelled_fn():
             break
-        time.sleep(min(0.25, deadline - time.monotonic()))
+        remaining = deadline - _now()
+        _sleep(min(0.25, remaining))
 
 
 # ── Main Engine ─────────────────────────────────────────────────────────────
@@ -164,6 +175,10 @@ class ScriptCaptureEngine:
         progress_callback: Optional[Callable[[dict], None]] = None,
         compile_timeout: int = 0,
         contiguous_gap_threshold: float = CONTIGUOUS_GAP_THRESHOLD,
+        video_watch_folder: Optional[str] = None,
+        clip_poll_timeout: float = 30.0,
+        _now: Optional[Callable[[], float]] = None,
+        _sleep: Optional[Callable[[float], None]] = None,
     ) -> None:
         """
         Args:
@@ -175,6 +190,18 @@ class ScriptCaptureEngine:
                 0 = auto-calculated from clip count.
             contiguous_gap_threshold: Max gap in seconds to treat consecutive
                 segments as contiguous (keeps recording running).
+            video_watch_folder: When using OBS/ShadowPlay hotkey recording the
+                capture software writes to its own configured folder.  Set this
+                to that folder so the engine can poll for the new file and move
+                it into the project clips directory.  Leave None (default) when
+                using native CaptureEngine recording where the output path is
+                known in advance.
+            clip_poll_timeout: Seconds to poll *video_watch_folder* for a new
+                clip before giving up (default 30 s).
+            _now: Clock function returning monotonic seconds.  Defaults to
+                ``time.monotonic``.  Inject a fake for unit tests.
+            _sleep: Sleep function.  Defaults to ``time.sleep``.  Inject a
+                fake for unit tests.
         """
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
@@ -183,10 +210,16 @@ class ScriptCaptureEngine:
         self._progress_cb = progress_callback
         self._compile_timeout = compile_timeout
         self._contiguous_gap_threshold = contiguous_gap_threshold
+        self._video_watch_folder = video_watch_folder
+        self._clip_poll_timeout = clip_poll_timeout
+        self._now: Callable[[], float] = _now or time.monotonic
+        self._sleep: Callable[[float], None] = _sleep or time.sleep
         self._clips: list[dict] = []
         self._capture_log: list[CaptureLogEntry] = []
         self._cancelled = False
         self._segment_strategies: list[dict] = []
+        # Wall-clock time when the current recording started (used for OBS polling)
+        self._recording_wall_start: float = 0.0
 
     # -- Public API ---------------------------------------------------------
 
