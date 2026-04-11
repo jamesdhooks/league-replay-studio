@@ -1,5 +1,6 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useCapture } from '../../context/CaptureContext'
+import { useScriptState } from '../../context/ScriptStateContext'
 import { useToast } from '../../context/ToastContext'
 import { formatFileSize } from '../../utils/format'
 import { formatTime } from '../../utils/time'
@@ -9,6 +10,9 @@ import {
   HardDrive, Zap, RefreshCw, FileVideo,
 } from 'lucide-react'
 import ClipsPanel from './ClipsPanel'
+import ScriptLockBanner from './ScriptLockBanner'
+import CaptureRangeSelector from './CaptureRangeSelector'
+import TrashBin from './TrashBin'
 
 /**
  * CapturePanel — Video capture orchestration UI.
@@ -19,13 +23,22 @@ import ClipsPanel from './ClipsPanel'
  * @param {Object} props
  * @param {number} props.projectId - Active project ID
  */
-export default function CapturePanel({ projectId }) {
+export default function CapturePanel({ projectId, script, totalDuration }) {
   const {
     software, activeSoftware, hotkeys, watchDir,
     captureState, elapsedSeconds, filePath, fileSize, error, testResult, loading,
     detectSoftware, testHotkey, startCapture, stopCapture, resetCapture,
   } = useCapture()
+  const { scriptLocked, fetchState } = useScriptState()
   const { showSuccess, showError } = useToast()
+  const [captureMode, setCaptureMode] = useState('all')
+  const [selectedSegmentIds, setSelectedSegmentIds] = useState([])
+  const [captureTimeRange, setCaptureTimeRange] = useState(null)
+
+  // Load script state on mount
+  useEffect(() => {
+    if (projectId) fetchState(projectId)
+  }, [projectId, fetchState])
 
   // Detect software on mount
   useEffect(() => {
@@ -186,8 +199,34 @@ export default function CapturePanel({ projectId }) {
           </div>
         )}
 
+        {/* ── Script Lock Banner ─────────────────────────────────── */}
+        <ScriptLockBanner
+          projectId={projectId}
+          script={script}
+          onLock={() => fetchState(projectId)}
+          onUnlock={() => fetchState(projectId)}
+        />
+
+        {/* ── Capture Range / Mode Selector ──────────────────────── */}
+        {scriptLocked && script?.length > 0 && (
+          <div className="bg-bg-secondary border border-border rounded-lg p-4 space-y-3">
+            <CaptureRangeSelector
+              projectId={projectId}
+              script={script}
+              totalDuration={totalDuration || 0}
+              onModeChange={setCaptureMode}
+              onRangeChange={setCaptureTimeRange}
+              selectedSegmentIds={selectedSegmentIds}
+              onSegmentIdsChange={setSelectedSegmentIds}
+            />
+          </div>
+        )}
+
         {/* ── Script Capture Clips ──────────────────────────────────── */}
         <ClipsPanel projectId={projectId} />
+
+        {/* ── Trash Bin ─────────────────────────────────────────────── */}
+        <TrashBin projectId={projectId} />
 
         <Section icon={Monitor} title="Capture Software">
           <div className="space-y-2">

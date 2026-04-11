@@ -37,6 +37,8 @@ class StartCompositionRequest(BaseModel):
     trim_config: dict[str, Any] | None = None
     output_dir: str
     preset_id: str = "youtube_1080p60"
+    # Only encode captured segments (filter via capture state)
+    captured_only: bool = False
 
 
 class CancelCompositionRequest(BaseModel):
@@ -89,10 +91,28 @@ async def start_composition(req: StartCompositionRequest):
         ``{"success": true, "job": {...}}`` or error dict.
     """
     try:
+        # Filter to only captured segments if requested
+        script = list(req.script)
+        clips_manifest = list(req.clips_manifest)
+        if req.captured_only:
+            from server.services.project_service import project_service
+            from server.services.script_state_service import script_state_service
+            project = project_service.get_project(req.project_id)
+            if project and project.get("project_dir"):
+                seg_states = script_state_service.get_segment_states(project["project_dir"])
+                captured_ids = {
+                    sid for sid, info in seg_states.items()
+                    if info.get("capture_state") == "captured"
+                }
+                script = [s for s in script if s.get("id", s.get("segment_id", "")) in captured_ids
+                          or s.get("type") == "transition"]
+                clips_manifest = [c for c in clips_manifest if c.get("id", c.get("segment_id", "")) in captured_ids]
+                logger.info("[Composition API] Filtered to %d captured segments", len(clips_manifest))
+
         result = composition_service.submit_job(
             project_id=req.project_id,
-            script=req.script,
-            clips_manifest=req.clips_manifest,
+            script=script,
+            clips_manifest=clips_manifest,
             overlay_config=req.overlay_config,
             transition_config=req.transition_config,
             trim_config=req.trim_config,

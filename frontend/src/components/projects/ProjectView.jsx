@@ -6,6 +6,7 @@ import AnalysisPanel from '../analysis/AnalysisPanel'
 import HighlightPanel from '../highlights/HighlightPanel'
 import OverlayPanel from '../overlay/OverlayPanel'
 import OverlayPreviewStep from '../overlay/OverlayPreviewStep'
+import PipConfigurator from '../overlay/PipConfigurator'
 import CapturePanel from '../capture/CapturePanel'
 import EncodingPanel from '../encoding/EncodingPanel'
 import CompositionPanel from '../encoding/CompositionPanel'
@@ -54,9 +55,12 @@ function ProjectView({ project, isLoading }) {
         if (!hasAnalysis) return <StepGate currentStep="overlay" requiredStep="analysis" />
         return (
           <div className="flex flex-1 overflow-hidden">
-            {/* Left: Overlay template config */}
-            <div className="w-1/2 border-r border-border overflow-hidden">
+            {/* Left: Overlay template config + PiP */}
+            <div className="w-1/2 border-r border-border overflow-y-auto">
               <OverlayPanel />
+              <div className="border-t border-border p-4">
+                <PipConfigurator projectId={project.id} />
+              </div>
             </div>
             {/* Right: Overlay preview with read-only timeline */}
             <div className="w-1/2 overflow-hidden">
@@ -70,7 +74,13 @@ function ProjectView({ project, isLoading }) {
 
       case 'capture':
         if (!hasAnalysis) return <StepGate currentStep="capture" requiredStep="analysis" />
-        return <CapturePanel projectId={project.id} />
+        return (
+          <CapturePanel
+            projectId={project.id}
+            script={project.script || []}
+            totalDuration={project.race_duration || 0}
+          />
+        )
 
       case 'export':
         return (

@@ -406,6 +406,11 @@ class CompositionService:
             if overlaid is None:
                 return
 
+            # ── Step 2b: PiP overlay (for PiP segments) ────────────────────
+            if self._is_cancelled(job):
+                return
+            overlaid = self._step_pip_overlay(job, overlaid, ffmpeg_path)
+
             # ── Step 3: Build clip list with transitions ────────────────────
             if self._is_cancelled(job):
                 return
@@ -733,6 +738,132 @@ class CompositionService:
         except ImportError:
             logger.warning("[Composition] overlay_engine not available — overlay step will be skipped")
             return None
+
+    # ── Step 2b: PiP overlay ────────────────────────────────────────────────
+
+    def _step_pip_overlay(
+        self,
+        job: CompositionJob,
+        clips: list[dict[str, Any]],
+        ffmpeg_path: str,
+    ) -> list[dict[str, Any]]:
+        """Apply Picture-in-Picture overlay for PiP segments.
+
+        For segments with ``pip`` metadata, overlays the secondary video
+        (scaled and positioned) on top of the primary clip using FFmpeg.
+
+        The PiP configuration (position, scale, border, badge) is read
+        from the overlay_config or from the project's capture_state.json.
+
+        If no PiP segments exist, clips pass through unchanged.
+        """
+        pip_clips = [c for c in clips if c.get("pip")]
+        if not pip_clips:
+            self._log(job, "pip", "No PiP segments — skipping PiP step")
+            return clips
+
+        # Load PiP config from overlay_config or defaults
+        pip_config = job.overlay_config.get("pip_config", {})
+        if not pip_config.get("enabled"):
+            # Try to load from project capture state
+            try:
+                from server.services.script_state_service import script_state_service
+                project_dir = clips[0].get("project_dir", "") if clips else ""
+                if project_dir:
+                    pip_config = script_state_service.get_pip_config(project_dir)
+            except Exception:
+                logger.debug("[Composition] Could not load PiP config from project state")
+
+        if not pip_config.get("enabled"):
+            self._log(job, "pip", "PiP disabled — skipping PiP overlay")
+            return clips
+
+        position = pip_config.get("position", "bottom-right")
+        scale = pip_config.get("scale", 0.3)
+        margin = pip_config.get("margin", 16)
+        border = pip_config.get("border", True)
+        border_color = pip_config.get("border_color", "#ffffff")
+        border_width = pip_config.get("border_width", 2)
+        # show_live_badge used for future badge rendering (e.g. LIVE text overlay)
+        _ = pip_config.get("show_live_badge", True)
+
+        out_dir = Path(job.output_dir) / "pip"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        total_pip = len(pip_clips)
+        for pip_idx, clip in enumerate(pip_clips):
+            if self._is_cancelled(job):
+                return clips
+
+            pip_meta = clip.get("pip", {})
+            secondary_path = pip_meta.get("secondary_clip_path")
+            seg_id = clip.get("id", f"pip_{pip_idx}")
+
+            if not secondary_path or not Path(secondary_path).exists():
+                self._log(job, "pip", f"No secondary clip for PiP segment {seg_id}",
+                          success=False, segment_id=seg_id)
+                continue
+
+            primary_path = clip.get("overlaid_path") or clip.get("trimmed_path")
+            if not primary_path:
+                continue
+
+            safe_id = _sanitise_id(seg_id)
+            pip_output = str(out_dir / f"{safe_id}_pip.mp4")
+
+            # Build FFmpeg PiP filter
+            # Position mapping
+            pos_map = {
+                "top-left":     f"overlay={margin}:{margin}",
+                "top-right":    f"overlay=main_w-overlay_w-{margin}:{margin}",
+                "bottom-left":  f"overlay={margin}:main_h-overlay_h-{margin}",
+                "bottom-right": f"overlay=main_w-overlay_w-{margin}:main_h-overlay_h-{margin}",
+            }
+            overlay_pos = pos_map.get(position, pos_map["bottom-right"])
+
+            # Build filter complex
+            filters = []
+            # Scale secondary to pip size
+            filters.append(f"[1:v]scale=iw*{scale}:ih*{scale}")
+            if border:
+                # Add border using pad filter
+                hex_color = border_color.lstrip("#")
+                filters[-1] += f",pad=iw+{border_width * 2}:ih+{border_width * 2}:{border_width}:{border_width}:0x{hex_color}"
+            filters[-1] += "[pip]"
+
+            # Overlay PiP on main
+            filters.append(f"[0:v][pip]{overlay_pos}[out]")
+
+            filter_complex = ";".join(filters)
+
+            cmd = [
+                ffmpeg_path, "-y",
+                "-i", _safe_video_path(primary_path),
+                "-i", _safe_video_path(secondary_path),
+                "-filter_complex", filter_complex,
+                "-map", "[out]", "-map", "0:a?",
+                "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+                "-c:a", "copy",
+                _safe_output_path(pip_output),
+            ]
+
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=300,
+                )
+                if result.returncode == 0 and Path(pip_output).exists():
+                    clip["overlaid_path"] = pip_output
+                    self._log(job, "pip", f"PiP overlay applied for {seg_id}",
+                              segment_id=seg_id, extra={"position": position, "scale": scale})
+                else:
+                    self._log(job, "pip", f"PiP FFmpeg failed for {seg_id}: {result.stderr[:200]}",
+                              success=False, segment_id=seg_id)
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                self._log(job, "pip", f"PiP overlay error for {seg_id}: {exc}",
+                          success=False, segment_id=seg_id)
+
+        self._log(job, "pip", f"PiP step complete: processed {total_pip} PiP segments")
+        return clips
 
     # ── Step 3: Transitions ─────────────────────────────────────────────────
 

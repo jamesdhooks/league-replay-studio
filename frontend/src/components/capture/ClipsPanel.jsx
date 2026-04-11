@@ -1,10 +1,11 @@
 import { useMemo, useState, useRef, useEffect } from 'react'
 import { useCapture } from '../../context/CaptureContext'
+import { useScriptState, CAPTURE_STATES } from '../../context/ScriptStateContext'
 import {
   Film, Loader2, CheckCircle2, XCircle,
   Clapperboard, Trophy, Flag, Star, FileVideo,
   ChevronDown, ChevronRight, AlertTriangle,
-  Radio, Camera, Repeat, Clock, ArrowRight,
+  Radio, Camera, Repeat, Clock, ArrowRight, Circle,
 } from 'lucide-react'
 
 // ── Section metadata ──────────────────────────────────────────────────────
@@ -63,7 +64,7 @@ const LOG_ACTION_ICONS = {
 
 // ── Script Timeline (read-only, progress bars) ────────────────────────────
 
-function ScriptTimeline({ strategies, currentSegmentId, completedIndex, totalSegments }) {
+function ScriptTimeline({ strategies, currentSegmentId, completedIndex, totalSegments, segmentStates }) {
   if (!strategies?.length) return null
 
   const totalDuration = strategies.reduce((sum, s) => sum + (s.duration || 0), 0)
@@ -89,20 +90,25 @@ function ScriptTimeline({ strategies, currentSegmentId, completedIndex, totalSeg
           const isCurrent = strat.segment_id === currentSegmentId
           const isCompleted = idx < (completedIndex ?? -1)
           const isPending = idx > (completedIndex ?? -1) && !isCurrent
+          // Capture state from persistent tracking
+          const captState = segmentStates?.[strat.segment_id]?.capture_state
 
           let bgClass = 'bg-bg-tertiary/50'
-          if (isCompleted) bgClass = meta.barColor + '/60'
+          if (captState === 'captured') bgClass = meta.barColor + '/70'
+          else if (captState === 'invalidated') bgClass = 'bg-amber-500/40'
+          else if (isCompleted) bgClass = meta.barColor + '/60'
           else if (isCurrent) bgClass = meta.barColor + ' animate-pulse'
           else if (isPending) bgClass = 'bg-bg-tertiary/30'
 
           const isContiguous = strat.contiguous_with_prev
+          const isPip = strat.is_pip || strat.type === 'pip'
 
           return (
             <div
               key={strat.segment_id || idx}
               className={`relative ${bgClass} transition-all duration-300`}
               style={{ width: `${widthPct}%`, minWidth: '3px' }}
-              title={`${strat.segment_id}\n${strat.section} / ${strat.event_type || strat.type}\n${formatDuration(strat.duration)}\n${strat.strategy === 'continue' ? '↔ Contiguous' : '⏺ New recording'}`}
+              title={`${strat.segment_id}\n${strat.section} / ${strat.event_type || strat.type}\n${formatDuration(strat.duration)}\n${strat.strategy === 'continue' ? '↔ Contiguous' : '⏺ New recording'}${captState ? `\n● ${captState}` : ''}${isPip ? '\n🖼 PiP segment' : ''}`}
             >
               {/* Contiguous indicator — thin line connecting to previous */}
               {isContiguous && (
@@ -112,6 +118,19 @@ function ScriptTimeline({ strategies, currentSegmentId, completedIndex, totalSeg
               {/* Current indicator glow */}
               {isCurrent && (
                 <div className="absolute inset-0 ring-1 ring-accent ring-inset rounded-sm" />
+              )}
+
+              {/* Capture state dot */}
+              {captState === 'captured' && (
+                <div className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-green-400" />
+              )}
+              {captState === 'invalidated' && (
+                <div className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-amber-400" />
+              )}
+
+              {/* PiP indicator */}
+              {isPip && (
+                <div className="absolute bottom-0 left-0 right-0 h-1 bg-blue-500/60" />
               )}
             </div>
           )
@@ -134,6 +153,18 @@ function ScriptTimeline({ strategies, currentSegmentId, completedIndex, totalSeg
           <ArrowRight className="w-2.5 h-2.5" />
           = contiguous
         </span>
+        {Object.values(segmentStates || {}).some(s => s.capture_state === 'captured') && (
+          <span className="flex items-center gap-1 text-xxs text-green-400">
+            <CheckCircle2 className="w-2.5 h-2.5" />
+            = captured
+          </span>
+        )}
+        {Object.values(segmentStates || {}).some(s => s.capture_state === 'invalidated') && (
+          <span className="flex items-center gap-1 text-xxs text-amber-400">
+            <AlertTriangle className="w-2.5 h-2.5" />
+            = invalidated
+          </span>
+        )}
       </div>
     </div>
   )
@@ -297,6 +328,7 @@ export default function ClipsPanel({ projectId }) {
     scriptCurrentSegment,
     cancelScriptCapture,
   } = useCapture()
+  const { segments: segmentStates } = useScriptState()
 
   const [showStrategies, setShowStrategies] = useState(false)
 
@@ -338,6 +370,7 @@ export default function ClipsPanel({ projectId }) {
           currentSegmentId={currentSegmentId}
           completedIndex={completedIndex}
           totalSegments={scriptCaptureProgress?.segment_total || scriptCaptureStrategies.length}
+          segmentStates={segmentStates}
         />
       )}
 

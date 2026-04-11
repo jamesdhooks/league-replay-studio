@@ -18,6 +18,7 @@ import { LLMProvider } from '../context/LLMContext'
 import { YouTubeProvider } from '../context/YouTubeContext'
 import { PipelineProvider } from '../context/PipelineContext'
 import { CompositionProvider } from '../context/CompositionContext'
+import { ScriptStateProvider } from '../context/ScriptStateContext'
 import { wsClient } from '../services/websocket'
 import ErrorBoundary from './ui/ErrorBoundary'
 import ComposeProviders from './ui/ComposeProviders'
@@ -90,6 +91,7 @@ const PROVIDER_STACK = [
   [ErrorBoundary, { name: 'Analysis' }],
   [AnalysisProvider],
   [CaptureProvider],
+  [ScriptStateProvider],
   [EncodingProvider],
   [PreviewProvider],
   [OverlayProvider],

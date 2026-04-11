@@ -1,9 +1,10 @@
 import { useHighlight, EVENT_TYPE_LABELS, tierColor } from '../../context/HighlightContext'
+import { useScriptState, CAPTURE_STATES } from '../../context/ScriptStateContext'
 import { EVENT_COLORS } from '../../context/TimelineContext'
 import { formatTime } from '../../utils/time'
 import {
   ArrowUpDown, ArrowUp, ArrowDown,
-  Check, X, Minus, Film, ChevronDown,
+  Check, X, Minus, Film, ChevronDown, Circle, CheckCircle2, AlertTriangle, Loader2,
 } from 'lucide-react'
 
 /**
@@ -20,6 +21,7 @@ export default function HighlightEventTable({ onInspect }) {
     filterType, setFilterType,
     filterInclusion, setFilterInclusion,
   } = useHighlight()
+  const { segments: segmentStates, scriptLocked } = useScriptState()
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -72,6 +74,9 @@ export default function HighlightEventTable({ onInspect }) {
               <SortableHeader column="type" label="Type" current={sortColumn} direction={sortDirection} onSort={handleSort} />
               <SortableHeader column="time" label="Time" current={sortColumn} direction={sortDirection} onSort={handleSort} />
               <th className="px-2 py-1.5 text-left text-text-tertiary font-medium">Reason</th>
+              {scriptLocked && (
+                <th className="w-8 px-1 py-1.5 text-center text-text-tertiary font-medium" title="Capture State">📹</th>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -186,6 +191,24 @@ export default function HighlightEventTable({ onInspect }) {
                   <td className="px-2 py-1 text-text-tertiary truncate max-w-[120px]" title={evt.reason}>
                     {evt.reason}
                   </td>
+
+                  {/* Capture State (shown when script is locked) */}
+                  {scriptLocked && (
+                    <td className="px-1 py-1 text-center">
+                      {(() => {
+                        // Find matching segment by event id or segment_id pattern
+                        const segId = `seg_${evt.id}` 
+                        const captState = segmentStates[segId]?.capture_state
+                          || Object.values(segmentStates).find(s =>
+                            Math.abs((s.start_time || 0) - (evt.start_time_seconds || 0)) < 0.5
+                          )?.capture_state
+                        if (captState === CAPTURE_STATES.CAPTURED) return <CheckCircle2 size={12} className="text-green-400 mx-auto" title="Captured" />
+                        if (captState === CAPTURE_STATES.INVALIDATED) return <AlertTriangle size={12} className="text-amber-400 mx-auto" title="Invalidated" />
+                        if (captState === CAPTURE_STATES.CAPTURING) return <Loader2 size={12} className="text-blue-400 mx-auto animate-spin" title="Capturing" />
+                        return <Circle size={12} className="text-zinc-600 mx-auto" title="Not captured" />
+                      })()}
+                    </td>
+                  )}
                 </tr>
               )
             })}
