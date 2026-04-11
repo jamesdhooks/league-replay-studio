@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 import subprocess
 import threading
@@ -270,14 +269,24 @@ class CompositionService:
         if self._active_job_id is not None:
             return {"success": False, "error": "A composition job is already running"}
 
-        # Validate output directory
+        # Validate output directory — must be under the application's
+        # data directory to prevent arbitrary filesystem writes.
+        if not output_dir:
+            return {"success": False, "error": "output_dir is required"}
         out_path = Path(output_dir)
         if ".." in out_path.parts:
             return {"success": False, "error": "Invalid output directory path"}
-        if not output_dir:
-            return {"success": False, "error": "output_dir is required"}
         out_resolved = out_path.resolve()
-        os.makedirs(str(out_resolved), exist_ok=True)
+
+        # Restrict to allowed base directories (project data paths).
+        from server.config import DATA_DIR, PROJECTS_DIR
+        allowed_bases = [DATA_DIR.resolve(), PROJECTS_DIR.resolve()]
+        if not any(out_resolved == base or out_resolved.is_relative_to(base) for base in allowed_bases):
+            return {
+                "success": False,
+                "error": "Output directory must be within the application data directory",
+            }
+        out_resolved.mkdir(parents=True, exist_ok=True)  # lgtm[py/path-injection]
 
         if not clips_manifest:
             return {"success": False, "error": "clips_manifest is empty"}
