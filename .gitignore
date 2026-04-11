@@ -76,3 +76,5 @@ backend/native_capture/build/
 nul
 exhaustive
 quality
+
+/assets
