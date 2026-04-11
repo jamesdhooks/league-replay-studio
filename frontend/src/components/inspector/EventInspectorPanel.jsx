@@ -5,13 +5,13 @@ import { useToast } from '../../context/ToastContext'
 import { useIRacing } from '../../context/IRacingContext'
 import { EVENT_TYPE_LABELS } from '../../context/HighlightContext'
 import { apiPost } from '../../services/api'
-import { formatTimePrecise } from '../../utils/time'
+import { formatTimePrecise, formatTime } from '../../utils/time'
 import EventControlsBar from '../ui/EventControlsBar'
 import {
-  Info, X, Save, RotateCcw, Scissors, Trash2,
+  Info, X, RotateCcw, Scissors, Trash2,
   ChevronDown, Users, Clock, Star, Camera, Zap,
-  ToggleLeft, ToggleRight, BarChart2, AlertTriangle,
-  Loader2, WifiOff, Play, Film,
+  BarChart2, AlertTriangle, CheckCircle2,
+  Loader2, WifiOff, Film,
 } from 'lucide-react'
 
 /** All event types available for the dropdown — must match live detectors */
@@ -37,9 +37,9 @@ export default function EventInspectorPanel({ projectId }) {
   const {
     selectedEventId, setSelectedEventId, events,
     updateEvent, deleteEvent, splitEvent,
-    playheadTime, seekTo,
+    playheadTime, seekTo, raceDuration,
   } = useTimeline()
-  const { drivers, params, overrides, toggleOverride } = useHighlight()
+  const { drivers, params, overrides, toggleOverride, setOverrideValue } = useHighlight()
   const { showSuccess, showError } = useToast()
   const { isConnected } = useIRacing()
 
@@ -52,13 +52,33 @@ export default function EventInspectorPanel({ projectId }) {
 
   // ── Find the selected event ──────────────────────────────────────────────
   const selectedEvent = useMemo(
-    () => events.find(e => e.id === selectedEventId) || null,
+    () => events.find(e => String(e.id) === String(selectedEventId)) || null,
     [events, selectedEventId],
   )
+
+  useEffect(() => {
+    console.debug('[Inspector] selection changed', {
+      selectedEventId,
+      selectedEventFound: !!selectedEvent,
+      selectedEventResolvedId: selectedEvent?.id ?? null,
+      eventsCount: Array.isArray(events) ? events.length : 0,
+      strictTypeSample: Array.isArray(events) ? events.slice(0, 5).map(e => ({ id: e.id, type: typeof e.id })) : [],
+    })
+
+    if (selectedEventId != null && !selectedEvent) {
+      console.warn('[Inspector] selectedEventId not found in events', {
+        selectedEventId,
+        sampleIds: Array.isArray(events) ? events.slice(0, 12).map(e => e.id) : [],
+      })
+    }
+  }, [events, selectedEvent, selectedEventId])
 
   // ── Local editing state (copy of event fields for editing) ───────────────
   const [editState, setEditState] = useState(null)
   const [isDirty, setIsDirty] = useState(false)
+  const [saveStatus, setSaveStatus] = useState('idle') // 'idle'|'pending'|'saving'|'saved'|'error'
+  const saveTimerRef = useRef(null)
+  const doSaveRef = useRef(null)
 
   // Sync local state when the selected event changes
   useEffect(() => {
@@ -149,12 +169,43 @@ export default function EventInspectorPanel({ projectId }) {
     })
   }, [checkDirty])
 
-  // ── Apply changes ─────────────────────────────────────────────────────────
+  // ── Auto-save ─────────────────────────────────────────────────────────────
+  const doSave = useCallback(async () => {
+    if (!editState || !selectedEvent) return
+    try {
+      setSaveStatus('saving')
+      const { padding_before, padding_after, ...coreFields } = editState
+      const paddingChanged =
+        (padding_before ?? null) !== (selectedEvent.metadata?.padding_before ?? null) ||
+        (padding_after ?? null) !== (selectedEvent.metadata?.padding_after ?? null)
+      const payload = paddingChanged
+        ? { ...coreFields, metadata: { padding_before, padding_after } }
+        : coreFields
+      await updateEvent(projectId, selectedEvent.id, payload)
+      setIsDirty(false)
+      setSaveStatus('saved')
+      setTimeout(() => setSaveStatus('idle'), 2500)
+    } catch {
+      showError('Failed to save event')
+      setSaveStatus('error')
+    }
+  }, [editState, selectedEvent, projectId, updateEvent, showError])
+
+  useEffect(() => { doSaveRef.current = doSave }, [doSave])
+
+  useEffect(() => {
+    if (!isDirty) return
+    setSaveStatus('pending')
+    clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = setTimeout(() => doSaveRef.current?.(), 1500)
+    return () => clearTimeout(saveTimerRef.current)
+  }, [editState]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Apply changes (kept for manual call from revert) ──────────────────────
   const handleApply = useCallback(async () => {
     if (!editState || !selectedEvent) return
     try {
       const { padding_before, padding_after, ...coreFields } = editState
-      // Build metadata patch for padding (null = remove override key)
       const paddingChanged =
         (padding_before ?? null) !== (selectedEvent.metadata?.padding_before ?? null) ||
         (padding_after ?? null) !== (selectedEvent.metadata?.padding_after ?? null)
@@ -172,6 +223,8 @@ export default function EventInspectorPanel({ projectId }) {
   // ── Revert to original ────────────────────────────────────────────────────
   const handleRevert = useCallback(() => {
     if (!selectedEvent) return
+    clearTimeout(saveTimerRef.current)
+    setSaveStatus('idle')
     setEditState({
       event_type: selectedEvent.event_type,
       severity: selectedEvent.severity,
@@ -188,6 +241,18 @@ export default function EventInspectorPanel({ projectId }) {
     })
     setIsDirty(false)
   }, [selectedEvent])
+
+  // ── iRacing-accurate timeline seek ────────────────────────────────────────
+  const handleTimelineScan = useCallback((time) => {
+    seekTo(time)
+    if (!projectId || !isConnected) return
+    const carIdx = Array.isArray(selectedEvent?.involved_drivers) && selectedEvent.involved_drivers.length > 0
+      ? selectedEvent.involved_drivers[0] : null
+    apiPost(`/projects/${projectId}/analysis/seek-event`, {
+      start_time_seconds: time,
+      car_idx: carIdx,
+    }).catch(() => {})
+  }, [seekTo, projectId, isConnected, selectedEvent])
 
   // ── Split at playhead ─────────────────────────────────────────────────────
   const handleSplit = useCallback(async () => {
@@ -285,6 +350,45 @@ export default function EventInspectorPanel({ projectId }) {
         </button>
       </div>
 
+      {/* ── Override 3-state toggle ───────────────────────────────────── */}
+      {(() => {
+        const raw = overrides[String(selectedEvent.id)] || null
+        const cur = (raw === 'highlight' || raw === 'full-video') ? 'include'
+          : raw === 'exclude' ? 'exclude' : 'auto'
+        const setOv = (val) => {
+          const v = val === 'include' ? 'highlight' : val === 'exclude' ? 'exclude' : null
+          setOverrideValue(String(selectedEvent.id), v)
+        }
+        const labels = { include: 'Include', auto: 'Auto', exclude: 'Exclude' }
+        const activeStyle = {
+          include: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
+          auto:    'bg-accent/20 text-accent border-accent/30',
+          exclude: 'bg-red-500/20 text-red-400 border-red-500/30',
+        }
+        return (
+          <div className="shrink-0 px-3 pt-2.5 pb-2 border-b border-border bg-bg-secondary">
+            <div className="text-xxs font-semibold text-text-tertiary uppercase tracking-wider mb-1.5">Override</div>
+            <div className="flex rounded-lg overflow-hidden border border-border">
+              {['exclude', 'auto', 'include'].map((val) => (
+                <button key={val} onClick={() => setOv(val)}
+                  className={`flex-1 py-1.5 text-xxs font-semibold transition-colors border-r last:border-r-0 border-border ${
+                    cur === val ? activeStyle[val] : 'text-text-disabled hover:text-text-secondary hover:bg-bg-hover'
+                  }`}
+                >
+                  {labels[val]}
+                </button>
+              ))}
+            </div>
+            {raw && (
+              <p className="mt-1 text-xxs text-text-disabled italic">
+                {cur === 'include' ? 'Forced into highlights — algorithm cannot drop this event'
+                  : 'Excluded from all scoring and output'}
+              </p>
+            )}
+          </div>
+        )
+      })()}
+
       {/* ── Live Preview Stream ───────────────────────────────────────── */}
       <div className="shrink-0 relative bg-black overflow-hidden" style={{ aspectRatio: '16/9' }}>
         {isConnected ? (
@@ -321,46 +425,53 @@ export default function EventInspectorPanel({ projectId }) {
         )}
       </div>
 
-      {/* Event controls bar */}
+      {/* ── Controls row + Timeline scanner ─────────────────────────── */}
       {selectedEvent && (
-        <div className="shrink-0 border-b border-border bg-bg-secondary px-3 py-2">
-          <EventControlsBar
-            event={displayEvent}
-            raceStart={0}
-            raceDuration={0}
-            replayState={null}
-            onSeekToEvent={(event) => {
-              const carIdx = Array.isArray(event.involved_drivers) && event.involved_drivers.length > 0
-                ? event.involved_drivers[0]
-                : null
-              setPreviewSeeking(true)
-              setPreviewError(null)
-              const ac = new AbortController()
-              seekAbortRef.current = ac
-              apiPost(`/projects/${projectId}/analysis/seek-event`, {
-                start_time_seconds: event.start_time_seconds ?? 0,
-                car_idx: carIdx,
-              }, { signal: ac.signal }).then(() => {
-                setStreamKey(k => k + 1)
-              }).catch((err) => {
-                if (err?.name !== 'AbortError') {
-                  setPreviewError('Failed to seek')
-                }
-              }).finally(() => {
-                setPreviewSeeking(false)
-              })
-            }}
-            onToggleOverride={toggleOverride}
-            onSwitchDriver={() => {}}
-            onToggleAutoLoop={() => {}}
-            onClose={() => setSelectedEventId(null)}
-            overrides={overrides}
-            autoLoop={false}
-            isSeeking={previewSeeking}
-            showClose={true}
-            compact={true}
-            className="bg-bg-secondary"
-          />
+        <div className="shrink-0 border-b border-border bg-bg-secondary">
+          <div className="px-2 py-1.5 border-b border-border-subtle">
+            <EventControlsBar
+              event={displayEvent}
+              raceStart={0}
+              raceDuration={raceDuration || 0}
+              replayState={null}
+              onSeekToEvent={(event) => {
+                const carIdx = Array.isArray(event.involved_drivers) && event.involved_drivers.length > 0
+                  ? event.involved_drivers[0] : null
+                setPreviewSeeking(true)
+                setPreviewError(null)
+                const ac = new AbortController()
+                seekAbortRef.current = ac
+                apiPost(`/projects/${projectId}/analysis/seek-event`, {
+                  start_time_seconds: event.start_time_seconds ?? 0, car_idx: carIdx,
+                }, { signal: ac.signal })
+                  .then(() => setStreamKey(k => k + 1))
+                  .catch((err) => { if (err?.name !== 'AbortError') setPreviewError('Failed to seek') })
+                  .finally(() => setPreviewSeeking(false))
+              }}
+              onToggleOverride={toggleOverride}
+              onSwitchDriver={() => {}}
+              onToggleAutoLoop={() => {}}
+              onClose={() => setSelectedEventId(null)}
+              overrides={overrides}
+              autoLoop={false}
+              isSeeking={previewSeeking}
+              showClose={false}
+              showOverride={false}
+              compact={true}
+              splitRows={true}
+              className="bg-bg-secondary"
+            />
+          </div>
+          {raceDuration > 0 && (
+            <EventTimelineScanner
+              selectedEvent={selectedEvent}
+              playheadTime={playheadTime}
+              paddingBefore={effectiveBefore}
+              paddingAfter={effectiveAfter}
+              eventColor={eventColor}
+              onSeek={handleTimelineScan}
+            />
+          )}
         </div>
       )}
 
@@ -500,25 +611,6 @@ export default function EventInspectorPanel({ projectId }) {
           </div>
         </Section>
 
-        {/* ── Include in Highlight ──────────────────────────────────────── */}
-        <Section icon={editState.included_in_highlight ? ToggleRight : ToggleLeft} label="Highlight">
-          <button
-            onClick={() => updateField('included_in_highlight', !editState.included_in_highlight)}
-            className={`flex items-center gap-2 w-full px-2 py-1.5 rounded text-xs transition-colors
-              ${editState.included_in_highlight
-                ? 'bg-accent/15 text-accent border border-accent/30'
-                : 'bg-bg-primary text-text-secondary border border-border'
-              }`}
-          >
-            {editState.included_in_highlight ? (
-              <ToggleRight size={16} className="text-accent" />
-            ) : (
-              <ToggleLeft size={16} className="text-text-disabled" />
-            )}
-            {editState.included_in_highlight ? 'Included in highlight' : 'Excluded from highlight'}
-          </button>
-        </Section>
-
         {/* ── Camera / Target Car ──────────────────────────────────────── */}
         <Section icon={Camera} label="Camera">
           <div className="text-xxs text-text-tertiary">
@@ -620,60 +712,58 @@ export default function EventInspectorPanel({ projectId }) {
         )}
       </div>
 
-      {/* Action buttons */}
-      <div className="border-t border-border px-3 py-2 space-y-1.5 bg-bg-secondary shrink-0">
-        {/* Primary row: Apply + Revert */}
+      {/* Action bar */}
+      <div className="border-t border-border px-3 py-2 bg-bg-secondary shrink-0">
         <div className="flex items-center gap-1.5">
-          <button
-            onClick={handleApply}
-            disabled={!isDirty}
-            className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded text-xs
-              font-medium transition-colors
-              ${isDirty
-                ? 'bg-accent hover:bg-accent-hover text-white'
-                : 'bg-bg-primary text-text-disabled cursor-not-allowed border border-border'
-              }`}
-          >
-            <Save size={12} />
-            Apply
-          </button>
+          <div className="flex items-center gap-1 min-w-0 flex-1 overflow-hidden">
+            {saveStatus === 'saving' && (
+              <><Loader2 size={11} className="text-accent animate-spin shrink-0" />
+              <span className="text-xxs text-text-disabled">Saving…</span></>
+            )}
+            {saveStatus === 'pending' && (
+              <span className="text-xxs text-text-disabled italic truncate">Unsaved changes</span>
+            )}
+            {saveStatus === 'saved' && (
+              <><CheckCircle2 size={11} className="text-emerald-400 shrink-0" />
+              <span className="text-xxs text-emerald-400">Saved</span></>
+            )}
+            {saveStatus === 'error' && (
+              <span className="text-xxs text-danger">Save failed</span>
+            )}
+          </div>
           <button
             onClick={handleRevert}
             disabled={!isDirty}
-            className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded text-xs
-              font-medium transition-colors
+            className={`flex items-center justify-center gap-1 px-2 py-1.5 rounded text-xs
+              font-medium transition-colors shrink-0
               ${isDirty
                 ? 'bg-bg-primary text-text-primary hover:bg-bg-hover border border-border'
-                : 'bg-bg-primary text-text-disabled cursor-not-allowed border border-border'
+                : 'bg-bg-primary text-text-disabled cursor-not-allowed border border-border-subtle'
               }`}
           >
-            <RotateCcw size={12} />
+            <RotateCcw size={11} />
             Revert
           </button>
-        </div>
-
-        {/* Secondary row: Split + Delete */}
-        <div className="flex items-center gap-1.5">
           <button
             onClick={handleSplit}
             disabled={!canSplit}
-            className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded text-xs
-              transition-colors
+            className={`flex items-center justify-center gap-1 px-2 py-1.5 rounded text-xs
+              transition-colors shrink-0
               ${canSplit
                 ? 'text-text-primary hover:bg-bg-hover border border-border'
                 : 'text-text-disabled cursor-not-allowed border border-border-subtle'
               }`}
-            title={canSplit ? 'Split at playhead position' : 'Move playhead inside event to split'}
+            title={canSplit ? 'Split at playhead' : 'Move playhead inside event'}
           >
-            <Scissors size={12} />
+            <Scissors size={11} />
             Split
           </button>
           <button
             onClick={handleDelete}
-            className="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded text-xs
-                       text-danger hover:bg-danger/10 border border-border transition-colors"
+            className="flex items-center justify-center gap-1 px-2 py-1.5 rounded text-xs
+                       text-danger hover:bg-danger/10 border border-border transition-colors shrink-0"
           >
-            <Trash2 size={12} />
+            <Trash2 size={11} />
             Delete
           </button>
         </div>
@@ -748,4 +838,76 @@ function parseTimeInput(str) {
   // Try plain seconds
   const num = parseFloat(str)
   return isNaN(num) ? null : Math.max(0, num)
+}
+
+
+/**
+ * EventTimelineScanner – scrubber scoped to the current event's padded window.
+ * The full bar width = [padded start → padded end]. Clicking seeks iRacing.
+ */
+function EventTimelineScanner({ selectedEvent, playheadTime, paddingBefore, paddingAfter, eventColor, onSeek }) {
+  const padBefore = paddingBefore ?? 0
+  const padAfter  = paddingAfter  ?? 0
+  const winStart  = Math.max(0, selectedEvent.start_time_seconds - padBefore)
+  const winEnd    = selectedEvent.end_time_seconds + padAfter
+  const winSpan   = Math.max(0.001, winEnd - winStart)
+  const coreStart = selectedEvent.start_time_seconds
+  const coreEnd   = selectedEvent.end_time_seconds
+  const color     = eventColor || '#6b7280'
+
+  // Convert absolute time → % within the window
+  const toPct = (t) => `${Math.min(100, Math.max(0, ((t - winStart) / winSpan) * 100)).toFixed(3)}%`
+
+  const handlePointer = (e) => {
+    if (!e.buttons && e.type === 'mousemove') return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const pct  = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+    onSeek(winStart + pct * winSpan)
+  }
+
+  const showPlayhead = playheadTime != null && playheadTime >= winStart && playheadTime <= winEnd
+  const coreDurLabel = formatTime(Math.max(0, coreEnd - coreStart))
+  const totalDurLabel = formatTime(Math.max(0, winEnd - winStart))
+
+  return (
+    <div
+      className="relative bg-bg-primary cursor-crosshair group select-none"
+      style={{ height: 28 }}
+      onClick={handlePointer}
+      onMouseMove={handlePointer}
+    >
+      {/* Time labels */}
+      <div className="absolute inset-x-0 top-0 flex items-center justify-between px-1.5 pointer-events-none"
+           style={{ fontSize: 8, lineHeight: '10px' }}>
+        <span className="text-text-disabled font-mono">{formatTime(winStart)}</span>
+        <span className="text-text-disabled font-mono">{coreDurLabel} event · {totalDurLabel} total</span>
+        <span className="text-text-disabled font-mono">{formatTime(winEnd)}</span>
+      </div>
+
+      {/* Track */}
+      <div className="absolute left-0 right-0 bg-bg-tertiary/60" style={{ top: 12, height: 10, borderRadius: 2 }}>
+        {/* Lead-in padding */}
+        {padBefore > 0 && (
+          <div className="absolute top-0 bottom-0 opacity-20 rounded-sm"
+               style={{ left: 0, width: toPct(coreStart), backgroundColor: color }} />
+        )}
+        {/* Core event */}
+        <div className="absolute top-0 bottom-0 rounded-sm"
+             style={{ left: toPct(coreStart), width: `calc(${toPct(coreEnd)} - ${toPct(coreStart)})`, backgroundColor: color }} />
+        {/* Follow-out padding */}
+        {padAfter > 0 && (
+          <div className="absolute top-0 bottom-0 opacity-20 rounded-sm"
+               style={{ left: toPct(coreEnd), right: 0, backgroundColor: color }} />
+        )}
+      </div>
+
+      {/* Playhead */}
+      {showPlayhead && (
+        <div className="absolute z-10 pointer-events-none" style={{ top: 10, bottom: 2, left: toPct(playheadTime), width: 1, backgroundColor: '#ef4444' }} />
+      )}
+
+      {/* Hover tint */}
+      <div className="absolute inset-0 bg-white/0 group-hover:bg-white/4 transition-colors pointer-events-none" />
+    </div>
+  )
 }

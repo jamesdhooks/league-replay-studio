@@ -57,7 +57,7 @@ export default memo(function PreviewPlayer({
               <HlsStreamPlayer
                 key={streamKey}
                 src={activeStreamUrl}
-                className="w-full h-full object-cover"
+                className="w-full h-full object-contain"
                 onLoad={() => setStreamLoaded(true)}
                 onError={(err) => setStreamError(err?.message || 'HLS stream error')}
               />
@@ -65,7 +65,7 @@ export default memo(function PreviewPlayer({
               <H264StreamPlayer
                 key={streamKey}
                 src={activeStreamUrl}
-                className="w-full h-full object-cover"
+                className="w-full h-full object-contain"
                 onLoad={() => setStreamLoaded(true)}
                 onError={(err) => setStreamError(err?.message || 'H.264 stream error')}
               />
@@ -74,7 +74,7 @@ export default memo(function PreviewPlayer({
                 key={streamKey}
                 src={streamUrl}
                 alt="iRacing replay"
-                className="w-full h-full object-cover"
+                className="w-full h-full object-contain"
                 onError={() => setStreamError('MJPEG stream failed to load')}
                 onLoad={(e) => { e.target.style.opacity = '1'; setStreamLoaded(true) }}
               />

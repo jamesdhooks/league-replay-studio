@@ -173,9 +173,15 @@ def score_events(
         if event_type == "battle":
             chain_length = metadata.get("chain_length", 2)
             narrative_bonus += math.log(chain_length + 1) * 0.5
-        # Overtakes during a sustained battle are more exciting (passer earned it)
+            # Battles with lead changes contain overtake moments — better stories
+            lead_changes = metadata.get("lead_changes", 0)
+            if lead_changes > 0:
+                narrative_bonus += 0.6 + min(lead_changes - 1, 3) * 0.3
+        # In-battle overtakes are redundant with the parent battle clip — dampen
+        # so the fuller battle story is preferred over the isolated pass.
         if event_type == "overtake" and metadata.get("in_battle"):
-            narrative_bonus += 0.4
+            score *= 0.6
+            narrative_bonus -= 0.2
         evt_time = event.get("start_time_seconds", 0)
         if race_duration > 0:
             race_pct = evt_time / race_duration

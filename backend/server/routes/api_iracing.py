@@ -49,6 +49,7 @@ import logging
 
 from server.services.iracing_bridge import bridge
 from server.services.project_service import project_service
+from server.utils.command_log import command_log
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/iracing", tags=["iracing"])
@@ -406,6 +407,7 @@ async def replay_play() -> dict:
     success = bridge.set_replay_speed(1)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to play replay")
+    command_log.record("play", {"speed": 1})
     return {"status": "ok", "speed": 1}
 
 
@@ -417,6 +419,7 @@ async def replay_pause() -> dict:
     success = bridge.set_replay_speed(0)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to pause replay")
+    command_log.record("pause", {})
     return {"status": "ok", "speed": 0}
 
 
@@ -428,6 +431,7 @@ async def replay_seek(body: SeekRequest) -> dict:
     success = bridge.seek_to_frame(body.frame)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to seek replay")
+    command_log.record("seek", {"frame": body.frame})
     return {"status": "ok", "frame": body.frame}
 
 
@@ -439,6 +443,7 @@ async def replay_seek_time(body: SeekTimeRequest) -> dict:
     success = bridge.replay_search_session_time(body.session_num, body.session_time_ms)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to seek replay to time")
+    command_log.record("seek-time", {"session_num": body.session_num, "session_time_ms": body.session_time_ms})
     return {"status": "ok", "session_num": body.session_num, "session_time_ms": body.session_time_ms}
 
 
@@ -460,6 +465,7 @@ async def replay_speed(body: SpeedRequest) -> dict:
     success = bridge.set_replay_speed(body.speed)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to set replay speed")
+    command_log.record("speed", {"speed": body.speed})
     return {"status": "ok", "speed": body.speed}
 
 
@@ -623,6 +629,7 @@ async def replay_camera(body: CameraRequest) -> dict:
 
     if not success:
         raise HTTPException(status_code=500, detail="Failed to switch camera")
+    command_log.record("camera", {"group_num": body.group_num, "target": target})
     return {"status": "ok", "group_num": body.group_num, "target": target}
 
 

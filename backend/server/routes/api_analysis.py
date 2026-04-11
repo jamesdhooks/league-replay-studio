@@ -1774,6 +1774,7 @@ class VideoScriptRequest(BaseModel):
     camera_weights: dict = {}   # { group_name: weight (0–100) } — empty = all equal
     camera_recency_penalty: float = 0.5  # 0 = none, 1 = maximum recency penalty
     camera_recency_decay: float = 30.0   # Seconds for recency penalty to decay to zero
+    production_timeline: list = []   # Pre-built production timeline from frontend (skips backend allocation)
 
 
 @router.post("/projects/{project_id}/highlights/video-script")
@@ -1808,15 +1809,147 @@ async def generate_video_script_endpoint(project_id: int, body: VideoScriptReque
             drivers = get_drivers(conn)
             num_drivers = len(drivers) if drivers else 1
 
+            def _meta_val(key, default):
+                r = conn.execute("SELECT value FROM analysis_meta WHERE key=?", (key,)).fetchone()
+                return r["value"] if r else default
+
             race_info = {
                 "duration": race_duration,
                 "num_drivers": num_drivers,
                 "track": project.get("track_name", "Unknown"),
                 "total_laps": project.get("num_laps", 0),
                 "target_duration": body.constraints.get("target_duration", 300),
+                "race_start_seconds": float(_meta_val("race_start_session_time", 0)),
             }
 
             weights = {**config.get("weights", {}), **body.weights}
+
+            # Build name lookup so enriched driver lists also get human-readable names
+            _name_map = {d["car_idx"]: d.get("user_name", "") for d in drivers}
+            _num_map  = {d["car_idx"]: d.get("car_number", str(d["car_idx"])) for d in drivers}
+
+            def _resolve_names(car_idxs: list[int]) -> list[str]:
+                return [_name_map.get(idx) or f"Car #{_num_map.get(idx, idx)}" for idx in car_idxs]
+
+            def _top_drivers_at(t: float, n: int = 5) -> list[int]:
+                """Return up to n car_idx values ranked by race position at time t.
+
+                Falls back to searching up to 30 s *after* t when the nearest tick
+                has no position data (common at the exact green-flag moment because
+                iRacing's CarIdxPosition is 0 until cars cross the start/finish line).
+                """
+                rows = conn.execute("""
+                    SELECT cs.car_idx
+                    FROM car_states cs
+                    JOIN race_ticks rt ON cs.tick_id = rt.id
+                    WHERE rt.id = (
+                        SELECT id FROM race_ticks
+                        ORDER BY ABS(session_time - ?) ASC
+                        LIMIT 1
+                    )
+                    AND cs.position > 0
+                    ORDER BY cs.position ASC
+                    LIMIT ?
+                """, (t, n)).fetchall()
+                if rows:
+                    return [r["car_idx"] for r in rows]
+                # Fallback: first tick after t where positions are assigned
+                rows = conn.execute("""
+                    SELECT cs.car_idx
+                    FROM car_states cs
+                    JOIN race_ticks rt ON cs.tick_id = rt.id
+                    WHERE rt.session_time BETWEEN ? AND ?
+                      AND cs.position > 0
+                    ORDER BY rt.session_time ASC, cs.position ASC
+                    LIMIT ?
+                """, (t, t + 30.0, n)).fetchall()
+                return [r["car_idx"] for r in rows]
+
+            # event_type sets used for enrichment
+            _POSITIONAL_TYPES = {"race_start", "pace_lap", "restart"}
+            _LAP_TYPES        = {"first_lap", "last_lap"}
+            _BATTLE_TYPES     = {"battle", "overtake", "close_call", "leader_change"}
+
+            def _lap_candidates(t_start: float, t_end: float) -> list[int]:
+                """Front runners + drivers in overlapping battles, deduped, capped at 6."""
+                front_runners = _top_drivers_at(t_start, 5)
+                battle_drivers: list[int] = []
+                for other in events:
+                    if other.get("event_type") not in _BATTLE_TYPES:
+                        continue
+                    o_start = other.get("start_time_seconds", 0.0)
+                    o_end   = other.get("end_time_seconds", o_start)
+                    if o_end >= t_start and o_start <= t_end:
+                        for d in (other.get("involved_drivers") or []):
+                            if d not in battle_drivers:
+                                battle_drivers.append(d)
+                return list(dict.fromkeys(front_runners + battle_drivers))[:6]
+
+            def _enrich(obj: dict, t_start: float, t_end: float) -> None:
+                """Set involved_drivers + driver_names on obj if currently empty."""
+                et = obj.get("event_type")
+                if obj.get("involved_drivers"):
+                    return
+                # Use the core event time (not the padded clip start) for position lookups.
+                # For production_timeline segments, coreStart == actual event start_time_seconds.
+                # This matters for race_start where clipStart is in the parade lap (positions=0).
+                # Note: use `is not None` not truthiness — coreStart can legitimately be 0.0.
+                _cs = obj.get("coreStart")
+                _ss = obj.get("start_time_seconds")
+                t_lookup = float(_cs if _cs is not None else (_ss if _ss is not None else t_start))
+                if et in _POSITIONAL_TYPES:
+                    logger.info(
+                        "[Enrich DEBUG] _enrich positional: et=%r t_lookup=%.2f (coreStart=%r, start_time_seconds=%r, t_start=%.2f)",
+                        et, t_lookup, _cs, _ss, t_start,
+                    )
+                    drivers_at = _top_drivers_at(t_lookup, 3)
+                    logger.info("[Enrich DEBUG] _top_drivers_at(%.2f, 3) → %r", t_lookup, drivers_at)
+                    if drivers_at:
+                        obj["involved_drivers"] = drivers_at
+                        obj["driver_names"] = _resolve_names(drivers_at)
+                        logger.info(
+                            "[Highlights API] Enriched %s at %.1fs with drivers %s",
+                            et, t_lookup, drivers_at,
+                        )
+                elif et in _LAP_TYPES:
+                    candidates = _lap_candidates(t_start, t_end)
+                    if candidates:
+                        obj["involved_drivers"] = candidates
+                        obj["driver_names"] = _resolve_names(candidates)
+                        logger.info(
+                            "[Highlights API] Enriched %s at %.1f–%.1fs with drivers %s",
+                            et, t_start, t_end, candidates,
+                        )
+
+            # Enrich the scored event dicts (used when generate_highlights builds the timeline)
+            for evt in events:
+                _enrich(evt, evt.get("start_time_seconds", 0.0), evt.get("end_time_seconds", 0.0))
+
+            # Also enrich production_timeline segments sent by the frontend.
+            # The frontend builds its timeline from local scores which carry the original
+            # empty involved_drivers; without this, the production_timeline path (which
+            # bypasses generate_highlights) would produce segments with no driver focus.
+            for seg in body.production_timeline:
+                t_s = float(seg.get("clipStart") or seg.get("start_time_seconds") or 0.0)
+                t_e = float(seg.get("clipEnd")   or seg.get("end_time_seconds")   or t_s)
+                et  = seg.get("event_type")
+                drv_before = seg.get("involved_drivers")
+                _enrich(seg, t_s, t_e)
+                if et in (_POSITIONAL_TYPES | _LAP_TYPES):
+                    logger.info(
+                        "[Enrich DEBUG] seg event_type=%r coreStart=%r clipStart=%r "
+                        "involved_drivers_before=%r involved_drivers_after=%r",
+                        et,
+                        seg.get("coreStart"),
+                        seg.get("clipStart"),
+                        drv_before,
+                        seg.get("involved_drivers"),
+                    )
+                # Propagate into nested sourceEvents so merge resolution keeps names
+                for src in (seg.get("sourceEvents") or []):
+                    src_s = float(src.get("start_time_seconds") or 0.0)
+                    src_e = float(src.get("end_time_seconds") or src_s)
+                    _enrich(src, src_s, src_e)
 
             result = generate_video_script(
                 events=events,
@@ -1833,6 +1966,7 @@ async def generate_video_script_endpoint(project_id: int, body: VideoScriptReque
                 camera_weights=body.camera_weights,
                 camera_recency_penalty=body.camera_recency_penalty,
                 camera_recency_decay=body.camera_recency_decay,
+                production_timeline=body.production_timeline,
             )
 
             logger.info(

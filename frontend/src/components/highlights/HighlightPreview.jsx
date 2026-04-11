@@ -1,40 +1,56 @@
-import { memo } from 'react'
-import { Eye, WifiOff, ChevronDown, ChevronRight } from 'lucide-react'
+import { memo, useState, useEffect, useRef } from 'react'
+import { Eye, WifiOff, ChevronDown, ChevronRight, Activity } from 'lucide-react'
 import { useIRacing } from '../../context/IRacingContext'
 import { useHighlight, EVENT_TYPE_LABELS } from '../../context/HighlightContext'
-import { useStream } from '../../hooks/useStream'
-import { H264StreamPlayer, HlsStreamPlayer } from '../analysis/StreamPlayers'
+import PreviewPlayer from '../analysis/PreviewPlayer'
 import { formatTime } from '../../utils/time'
 
 /**
  * HighlightPreview — collapsible live stream panel for the editing view.
  *
- * Sits between the Score Histogram and the Final Script timeline.
- * Collapse state is lifted into HighlightPanel so opening this tab
- * automatically collapses the Score Histogram, and vice-versa.
+ * Uses the same PreviewPlayer component as the Analysis step, giving it
+ * identical controls: visibility toggle, stream reset, quality settings,
+ * and window picker.
  *
- * Props:
- *   collapsed  {boolean}  — controlled from HighlightPanel
- *   onToggle   {fn}       — called with no args when header is clicked
+ * Includes feed health monitoring with visual activity indicator and polling
+ * fallback to detect stale feeds.
  */
 export default memo(function HighlightPreview({ collapsed, onToggle }) {
   const { isConnected } = useIRacing()
   const { scriptActionLog } = useHighlight()
-
-  const {
-    streamFormat,
-    streamKey, setStreamKey,
-    streamLoaded, setStreamLoaded,
-    streamError, setStreamError,
-    streamResetting, handleStreamReset,
-    activeStreamUrl, streamUrl,
-  } = useStream()
+  const lastActionCountRef = useRef(0)
+  const [isFeedActive, setIsFeedActive] = useState(false)
+  const activeTimerRef = useRef(null)
 
   // Show last 4 actions in the feed (most recent at top)
   const recentActions = scriptActionLog.slice(-4).reverse()
 
+  // Monitor for new actions: poll every 200ms to detect updates
+  // If feed is being actively updated, show a pulsing indicator
+  useEffect(() => {
+    if (collapsed) return
+
+    // Periodic health check: if we see new actions, mark as active
+    const checkInterval = setInterval(() => {
+      if (scriptActionLog.length > lastActionCountRef.current) {
+        lastActionCountRef.current = scriptActionLog.length
+        setIsFeedActive(true)
+        // Reset active indicator after 800ms of no new updates
+        if (activeTimerRef.current) clearTimeout(activeTimerRef.current)
+        activeTimerRef.current = setTimeout(() => {
+          setIsFeedActive(false)
+        }, 800)
+      }
+    }, 200)
+
+    return () => {
+      clearInterval(checkInterval)
+      if (activeTimerRef.current) clearTimeout(activeTimerRef.current)
+    }
+  }, [collapsed, scriptActionLog])
+
   return (
-    <div className="h-full flex flex-col overflow-hidden border-b border-border bg-bg-secondary">
+    <div className="h-full flex flex-col overflow-hidden border-b border-border bg-bg-secondary relative">
       {/* ── Header ────────────────────────────────────────────────────── */}
       <button
         onClick={onToggle}
@@ -56,114 +72,55 @@ export default memo(function HighlightPreview({ collapsed, onToggle }) {
 
       {/* ── Body ─────────────────────────────────────────────────────── */}
       {!collapsed && (
-        <div className="relative bg-black overflow-hidden" style={{ aspectRatio: '16/9', width: '100%' }}>
-          {isConnected ? (
-            <>
-              {streamFormat === 'hls' ? (
-                <HlsStreamPlayer
-                  key={streamKey}
-                  src={activeStreamUrl}
-                  className="w-full h-full object-cover"
-                  onLoad={() => setStreamLoaded(true)}
-                  onError={(err) => setStreamError(err?.message || 'HLS stream error')}
-                />
-              ) : streamFormat === 'h264' ? (
-                <H264StreamPlayer
-                  key={streamKey}
-                  src={activeStreamUrl}
-                  className="w-full h-full object-cover"
-                  onLoad={() => setStreamLoaded(true)}
-                  onError={(err) => setStreamError(err?.message || 'H.264 stream error')}
-                />
-              ) : (
-                <img
-                  key={streamKey}
-                  src={streamUrl}
-                  alt="iRacing replay"
-                  className="w-full h-full object-cover"
-                  onError={() => setStreamError('MJPEG stream failed to load')}
-                  onLoad={(e) => { e.target.style.opacity = '1'; setStreamLoaded(true) }}
-                />
-              )}
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+          {/* PreviewPlayer provides: stream feed, visibility toggle, quality settings, window picker, reset */}
+          <PreviewPlayer />
+        </div>
+      )}
 
-              {/* Loading overlay */}
-              {streamResetting || (!streamLoaded && !streamError) ? (
-                <div className="absolute inset-0 flex items-center justify-center bg-black/60">
-                  <span className="text-xs text-white/60">
-                    {streamResetting ? 'Resetting stream…' : 'Connecting…'}
-                  </span>
+      {/* ── Script action feed (absolutely positioned, bottom-right) ─── */}
+      {!collapsed && (
+        <div className="absolute bottom-3 right-3 w-fit bg-bg-primary border border-border-subtle rounded px-3 py-2 space-y-1 shadow-lg">
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <div className="text-[9px] uppercase tracking-wider text-text-tertiary font-semibold">Event Feed</div>
+            {/* Activity indicator: pulsing dot when feed is receiving updates */}
+            {isFeedActive && (
+              <div className="flex items-center gap-1">
+                <div className="w-1.5 h-1.5 rounded-full bg-success animate-pulse"></div>
+                <span className="text-[8px] text-success font-mono">LIVE</span>
+              </div>
+            )}
+          </div>
+          {recentActions.length > 0 ? (
+            recentActions.map((action, i) => {
+              const isLatest = i === 0
+              const label = action.eventType
+                ? (EVENT_TYPE_LABELS[action.eventType] || action.eventType)
+                : (action.section ? action.section.replace('_', ' ') : 'Bridge')
+              return (
+                <div
+                  key={action.id + action.ts}
+                  className="flex items-center gap-2 text-right leading-snug"
+                  style={{ opacity: isLatest ? 1 : Math.max(0.3, 1 - i * 0.25) }}
+                >
+                  <span className="text-[9px] text-text-disabled font-mono shrink-0">{formatTime(action.raceTime)}</span>
+                  <span className={`text-[10px] font-semibold flex-1 truncate ${isLatest ? 'text-text-primary' : 'text-text-secondary'}`}>{label}</span>
+                  {action.cameraLabel && (
+                    <span className="text-[9px] text-indigo-300/80 font-mono shrink-0">{action.cameraLabel}</span>
+                  )}
+                  {action.driverName && (
+                    <span className="text-[9px] text-emerald-300/80 shrink-0">{action.driverName}</span>
+                  )}
                 </div>
-              ) : null}
-
-              {/* Error overlay */}
-              {streamError && !streamResetting && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 gap-2">
-                  <span className="text-xs text-white/70">{streamError}</span>
-                  <button
-                    onClick={handleStreamReset}
-                    className="px-3 py-1 rounded text-xxs bg-accent/20 text-accent border border-accent/30 hover:bg-accent/30"
-                  >
-                    Retry
-                  </button>
-                </div>
-              )}
-
-              {/* Reset button */}
-              <button
-                onClick={handleStreamReset}
-                disabled={streamResetting}
-                title="Hard-reset preview stream"
-                className="absolute top-2 right-2 px-2 py-1 rounded text-xxs bg-black/70 text-white/70 hover:text-white border border-white/10 transition-colors disabled:opacity-40"
-              >
-                ↺
-              </button>
-
-              {/* ── Script action feed ───────────────────────────────── */}
-              {recentActions.length > 0 && (
-                <div className="absolute bottom-2 right-2 flex flex-col gap-1 items-end pointer-events-none"
-                     style={{ maxWidth: '60%' }}>
-                  {recentActions.map((action, i) => {
-                    const isLatest = i === 0
-                    const label = action.eventType
-                      ? (EVENT_TYPE_LABELS[action.eventType] || action.eventType)
-                      : (action.section ? action.section.replace('_', ' ') : 'Bridge')
-                    return (
-                      <div
-                        key={action.id + action.ts}
-                        className="rounded px-2 py-1 text-right leading-snug"
-                        style={{
-                          background: isLatest ? 'rgba(0,0,0,0.82)' : 'rgba(0,0,0,0.52)',
-                          border: isLatest ? '1px solid rgba(99,102,241,0.55)' : '1px solid rgba(255,255,255,0.08)',
-                          opacity: isLatest ? 1 : Math.max(0.3, 1 - i * 0.25),
-                        }}
-                      >
-                        <div className="text-[10px] font-semibold text-white/90">{label}</div>
-                        {action.cameraLabel && (
-                          <div className="text-[9px] text-indigo-300/80 font-mono">{action.cameraLabel}</div>
-                        )}
-                        {action.driverName && (
-                          <div className="text-[9px] text-emerald-300/80">Focus: {action.driverName}</div>
-                        )}
-                        {action.involvedDrivers?.length > 1 && (
-                          <div className="text-[8px] text-white/40 truncate">
-                            {action.involvedDrivers.slice(0, 3).join(' · ')}{action.involvedDrivers.length > 3 ? ` +${action.involvedDrivers.length - 3}` : ''}
-                          </div>
-                        )}
-                        <div className="text-[8px] text-white/30 font-mono">{formatTime(action.raceTime)}</div>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-            </>
+              )
+            })
           ) : (
-            <div className="flex flex-col items-center justify-center h-full gap-2 py-8">
-              <WifiOff className="w-6 h-6 text-text-disabled opacity-40" />
-              <span className="text-xs text-text-disabled">iRacing not connected</span>
-            </div>
+            <div className="text-[10px] text-text-disabled">No script actions yet. Press Play in the timeline to populate this feed.</div>
           )}
         </div>
       )}
     </div>
   )
 })
+
+

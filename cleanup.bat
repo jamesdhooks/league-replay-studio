@@ -1,7 +1,7 @@
 @echo off
 REM ═══════════════════════════════════════════════════════════
 REM  League Replay Studio — Cleanup Utility
-REM  Kills any processes holding LRS ports (6176, 3174)
+REM  Kills any processes holding LRS ports (6177, 3189)
 REM  or the lrs_capture service, with before/after validation.
 REM ═══════════════════════════════════════════════════════════
 

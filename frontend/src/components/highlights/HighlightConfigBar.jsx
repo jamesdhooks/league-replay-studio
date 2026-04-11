@@ -1,9 +1,11 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useHighlight } from '../../context/HighlightContext'
+import { useIRacing } from '../../context/IRacingContext'
 import { useToast } from '../../context/ToastContext'
+import { useLocalStorage } from '../../hooks/useLocalStorage'
 import {
   Download, GitCompare,
-  ToggleRight, Loader2,
+  ToggleRight, Loader2, Zap,
 } from 'lucide-react'
 
 /**
@@ -16,14 +18,39 @@ export default function HighlightConfigBar({ projectId }) {
     applyHighlights,
     generateVideoScript,
     serverScoring,
+    productionTimeline,
   } = useHighlight()
+  const { sessionData } = useIRacing()
   const { showInfo, showSuccess, showError } = useToast()
+  const [autoGenerate, setAutoGenerate] = useLocalStorage('lrs:highlights:autoGenerate', false)
+  const autoGenDebounce = useRef(null)
+  const isFirstRender = useRef(true)
+
+  // Auto-generate: silently regenerate script whenever productionTimeline changes
+  useEffect(() => {
+    // Skip the very first render so toggling on doesn't fire immediately for stale data
+    if (isFirstRender.current) {
+      isFirstRender.current = false
+      return
+    }
+    if (!autoGenerate || !projectId || serverScoring) return
+    clearTimeout(autoGenDebounce.current)
+    autoGenDebounce.current = setTimeout(async () => {
+      try {
+        await applyHighlights(projectId)
+        await generateVideoScript(projectId, { cameras: sessionData?.cameras })
+      } catch {
+        // Silent — errors only surface via console, not toast
+      }
+    }, 1500)
+    return () => clearTimeout(autoGenDebounce.current)
+  }, [productionTimeline]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleApply = async () => {
     try {
       showInfo('Generating race script...')
       await applyHighlights(projectId)
-      await generateVideoScript(projectId)
+      await generateVideoScript(projectId, { cameras: sessionData?.cameras })
       showSuccess('Race script generated')
     } catch {
       showError('Failed to generate race script')
@@ -78,7 +105,18 @@ export default function HighlightConfigBar({ projectId }) {
       {/* Spacer */}
       <div className="flex-1" />
 
-      {/* Apply button */}
+      {/* Auto-generate toggle + Apply button */}
+      <button
+        onClick={() => setAutoGenerate(v => !v)}
+        title={autoGenerate ? 'Auto-generate on (click to disable)' : 'Auto-generate script on changes'}
+        className={`p-1.5 rounded transition-colors ${
+          autoGenerate
+            ? 'text-accent bg-accent/15 hover:bg-accent/25'
+            : 'text-text-tertiary hover:text-text-secondary hover:bg-bg-primary/50'
+        }`}
+      >
+        <Zap className="w-3.5 h-3.5" />
+      </button>
       <button
         onClick={handleApply}
         disabled={serverScoring}

@@ -82,10 +82,10 @@ else
 fi
 
 # ── Start backend ────────────────────────────────────────────────────
-echo -e "${CYAN}Starting backend server on http://127.0.0.1:6176 ...${NC}"
+echo -e "${CYAN}Starting backend server on http://127.0.0.1:6177 ...${NC}"
 
 if [[ "$DEV_MODE" == true ]]; then
-  echo -e "${CYAN}Frontend dev server on http://localhost:3174${NC}"
+  echo -e "${CYAN}Frontend dev server on http://localhost:3189${NC}"
 fi
 
-$PYTHON -m uvicorn backend.app:app --host 127.0.0.1 --port 6176 --reload
+$PYTHON -m uvicorn backend.app:app --host 127.0.0.1 --port 6177 --reload

@@ -148,8 +148,8 @@ REM ── Build frontend ──────────────────
 echo [4/6] Building frontend...
 
 if "%DEV_WEB_HMR%"=="1" (
-    echo       Dev mode detected (^--web ^--reload^) - starting Vite HMR server on 3174...
-    start "LRS Frontend Dev Server" cmd /k "cd /d "%FRONTEND%" && npm run dev -- --host 127.0.0.1 --port 3174"
+    echo       Dev mode detected (^--web ^--reload^) - starting Vite HMR server on 3189...
+    start "LRS Frontend Dev Server" cmd /k "cd /d "%FRONTEND%" && npm run dev -- --host 127.0.0.1 --port 3189"
 ) else (
     call npm run build --silent
     if errorlevel 1 (
@@ -165,7 +165,7 @@ echo.
 
 cd /d "%BACKEND%"
 if "%DEV_WEB_HMR%"=="1" (
-    set "LRS_FRONTEND_URL=http://127.0.0.1:3174"
+    set "LRS_FRONTEND_URL=http://127.0.0.1:3189"
     echo       Opening frontend via Vite dev server: %LRS_FRONTEND_URL%
 )
 python app.py %RUN_ARGS%
@@ -175,7 +175,7 @@ set "PYTHON_EXIT_CODE=%ERRORLEVEL%"
 echo.
 echo [5/6] Cleaning up after exit...
 
-REM Force-kill any remaining LRS processes on ports 6176 and 3174
+REM Force-kill any remaining LRS processes on ports 6177 and 3189
 REM (in case Python didn't terminate or Ctrl+C orphaned child processes)
 powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%lrs-cleanup.ps1"
 

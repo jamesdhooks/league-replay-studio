@@ -1,9 +1,9 @@
-# lrs-cleanup.ps1 - Kill any processes holding LRS ports (6176, 3174) or named lrs_capture.
+# lrs-cleanup.ps1 - Kill any processes holding LRS ports (6177, 3189) or named lrs_capture.
 # Called from start.bat at startup and after Python exits.
 # Pass -ShowDetails for before/after diagnostic output (used by cleanup.bat).
 param([switch]$ShowDetails)
 
-$ports = @(6176, 3174)
+$ports = @(6177, 3189)
 $namedServices = @('lrs_capture')
 
 function Show-LrsStatus {
@@ -152,10 +152,10 @@ if ($ShowDetails) {
     }
 
     if ($liveRemaining -eq 0 -and $ghostSockets -eq 0) {
-        Write-Host '  All clear. Ports 6176 and 3174 are free.'
+        Write-Host '  All clear. Ports 6177 and 3189 are free.'
     } elseif ($liveRemaining -gt 0) {
         Write-Host "  WARNING: $liveRemaining live process(es) still holding ports - manual intervention needed."
-        Write-Host '  Run: Get-NetTCPConnection -LocalPort 6176,3174 | Select LocalPort,State,OwningProcess'
+        Write-Host '  Run: Get-NetTCPConnection -LocalPort 6177,3189 | Select LocalPort,State,OwningProcess'
     } else {
         # Ghost sockets only - process is dead, just waiting for OS TCP cleanup
         Write-Host "  Ghost socket detected ($ghostSockets): process is dead, OS is reclaiming TCP state."
@@ -163,7 +163,7 @@ if ($ShowDetails) {
         $cleared = $false
         for ($i = 1; $i -le 30; $i++) {
             Start-Sleep -Seconds 1
-            $stillThere = Get-NetTCPConnection -LocalPort 6176 -State Listen -ErrorAction SilentlyContinue
+            $stillThere = Get-NetTCPConnection -LocalPort 6177 -State Listen -ErrorAction SilentlyContinue
             if (-not $stillThere) {
                 Write-Host "  Port cleared after ${i}s. All clear."
                 $cleared = $true

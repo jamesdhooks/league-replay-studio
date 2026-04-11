@@ -8,6 +8,7 @@ import {
   Loader2, CheckCircle2, XCircle, AlertTriangle,
   RefreshCw, Square, Clock, Eye,
 } from 'lucide-react'
+import IracingCommandLog from '../highlights/IracingCommandLog'
 
 /**
  * PreviewPanel — Video preview player with tiered playback.
@@ -197,6 +198,9 @@ export default function PreviewPanel({ projectId, inputFile, previewDir }) {
         ) : (
           <InitOverlay onInit={handleInit} loading={loading} hasInputFile={!!inputFile} />
         )}
+
+        {/* iRacing command log — bottom-right overlay */}
+        <IracingCommandLog />
       </div>
 
       {/* Progress / scrub bar */}

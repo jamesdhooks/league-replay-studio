@@ -53,6 +53,7 @@ from server.routes.api_overlay import router as overlay_router
 from server.routes.api_preset import router as preset_router
 from server.routes.api_youtube import router as youtube_router
 from server.routes.api_pipeline import router as pipeline_router
+from server.utils.command_log import command_log
 from server.routes.api_wizard import router as wizard_router
 from server.routes.api_llm import router as llm_router
 from server.routes.api_collection import router as collection_router
@@ -185,7 +186,12 @@ async def lifespan(app: FastAPI):
     from server.services.llm_skills import register_default_skills
     register_default_skills()
     logger.info("[App] LLM skills registered")
+    # ── Wire command log broadcast ────────────────────────────────────────
+    def _command_log_broadcast(message: dict) -> None:
+        if loop.is_running():
+            asyncio.run_coroutine_threadsafe(ws_manager.broadcast(message), loop)
 
+    command_log.set_broadcast_fn(_command_log_broadcast)
     # ── Background update check ──────────────────────────────────────────────
     from server.services.update_service import update_service
     asyncio.create_task(update_service.startup_check(delay=10.0))
@@ -204,10 +210,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS for local development (Vite dev server on port 3174)
+# CORS for local development (Vite dev server on port 3189)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3174", "http://127.0.0.1:3174"],
+    allow_origins=["http://localhost:3189", "http://127.0.0.1:3189"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -455,7 +461,7 @@ def _apply_app_user_model_id() -> None:
 
 # ── Server runner ────────────────────────────────────────────────────────────
 
-def start_server(port: int = 6176, reload_enabled: bool = False) -> None:
+def start_server(port: int = 6177, reload_enabled: bool = False) -> None:
     """Start the FastAPI server with uvicorn."""
     import uvicorn
     logger.info("[App] Starting FastAPI on http://127.0.0.1:%d (reload=%s)", port, reload_enabled)
@@ -481,7 +487,7 @@ def start_server(port: int = 6176, reload_enabled: bool = False) -> None:
 
 def main() -> None:
     """Launch the application — pywebview window or browser."""
-    port = int(os.environ.get("LRS_PORT", "6176"))
+    port = int(os.environ.get("LRS_PORT", "6177"))
     argv = sys.argv[1:]
     web_only = (os.environ.get("WEB_ONLY", "0") == "1") or ("--web" in argv)
     reload_requested = (os.environ.get("LRS_RELOAD", "0") == "1") or ("--reload" in argv)

@@ -5,6 +5,8 @@ import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { useAnalysis } from '../../context/AnalysisContext'
 import { useProject } from '../../context/ProjectContext'
 import { useUndoRedo } from '../../context/UndoRedoContext'
+import { useModal } from '../../context/ModalContext'
+import { useToast } from '../../context/ToastContext'
 import HighlightWeightSliders from './HighlightWeightSliders'
 import HighlightEventTable from './HighlightEventTable'
 import HighlightMetrics from './HighlightMetrics'
@@ -16,7 +18,7 @@ import EditHistoryPanel from '../history/EditHistoryPanel'
 import ProjectFileBrowser from '../projects/ProjectFileBrowser'
 import ResizableSidebar from '../layout/ResizableSidebar'
 import CollapsibleSection from '../ui/CollapsibleSection'
-import { Sparkles, List, Search, History, Folder, Film, Scissors, Clapperboard, ChevronDown, ChevronRight, AlertCircle } from 'lucide-react'
+import { Sparkles, List, Search, History, Folder, Film, Scissors, Clapperboard, ChevronDown, ChevronRight, AlertCircle, Save, Zap } from 'lucide-react'
 
 /**
  * HighlightPanel — Main container for the Highlight Editing Suite.
@@ -28,7 +30,7 @@ import { Sparkles, List, Search, History, Folder, Film, Scissors, Clapperboard, 
  * @param {number} props.projectId - Active project ID
  */
 export default function HighlightPanel({ projectId }) {
-  const { loadConfig, loadDrivers, loadPresets, replayMode, setReplayMode, presets, loadPreset, savePreset, deletePreset, videoSections, sectionConfig, updateSectionConfig, metrics, currentPresetId, hasUnsavedChanges } = useHighlight()
+  const { loadConfig, loadDrivers, loadPresets, replayMode, setReplayMode, presets, loadPreset, savePreset, deletePreset, videoSections, sectionConfig, updateSectionConfig, metrics, currentPresetId, hasUnsavedChanges, autoSavePreset, setAutoSavePreset } = useHighlight()
   const { loadRaceDuration } = useTimeline()
   const { fetchEvents, events } = useAnalysis()
   const { history } = useUndoRedo()
@@ -245,6 +247,8 @@ export default function HighlightPanel({ projectId }) {
               onLoad={loadPreset}
               onSave={savePreset}
               onDelete={deletePreset}
+              autoSave={autoSavePreset}
+              onToggleAutoSave={setAutoSavePreset}
             />
 
             <div className="flex-1 overflow-y-auto">
@@ -312,7 +316,7 @@ export default function HighlightPanel({ projectId }) {
               className="shrink-0 overflow-hidden"
               style={{ height: timelineHeight }}
             >
-              <HighlightTimeline />
+              <HighlightTimeline onInspect={() => sidebarRef.current?.switchTab('inspector')} />
             </div>
           </div>
         </div>
@@ -325,10 +329,13 @@ export default function HighlightPanel({ projectId }) {
 /**
  * PresetSelector — Compact inline preset picker for the tuning pane.
  */
-function PresetSelector({ presets, onLoad, onSave, onDelete, currentPresetId, hasUnsavedChanges }) {
+function PresetSelector({ presets, onLoad, onSave, onDelete, currentPresetId, hasUnsavedChanges, autoSave, onToggleAutoSave }) {
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [name, setName] = useState('')
+  const [isSaving, setIsSaving] = useState(false)
+  const { openModal } = useModal()
+  const { showSuccess } = useToast()
 
   const handleSave = async () => {
     if (!name.trim()) return
@@ -339,8 +346,33 @@ function PresetSelector({ presets, onLoad, onSave, onDelete, currentPresetId, ha
     } catch {}
   }
 
+  const handleSaveExisting = async () => {
+    if (!currentPresetId) return
+    setIsSaving(true)
+    try { await onSave(currentPresetId) } catch {}
+    finally { setIsSaving(false) }
+  }
+
+  const handleDeleteWithConfirmation = useCallback((presetName) => {
+    openModal('delete-preset', 'confirm', {
+      title: 'Delete Preset',
+      message: `Are you sure you want to delete the preset "${presetName}"? This action cannot be undone.`,
+      confirmText: 'Delete',
+      danger: true,
+      onConfirm: async () => {
+        try {
+          await onDelete(presetName)
+          showSuccess('Preset deleted')
+        } catch (err) {
+          console.error('Failed to delete preset:', err)
+        }
+      },
+    })
+  }, [openModal, onDelete, showSuccess])
+
   return (
-    <div className="px-3 py-2 border-b border-border-subtle shrink-0">
+    <div className="px-3 py-2 border-b border-border-subtle shrink-0 space-y-2">
+      {/* Preset selector row */}
       <div className="flex items-center gap-1.5">
         <span className="text-xxs text-text-tertiary font-medium">Preset:</span>
         <div className="relative flex-1">
@@ -351,10 +383,10 @@ function PresetSelector({ presets, onLoad, onSave, onDelete, currentPresetId, ha
           >
             <div className="flex items-center gap-2 min-w-0">
               <span className="truncate">
-                {currentPresetId && !hasUnsavedChanges ? currentPresetId : 'Select preset...'}
+                {currentPresetId || 'Select preset...'}
               </span>
-              {hasUnsavedChanges && (
-                <span title="Unsaved changes" className="w-1.5 h-1.5 rounded-full bg-red-500 flex-shrink-0"></span>
+              {hasUnsavedChanges && currentPresetId && !autoSave && (
+                <span title="Unsaved changes" className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0"></span>
               )}
             </div>
             <Folder className="w-3 h-3 text-text-disabled shrink-0" />
@@ -369,7 +401,7 @@ function PresetSelector({ presets, onLoad, onSave, onDelete, currentPresetId, ha
                   <button onClick={() => { onLoad(p); setOpen(false) }} className="flex-1 text-left text-xxs text-text-primary truncate">
                     {p.name}
                   </button>
-                  <button onClick={() => onDelete(p.name)} className="p-0.5 text-text-disabled hover:text-danger">
+                  <button onClick={() => handleDeleteWithConfirmation(p.name)} className="p-0.5 text-text-disabled hover:text-danger">
                     ×
                   </button>
                 </div>
@@ -396,22 +428,55 @@ function PresetSelector({ presets, onLoad, onSave, onDelete, currentPresetId, ha
           )}
         </div>
       </div>
+
+      {/* Save + Auto-save controls — separate row, only when a preset is loaded */}
+      {currentPresetId && (
+        <div className="flex items-center gap-1.5">
+          {/* Save button — highlighted when there are pending changes */}
+          <button
+            onClick={handleSaveExisting}
+            disabled={isSaving || !hasUnsavedChanges}
+            title={hasUnsavedChanges ? `Save changes to "${currentPresetId}"` : 'No changes to save'}
+            className={`flex items-center gap-1 px-2 py-0.5 text-xxs rounded border transition-colors
+              ${ hasUnsavedChanges && !autoSave
+                ? 'bg-amber-500/20 border-amber-400/60 text-amber-300 hover:bg-amber-500/35 cursor-pointer'
+                : 'bg-bg-primary border-border text-text-disabled cursor-default opacity-50'
+              }`}
+          >
+            <Save className="w-3 h-3" />
+            {isSaving ? 'Saving…' : 'Save'}
+          </button>
+
+          {/* Auto-save toggle */}
+          <button
+            onClick={() => onToggleAutoSave(!autoSave)}
+            title={autoSave ? 'Auto-save ON — every change is saved immediately' : 'Auto-save OFF'}
+            className={`flex items-center gap-1 px-2 py-0.5 text-xxs rounded border transition-colors
+              ${ autoSave
+                ? 'bg-accent/20 border-accent/60 text-accent hover:bg-accent/30'
+                : 'bg-bg-primary border-border text-text-disabled hover:border-border-active hover:text-text-secondary'
+              }`}
+          >
+            <Zap className="w-3 h-3" />
+            Auto-save
+          </button>
+        </div>
+      )}
     </div>
   )
 }
 
 
 const SEGMENT_TYPES = [
-  { id: 'intro', label: 'Intro', icon: '🎬' },
-  { id: 'qualifying', label: 'Qualifying', icon: '🏁' },
-  { id: 'race', label: 'Race', icon: '🏎️' },
-  { id: 'final_standings', label: 'Final Standings', icon: '🏆' },
+  { id: 'intro',              label: 'Intro',             icon: '🎬', defaultDuration: 10 },
+  { id: 'qualifying_results', label: 'Qualifying',        icon: '🏁', defaultDuration: 15 },
+  { id: 'race',               label: 'Race',              icon: '🏎️', defaultDuration: null  },
+  { id: 'race_results',       label: 'Final Standings',   icon: '🏆', defaultDuration: 20 },
 ]
 
 /**
  * SegmentBreakdown — Toggle and configure individual race segments.
- * Each segment can be enabled/disabled and has its own clip allocation.
- * Total video duration = sum of all enabled segments.
+ * Non-race sections expose a duration input; race duration is automatic.
  */
 function SegmentBreakdown({ sections, config, onUpdate, metrics }) {
   const [expanded, setExpanded] = useLocalStorage('lrs:editing:segments:expanded', false)
@@ -442,38 +507,80 @@ function SegmentBreakdown({ sections, config, onUpdate, metrics }) {
           const enabled = cfg.enabled !== false
           const section = sections.find(s => s.name === seg.id || s.type === seg.id)
           const clipCount = section?.clip_count || cfg.clipCount || 0
-          const segDuration = cfg.duration || section?.duration || 0
+          const isRace = seg.id === 'race'
+          // For b-roll sections, use config override → section actual → default
+          const durationSec = !isRace
+            ? (cfg.duration ?? section?.duration ?? seg.defaultDuration ?? 10)
+            : null
 
           return (
-            <div key={seg.id} className={`flex items-center gap-2 py-1 px-1.5 rounded transition-colors
+            <div key={seg.id} className={`flex flex-col gap-1 py-1 px-1.5 rounded transition-colors
               ${enabled ? 'bg-bg-primary/50' : 'opacity-40'}`}>
-              <button
-                onClick={() => onUpdate(seg.id, { enabled: !enabled })}
-                className={`w-4 h-4 rounded border text-center text-[10px] leading-4 transition-colors
-                  ${enabled
-                    ? 'bg-accent border-accent text-white'
-                    : 'border-border text-transparent hover:border-accent/50'}`}
-              >
-                ✓
-              </button>
-              <span className="text-xxs" style={{ width: 14 }}>{seg.icon}</span>
-              <span className="text-xxs text-text-primary flex-1 truncate">{seg.label}</span>
-              {enabled && (
-                <>
+              {/* Row 1: toggle + label + clip count / auto badge */}
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => onUpdate(seg.id, { enabled: !enabled })}
+                  className={`w-4 h-4 rounded border text-center text-[10px] leading-4 transition-colors shrink-0
+                    ${enabled
+                      ? 'bg-accent border-accent text-white'
+                      : 'border-border text-transparent hover:border-accent/50'}`}
+                >
+                  ✓
+                </button>
+                <span className="text-xxs" style={{ width: 14 }}>{seg.icon}</span>
+                <span className="text-xxs text-text-primary flex-1 truncate">{seg.label}</span>
+                {isRace && enabled && (
                   <span className="text-[9px] text-text-disabled font-mono">
                     {clipCount > 0 ? `${clipCount} clips` : '—'}
                   </span>
-                  <span className="text-[9px] text-text-disabled font-mono w-8 text-right">
-                    {segDuration > 0 ? `${Math.round(segDuration)}s` : '—'}
-                  </span>
-                </>
+                )}
+                {isRace && enabled && (
+                  <span className="text-[9px] text-text-disabled italic font-mono w-8 text-right">auto</span>
+                )}
+              </div>
+
+              {/* Row 2: duration control for non-race sections */}
+              {!isRace && enabled && (
+                <div className="flex items-center gap-1.5 pl-6">
+                  <span className="text-[9px] text-text-disabled">Duration</span>
+                  <div className="flex items-center gap-0.5">
+                    <button
+                      onClick={() => onUpdate(seg.id, { duration: Math.max(5, (durationSec ?? 10) - 5) })}
+                      className="w-4 h-4 rounded text-[10px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors leading-none"
+                      title="Decrease by 5s"
+                    >−</button>
+                    <input
+                      type="number"
+                      className="w-10 text-center text-[9px] font-mono bg-bg-primary border border-border rounded
+                                 text-text-primary focus:outline-none focus:border-accent px-0.5 py-0 leading-tight"
+                      style={{ height: 16 }}
+                      value={Math.round(durationSec ?? 10)}
+                      min={5}
+                      max={120}
+                      step={5}
+                      onChange={e => {
+                        const v = parseFloat(e.target.value)
+                        if (!isNaN(v) && v >= 1) onUpdate(seg.id, { duration: v })
+                      }}
+                    />
+                    <button
+                      onClick={() => onUpdate(seg.id, { duration: Math.min(120, (durationSec ?? 10) + 5) })}
+                      className="w-4 h-4 rounded text-[10px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors leading-none"
+                      title="Increase by 5s"
+                    >+</button>
+                  </div>
+                  <span className="text-[9px] text-text-disabled">s</span>
+                  {section?.duration != null && cfg.duration == null && (
+                    <span className="text-[8px] text-text-disabled italic">(actual)</span>
+                  )}
+                </div>
               )}
             </div>
           )
         })}
 
         <div className="flex items-center justify-between pt-1 border-t border-border-subtle">
-          <span className="text-[9px] text-text-disabled">Total video duration</span>
+          <span className="text-[9px] text-text-disabled">Non-race sections total</span>
           <span className="text-xxs text-text-primary font-semibold font-mono">
             {totalSegmentDuration > 0
               ? `${Math.floor(totalSegmentDuration / 60)}:${String(Math.floor(totalSegmentDuration % 60)).padStart(2, '0')}`

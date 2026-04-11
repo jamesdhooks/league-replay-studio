@@ -3,11 +3,12 @@ import { useHighlight, EVENT_TYPE_LABELS } from '../../context/HighlightContext'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { useTimeline, EVENT_COLORS } from '../../context/TimelineContext'
 import { useToast } from '../../context/ToastContext'
+import { useIRacing } from '../../context/IRacingContext'
 import { formatTime, formatDuration } from '../../utils/time'
-import { Columns3, ArrowRight, RotateCw, ChevronDown, ChevronRight, Download, FileText, Loader2 } from 'lucide-react'
+import { Columns3, ArrowRight, RotateCw, ChevronDown, ChevronRight, Download, FileText, Loader2, Zap } from 'lucide-react'
 import ScoringReportModal from './ScoringReportModal'
 import EventTile from './EventTile'
-import ResultColumn from './ResultColumn'
+import ProductionColumn from './ProductionColumn'
 import RangeSlider from '../ui/RangeSlider'
 import { TimeGutter, TimeGutterH } from './TimeGutter'
 
@@ -30,12 +31,9 @@ import { TimeGutter, TimeGutterH } from './TimeGutter'
 const BUCKET_COUNT = 10
 const BUCKET_LABELS = Array.from({ length: BUCKET_COUNT }, (_, i) => i + 1)
 const MIN_HEIGHT_PX = 900  // fallback height before container is measured
-const BUCKET_COL_WIDTH = 44 // column width in vertical mode
 const BUCKET_ROW_H = 32     // row height in horizontal mode
 const CHOSEN_ROW_H = 56     // result row height in horizontal mode
 const V_GUTTER_W = 52
-const V_PIP_COL_W = 72
-const V_COMPRESS_TIME_W = 48
 
 /** Map a score (0–10) to bucket index 0–9 */
 function scoreToBucket(score) {
@@ -46,12 +44,17 @@ function scoreToBucket(score) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function HighlightHistogram({ onInspect, projectId, collapsed, onToggle, eventsLoaded = false }) {
-  const { selection, metrics, toggleOverride, jumpToEvent, applyHighlights, generateVideoScript, params, serverScoring } = useHighlight()
+  const { selection, productionTimeline, metrics, toggleOverride, applyHighlights, generateVideoScript, params, serverScoring } = useHighlight()
   const { raceDuration, selectedEventId, setSelectedEventId, playheadTime, seekTo } = useTimeline()
   const { showInfo, showSuccess, showError } = useToast()
+  const { sessionData } = useIRacing()
   const [hoveredId, setHoveredId] = useState(null)
   const [compress, setCompress] = useState(false)
-  const [horizontal, setHorizontal] = useState(false)
+  const [horizontal, setHorizontal] = useLocalStorage('lrs:highlights:horizontal', true)
+  const [tooltip, setTooltip] = useState(null)   // { evt, x, y }
+  const [autoGenerate, setAutoGenerate] = useLocalStorage('lrs:highlights:autoGenerate', false)
+  const autoGenDebounce = useRef(null)
+  const isFirstAutoRender = useRef(true)
   // Support controlled mode (collapsed/onToggle props from HighlightPanel) with local fallback
   const [_localCollapsed, _setLocalCollapsed] = useState(false)
   const histogramCollapsed = collapsed !== undefined ? collapsed : _localCollapsed
@@ -59,17 +62,31 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
   const [activeTypes, setActiveTypes] = useState(null)  // null = all types visible
   const scrollRef = useRef(null)
 
+  // Auto-generate: silently regenerate script whenever productionTimeline changes
+  useEffect(() => {
+    if (isFirstAutoRender.current) { isFirstAutoRender.current = false; return }
+    if (!autoGenerate || !projectId || serverScoring) return
+    clearTimeout(autoGenDebounce.current)
+    autoGenDebounce.current = setTimeout(async () => {
+      try {
+        await applyHighlights(projectId)
+        await generateVideoScript(projectId, { cameras: sessionData?.cameras })
+      } catch { /* silent */ }
+    }, 1500)
+    return () => clearTimeout(autoGenDebounce.current)
+  }, [productionTimeline]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleApply = useCallback(async () => {
     if (!projectId) return
     try {
       showInfo('Generating race script...')
       await applyHighlights(projectId)
-      await generateVideoScript(projectId)
+      await generateVideoScript(projectId, { cameras: sessionData?.cameras })
       showSuccess('Race script generated')
     } catch {
       showError('Failed to generate race script')
     }
-  }, [projectId, applyHighlights, generateVideoScript, showInfo, showSuccess, showError])
+  }, [projectId, applyHighlights, generateVideoScript, showInfo, showSuccess, showError, sessionData?.cameras])
 
   // Resizable split between histogram and chosen events
   const [chosenWidth, setChosenWidth] = useLocalStorage('lrs:editing:chosenWidth', 200)
@@ -168,35 +185,27 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
 
   const rangeWidth = rangeEnd - rangeStart
 
-  // Compressed sequential positions for result columns (must compute before contentSize)
+  // Compressed sequential positions for production timeline (must compute before contentSize)
   const compressState = useMemo(() => {
-    if (!compress) return null
-    const combined = [...chosenEvents, ...pipEvents]
-      .sort((a, b) => a.start_time_seconds - b.start_time_seconds)
+    if (!compress || !productionTimeline?.timeline) return null
+    const segs = productionTimeline.timeline
     if (horizontal) {
-      // Horizontal: sequential stacking left→right
+      // Horizontal: sequential stacking left→right using edit positions
+      const map = new Map()
       const ITEM_W = 80
       const GAP = 4
-      const map = new Map()
       let left = 0
-      for (const evt of combined) {
-        map.set(evt.id, left)
+      for (const seg of segs) {
+        map.set(seg.id, left)
         left += ITEM_W + GAP
       }
       return { map, totalWidth: left + 20, horizontal: true }
     } else {
-      // Vertical: sequential stacking top→bottom
-      const ITEM_H = 38
-      const GAP = 4
-      const map = new Map()
-      let top = 0
-      for (const evt of combined) {
-        map.set(evt.id, top)
-        top += ITEM_H + GAP
-      }
-      return { map, totalHeight: top + 20, horizontal: false }
+      // Vertical: use editStart/editDur from timeline for proportional layout
+      const totalEdit = segs.length > 0 ? segs[segs.length - 1].editEnd : 0
+      return { totalEdit, totalHeight: totalEdit > 0 ? Math.max(400, totalEdit * 3) : 400, horizontal: false }
     }
-  }, [compress, chosenEvents, pipEvents, horizontal])
+  }, [compress, productionTimeline, horizontal])
 
   // contentSize = containerSize / rangeWidth: full range = one page, narrower = scrollable.
   // IMPORTANT: must be exactly containerSize / rangeWidth (not clamped by MIN_HEIGHT_PX) so
@@ -243,12 +252,14 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
     setRangeEnd(e)
   }, [])
 
-  const handleClick = useCallback((evt) => {
-    setSelectedEventId(evt.id)
-    jumpToEvent(evt)
-    seekTo(evt.start_time_seconds)
+  const handleClick = useCallback((evtOrSeg) => {
+    // Support both raw events (from histogram columns) and production segments
+    const id = evtOrSeg.primaryEventId || evtOrSeg.id
+    const time = evtOrSeg.start_time_seconds ?? evtOrSeg.clipStart ?? 0
+    setSelectedEventId(id)
+    seekTo(time)
     onInspect?.()
-  }, [setSelectedEventId, jumpToEvent, seekTo, onInspect])
+  }, [setSelectedEventId, seekTo, onInspect])
 
   // Click on time gutter — absolute position within content → time
   const handleGutterClick = useCallback((e) => {
@@ -320,10 +331,12 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
         <div className="w-px h-4 bg-border-subtle mx-1" />
         <ArrowRight size={12} className="text-accent shrink-0" />
         <span className="text-xs font-semibold text-text-primary uppercase tracking-wider whitespace-nowrap">
-          Result
+          Production
         </span>
         <span className="text-xs text-text-disabled">
-          {metrics.eventCount || 0} clips · {formatDuration(metrics.duration)}
+          {productionTimeline?.metrics?.segmentCount || 0} segs · {formatDuration(productionTimeline?.metrics?.duration || 0)}
+          {(productionTimeline?.metrics?.mergeCount || 0) > 0 && ` · ${productionTimeline.metrics.mergeCount} merged`}
+          {(productionTimeline?.metrics?.pipCount || 0) > 0 && ` · ${productionTimeline.metrics.pipCount} PIP`}
         </span>
         <div className="w-px h-4 bg-border-subtle mx-1" />
         <button
@@ -333,6 +346,17 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
         >
           <FileText size={11} />
           View Report
+        </button>
+        <button
+          onClick={() => setAutoGenerate(v => !v)}
+          title={autoGenerate ? 'Auto-generate on — click to disable' : 'Auto-generate script on changes'}
+          className={`p-1.5 rounded transition-colors ${
+            autoGenerate
+              ? 'text-accent bg-accent/15 hover:bg-accent/25'
+              : 'text-text-tertiary hover:text-text-secondary hover:bg-bg-primary/50'
+          }`}
+        >
+          <Zap className="w-3.5 h-3.5" />
         </button>
         <button
           onClick={handleApply}
@@ -415,19 +439,9 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
             <div className="absolute inset-y-0 -left-2 -right-2 z-20" />
             <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-px bg-border transition-colors group-hover/divider:bg-accent group-active/divider:bg-accent" />
           </div>
-          {compress && (
-            <div className="shrink-0 text-center text-xs text-text-disabled py-1.5 border-r border-border-subtle"
-                 style={{ width: V_COMPRESS_TIME_W }}>
-              Time
-            </div>
-          )}
-          <div className="shrink-0 text-center text-xs text-text-disabled py-1.5 border-r border-border-subtle"
-               style={{ width: chosenWidth }}>
-            Chosen Events
-          </div>
           <div className="shrink-0 text-center text-xs text-text-disabled py-1.5"
-               style={{ width: V_PIP_COL_W }}>
-            PIP
+               style={{ width: chosenWidth }}>
+            Production Timeline
           </div>
         </div>
       )}
@@ -470,7 +484,8 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
                       key={evt.id} event={evt} totalDuration={totalDuration}
                       isHovered={hoveredId === evt.id} isSelected={selectedEventId === evt.id}
                       onClick={() => handleClick(evt)} onEnter={() => setHoveredId(evt.id)}
-                      onLeave={() => setHoveredId(null)} onRightClick={() => toggleOverride(evt.id)}
+                      onLeave={() => { setHoveredId(null); setTooltip(null) }} onRightClick={() => toggleOverride(evt.id)}
+                    onEnter={(e) => { setHoveredId(evt.id); setTooltip({ evt, x: e.clientX, y: e.clientY }) }}
                       horizontal
                       paddingBefore={paddingBefore}
                       paddingAfter={paddingAfter}
@@ -481,57 +496,68 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
               ))}
 
               <div className="relative border-t border-border" style={{ height: CHOSEN_ROW_H, ...(compress && compressState ? { width: compressState.totalWidth } : {}) }}>
-                {[...chosenEvents, ...pipEvents].map(evt => {
+                {(productionTimeline?.timeline || []).map(seg => {
+                  if (seg.type === 'bridge') return null
+                  const color = EVENT_COLORS[seg.event_type] || '#6b7280'
+                  const isSelected = selectedEventId === seg.primaryEventId || selectedEventId === seg.id
+                  const isHovered = hoveredId === seg.primaryEventId || hoveredId === seg.id
                   if (compress && compressState) {
-                    const left = compressState.map.get(evt.id) ?? 0
-                    const color = EVENT_COLORS[evt.event_type] || '#6b7280'
-                    const isSelected = selectedEventId === evt.id
-                    const isHovered = hoveredId === evt.id
+                    const left = compressState.map.get(seg.id) ?? 0
                     return (
                       <div
-                        key={evt.id}
+                        key={seg.id}
                         className="absolute cursor-pointer transition-all duration-100 overflow-hidden"
                         style={{
                           left, width: 80, top: 1, bottom: 1,
-                          backgroundColor: color, opacity: 0.88,
+                          backgroundColor: color, opacity: seg.type === 'bridge' ? 0.55 : 0.88,
                           borderWidth: isSelected || isHovered ? 2 : 1,
-                          borderStyle: 'solid',
+                          borderStyle: seg.type === 'bridge' ? 'dashed' : 'solid',
                           borderColor: isSelected ? 'rgba(255,255,255,0.8)' : isHovered ? 'rgba(255,255,255,0.5)' : 'rgba(255,255,255,0.1)',
                           zIndex: isSelected ? 20 : isHovered ? 10 : 1,
                         }}
-                        onClick={() => handleClick(evt)}
-                        onMouseEnter={() => setHoveredId(evt.id)}
+                        onClick={() => seg.type !== 'bridge' && handleClick(seg)}
+                        onMouseEnter={() => setHoveredId(seg.primaryEventId || seg.id)}
                         onMouseLeave={() => setHoveredId(null)}
-                        onContextMenu={e => { e.preventDefault(); toggleOverride(evt.id) }}
-                        title={`${EVENT_TYPE_LABELS[evt.event_type]} · ${formatTime(evt.start_time_seconds)}`}
+                        title={`${seg.type === 'bridge' ? 'B-roll' : EVENT_TYPE_LABELS[seg.event_type] || seg.event_type} · ${formatTime(seg.clipStart)}`}
                       >
                         <div className="px-0.5 py-px truncate" style={{ fontSize: 9, lineHeight: '11px' }}>
-                          <span className="text-white/90 font-medium">{EVENT_TYPE_LABELS[evt.event_type]?.slice(0, 6) || '?'}</span>
+                          <span className="text-white/90 font-medium">{seg.type === 'bridge' ? 'B-roll' : (EVENT_TYPE_LABELS[seg.event_type]?.slice(0, 6) || '?')}</span>
                         </div>
                         <div className="px-0.5 truncate" style={{ fontSize: 8, lineHeight: '10px' }}>
-                          <span className="text-white/60">{formatTime(evt.start_time_seconds)}</span>
+                          <span className="text-white/60">{formatTime(seg.clipStart)}</span>
                         </div>
-                        {evt.driver_names?.length > 0 && (
+                        {seg.driver_names?.length > 0 && (
                           <div className="px-0.5 truncate" style={{ fontSize: 7, lineHeight: '9px' }}>
-                            <span className="text-white/55">{evt.driver_names.slice(0, 2).join('/')}</span>
+                            <span className="text-white/55">{seg.driver_names.slice(0, 2).join('/')}</span>
                           </div>
                         )}
                       </div>
                     )
                   }
-                  const typeSettings = params.paddingByType?.[evt.event_type] || {}
-                  const paddingBefore = typeSettings.before != null ? typeSettings.before : params.paddingBefore
-                  const paddingAfter = typeSettings.after != null ? typeSettings.after : params.paddingAfter
+                  // Race-time layout
+                  const pct = totalDuration > 0 ? (seg.clipStart / totalDuration) * 100 : 0
+                  const widthPct = totalDuration > 0 ? (seg.clipDuration / totalDuration) * 100 : 0
                   return (
-                    <EventTile
-                      key={evt.id} event={evt} totalDuration={totalDuration}
-                      isHovered={hoveredId === evt.id} isSelected={selectedEventId === evt.id}
-                      onClick={() => handleClick(evt)} onEnter={() => setHoveredId(evt.id)}
-                      onLeave={() => setHoveredId(null)} onRightClick={() => toggleOverride(evt.id)}
-                      horizontal
-                      paddingBefore={paddingBefore}
-                      paddingAfter={paddingAfter}
-                    />
+                    <div
+                      key={seg.id}
+                      className="absolute cursor-pointer transition-all duration-100 overflow-hidden"
+                      style={{
+                        left: `${pct}%`, width: `${widthPct}%`, minWidth: 2, top: 1, bottom: 1,
+                        backgroundColor: color, opacity: seg.type === 'bridge' ? 0.55 : 0.88,
+                        borderWidth: isSelected || isHovered ? 2 : 1,
+                        borderStyle: seg.type === 'bridge' ? 'dashed' : 'solid',
+                        borderColor: isSelected ? 'rgba(255,255,255,0.8)' : isHovered ? 'rgba(255,255,255,0.5)' : 'rgba(255,255,255,0.1)',
+                        zIndex: isSelected ? 20 : isHovered ? 10 : 1,
+                      }}
+                      onClick={() => seg.type !== 'bridge' && handleClick(seg)}
+                      onMouseEnter={() => setHoveredId(seg.primaryEventId || seg.id)}
+                      onMouseLeave={() => setHoveredId(null)}
+                      title={`${seg.type === 'bridge' ? 'B-roll' : EVENT_TYPE_LABELS[seg.event_type] || seg.event_type} · ${formatTime(seg.clipStart)} (${formatDuration(seg.clipDuration)})`}
+                    >
+                      <div className="px-0.5 py-px truncate" style={{ fontSize: 9, lineHeight: '11px' }}>
+                        <span className="text-white/90 font-medium">{seg.type === 'bridge' ? 'B-roll' : (EVENT_TYPE_LABELS[seg.event_type]?.slice(0, 6) || '?')}</span>
+                      </div>
+                    </div>
                   )
                 })}
               </div>
@@ -574,7 +600,8 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
                     key={evt.id} event={evt} totalDuration={totalDuration}
                     isHovered={hoveredId === evt.id} isSelected={selectedEventId === evt.id}
                     onClick={() => handleClick(evt)} onEnter={() => setHoveredId(evt.id)}
-                    onLeave={() => setHoveredId(null)} onRightClick={() => toggleOverride(evt.id)}
+                    onLeave={() => { setHoveredId(null); setTooltip(null) }} onRightClick={() => toggleOverride(evt.id)}
+                    onEnter={(e) => { setHoveredId(evt.id); setTooltip({ evt, x: e.clientX, y: e.clientY }) }}
                     paddingBefore={paddingBefore}
                     paddingAfter={paddingAfter}
                   />
@@ -592,39 +619,17 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
               </div>
             )}
 
-            {compress && (
-              <div className="shrink-0 relative border-r border-border-subtle bg-bg-primary/30"
-                   style={{ width: 48 }}>
-                {chosenEvents.concat(pipEvents)
-                  .sort((a, b) => a.start_time_seconds - b.start_time_seconds)
-                  .map((evt) => {
-                    const top = compressState?.map?.get(evt.id) ?? 0
-                    return (
-                      <div key={evt.id} className="absolute left-0 right-0 text-center font-mono text-text-disabled"
-                           style={{ top, fontSize: 9, lineHeight: '34px' }}>
-                        {formatTime(evt.start_time_seconds)}
-                      </div>
-                    )
-                  })}
-              </div>
-            )}
-
-            <ResultColumn
-              events={chosenEvents} totalDuration={totalDuration}
-              compress={compress} compressPositions={compressState?.map}
-              hoveredId={hoveredId} selectedId={selectedEventId}
-              onClick={handleClick} onEnter={id => setHoveredId(id)}
-              onLeave={() => setHoveredId(null)} width={chosenWidth}
-              paddingParams={params}
-            />
-
-            <ResultColumn
-              events={pipEvents} totalDuration={totalDuration}
-              compress={compress} compressPositions={compressState?.map}
-              hoveredId={hoveredId} selectedId={selectedEventId}
-              onClick={handleClick} onEnter={id => setHoveredId(id)}
-              onLeave={() => setHoveredId(null)} width={72} isPip
-              paddingParams={params}
+            <ProductionColumn
+              timeline={productionTimeline?.timeline || []}
+              totalDuration={totalDuration}
+              compress={compress}
+              hoveredId={hoveredId}
+              selectedId={selectedEventId}
+              onClick={handleClick}
+              onEnter={id => setHoveredId(id)}
+              onLeave={() => setHoveredId(null)}
+              width={chosenWidth}
+              flex
             />
           </div>
         </div>
@@ -649,9 +654,126 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
           pipEvents={pipEvents}
           metrics={metrics}
           totalDuration={totalDuration}
+          productionTimeline={productionTimeline}
           onClose={() => setShowReport(false)}
         />
       )}
+
+      {/* ── Rich event tooltip ─────────────────────────────────────────── */}
+      {tooltip && (
+        <EventTooltip
+          evt={tooltip.evt}
+          x={tooltip.x}
+          y={tooltip.y}
+        />
+      )}
+    </div>
+  )
+}
+
+// ── Rich hover tooltip ────────────────────────────────────────────────────────
+function EventTooltip({ evt, x, y }) {
+  const color = EVENT_COLORS[evt.event_type] || '#6b7280'
+  const typeLabel = EVENT_TYPE_LABELS[evt.event_type] || evt.event_type || '—'
+  const isHighlight = evt.inclusion === 'highlight'
+  const isFullVideo = evt.inclusion === 'full-video'
+  const isExcluded  = evt.inclusion === 'excluded'
+  const inclusionLabel = isHighlight ? 'Highlight' : isFullVideo ? 'Full-video' : isExcluded ? 'Excluded' : 'Below threshold'
+  const inclusionColor = isHighlight ? 'text-emerald-400' : isFullVideo ? 'text-sky-400' : 'text-text-disabled'
+
+  // Position: prefer right/above mouse, clamp to viewport
+  const vpW = window.innerWidth
+  const vpH = window.innerHeight
+  const W = 240
+  const left = x + 14 + W > vpW ? x - W - 8 : x + 14
+  const top  = y - 10 < 0 ? y + 14 : y - 10
+
+  const duration = Math.max(0, (evt.end_time_seconds || 0) - (evt.start_time_seconds || 0))
+  const fmt = (s) => {
+    const m = Math.floor(s / 60)
+    const sec = Math.floor(s % 60)
+    return `${m}:${String(sec).padStart(2, '0')}`
+  }
+
+  return (
+    <div
+      className="fixed z-[9999] pointer-events-none rounded-xl border border-border shadow-float text-xs"
+      style={{ left, top, width: W, background: 'rgba(18,18,24,0.97)', borderColor: 'rgba(99,102,241,0.35)' }}
+    >
+      {/* Color header */}
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-border-subtle rounded-t-xl"
+           style={{ background: `linear-gradient(90deg,${color}22,transparent)` }}>
+        <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
+        <span className="font-semibold text-text-primary truncate">{typeLabel}</span>
+        {evt.tier && (
+          <span className="ml-auto text-xxs font-bold px-1.5 py-0.5 rounded"
+                style={{ background: color + '33', color }}>
+            {evt.tier}
+          </span>
+        )}
+      </div>
+
+      <div className="px-3 py-2 space-y-1.5">
+        {/* Score */}
+        <div className="flex items-center justify-between">
+          <span className="text-text-tertiary">Score</span>
+          <span className="font-mono font-semibold text-text-primary">{evt.score?.toFixed(2) ?? '—'}</span>
+        </div>
+
+        {/* Status */}
+        <div className="flex items-center justify-between">
+          <span className="text-text-tertiary">Status</span>
+          <span className={`font-medium ${inclusionColor}`}>{inclusionLabel}</span>
+        </div>
+
+        {/* Time */}
+        <div className="flex items-center justify-between">
+          <span className="text-text-tertiary">Time</span>
+          <span className="font-mono text-text-secondary text-xxs">
+            {fmt(evt.start_time_seconds)} – {fmt(evt.end_time_seconds)}
+          </span>
+        </div>
+
+        {/* Duration */}
+        <div className="flex items-center justify-between">
+          <span className="text-text-tertiary">Duration</span>
+          <span className="font-mono text-text-secondary">{duration.toFixed(1)}s</span>
+        </div>
+
+        {/* Severity */}
+        {evt.severity != null && (
+          <div className="flex items-center justify-between">
+            <span className="text-text-tertiary">Severity</span>
+            <div className="flex items-center gap-1">
+              <div className="flex gap-px">
+                {Array.from({ length: 10 }).map((_, i) => (
+                  <div key={i} className="w-1.5 h-2 rounded-sm"
+                       style={{ backgroundColor: i < evt.severity ? color : 'rgba(255,255,255,0.1)' }} />
+                ))}
+              </div>
+              <span className="font-mono text-text-secondary ml-1">{evt.severity}</span>
+            </div>
+          </div>
+        )}
+
+        {/* Drivers */}
+        {evt.driver_names?.length > 0 && (
+          <div className="flex items-start justify-between gap-2">
+            <span className="text-text-tertiary shrink-0">Drivers</span>
+            <span className="text-text-secondary text-right leading-relaxed" style={{ fontSize: 10 }}>
+              {evt.driver_names.slice(0, 4).join(', ')}
+              {evt.driver_names.length > 4 && ` +${evt.driver_names.length - 4}`}
+            </span>
+          </div>
+        )}
+
+        {/* Reason */}
+        {evt.reason && (
+          <div className="pt-1 border-t border-border-subtle">
+            <p className="text-text-disabled leading-relaxed" style={{ fontSize: 10 }}>{evt.reason}</p>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

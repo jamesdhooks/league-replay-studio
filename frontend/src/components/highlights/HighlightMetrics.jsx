@@ -1,4 +1,4 @@
-import { memo, useState } from 'react'
+import { memo, useState, useMemo } from 'react'
 import { useHighlight, tierColor } from '../../context/HighlightContext'
 import { useTimeline } from '../../context/TimelineContext'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
@@ -13,12 +13,28 @@ import CollapsibleSection from '../ui/CollapsibleSection'
  * Updates within 100ms of any parameter change (computed in HighlightContext).
  */
 export default memo(function HighlightMetrics() {
-  const { metrics, targetDuration } = useHighlight()
+  const { metrics, targetDuration, videoScript } = useHighlight()
   const { raceDuration } = useTimeline()
   const [metricsExpanded, setMetricsExpanded] = useLocalStorage('lrs:editing:metrics:expanded', true)
 
-  const overTarget = targetDuration && metrics.duration > targetDuration
-  const underTarget = targetDuration && metrics.duration < targetDuration * 0.9
+  // Full production video duration: sum all edit segments (includes intro/outro sections).
+  // This matches the "X total" shown in the race script timeline.
+  const videoDuration = useMemo(() => {
+    if (!videoScript?.length) return metrics.duration
+    return videoScript
+      .filter(s => s.type !== 'transition')
+      .reduce((acc, s) => {
+        const rawDur  = Math.max(0, (s.end_time_seconds || 0) - (s.start_time_seconds || 0))
+        const padBef  = Math.max(0, Number(s.clip_padding       || 0))
+        const padAft  = Math.max(0, Number(s.clip_padding_after || 0))
+        // Bridges contribute 0 edit-time (instant cuts)
+        if (s.type === 'bridge') return acc
+        return acc + Math.max(1, rawDur + padBef + padAft)
+      }, 0)
+  }, [videoScript, metrics.duration])
+
+  const overTarget = targetDuration && videoDuration > targetDuration
+  const underTarget = targetDuration && videoDuration < targetDuration * 0.9
 
   return (
     <CollapsibleSection
@@ -32,8 +48,8 @@ export default memo(function HighlightMetrics() {
           <MetricRow
             icon={Clock}
             label="Duration"
-            tooltip="Total duration of all selected highlight clips combined"
-            value={formatDuration(metrics.duration)}
+            tooltip="Total production video duration (highlights + context fills + intro/outro)"
+            value={formatDuration(videoDuration)}
             suffix={targetDuration ? ` / ${formatDuration(targetDuration)}` : ''}
             warning={overTarget ? 'Over target' : underTarget ? 'Under target' : null}
             warningColor={overTarget ? 'text-danger' : 'text-warning'}

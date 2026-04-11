@@ -73,13 +73,6 @@ export default function EventTile({
         onMouseEnter={onEnter}
         onMouseLeave={onLeave}
         onContextMenu={e => { e.preventDefault(); onRightClick() }}
-        title={[
-          EVENT_TYPE_LABELS[evt.event_type] || evt.event_type,
-          `Score: ${evt.score ?? '?'} | Tier: ${evt.tier || '?'}`,
-          `${formatTime(evt.start_time_seconds)} — ${formatTime(evt.end_time_seconds)} (${formatDuration(duration)})`,
-          evt.reason || '',
-          isHighlight ? '✓ Selected' : isFullVideo ? '○ Full-video' : '✗ Excluded',
-        ].filter(Boolean).join('\n')}
       >
         {evt.narrative_anchor && (
           <span className="absolute top-0 right-0 text-yellow-300 z-10 leading-none" style={{ fontSize: 8 }}>★</span>

@@ -184,6 +184,48 @@ export default function HighlightWeightSliders() {
           labelWidth="7rem"
         />
 
+        {/* Camera hold variability */}
+        <LabeledSlider
+          label="Cam Variability"
+          tooltip="Random ±seconds applied to each camera hold (0 = fixed hold)"
+          value={params.cameraHoldVariability ?? 0}
+          min={0} max={15} step={1}
+          format={v => v === 0 ? 'Fixed' : `±${v}s`}
+          onChange={v => setParams(p => ({ ...p, cameraHoldVariability: v }))}
+          labelWidth="7rem"
+        />
+
+        {/* Driver change probability */}
+        <LabeledSlider
+          label="Driver Change"
+          tooltip="Probability of switching driver focus on each camera cut (0 = never, 100 = always)"
+          value={Math.round((params.driverChangeProbability ?? 0.3) * 100)}
+          min={0} max={100} step={10}
+          format={v => `${v}%`}
+          onChange={v => setParams(p => ({ ...p, driverChangeProbability: v / 100 }))}
+          labelWidth="7rem"
+        />
+
+        {/* Driver recency controls */}
+        <LabeledSlider
+          label="Driver Recency"
+          tooltip="How strongly to penalise showing the same driver again soon. 0 = no penalty, 1 = maximum. Higher values force more driver variety."
+          value={params.driverRecencyPenalty ?? 0.5}
+          min={0} max={1.0} step={0.05}
+          format={v => v === 0 ? 'Off' : v.toFixed(2)}
+          onChange={v => setParams(p => ({ ...p, driverRecencyPenalty: v }))}
+          labelWidth="7rem"
+        />
+        <LabeledSlider
+          label="Driver Decay"
+          tooltip="Seconds for the driver recency penalty to fade back to zero. Short decay = drivers re-qualify quickly."
+          value={params.driverRecencyDecay ?? 60}
+          min={10} max={300} step={10}
+          format={v => `${v}s`}
+          onChange={v => setParams(p => ({ ...p, driverRecencyDecay: v }))}
+          labelWidth="7rem"
+        />
+
         {/* Overtake boost */}
         <LabeledSlider
           label="Overtake Boost"

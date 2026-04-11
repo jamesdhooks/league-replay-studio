@@ -144,10 +144,18 @@ export function computeEventScore(event, weights, params = {}, raceDuration = 0)
   if (eventType === 'battle') {
     const chainLength = metadata.chain_length || 2
     narrativeBonus += Math.log(chainLength + 1) * 0.5
+    // Battles with lead changes contain overtake moments — they're better stories.
+    const leadChanges = metadata.lead_changes || 0
+    if (leadChanges > 0) {
+      narrativeBonus += 0.6 + Math.min(leadChanges - 1, 3) * 0.3
+    }
   }
-  // Overtakes during a sustained battle are more exciting
+  // In-battle overtakes are redundant with the parent battle clip — dampen them
+  // so the fuller battle story is preferred over the isolated pass.
+  // Standalone overtakes (not part of a battle) keep their full score.
   if (eventType === 'overtake' && metadata.in_battle) {
-    narrativeBonus += 0.4
+    score *= 0.6
+    narrativeBonus -= 0.2
   }
   const evtTime = event.start_time_seconds || 0
   if (raceDuration > 0) {
@@ -435,10 +443,17 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
       continue
     }
 
-    if (params.incidentPositionCutoff > 0 && evt.event_type === 'incident') {
-      if (evt.position && evt.position > params.incidentPositionCutoff) {
-        excludedIds.add(evt.id)
-        continue
+    if (params.incidentPositionCutoff > 0) {
+      const INCIDENT_TYPES = new Set([
+        'incident', 'crash', 'spinout', 'car_contact', 'contact',
+        'lost_control', 'off_track', 'turn_cutting', 'close_call',
+      ])
+      if (INCIDENT_TYPES.has(evt.event_type)) {
+        const pos = evt.position ?? null
+        if (pos !== null && pos > params.incidentPositionCutoff) {
+          excludedIds.add(evt.id)
+          continue
+        }
       }
     }
 
@@ -561,6 +576,515 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     fullVideoIds: [...fullVideoIds],
     excludedIds: [...excludedIds],
     metrics,
+  }
+}
+
+
+// ── Production Timeline Builder ──────────────────────────────────────────
+
+/** Minimum clip duration (seconds) after trimming — shorter clips are demoted */
+const MIN_CLIP_DURATION = 2.0
+
+/** Minimum gap (seconds) to mark as bridge-needed */
+const MIN_BRIDGE_DURATION = 3.0
+
+/** Gap threshold as fraction of target duration — gaps smaller than this are ignored */
+const GAP_THRESHOLD_FRACTION = 0.01
+
+/** Max context fills per gap */
+const MAX_CONTEXT_PER_GAP = 3
+
+/**
+ * Compute the padded clip window for an event given padding params.
+ * Returns { clipStart, clipEnd, clipDuration }.
+ */
+function computeClipWindow(evt, params) {
+  const start = evt.start_time_seconds || 0
+  const end = evt.end_time_seconds || start
+  const typeSettings = params?.paddingByType?.[evt.event_type] || {}
+  const meta = (typeof evt.metadata === 'string')
+    ? (() => { try { return JSON.parse(evt.metadata) } catch { return {} } })()
+    : (evt.metadata || {})
+  const before = Math.max(0, meta.padding_before ?? typeSettings.before ?? params?.paddingBefore ?? 2.0)
+  const after = Math.max(0, meta.padding_after ?? typeSettings.after ?? params?.paddingAfter ?? 5.0)
+  const clipStart = Math.max(0, start - before)
+  const clipEnd = end + after
+  return { clipStart, clipEnd, clipDuration: clipEnd - clipStart }
+}
+
+/** Check if two clip windows overlap. */
+function windowsOverlap(a, b) {
+  return a.clipStart < b.clipEnd && a.clipEnd > b.clipStart
+}
+
+/** Get set of involved driver IDs from an event */
+function getDriverSet(evt) {
+  const drivers = evt.involved_drivers || []
+  return new Set(Array.isArray(drivers) ? drivers : [])
+}
+
+/** Check if two events share any involved drivers */
+function eventsShareDrivers(a, b) {
+  const da = getDriverSet(a)
+  const db = getDriverSet(b)
+  for (const d of da) { if (db.has(d)) return true }
+  return false
+}
+
+/** Find all segments in timeline whose clip window overlaps the given window */
+function findOverlaps(window, timeline) {
+  return timeline.filter(seg => windowsOverlap(window, seg))
+}
+
+/** Union two clip windows into one covering both */
+function unionWindows(a, b) {
+  const clipStart = Math.min(a.clipStart, b.clipStart)
+  const clipEnd = Math.max(a.clipEnd, b.clipEnd)
+  return { clipStart, clipEnd, clipDuration: clipEnd - clipStart }
+}
+
+/** Try to trim a candidate window so it doesn't overlap existing.
+ *  Returns trimmed window or null if core event would be lost. */
+function trimWindow(candidateWindow, candidateEvt, existing) {
+  const coreStart = candidateEvt.start_time_seconds || 0
+  const coreEnd = candidateEvt.end_time_seconds || coreStart
+
+  // Try trimming from the left (clip starts after existing ends)
+  const leftTrimmed = { clipStart: existing.clipEnd, clipEnd: candidateWindow.clipEnd }
+  leftTrimmed.clipDuration = leftTrimmed.clipEnd - leftTrimmed.clipStart
+  if (leftTrimmed.clipStart <= coreStart && leftTrimmed.clipDuration >= MIN_CLIP_DURATION) {
+    return leftTrimmed
+  }
+
+  // Try trimming from the right (clip ends before existing starts)
+  const rightTrimmed = { clipStart: candidateWindow.clipStart, clipEnd: existing.clipStart }
+  rightTrimmed.clipDuration = rightTrimmed.clipEnd - rightTrimmed.clipStart
+  if (rightTrimmed.clipEnd >= coreEnd && rightTrimmed.clipDuration >= MIN_CLIP_DURATION) {
+    return rightTrimmed
+  }
+
+  return null
+}
+
+let _nextSegId = 1
+
+/** Create a production segment from an event */
+function makeSegment(type, evt, clipWindow, resolution, extra = {}) {
+  const id = `prod_${_nextSegId++}`
+  return {
+    id,
+    type,
+    clipStart: clipWindow.clipStart,
+    clipEnd: clipWindow.clipEnd,
+    clipDuration: clipWindow.clipDuration,
+    coreStart: evt.start_time_seconds || 0,
+    coreEnd: evt.end_time_seconds || (evt.start_time_seconds || 0),
+    sourceEvents: [evt],
+    primaryEventId: evt.id,
+    event_type: evt.event_type,
+    score: evt.score,
+    tier: evt.tier,
+    bucket: evt.bucket,
+    involved_drivers: evt.involved_drivers || [],
+    driver_names: evt.driver_names || [],
+    severity: evt.severity,
+    resolution,
+    ...extra,
+  }
+}
+
+/**
+ * Build an overlap-aware Production Timeline from scored events.
+ *
+ * This replaces the old bucket-fill + backend resolve_conflicts flow.
+ * Events are placed in descending score order; overlaps are resolved
+ * via merge / PIP / trim / demote. Gaps are filled with context events
+ * and explicit bridge markers.
+ *
+ * @param {Object} selection - Result from computeHighlightSelection()
+ * @param {number} targetDuration - Target highlight reel duration (seconds)
+ * @param {Object} params - Padding params, pipThreshold, etc.
+ * @param {number} raceDuration - Total race duration for gap analysis
+ * @returns {{ timeline, metrics, fullVideoIds, demotedIds }}
+ */
+export function buildProductionTimeline(selection, targetDuration, params, raceDuration) {
+  _nextSegId = 1
+
+  const pipThreshold = params?.pipThreshold ?? 7.0
+  const gapThreshold = Math.max(MIN_BRIDGE_DURATION, (targetDuration || 300) * GAP_THRESHOLD_FRACTION)
+
+  // Start with events already classified by computeHighlightSelection
+  const highlights = selection.scoredEvents
+    .filter(e => e.inclusion === 'highlight')
+    .sort((a, b) => {
+      // Mandatory first, then by score descending
+      const am = MANDATORY_TYPES.has(a.event_type) ? 1 : 0
+      const bm = MANDATORY_TYPES.has(b.event_type) ? 1 : 0
+      if (am !== bm) return bm - am
+      return b.score - a.score
+    })
+
+  const timeline = []
+  let usedBudget = 0
+  const placedIds = new Set()
+  const demotedIds = new Set()
+
+  // Tracking metrics
+  let mergeCount = 0
+  let pipCount = 0
+  let trimCount = 0
+  let absorbCount = 0
+
+  // ── Pre-compute battle→overtake containment ──────────────────────────
+  // When a battle is placed, its child overtakes (same drivers, time overlap)
+  // are absorbed into it rather than consuming separate budget.
+  const battleChildren = new Map()  // battleId → Set<overtakeId>
+  const overtakeParent = new Map()  // overtakeId → battleId
+  const allEvents = selection.scoredEvents
+  const battles = allEvents.filter(e => e.event_type === 'battle')
+  const inBattleOvertakes = allEvents.filter(e =>
+    e.event_type === 'overtake' && e.metadata?.in_battle
+  )
+  for (const battle of battles) {
+    const bStart = battle.start_time_seconds || 0
+    const bEnd = battle.end_time_seconds || bStart
+    const bDrivers = new Set(battle.involved_drivers || [])
+    if (bDrivers.size === 0) continue
+    for (const ot of inBattleOvertakes) {
+      const otTime = ot.start_time_seconds || 0
+      // Overtake falls within battle time window (with small tolerance)
+      if (otTime >= bStart - 2 && otTime <= bEnd + 2) {
+        const otDrivers = ot.involved_drivers || []
+        if (otDrivers.length >= 2 && otDrivers.every(d => bDrivers.has(d))) {
+          if (!battleChildren.has(battle.id)) battleChildren.set(battle.id, new Set())
+          battleChildren.get(battle.id).add(ot.id)
+          overtakeParent.set(ot.id, battle.id)
+        }
+      }
+    }
+  }
+  const absorbedIds = new Set()  // overtakes absorbed into a placed battle
+
+  /** When a battle is placed, absorb its child overtakes into the segment */
+  function absorbChildOvertakes(seg) {
+    const evtId = seg.primaryEventId
+    const children = battleChildren.get(evtId)
+    if (!children || children.size === 0) return
+    for (const childId of children) {
+      if (!absorbedIds.has(childId) && !placedIds.has(childId)) {
+        absorbedIds.add(childId)
+        absorbCount++
+      }
+    }
+    // Also absorb children of any merged events
+    for (const src of (seg.sourceEvents || [])) {
+      const srcChildren = battleChildren.get(src.id)
+      if (!srcChildren) continue
+      for (const childId of srcChildren) {
+        if (!absorbedIds.has(childId) && !placedIds.has(childId)) {
+          absorbedIds.add(childId)
+          absorbCount++
+        }
+      }
+    }
+  }
+
+  // ── Phase 1: Overlap-aware greedy placement ──────────────────────────
+  for (const evt of highlights) {
+    // Skip overtakes already absorbed into a placed battle
+    if (absorbedIds.has(evt.id)) {
+      placedIds.add(evt.id)
+      continue
+    }
+
+    const window = computeClipWindow(evt, params)
+    const overlaps = findOverlaps(window, timeline)
+
+    if (overlaps.length === 0) {
+      // Clean placement
+      if (usedBudget + window.clipDuration <= targetDuration * TARGET_DURATION_TOLERANCE || MANDATORY_TYPES.has(evt.event_type)) {
+        const seg = makeSegment('event', evt, window, 'placed')
+        timeline.push(seg)
+        usedBudget += window.clipDuration
+        placedIds.add(evt.id)
+        // If this is a battle, absorb its child overtakes
+        if (evt.event_type === 'battle') absorbChildOvertakes(seg)
+      } else {
+        demotedIds.add(evt.id)
+      }
+    } else if (overlaps.length === 1) {
+      const existing = overlaps[0]
+
+      if (eventsShareDrivers(evt, { involved_drivers: existing.involved_drivers })) {
+        // MERGE: same drivers, extend window
+        const merged = unionWindows(existing, window)
+        const durationDelta = merged.clipDuration - existing.clipDuration
+        if (usedBudget + durationDelta <= targetDuration * TARGET_DURATION_TOLERANCE || MANDATORY_TYPES.has(evt.event_type)) {
+          const allSources = [...(existing.sourceEvents || []), evt]
+          const allDrivers = [...new Set([...(existing.involved_drivers || []), ...(evt.involved_drivers || [])])]
+          const allDriverNames = [...new Set([...(existing.driver_names || []), ...(evt.driver_names || [])])]
+          const primary = existing.score >= evt.score ? existing : evt
+          Object.assign(existing, {
+            type: 'merge',
+            clipStart: merged.clipStart,
+            clipEnd: merged.clipEnd,
+            clipDuration: merged.clipDuration,
+            coreStart: Math.min(existing.coreStart, evt.start_time_seconds || 0),
+            coreEnd: Math.max(existing.coreEnd, evt.end_time_seconds || (evt.start_time_seconds || 0)),
+            sourceEvents: allSources,
+            primaryEventId: primary.primaryEventId || primary.id,
+            score: Math.max(existing.score, evt.score),
+            involved_drivers: allDrivers,
+            driver_names: allDriverNames,
+            mergedEventIds: [...(existing.mergedEventIds || [existing.primaryEventId]), evt.id],
+            resolution: 'merged',
+            resolutionNote: `Merged ${allSources.length} events (shared drivers)`,
+          })
+          usedBudget += durationDelta
+          placedIds.add(evt.id)
+          mergeCount++
+          // If either event is a battle, absorb child overtakes
+          if (evt.event_type === 'battle' || existing.event_type === 'battle') absorbChildOvertakes(existing)
+        } else {
+          demotedIds.add(evt.id)
+        }
+      } else if (evt.score >= pipThreshold && existing.score >= pipThreshold) {
+        // PIP: both high-value, different drivers
+        const pipWindow = unionWindows(existing, window)
+        const durationDelta = pipWindow.clipDuration - existing.clipDuration
+        if (usedBudget + durationDelta <= targetDuration * TARGET_DURATION_TOLERANCE) {
+          const primary = existing.score >= evt.score ? existing : evt
+          const secondary = existing.score >= evt.score ? evt : existing
+          const allSources = [...(existing.sourceEvents || []), evt]
+          Object.assign(existing, {
+            type: 'pip',
+            clipStart: pipWindow.clipStart,
+            clipEnd: pipWindow.clipEnd,
+            clipDuration: pipWindow.clipDuration,
+            coreStart: Math.min(existing.coreStart, evt.start_time_seconds || 0),
+            coreEnd: Math.max(existing.coreEnd, evt.end_time_seconds || (evt.start_time_seconds || 0)),
+            sourceEvents: allSources,
+            primaryEventId: primary.primaryEventId || primary.id,
+            score: Math.max(existing.score, evt.score),
+            involved_drivers: [...new Set([...(existing.involved_drivers || []), ...(evt.involved_drivers || [])])],
+            driver_names: [...new Set([...(existing.driver_names || []), ...(evt.driver_names || [])])],
+            pip: {
+              primaryRegion: 'full',
+              primaryEventId: primary.primaryEventId || primary.id,
+              secondaryRegion: 'bottom_right',
+              secondaryScale: 0.35,
+              secondaryEventId: secondary.primaryEventId || secondary.id,
+            },
+            resolution: 'pip',
+            resolutionNote: `PIP: ${primary.event_type} (primary) + ${secondary.event_type} (secondary)`,
+          })
+          usedBudget += durationDelta
+          placedIds.add(evt.id)
+          pipCount++
+        } else {
+          demotedIds.add(evt.id)
+        }
+      } else {
+        // Try trimming
+        const trimmed = trimWindow(window, evt, existing)
+        if (trimmed && usedBudget + trimmed.clipDuration <= targetDuration * TARGET_DURATION_TOLERANCE) {
+          const seg = makeSegment('event', evt, trimmed, 'trimmed', {
+            resolutionNote: `Trimmed to avoid overlap (${trimmed.clipDuration.toFixed(1)}s)`,
+          })
+          timeline.push(seg)
+          usedBudget += trimmed.clipDuration
+          placedIds.add(evt.id)
+          trimCount++
+        } else {
+          demotedIds.add(evt.id)
+        }
+      }
+    } else {
+      // Multiple overlaps — complex case, try trimming or demote
+      // Sort overlaps by time to find the tightest fit
+      overlaps.sort((a, b) => a.clipStart - b.clipStart)
+      let placed = false
+      // Try trimming between each pair of overlapping segments
+      for (let i = 0; i < overlaps.length - 1; i++) {
+        const gapStart = overlaps[i].clipEnd
+        const gapEnd = overlaps[i + 1].clipStart
+        if (gapEnd - gapStart >= MIN_CLIP_DURATION) {
+          const trimmedWindow = { clipStart: gapStart, clipEnd: gapEnd, clipDuration: gapEnd - gapStart }
+          const coreStart = evt.start_time_seconds || 0
+          const coreEnd = evt.end_time_seconds || coreStart
+          if (trimmedWindow.clipStart <= coreEnd && trimmedWindow.clipEnd >= coreStart) {
+            const seg = makeSegment('event', evt, trimmedWindow, 'trimmed', {
+              resolutionNote: `Trimmed to fit between overlaps (${trimmedWindow.clipDuration.toFixed(1)}s)`,
+            })
+            timeline.push(seg)
+            usedBudget += trimmedWindow.clipDuration
+            placedIds.add(evt.id)
+            trimCount++
+            placed = true
+            break
+          }
+        }
+      }
+      if (!placed) {
+        demotedIds.add(evt.id)
+      }
+    }
+  }
+
+  // ── Phase 2: Sort timeline by clip start ─────────────────────────────
+  timeline.sort((a, b) => a.clipStart - b.clipStart)
+
+  // ── Phase 3: Gap analysis + context fills ────────────────────────────
+  // Candidates: all non-excluded, non-placed events, sorted by score
+  const contextCandidates = selection.scoredEvents
+    .filter(e => !placedIds.has(e.id) && !demotedIds.has(e.id) && e.inclusion !== 'excluded' && e.score > 0)
+    .sort((a, b) => {
+      // Prefer events that bring new drivers
+      const existingDrivers = new Set()
+      for (const seg of timeline) {
+        for (const d of (seg.involved_drivers || [])) existingDrivers.add(d)
+      }
+      const aNew = (a.involved_drivers || []).filter(d => !existingDrivers.has(d)).length
+      const bNew = (b.involved_drivers || []).filter(d => !existingDrivers.has(d)).length
+      if (aNew !== bNew) return bNew - aNew
+      return b.score - a.score
+    })
+
+  let contextFillCount = 0
+  const contextUsedIds = new Set()
+
+  // Find gaps and fill
+  const gaps = []
+  if (timeline.length >= 2) {
+    for (let i = 0; i < timeline.length - 1; i++) {
+      const gapStart = timeline[i].clipEnd
+      const gapEnd = timeline[i + 1].clipStart
+      if (gapEnd - gapStart >= gapThreshold) {
+        gaps.push({ start: gapStart, end: gapEnd, duration: gapEnd - gapStart, afterIndex: i })
+      }
+    }
+  }
+
+  // Process gaps in reverse so index shifts don't affect earlier gaps
+  for (let gi = gaps.length - 1; gi >= 0; gi--) {
+    const gap = gaps[gi]
+    let insertAt = gap.afterIndex + 1
+    let contextInThisGap = 0
+    let gapStart = gap.start
+    const gapEnd = gap.end
+
+    for (const candidate of contextCandidates) {
+      if (contextUsedIds.has(candidate.id)) continue
+      if (contextInThisGap >= MAX_CONTEXT_PER_GAP) break
+      if (usedBudget >= targetDuration * TARGET_DURATION_TOLERANCE) break
+
+      const cw = computeClipWindow(candidate, params)
+      // Candidate must fit within the gap
+      if (cw.clipStart >= gapStart && cw.clipEnd <= gapEnd) {
+        const seg = makeSegment('context', candidate, cw, 'context-fill', {
+          resolutionNote: 'Context fill for gap',
+        })
+        timeline.splice(insertAt, 0, seg)
+        insertAt++
+        usedBudget += cw.clipDuration
+        contextUsedIds.add(candidate.id)
+        placedIds.add(candidate.id)
+        gapStart = cw.clipEnd
+        contextFillCount++
+        contextInThisGap++
+      }
+    }
+  }
+
+  // Re-sort after inserts
+  timeline.sort((a, b) => a.clipStart - b.clipStart)
+
+  // ── Phase 4: Mark remaining gaps as bridge segments ──────────────────
+  const finalTimeline = []
+  for (let i = 0; i < timeline.length; i++) {
+    if (i > 0) {
+      const prevEnd = timeline[i - 1].clipEnd
+      const curStart = timeline[i].clipStart
+      const gapDur = curStart - prevEnd
+      if (gapDur >= MIN_BRIDGE_DURATION) {
+        finalTimeline.push({
+          id: `bridge_${_nextSegId++}`,
+          type: 'bridge',
+          clipStart: prevEnd,
+          clipEnd: curStart,
+          clipDuration: gapDur,
+          coreStart: prevEnd,
+          coreEnd: curStart,
+          sourceEvents: [],
+          primaryEventId: null,
+          event_type: null,
+          score: 0,
+          tier: null,
+          bucket: null,
+          involved_drivers: [],
+          driver_names: [],
+          severity: 0,
+          resolution: 'bridge',
+          resolutionNote: `Cut point (${gapDur.toFixed(1)}s race gap)`,
+        })
+      }
+    }
+    finalTimeline.push(timeline[i])
+  }
+
+  // ── Compute edit-time positions (for compact mode) ───────────────────
+  // Bridges are instant cuts — zero edit-time contribution, just markers.
+  let editCursor = 0
+  for (const seg of finalTimeline) {
+    seg.editStart = editCursor
+    seg.editDur = seg.type === 'bridge' ? 0 : seg.clipDuration
+    seg.editEnd = editCursor + seg.editDur
+    editCursor += seg.editDur
+  }
+
+  // ── Build full-video IDs (demoted + original full-video) ─────────────
+  const newFullVideoIds = [
+    ...selection.fullVideoIds.filter(id => !placedIds.has(id)),
+    ...demotedIds,
+  ]
+
+  // ── Compute metrics ──────────────────────────────────────────────────
+  const eventSegs = finalTimeline.filter(s => s.type === 'event' || s.type === 'merge' || s.type === 'pip')
+  const totalContentDuration = eventSegs.reduce((sum, s) => sum + s.clipDuration, 0)
+  const totalContextDuration = finalTimeline.filter(s => s.type === 'context').reduce((sum, s) => sum + s.clipDuration, 0)
+  const bridgeCount = finalTimeline.filter(s => s.type === 'bridge').length
+  const totalEditDuration = editCursor
+
+  const allPlacedDrivers = new Set()
+  for (const seg of finalTimeline) {
+    for (const d of (seg.involved_drivers || [])) allPlacedDrivers.add(d)
+  }
+
+  const productionMetrics = {
+    duration: Math.round(totalEditDuration * 10) / 10,
+    contentDuration: Math.round(totalContentDuration * 10) / 10,
+    contextDuration: Math.round(totalContextDuration * 10) / 10,
+    bridgeCount,
+    bridgeDuration: 0,  // Bridges are instant cuts
+    bridgePct: 0,
+    eventCount: eventSegs.length,
+    mergeCount,
+    pipCount,
+    trimCount,
+    absorbCount,
+    contextFillCount,
+    demotedCount: demotedIds.size,
+    overlapResolutions: mergeCount + pipCount + trimCount,
+    driverCount: allPlacedDrivers.size,
+    segmentCount: finalTimeline.length,
+  }
+
+  return {
+    timeline: finalTimeline,
+    metrics: productionMetrics,
+    fullVideoIds: newFullVideoIds,
+    demotedIds: [...demotedIds],
+    placedIds: [...placedIds],
   }
 }
 

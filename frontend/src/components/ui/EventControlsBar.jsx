@@ -29,7 +29,9 @@ import { EVENT_COLORS } from '../../context/TimelineContext'
  * @param {boolean} props.isSeeking - Whether currently seeking
  * @param {string} props.className - Additional CSS classes for wrapper
  * @param {boolean} props.showClose - Whether to show close button (default: true)
+ * @param {boolean} props.showOverride - Whether to show inclusion override toggle (default: true)
  * @param {boolean} props.compact - Compact layout mode (default: false)
+ * @param {boolean} props.splitRows - Two-row layout: info row + centered controls row (default: false)
  * @param {'sidebar'|'timeline'} props.theme - Color theme: 'sidebar' or 'timeline' (default: 'sidebar')
  */
 export default function EventControlsBar({
@@ -47,7 +49,9 @@ export default function EventControlsBar({
   isSeeking = false,
   className = '',
   showClose = true,
+  showOverride = true,
   compact = false,
+  splitRows = false,
   theme = 'sidebar',
 }) {
   if (!event) return null
@@ -85,6 +89,75 @@ export default function EventControlsBar({
   const textPrimaryClass = isTimelineTheme ? 'text-white' : 'text-text-primary'
   const iconColorClass = isTimelineTheme ? `${cfg.color || 'text-white/70'}` : cfg.color || 'text-text-primary'
 
+  if (splitRows) {
+    return (
+      <div className={`flex flex-col gap-1.5 ${className}`}>
+        {/* Row 1: Event info */}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <EvIcon size={10} className={`shrink-0 ${iconColorClass}`} />
+          <span className={`text-xxs font-semibold ${textPrimaryClass} shrink-0`}>
+            {cfg.label || event.event_type}
+          </span>
+          <span className={`flex items-center gap-1 text-xxs ${textTertiaryClass} font-mono shrink-0`}>
+            <Clock size={7} />
+            {evStartRel} – {evEndRel} ({evDuration.toFixed(1)}s)
+          </span>
+          {event.severity != null && (
+            <span className={`text-xxs ${textTertiaryClass} font-mono shrink-0`}>
+              Severity {event.severity}
+            </span>
+          )}
+        </div>
+        {/* Row 2: Controls centered */}
+        <div className="flex items-center justify-center gap-2 flex-wrap">
+          <button
+            onClick={() => onSeekToEvent(event)}
+            disabled={isSeeking}
+            className={`flex items-center gap-1 rounded px-1.5 py-1 text-xxs ${buttonBaseClass} transition-colors disabled:opacity-40 shrink-0`}
+            title="Seek to event start"
+          >
+            <SkipBack size={9} />
+            <span>Rewind</span>
+          </button>
+          {evDrivers.map((carIdx, i) => {
+            const name = names[i] || `Car ${carIdx}`
+            const isActive = replayState?.cam_car_idx === carIdx
+            return (
+              <button
+                key={carIdx}
+                onClick={() => onSwitchDriver(carIdx)}
+                className={`flex items-center gap-1 rounded px-1.5 py-1 text-xxs border transition-colors shrink-0
+                  ${isActive ? buttonActiveClass : buttonBaseClass}`}
+                title={`Switch to ${name}'s POV`}
+              >
+                <Users size={8} />
+                <span>{name}</span>
+              </button>
+            )
+          })}
+          <button
+            onClick={() => onToggleAutoLoop()}
+            className={`flex items-center gap-1 rounded px-1.5 py-1 text-xxs border transition-colors shrink-0
+              ${autoLoop ? buttonActiveClass : buttonBaseClass}`}
+            title={autoLoop ? 'Auto-loop enabled' : 'Enable auto-loop'}
+          >
+            <Repeat size={8} />
+            <span>Loop</span>
+          </button>
+          {showClose && (
+            <button
+              onClick={() => onClose()}
+              className={`flex items-center gap-1 rounded px-1.5 py-1 text-xxs ${buttonBaseClass} transition-colors shrink-0`}
+              title="Close"
+            >
+              <X size={9} />
+            </button>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className={`${baseClass} ${className}`}>
       {/* Event info header */}
@@ -119,6 +192,7 @@ export default function EventControlsBar({
         {!compact && <span>{isTimelineTheme ? 'Rewind' : 'Seek'}</span>}
       </button>
 
+      {showOverride && (
       <button
         onClick={() => onToggleOverride(event.id)}
         className={`flex items-center gap-1 rounded ${buttonPadding} ${buttonSize} border transition-colors shrink-0
@@ -133,6 +207,7 @@ export default function EventControlsBar({
         {ov === 'exclude' && <><X size={compact ? 7 : 8} /> {!compact && 'Excl'}</>}
         {!ov && <><Minus size={compact ? 7 : 8} /> {!compact && 'Auto'}</>}
       </button>
+      )}
 
       {/* Driver POV buttons */}
       {evDrivers.map((carIdx, i) => {

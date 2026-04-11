@@ -3,7 +3,7 @@ import { EVENT_TYPE_LABELS } from '../../context/HighlightContext'
 import { formatTime, formatDuration } from '../../utils/time'
 import { Copy, X } from 'lucide-react'
 
-function generateReportText(allEvents, chosenEvents, pipEvents, metrics, totalDuration) {
+function generateReportText(allEvents, chosenEvents, pipEvents, metrics, totalDuration, productionTimeline) {
   const lines = []
   const hr = '─'.repeat(60)
 
@@ -78,6 +78,44 @@ function generateReportText(allEvents, chosenEvents, pipEvents, metrics, totalDu
   lines.push(`  Driver Coverage: ${metrics.driverCoverage ?? '—'}% (${metrics.driverCount ?? 0}/${metrics.totalDrivers ?? 0})`)
   lines.push('')
 
+  // Production Timeline section
+  if (productionTimeline?.timeline?.length > 0) {
+    const pt = productionTimeline
+    const pm = productionTimeline.metrics || {}
+    lines.push(hr)
+    lines.push('## PRODUCTION TIMELINE')
+    lines.push(hr)
+    lines.push('')
+    lines.push('### Summary')
+    lines.push(`  Total edit duration:  ${formatDuration(pm.duration || 0)}`)
+    lines.push(`  Content (events):     ${formatDuration(pm.contentDuration || 0)}`)
+    lines.push(`  Context fills:        ${formatDuration(pm.contextDuration || 0)}`)
+    lines.push(`  B-roll cut points:    ${pm.bridgeCount || 0} (instant cuts)`)
+    lines.push(`  Segments:             ${pm.segmentCount || 0} total (${pm.eventCount || 0} event, ${pm.bridgeCount || 0} bridge, ${pt.timeline.filter(s=>s.type==='context').length} context)`)
+    lines.push('')
+    lines.push('### Overlap Resolutions')
+    lines.push(`  Merged clips:         ${pm.mergeCount || 0}`)
+    lines.push(`  PIP segments:         ${pm.pipCount || 0}`)
+    lines.push(`  Trimmed clips:        ${pm.trimCount || 0}`)
+    lines.push(`  Absorbed overtakes:   ${pm.absorbCount || 0}`)
+    lines.push(`  Demoted (dropped):    ${pm.demotedCount || 0}`)
+    lines.push(`  Context fills added:  ${pm.contextFillCount || 0}`)
+    lines.push('')
+    lines.push('### Segment Sequence')
+    for (const seg of pt.timeline) {
+      const typeLabel = seg.type === 'bridge' ? 'BRIDGE'
+        : seg.type === 'context' ? 'CONTEXT'
+        : seg.type === 'merge' ? 'MERGE'
+        : seg.type === 'pip' ? 'PIP'
+        : 'EVENT'
+      const evtLabel = seg.event_type ? (EVENT_TYPE_LABELS[seg.event_type] || seg.event_type) : ''
+      const resolution = seg.resolution && seg.resolution !== 'placed' ? ` [${seg.resolution}]` : ''
+      lines.push(`  ${typeLabel.padEnd(8)} ${formatTime(seg.clipStart)} – ${formatTime(seg.clipEnd)} (${formatDuration(seg.clipDuration)}) ${evtLabel}${resolution}`)
+      if (seg.resolutionNote) lines.push(`           └ ${seg.resolutionNote}`)
+    }
+    lines.push('')
+  }
+
   // Per-event detail (chosen events, sorted by time)
   lines.push(hr)
   lines.push('## CHOSEN EVENT DETAILS')
@@ -124,10 +162,10 @@ function generateReportText(allEvents, chosenEvents, pipEvents, metrics, totalDu
   return lines.join('\n')
 }
 
-export default function ScoringReportModal({ allEvents, chosenEvents, pipEvents, metrics, totalDuration, onClose }) {
+export default function ScoringReportModal({ allEvents, chosenEvents, pipEvents, metrics, totalDuration, productionTimeline, onClose }) {
   const reportText = useMemo(() =>
-    generateReportText(allEvents, chosenEvents, pipEvents, metrics, totalDuration),
-    [allEvents, chosenEvents, pipEvents, metrics, totalDuration]
+    generateReportText(allEvents, chosenEvents, pipEvents, metrics, totalDuration, productionTimeline),
+    [allEvents, chosenEvents, pipEvents, metrics, totalDuration, productionTimeline]
   )
 
   const handleCopy = useCallback(() => {

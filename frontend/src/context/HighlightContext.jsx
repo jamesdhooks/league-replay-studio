@@ -9,6 +9,7 @@ import {
   tierColor,
   computeEventScore,
   computeHighlightSelection,
+  buildProductionTimeline,
   autoBalanceWeights,
   normalizeOverride,
   MANDATORY_TYPES,
@@ -66,12 +67,13 @@ const DEFAULT_PARAMS = {
   maxRaceFinishes: 0,           // Max race_finish events to include in highlights (0 = all)
   paddingBefore: 2.0,           // Default seconds before event start to include in each clip
   paddingAfter: 5.0,            // Default seconds after event end to include in each clip
-  paddingByType: {              // Per event-type padding overrides: { type: { before, after } }
-    incident: { before: 2.0, after: 8.0 },
-  },
+  paddingByType: {},            // Per event-type padding overrides: { type: { before, after } }
   cameraWeights: {},            // Per-camera weight overrides: { group_name: 0–100 } — empty = all equal (50)
   cameraRecencyPenalty: 0.5,    // 0 = no recency penalty, 1 = maximum penalty for recently-used cameras
   cameraRecencyDecay: 30.0,     // Seconds for recency penalty to decay back to zero
+  driverChangeProbability: 0.3, // Probability of switching driver focus on each camera cut (0–1)
+  driverRecencyPenalty: 0.5,    // 0 = no recency penalty, 1 = maximum penalty for recently-shown drivers
+  driverRecencyDecay: 60.0,     // Seconds for driver recency penalty to decay back to zero
 }
 
 /** Event type labels for UI display */
@@ -126,7 +128,17 @@ export function HighlightProvider({ children }) {
   // even when an older stored value is found in localStorage.
   useEffect(() => {
     setWeights(w => ({ ...DEFAULT_WEIGHTS, ...w }))
-    setParams(p => ({ ...DEFAULT_PARAMS, ...p }))
+    setParams(p => {
+      const merged = { ...DEFAULT_PARAMS, ...p }
+      // Migration: remove hardcoded incident padding override that was previously
+      // baked into DEFAULT_PARAMS — it silently blocked the global Lead-in slider.
+      const pbt = { ...(merged.paddingByType || {}) }
+      if (pbt.incident?.before === 2.0 && pbt.incident?.after === 8.0) {
+        delete pbt.incident
+        merged.paddingByType = pbt
+      }
+      return merged
+    })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -140,6 +152,7 @@ export function HighlightProvider({ children }) {
   const [presets, setPresets] = useState([])
   const [currentPresetId, setCurrentPresetId] = useState(null)  // Track which preset (if any) is loaded
   const [presetSnapshot, setPresetSnapshot] = useState(null)    // Snapshot of state when preset was loaded
+  const [autoSavePreset, setAutoSavePreset] = useLocalStorage('lrs:highlights:autoSavePreset', false)
 
   // ── Drivers ─────────────────────────────────────────────────────────────
   const [drivers, setDrivers] = useState([])
@@ -172,6 +185,12 @@ export function HighlightProvider({ children }) {
       return result
     },
     [replayMode, events, weights, targetDuration, minSeverity, overrides, raceDuration, drivers, params],
+  )
+
+  // ── Production timeline (overlap-aware, memoised) ─────────────────────
+  const productionTimeline = useMemo(
+    () => buildProductionTimeline(selection, targetDuration, params, raceDuration),
+    [selection, targetDuration, params, raceDuration],
   )
 
   // ── Sorted & filtered event list ───────────────────────────────────────
@@ -285,17 +304,82 @@ export function HighlightProvider({ children }) {
   const [serverMetrics, setServerMetrics] = useState(null)
 
   // ── Video Script state ─────────────────────────────────────────────────
-  const [videoScript, setVideoScript] = useState(null)    // Full script segment array
-  const [videoSections, setVideoSections] = useState([])  // Section summaries
+  const SCRIPT_CACHE_KEY = 'lrs:highlights:videoScript'
+  const [videoScript, _setVideoScript]   = useState(() => {
+    try {
+      const cached = JSON.parse(localStorage.getItem(SCRIPT_CACHE_KEY) || 'null')
+      return cached?.script ?? null
+    } catch { return null }
+  })
+  const [videoSections, _setVideoSections] = useState(() => {
+    try {
+      const cached = JSON.parse(localStorage.getItem(SCRIPT_CACHE_KEY) || 'null')
+      return cached?.sections ?? []
+    } catch { return [] }
+  })
+  const [scriptProjectId, _setScriptProjectId] = useState(() => {
+    try {
+      const cached = JSON.parse(localStorage.getItem(SCRIPT_CACHE_KEY) || 'null')
+      return cached?.projectId ?? null
+    } catch { return null }
+  })
+
+  const setVideoScript = useCallback((script) => {
+    _setVideoScript(script)
+  }, [])
+  const setVideoSections = useCallback((sections) => {
+    _setVideoSections(sections)
+  }, [])
   const [sectionConfig, setSectionConfig] = useLocalStorage(SECTION_CONFIG_KEY, {})  // Per-section overrides
   const [clipPadding, setClipPadding] = useLocalStorage(CLIP_PADDING_KEY, 0.5)       // Seconds of pre-roll
   // ── Script execution action log ────────────────────────────────────────
   // Each entry: { id, ts, eventType, section, cameraLabel, driverName, raceTime }
+  // Uses both React state and a ref-based queue for reliable updates.
+  // Periodic flush (50ms) ensures actions surface even if React batches updates.
   const [scriptActionLog, setScriptActionLog] = useState([])
+  const actionQueueRef = useRef([])           // Queue of pending actions
+  const flushTimerRef = useRef(null)          // Debounce timer for flushing
+  const lastFlushTimeRef = useRef(0)
+
+  // Immediately queue an action, then schedule a flush
   const pushScriptAction = useCallback((action) => {
-    setScriptActionLog(prev => [...prev.slice(-19), action])
+    // Add to queue
+    actionQueueRef.current.push(action)
+    
+    // Schedule flush if not already pending
+    if (!flushTimerRef.current) {
+      // Flush immediately if it's been >50ms since last flush
+      const timeSinceLastFlush = Date.now() - lastFlushTimeRef.current
+      if (timeSinceLastFlush > 50) {
+        // Flush immediately
+        const queued = actionQueueRef.current
+        if (queued.length > 0) {
+          actionQueueRef.current = []
+          lastFlushTimeRef.current = Date.now()
+          setScriptActionLog(prev => [...prev.slice(-(20 - queued.length)), ...queued])
+        }
+      } else {
+        // Schedule flush after remaining time
+        flushTimerRef.current = setTimeout(() => {
+          flushTimerRef.current = null
+          const queued = actionQueueRef.current
+          if (queued.length > 0) {
+            actionQueueRef.current = []
+            lastFlushTimeRef.current = Date.now()
+            setScriptActionLog(prev => [...prev.slice(-(20 - queued.length)), ...queued])
+          }
+        }, 50 - timeSinceLastFlush)
+      }
+    }
   }, [])
-  const clearScriptActionLog = useCallback(() => setScriptActionLog([]), [])
+
+  const clearScriptActionLog = useCallback(() => {
+    // Clear both state and queue
+    actionQueueRef.current = []
+    if (flushTimerRef.current) clearTimeout(flushTimerRef.current)
+    flushTimerRef.current = null
+    setScriptActionLog([])
+  }, [])
 
   const reprocessHighlights = useCallback(async (projectId, opts = {}) => {
     try {
@@ -325,6 +409,9 @@ export function HighlightProvider({ children }) {
           maxRaceFinishes: params.maxRaceFinishes,
           battleStickyPeriod: params.battleStickyPeriod,
           cameraStickyPeriod: params.cameraStickyPeriod,
+          driverChangeProbability: params.driverChangeProbability ?? 0.3,
+          driverRecencyPenalty: params.driverRecencyPenalty ?? 0.5,
+          driverRecencyDecay: params.driverRecencyDecay ?? 60.0,
         },
       })
       if (result.scored_events) {
@@ -346,6 +433,17 @@ export function HighlightProvider({ children }) {
   const generateVideoScript = useCallback(async (projectId, opts = {}) => {
     try {
       setServerScoring(true)
+      // Build full camera_weights: default 50 for any camera not explicitly set
+      const userWeights = params.cameraWeights || {}
+      const fullCameraWeights = {}
+      if (opts.cameras?.length) {
+        for (const cam of opts.cameras) {
+          fullCameraWeights[cam.group_name] = userWeights[cam.group_name] ?? 50
+        }
+      } else {
+        // No camera list available — send user overrides as-is
+        Object.assign(fullCameraWeights, userWeights)
+      }
       const result = await apiPost(`/projects/${projectId}/highlights/video-script`, {
         weights,
         constraints: {
@@ -371,18 +469,31 @@ export function HighlightProvider({ children }) {
           maxRaceFinishes: params.maxRaceFinishes,
           battleStickyPeriod: params.battleStickyPeriod,
           cameraStickyPeriod: params.cameraStickyPeriod,
+          driverChangeProbability: params.driverChangeProbability ?? 0.3,
+          driverRecencyPenalty: params.driverRecencyPenalty ?? 0.5,
+          driverRecencyDecay: params.driverRecencyDecay ?? 60.0,
         },
         section_config: sectionConfig,
         clip_padding: params.paddingBefore,
         clip_padding_after: params.paddingAfter,
         padding_by_type: params.paddingByType || {},
-        camera_weights: params.cameraWeights || {},
+        camera_weights: fullCameraWeights,
         camera_recency_penalty: params.cameraRecencyPenalty ?? 0.5,
         camera_recency_decay: params.cameraRecencyDecay ?? 30.0,
+        production_timeline: productionTimeline?.timeline || [],
       })
       if (result.script) {
+        const pid = projectId
+        _setScriptProjectId(pid)
         setVideoScript(result.script)
         setVideoSections(result.sections || [])
+        try {
+          localStorage.setItem(SCRIPT_CACHE_KEY, JSON.stringify({
+            projectId: pid,
+            script: result.script,
+            sections: result.sections || [],
+          }))
+        } catch { /* storage full — non-fatal */ }
       }
       if (result.scored_events) {
         setServerScoredEvents(result.scored_events)
@@ -395,7 +506,7 @@ export function HighlightProvider({ children }) {
     } finally {
       setServerScoring(false)
     }
-  }, [weights, targetDuration, minSeverity, sectionConfig, params])
+  }, [weights, targetDuration, minSeverity, sectionConfig, params, productionTimeline])
 
   const updateSectionConfig = useCallback((sectionName, updates) => {
     setSectionConfig(prev => ({
@@ -636,12 +747,18 @@ export function HighlightProvider({ children }) {
   const deletePreset = useCallback(async (name) => {
     try {
       await apiDelete(`/highlights/presets/${encodeURIComponent(name)}`)
+      // If the deleted preset was the currently selected one, clear it
+      if (currentPresetId === name) {
+        setCurrentPresetId(null)
+        setPresetSnapshot(null)
+        setAutoSavePreset(false)
+      }
       await loadPresets()
     } catch (err) {
       console.error('[Highlights] Preset delete error:', err)
       throw err
     }
-  }, [loadPresets])
+  }, [loadPresets, currentPresetId])
 
   // ── Navigate to event ─────────────────────────────────────────────────
   const jumpToEvent = useCallback((event) => {
@@ -686,6 +803,19 @@ export function HighlightProvider({ children }) {
     )
   }, [weights, targetDuration, minSeverity, params, sectionConfig, replayMode, presetSnapshot])
 
+  // ── Auto-save: persist preset whenever changes are detected ───────────
+  const _autoSaveTimer = useRef(null)
+  useEffect(() => {
+    if (!autoSavePreset || !currentPresetId || !hasUnsavedChanges) return
+    // Debounce 800 ms so rapid slider drags don't flood the API
+    clearTimeout(_autoSaveTimer.current)
+    _autoSaveTimer.current = setTimeout(() => {
+      savePreset(currentPresetId).catch(() => {})
+    }, 800)
+    return () => clearTimeout(_autoSaveTimer.current)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSavePreset, currentPresetId, hasUnsavedChanges, weights, targetDuration, minSeverity, params, sectionConfig, replayMode])
+
   // ── Context value ─────────────────────────────────────────────────────
   const value = useMemo(() => ({
     // Weights
@@ -712,6 +842,8 @@ export function HighlightProvider({ children }) {
 
     // Selection results
     selection,
+    productionTimeline,
+    productionMetrics: productionTimeline?.metrics || {},
     filteredEvents,
     metrics: selection.metrics,
 
@@ -733,6 +865,7 @@ export function HighlightProvider({ children }) {
     // Video Script
     videoScript,
     videoSections,
+    scriptProjectId,
     sectionConfig,
     clipPadding,
     setClipPadding,
@@ -776,18 +909,27 @@ export function HighlightProvider({ children }) {
     weights, setWeight, targetDuration, minSeverity,
     params,
     overrides, toggleOverride, setOverrideValue,
-    selection, filteredEvents,
+    selection, productionTimeline, filteredEvents,
     loadConfig, saveConfig, applyHighlights, loadDrivers, autoBalance, jumpToEvent,
     reprocessHighlights, generateVideoScript, updateSectionConfig,
     serverScoring, serverScoredEvents, serverMetrics,
-    videoScript, videoSections, sectionConfig, clipPadding,
+    videoScript, videoSections, scriptProjectId, sectionConfig, clipPadding,
     abMode, activeConfig, startABCompare, stopABCompare, switchABConfig,
     presets, currentPresetId, hasUnsavedChanges, loadPresets, savePreset, loadPreset, deletePreset,
+    autoSavePreset, setAutoSavePreset,
     sortColumn, sortDirection, handleSort,
     filterType, filterInclusion, filterSeverityRange,
     drivers,
     replayMode, setReplayMode,
   ])
+
+  // ── Cleanup: ensure flush timer and queues are cleared ───────────────
+  useEffect(() => {
+    return () => {
+      if (flushTimerRef.current) clearTimeout(flushTimerRef.current)
+      actionQueueRef.current = []
+    }
+  }, [])
 
   return (
     <HighlightContext.Provider value={value}>
