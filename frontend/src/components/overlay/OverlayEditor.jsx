@@ -494,6 +494,7 @@ export default function OverlayEditor({ templateId, onClose }) {
             <DataContextInspector
               variables={dataContext?.variables || {}}
               variableDocs={dataContext?.variable_docs || {}}
+              variableSources={dataContext?.variable_sources || {}}
               onInsertVariable={insertAtCursor}
             />
           )}

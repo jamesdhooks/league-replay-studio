@@ -4,11 +4,12 @@ import { usePreset } from '../../context/PresetContext'
 import { useToast } from '../../context/ToastContext'
 import OverlayEditor from './OverlayEditor'
 import PresetDesigner from './PresetDesigner'
+import DataPluginsPanel from './DataPluginsPanel'
 import {
   Layers, Plus, Copy, Trash2, Download, Upload,
   Monitor, Film, Palette, Eye, ChevronRight, Settings,
   Play, Square, Loader2, Check, AlertCircle, Code,
-  Settings2,
+  Settings2, Plug,
 } from 'lucide-react'
 
 /**
@@ -198,12 +199,12 @@ export default function OverlayPanel() {
         </div>
       </div>
 
-      {/* ── Tab bar: Templates / Presets ──────────────────────────────── */}
+      {/* ── Tab bar: Templates / Presets / Data Sources ────────────── */}
       <div className="flex border-b border-border shrink-0">
         <button
           onClick={() => setFilter('all')}
           className={`flex-1 px-4 py-2 text-xs font-medium transition-colors border-b-2 ${
-            filter !== 'presets'
+            !['presets', 'data-sources'].includes(filter)
               ? 'border-accent text-accent'
               : 'border-transparent text-text-secondary hover:text-text-primary'
           }`}
@@ -223,10 +224,21 @@ export default function OverlayPanel() {
           Presets
           <span className="ml-1 text-xxs text-text-disabled">({presets.length})</span>
         </button>
+        <button
+          onClick={() => setFilter('data-sources')}
+          className={`flex-1 px-4 py-2 text-xs font-medium transition-colors border-b-2 ${
+            filter === 'data-sources'
+              ? 'border-accent text-accent'
+              : 'border-transparent text-text-secondary hover:text-text-primary'
+          }`}
+        >
+          <Plug className="w-3 h-3 inline mr-1" />
+          Data Sources
+        </button>
       </div>
 
       {/* ── Toolbar (templates view only) ────────────────────────────── */}
-      {filter !== 'presets' && (
+      {!['presets', 'data-sources'].includes(filter) && (
         <div className="flex items-center gap-2 px-4 py-2 border-b border-border shrink-0">
           {/* Sub-filter tabs */}
           <div className="flex items-center gap-1 text-xxs">
@@ -269,7 +281,7 @@ export default function OverlayPanel() {
       )}
 
       {/* ── Create form ─────────────────────────────────────────────────── */}
-      {showCreateForm && filter !== 'presets' && (
+      {showCreateForm && !['presets', 'data-sources'].includes(filter) && (
         <div className="px-4 py-3 border-b border-border bg-bg-secondary/50 shrink-0">
           <input
             type="text"
@@ -378,8 +390,15 @@ export default function OverlayPanel() {
           </div>
         )}
 
+        {/* ── Data Sources View ──────────────────────────────────────────── */}
+        {filter === 'data-sources' && (
+          <div className="-m-4">
+            <DataPluginsPanel />
+          </div>
+        )}
+
         {/* ── Templates View ────────────────────────────────────────────── */}
-        {filter !== 'presets' && (
+        {!['presets', 'data-sources'].includes(filter) && (
           <div className="grid grid-cols-1 gap-3">
           {filteredTemplates.map(template => (
             <div
@@ -481,7 +500,7 @@ export default function OverlayPanel() {
       </div>
 
       {/* ── Selected template footer ───────────────────────────────────── */}
-      {selectedTemplateId && filter !== 'presets' && (
+      {selectedTemplateId && !['presets', 'data-sources'].includes(filter) && (
         <div className="px-4 py-2 border-t border-border bg-bg-secondary shrink-0 flex items-center justify-between">
           <div className="flex items-center gap-2 text-xxs text-text-tertiary">
             <Check className="w-3 h-3 text-accent" />
