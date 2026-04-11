@@ -17,6 +17,7 @@ import { PresetProvider } from '../context/PresetContext'
 import { LLMProvider } from '../context/LLMContext'
 import { YouTubeProvider } from '../context/YouTubeContext'
 import { PipelineProvider } from '../context/PipelineContext'
+import { CompositionProvider } from '../context/CompositionContext'
 import { wsClient } from '../services/websocket'
 import ErrorBoundary from './ui/ErrorBoundary'
 import ComposeProviders from './ui/ComposeProviders'
@@ -96,6 +97,7 @@ const PROVIDER_STACK = [
   [LLMProvider],
   [YouTubeProvider],
   [PipelineProvider],
+  [CompositionProvider],
   [UndoRedoProvider],
   [TimelineProvider],
   [ErrorBoundary, { name: 'Highlights' }],

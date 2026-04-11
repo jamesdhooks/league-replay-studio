@@ -1,12 +1,14 @@
-import { useCallback } from 'react'
+import { useCallback, useMemo } from 'react'
 import { Loader2 } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext'
 import { useAnalysis } from '../../context/AnalysisContext'
 import AnalysisPanel from '../analysis/AnalysisPanel'
 import HighlightPanel from '../highlights/HighlightPanel'
 import OverlayPanel from '../overlay/OverlayPanel'
+import OverlayPreviewStep from '../overlay/OverlayPreviewStep'
 import CapturePanel from '../capture/CapturePanel'
 import EncodingPanel from '../encoding/EncodingPanel'
+import CompositionPanel from '../encoding/CompositionPanel'
 import StepGate from '../common/StepGate'
 
 /**
@@ -50,14 +52,44 @@ function ProjectView({ project, isLoading }) {
 
       case 'overlay':
         if (!hasAnalysis) return <StepGate currentStep="overlay" requiredStep="analysis" />
-        return <OverlayPanel />
+        return (
+          <div className="flex flex-1 overflow-hidden">
+            {/* Left: Overlay template config */}
+            <div className="w-1/2 border-r border-border overflow-hidden">
+              <OverlayPanel />
+            </div>
+            {/* Right: Overlay preview with read-only timeline */}
+            <div className="w-1/2 overflow-hidden">
+              <OverlayPreviewStep
+                script={project.script || []}
+                projectId={project.id}
+              />
+            </div>
+          </div>
+        )
 
       case 'capture':
         if (!hasAnalysis) return <StepGate currentStep="capture" requiredStep="analysis" />
         return <CapturePanel projectId={project.id} />
 
       case 'export':
-        return <EncodingPanel projectId={project.id} />
+        return (
+          <div className="flex flex-1 overflow-hidden">
+            {/* Left: Standard encoding panel */}
+            <div className="w-1/2 border-r border-border overflow-hidden">
+              <EncodingPanel projectId={project.id} />
+            </div>
+            {/* Right: Composition pipeline (trim, overlay, transition, stitch) */}
+            <div className="w-1/2 overflow-hidden">
+              <CompositionPanel
+                projectId={project.id}
+                script={project.script || []}
+                clipsManifest={project.clips_manifest || project.clips || []}
+                outputDir={project.output_dir || project.project_dir || ''}
+              />
+            </div>
+          </div>
+        )
 
       case 'upload':
         return (
