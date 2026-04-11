@@ -392,8 +392,9 @@ class TestCaptureScript:
             capture_engine=capture_eng,
         )
 
-        # Only 1 segment should have been captured before cancel
-        assert len(clips) <= 2
+        # Should have fewer clips than total segments (3) since we cancelled
+        assert len(clips) < 3
+        assert len(clips) >= 1  # at least the first segment was captured or in progress
 
     @patch("server.utils.script_capture.time.sleep")
     def test_structured_log_populated(self, mock_sleep):

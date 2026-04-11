@@ -162,6 +162,7 @@ function CaptureActionLog({ log, maxVisible = 50 }) {
     <div className="space-y-1">
       <button
         onClick={() => setExpanded(prev => !prev)}
+        aria-label={expanded ? 'Collapse capture log' : 'Expand capture log'}
         className="flex items-center gap-1.5 text-xxs font-semibold text-text-tertiary uppercase
                    tracking-wider hover:text-text-secondary transition-colors"
       >
@@ -436,6 +437,7 @@ export default function ClipsPanel({ projectId }) {
         <div className="space-y-1">
           <button
             onClick={() => setShowStrategies(prev => !prev)}
+            aria-label={showStrategies ? 'Collapse segment strategies' : 'Expand segment strategies'}
             className="flex items-center gap-1.5 text-xxs font-semibold text-text-tertiary uppercase
                        tracking-wider hover:text-text-secondary transition-colors"
           >

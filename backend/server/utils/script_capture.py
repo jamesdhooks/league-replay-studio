@@ -811,7 +811,7 @@ class ScriptCaptureEngine:
             "path": clip_path,
             "section": section,
             "order": order_idx,
-            "duration": 0,  # actual duration from the file
+            "duration": 0,  # populated by downstream compilation/validation
             "segments": segment_ids,
             "clip_start_time": clip_start_time,
         })
@@ -886,7 +886,7 @@ class ScriptCaptureEngine:
                     "log_entry": entry.to_dict(),
                 })
             except Exception:
-                pass
+                logger.debug("Suppressed exception in log progress callback", exc_info=True)
 
     def _emit_progress(self, data: dict) -> None:
         """Send progress update via callback if registered."""
