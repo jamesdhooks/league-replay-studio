@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 # ── Event Categories ─────────────────────────────────────────────────────────
 
 class EventCategory:
@@ -27,6 +26,7 @@ class EventCategory:
     CAPTURE = "capture"
     PREVIEW = "preview"
     OVERLAY = "overlay"
+    COMPOSITION = "composition"
     YOUTUBE = "youtube"
     PROJECT = "project"
     SYSTEM = "system"
@@ -34,7 +34,7 @@ class EventCategory:
 
     ALL: list[str] = [
         "iracing", "pipeline", "encoding", "capture", "preview", "overlay",
-        "youtube", "project", "system", "automation",
+        "composition", "youtube", "project", "system", "automation",
     ]
 
 
@@ -94,6 +94,12 @@ class EventType:
     OVERLAY_RENDER_PROGRESS   = "overlay:render_progress"
     OVERLAY_RENDER_COMPLETED  = "overlay:render_completed"
     OVERLAY_ERROR             = "overlay:error"
+
+    # Composition (trim → overlay → transition → stitch)
+    COMPOSITION_STARTED    = "composition:started"
+    COMPOSITION_PROGRESS   = "composition:progress"
+    COMPOSITION_COMPLETED  = "composition:completed"
+    COMPOSITION_ERROR      = "composition:error"
 
     # YouTube
     YOUTUBE_CONNECTED         = "youtube:connected"
