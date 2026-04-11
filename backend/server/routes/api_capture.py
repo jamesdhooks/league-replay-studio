@@ -11,6 +11,7 @@ REST endpoints for video capture (OBS / ShadowPlay / ReLive).
   POST /api/capture/reset       — Reset capture state to idle
   POST /api/capture/script-capture — Script-based per-segment capture (async)
   GET  /api/capture/script-capture/status — Status of running script capture
+  GET  /api/capture/script-capture/log   — Structured capture log
 """
 
 from __future__ import annotations
@@ -44,6 +45,9 @@ _script_capture_state: dict = {
     "compiled_path": None,
     "error": None,
     "started_at": None,
+    "strategies": [],
+    "capture_log": [],
+    "current_segment": None,
 }
 _script_capture_lock = threading.Lock()
 _script_capture_engine: Optional[object] = None
@@ -152,8 +156,10 @@ class ScriptCaptureRequest(BaseModel):
     """Request body for script-based capture."""
     project_id: int
     script: list[dict]
-    clip_padding: float = 0.5
+    clip_padding: float = 2.0
+    clip_padding_after: float = 5.0
     output_filename: str = "highlight_compiled.mp4"
+    contiguous_gap_threshold: float = 1.0
 
 
 @router.post("/script-capture", status_code=202)
@@ -198,6 +204,9 @@ async def start_script_capture(body: ScriptCaptureRequest):
             "compiled_path": None,
             "error": None,
             "started_at": time.time(),
+            "strategies": [],
+            "capture_log": [],
+            "current_segment": None,
         })
 
     from server.services.project_service import project_service
@@ -237,25 +246,46 @@ async def start_script_capture(body: ScriptCaptureRequest):
     cameras = getattr(iracing_bridge, "cameras", []) or []
     script = list(body.script)
     clip_padding = body.clip_padding
+    clip_padding_after = body.clip_padding_after
     output_filename = body.output_filename
+    contiguous_gap = body.contiguous_gap_threshold
 
     def _progress_cb(data: dict) -> None:
-        """Called by ScriptCaptureEngine on each segment completion."""
+        """Called by ScriptCaptureEngine on progress updates."""
         step = data.get("step", "")
-        if step == "capturing":
+        if step == "strategy_computed":
             with _script_capture_lock:
-                _script_capture_state["completed_segments"] = data.get("segment_index", 0)
-            total = _script_capture_state["total_segments"]
-            done = _script_capture_state["completed_segments"]
-            pct = round((done / total * 100) if total else 0, 1)
+                _script_capture_state["strategies"] = data.get("strategies", [])
             _do_broadcast(EventType.CAPTURE_SCRIPT_PROGRESS, {
                 **data,
-                "percentage": pct,
+                "project_id": body.project_id,
+            })
+        elif step == "capturing":
+            with _script_capture_lock:
+                _script_capture_state["completed_segments"] = data.get("segment_index", 0)
+                _script_capture_state["current_segment"] = {
+                    "segment_id": data.get("segment_id"),
+                    "section": data.get("section"),
+                    "segment_type": data.get("segment_type"),
+                    "strategy": data.get("strategy"),
+                }
+            _do_broadcast(EventType.CAPTURE_SCRIPT_PROGRESS, {
+                **data,
+                "project_id": body.project_id,
+            })
+        elif step == "log_entry":
+            log_entry = data.get("log_entry", {})
+            with _script_capture_lock:
+                _script_capture_state["capture_log"].append(log_entry)
+            _do_broadcast(EventType.CAPTURE_SCRIPT_PROGRESS, {
+                "step": "log_entry",
+                "log_entry": log_entry,
                 "project_id": body.project_id,
             })
         elif step == "capture_complete":
             with _script_capture_lock:
                 _script_capture_state["completed_segments"] = data.get("clips_captured", 0)
+                _script_capture_state["capture_log"] = data.get("capture_log", [])
         elif step in ("compiling", "compile_complete"):
             _do_broadcast(EventType.CAPTURE_SCRIPT_PROGRESS, {
                 **data,
@@ -282,7 +312,9 @@ async def start_script_capture(body: ScriptCaptureRequest):
             engine = ScriptCaptureEngine(
                 output_dir=clips_dir,
                 clip_padding=clip_padding,
+                clip_padding_after=clip_padding_after,
                 progress_callback=_progress_cb,
+                contiguous_gap_threshold=contiguous_gap,
             )
 
             with _script_capture_lock:
@@ -297,6 +329,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
 
             with _script_capture_lock:
                 _script_capture_state["clips"] = clips
+                _script_capture_state["capture_log"] = engine.capture_log
 
             output_path = str(Path(project_dir) / output_filename)
             compiled = engine.compile_clips(output_path)
@@ -310,6 +343,8 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 "clips": clips,
                 "compiled_path": compiled,
                 "total_clips": len(clips),
+                "capture_log": engine.capture_log,
+                "strategies": engine.segment_strategies,
             })
 
         except Exception as exc:
@@ -359,3 +394,20 @@ async def get_script_capture_status():
     """Get the current state of the script capture."""
     with _script_capture_lock:
         return dict(_script_capture_state)
+
+
+@router.get("/script-capture/log")
+async def get_script_capture_log():
+    """Get the structured capture log for the current/last script capture.
+
+    Returns the full audit trail of commands sent, validations, retries,
+    and failures for debugging and review.
+    """
+    with _script_capture_lock:
+        return {
+            "running": _script_capture_state["running"],
+            "project_id": _script_capture_state["project_id"],
+            "capture_log": _script_capture_state.get("capture_log", []),
+            "strategies": _script_capture_state.get("strategies", []),
+            "current_segment": _script_capture_state.get("current_segment"),
+        }

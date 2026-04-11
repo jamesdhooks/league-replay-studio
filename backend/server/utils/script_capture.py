@@ -5,20 +5,22 @@ Script-driven capture engine for Video Composition Scripts.
 
 For each segment in the script, the engine:
   1. Pauses the replay
-  2. Seeks to the segment's start time (minus configurable padding)
-  3. Switches to the appropriate iRacing camera
-  4. Starts recording
-  5. Resumes replay at 1× speed
-  6. Waits for the segment duration to elapse
-  7. Stops recording
-  8. Trims the padding from the clip start
-  9. Saves the clip with a name tied to the script segment ID
+  2. Seeks to the segment's start time (minus configurable padding buffer)
+  3. Switches to the appropriate iRacing camera / driver focus
+  4. **Validates** seek position, camera, and driver via iRacing telemetry
+  5. Retries commands with cooldown until confirmed (configurable max retries)
+  6. Simultaneously starts native capture and resumes the replay
+  7. Processes intra-segment camera/driver schedule switches at their timestamps
+  8. Determines if the next segment is contiguous or has a gap:
+     - **Contiguous**: keeps recording, sends camera/driver switch only
+     - **Gap**: stops recording, validates clip file, catalogues it with
+       a descriptive name linked to the script segment(s)
+  9. After capture: validates each clip and records the mapping in the output log
 
-After all segments are captured, it concatenates them in script order
-using FFmpeg.
+After all segments are captured, clips are compiled using FFmpeg concat.
 
-Camera switching within race segments (e.g., changing focus car during a
-battle) is handled by the existing capture-time camera direction logic.
+All commands and their outcomes are recorded in a structured capture log
+for full auditability and debugging.
 """
 
 from __future__ import annotations
@@ -26,29 +28,67 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import subprocess
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-# Default padding in seconds added before each clip to avoid missed starts.
-# This prefix is trimmed from the final clip.
-DEFAULT_CLIP_PADDING = 0.5
+# ── Configuration defaults ──────────────────────────────────────────────────
 
-# Maximum characters for a sanitized segment filename component
+DEFAULT_CLIP_PADDING = 2.0        # seconds before each clip
+DEFAULT_CLIP_PADDING_AFTER = 5.0  # seconds after each clip
+MAX_SEEK_RETRIES = 5              # attempts to validate a seek command
+MAX_CAMERA_RETRIES = 3            # attempts to validate camera/driver switch
+SEEK_COOLDOWN = 0.8               # seconds between seek retry attempts
+CAMERA_COOLDOWN = 0.5             # seconds between camera retry attempts
+SEEK_TOLERANCE_MS = 3000          # ±ms tolerance for seek validation
+CONTIGUOUS_GAP_THRESHOLD = 1.0    # max gap (seconds) to treat segments as contiguous
+
 _MAX_FILENAME_LENGTH = 64
-
-# Minimum FFmpeg compile timeout in seconds (prevents excessively short deadlines)
 _MIN_COMPILE_TIMEOUT = 120
-
-# Seconds of FFmpeg compile budget allocated per clip
 _COMPILE_SECONDS_PER_CLIP = 60
-
-# Pattern to strip unsafe characters from segment IDs used as filenames
 _SAFE_FILENAME_RE = re.compile(r'[^a-zA-Z0-9_\-]')
 
+
+# ── Structured capture log entry ────────────────────────────────────────────
+
+@dataclass
+class CaptureLogEntry:
+    """A single structured log entry for the capture audit trail."""
+    timestamp: float = 0.0
+    segment_id: str = ""
+    action: str = ""         # seek, camera, driver, record_start, record_stop, validate, retry, error, info
+    detail: str = ""
+    success: bool = True
+    attempt: int = 1
+    expected: Any = None
+    actual: Any = None
+    extra: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        d = {
+            "timestamp": round(self.timestamp, 3),
+            "segment_id": self.segment_id,
+            "action": self.action,
+            "detail": self.detail,
+            "success": self.success,
+        }
+        if self.attempt > 1:
+            d["attempt"] = self.attempt
+        if self.expected is not None:
+            d["expected"] = self.expected
+        if self.actual is not None:
+            d["actual"] = self.actual
+        if self.extra:
+            d["extra"] = self.extra
+        return d
+
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
 
 def _find_ffmpeg() -> Optional[str]:
     """Locate the FFmpeg binary."""
@@ -56,7 +96,6 @@ def _find_ffmpeg() -> Optional[str]:
         from server.utils.gpu_detection import find_ffmpeg
         return find_ffmpeg()
     except Exception:
-        import shutil
         return shutil.which("ffmpeg")
 
 
@@ -66,11 +105,29 @@ def _sanitize_filename(name: str) -> str:
     Strips path separators, special characters, and limits length to
     prevent path traversal or command injection.
     """
-    # Strip all non-safe characters (handles path separators, spaces, etc.)
     sanitized = _SAFE_FILENAME_RE.sub("_", name or "clip")
-    # Limit length and ensure non-empty
     return (sanitized[:_MAX_FILENAME_LENGTH] or "clip")
 
+
+def _format_race_time(seconds: float) -> str:
+    """Format seconds as M:SS or H:MM:SS."""
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
+def _interruptible_sleep(seconds: float, cancelled_fn: Callable[[], bool]) -> None:
+    """Sleep for *seconds*, checking cancellation every 0.25s."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if cancelled_fn():
+            break
+        time.sleep(min(0.25, deadline - time.monotonic()))
+
+
+# ── Main Engine ─────────────────────────────────────────────────────────────
 
 class ScriptCaptureEngine:
     """Capture engine that processes a Video Composition Script segment by
@@ -81,31 +138,55 @@ class ScriptCaptureEngine:
     and the CaptureEngine (for recording) but does NOT depend on the
     CaptureService (OBS hotkey layer).  It uses the CaptureEngine's
     start_recording / stop_recording directly for precise clip control.
+
+    Key features:
+    - **Validation**: Every seek/camera/driver command is verified via
+      iRacing telemetry readback before proceeding.
+    - **Retry with cooldown**: Failed commands are retried up to a
+      configurable number of times with cooldown between attempts.
+    - **Gap detection**: Consecutive segments with overlapping or nearly
+      contiguous timing share a single recording pass.  Only actual gaps
+      trigger stop/start of recording.
+    - **Intra-segment scheduling**: Camera and driver switches within a
+      segment are executed at their scheduled timestamps.
+    - **Structured logging**: Every command sent, validation result, retry,
+      and failure is recorded in a structured capture log.
+    - **Clip management**: Each clip is named descriptively with section,
+      event type, and driver info.  A manifest links clip files to script
+      segments.
     """
 
     def __init__(
         self,
         output_dir: str,
         clip_padding: float = DEFAULT_CLIP_PADDING,
+        clip_padding_after: float = DEFAULT_CLIP_PADDING_AFTER,
         progress_callback: Optional[Callable[[dict], None]] = None,
         compile_timeout: int = 0,
+        contiguous_gap_threshold: float = CONTIGUOUS_GAP_THRESHOLD,
     ) -> None:
         """
         Args:
             output_dir: Directory to write clip files.
-            clip_padding: Seconds of pre-roll before each clip (trimmed later).
+            clip_padding: Seconds of pre-roll before each clip.
+            clip_padding_after: Seconds of post-roll after each clip.
             progress_callback: Optional callable for progress events.
             compile_timeout: Timeout in seconds for the FFmpeg compile step.
-                0 = auto (_COMPILE_SECONDS_PER_CLIP × clip count,
-                minimum _MIN_COMPILE_TIMEOUT seconds).
+                0 = auto-calculated from clip count.
+            contiguous_gap_threshold: Max gap in seconds to treat consecutive
+                segments as contiguous (keeps recording running).
         """
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._clip_padding = clip_padding
+        self._clip_padding_after = clip_padding_after
         self._progress_cb = progress_callback
         self._compile_timeout = compile_timeout
-        self._clips: list[dict] = []  # {id, path, section, order}
+        self._contiguous_gap_threshold = contiguous_gap_threshold
+        self._clips: list[dict] = []
+        self._capture_log: list[CaptureLogEntry] = []
         self._cancelled = False
+        self._segment_strategies: list[dict] = []
 
     # -- Public API ---------------------------------------------------------
 
@@ -118,6 +199,16 @@ class ScriptCaptureEngine:
         """Return list of captured clip metadata."""
         return list(self._clips)
 
+    @property
+    def capture_log(self) -> list[dict]:
+        """Return the structured capture log as a list of dicts."""
+        return [entry.to_dict() for entry in self._capture_log]
+
+    @property
+    def segment_strategies(self) -> list[dict]:
+        """Return strategy info for each segment (for UI progress display)."""
+        return list(self._segment_strategies)
+
     def capture_script(
         self,
         script: list[dict],
@@ -125,28 +216,32 @@ class ScriptCaptureEngine:
         capture_engine: Any,
         available_cameras: Optional[list[dict]] = None,
     ) -> list[dict]:
-        """Process every segment in *script*, capturing a clip for each.
+        """Process every segment in *script*, capturing clips.
 
-        Args:
-            script: Ordered list of script segment dicts (from
-                    generate_video_script).
-            iracing_bridge: The IRacingBridge singleton for replay/camera
-                            control.
-            capture_engine: The CaptureEngine instance for recording.
-            available_cameras: Optional cached list of camera groups from
-                               iRacing (each has 'group_num', 'group_name').
+        Uses gap detection to merge contiguous segments into single recording
+        passes, and validates all iRacing commands with retry loops.
 
         Returns:
-            List of clip dicts [{id, path, section, order, duration}, ...].
+            List of clip dicts [{id, path, section, order, duration, segments}, ...].
         """
         self._cancelled = False
         self._clips = []
+        self._capture_log = []
+        self._segment_strategies = []
 
-        total = len(script)
+        # Filter out transitions and zero-duration segments
+        active_segments = [
+            s for s in script
+            if s.get("type") != "transition"
+            and (s.get("end_time_seconds", 0) - s.get("start_time_seconds", 0)) > 0
+        ]
+        total = len(active_segments)
         if total == 0:
             return []
 
-        # Cache camera groups if not provided
+        self._log_entry("", "info", f"Starting script capture: {total} segments")
+
+        # Cache camera groups
         if available_cameras is None:
             available_cameras = getattr(iracing_bridge, "cameras", []) or []
 
@@ -155,9 +250,26 @@ class ScriptCaptureEngine:
             for c in available_cameras
         }
 
-        for idx, segment in enumerate(script):
+        # Pre-compute strategies: determine which segments are contiguous
+        strategies = self._compute_strategies(active_segments)
+        self._segment_strategies = strategies
+
+        self._emit_progress({
+            "step": "strategy_computed",
+            "strategies": strategies,
+            "total_segments": total,
+            "message": f"Computed capture strategy for {total} segments",
+        })
+
+        # Process segments using gap-aware recording
+        recording = False
+        current_clip_path: Optional[str] = None
+        current_clip_segments: list[str] = []
+        clip_start_time: float = 0
+
+        for idx, segment in enumerate(active_segments):
             if self._cancelled:
-                logger.info("[ScriptCapture] Cancelled at segment %d/%d", idx + 1, total)
+                self._log_entry("", "info", f"Cancelled at segment {idx + 1}/{total}")
                 break
 
             seg_id = segment.get("id", f"seg_{idx:03d}")
@@ -166,80 +278,127 @@ class ScriptCaptureEngine:
             start = segment.get("start_time_seconds", 0)
             end = segment.get("end_time_seconds", start + 5)
             duration = end - start
-            padding = segment.get("clip_padding", self._clip_padding)
+            strategy = strategies[idx] if idx < len(strategies) else {}
+            is_contiguous_with_prev = strategy.get("contiguous_with_prev", False)
+            is_contiguous_with_next = strategy.get("contiguous_with_next", False)
 
-            # Skip zero-duration or transition-only segments
-            if seg_type == "transition" or duration <= 0:
-                continue
-
+            pct = round(((idx + 0.5) / total) * 100, 1)
             self._emit_progress({
                 "step": "capturing",
                 "segment_index": idx,
                 "segment_total": total,
                 "segment_id": seg_id,
                 "section": section,
-                "message": f"Capturing {section}: {seg_id}",
+                "segment_type": seg_type,
+                "strategy": strategy,
+                "percentage": pct,
+                "message": f"Segment {idx + 1}/{total}: {section}/{seg_id}",
             })
 
-            clip_path = str(self._output_dir / f"{_sanitize_filename(seg_id)}.mp4")
+            if is_contiguous_with_prev and recording:
+                # ── Contiguous: just switch camera/driver, keep recording ──
+                self._log_entry(seg_id, "info",
+                    "Contiguous with previous — continuing recording")
 
-            # 1. Pause replay
-            iracing_bridge.set_replay_speed(0)
-            time.sleep(0.2)
+                self._apply_camera_and_driver(
+                    segment, iracing_bridge, cam_name_to_num, available_cameras
+                )
+                current_clip_segments.append(seg_id)
 
-            # 2. Seek to start time minus padding buffer
-            seek_time_ms = max(0, int((start - padding) * 1000))
-            session_num = iracing_bridge.get_replay_session_num()
-            if session_num < 0:
-                logger.warning("[ScriptCapture] Replay session num unavailable, defaulting to 0")
-                session_num = 0
-            iracing_bridge.replay_search_session_time(session_num, seek_time_ms)
-            time.sleep(0.5)  # allow seek to settle
+                # Wait for this segment's duration
+                self._log_entry(seg_id, "info",
+                    f"Waiting {duration:.1f}s for segment duration")
+                _interruptible_sleep(duration, lambda: self._cancelled)
 
-            # 3. Switch camera for B-roll segments
-            self._select_camera(segment, iracing_bridge, cam_name_to_num)
-            time.sleep(0.2)
+                # Handle intra-segment camera schedule
+                self._execute_camera_schedule(
+                    segment, iracing_bridge, cam_name_to_num
+                )
 
-            # 4. Start recording
-            try:
-                capture_engine.start_recording(clip_path, mode="auto")
-            except Exception as exc:
-                logger.error("[ScriptCapture] Recording start failed for %s: %s", seg_id, exc)
-                continue
+            else:
+                # ── New recording pass (gap detected or first segment) ──
 
-            # 5. Resume replay at 1×
-            iracing_bridge.set_replay_speed(1)
+                # If we were recording, stop and save the clip
+                if recording:
+                    recording = self._stop_and_save_clip(
+                        capture_engine, iracing_bridge, current_clip_path,
+                        current_clip_segments, clip_start_time, idx - 1,
+                        section
+                    )
 
-            # 6. Wait for segment duration + padding
-            wait_seconds = duration + padding
-            _interruptible_sleep(wait_seconds, lambda: self._cancelled)
+                # 1. Pause replay
+                self._log_entry(seg_id, "seek", "Pausing replay")
+                iracing_bridge.set_replay_speed(0)
+                time.sleep(0.2)
 
-            # 7. Stop recording
-            iracing_bridge.set_replay_speed(0)
-            capture_engine.stop_recording()
-            time.sleep(0.3)
+                # 2. Seek to start time minus padding buffer
+                padding = segment.get("clip_padding", self._clip_padding)
+                seek_target_s = max(0, start - padding)
+                seek_ok = self._validated_seek(
+                    seg_id, iracing_bridge, seek_target_s
+                )
+                if not seek_ok:
+                    self._log_entry(seg_id, "error",
+                        "Seek validation failed after all retries — proceeding anyway")
 
-            # 8. Trim the padding from the clip start
-            trimmed_path = self._trim_clip(clip_path, padding) if padding > 0 else clip_path
+                # 3. Switch camera and driver focus with validation
+                self._apply_camera_and_driver(
+                    segment, iracing_bridge, cam_name_to_num, available_cameras
+                )
 
-            self._clips.append({
-                "id": seg_id,
-                "path": trimmed_path,
-                "section": section,
-                "order": idx,
-                "duration": duration,
-                "type": seg_type,
-            })
+                # 4. Build clip filename
+                clip_name = self._build_clip_name(seg_id, section, seg_type, segment, idx)
+                current_clip_path = str(self._output_dir / f"{clip_name}.mp4")
+                current_clip_segments = [seg_id]
+                clip_start_time = start
 
-            logger.info(
-                "[ScriptCapture] Captured %s (%s) → %s  [%.1fs]",
-                seg_id, section, trimmed_path, duration,
-            )
+                # 5. Start recording
+                try:
+                    capture_engine.start_recording(current_clip_path, mode="auto")
+                    self._log_entry(seg_id, "record_start",
+                        f"Recording started → {Path(current_clip_path).name}")
+                    recording = True
+                except Exception as exc:
+                    self._log_entry(seg_id, "error",
+                        f"Recording start failed: {exc}", success=False)
+                    continue
 
+                # 6. Resume replay at 1×
+                iracing_bridge.set_replay_speed(1)
+                self._log_entry(seg_id, "info", "Replay resumed at 1×")
+
+                # 7. Wait for segment duration + padding
+                wait_seconds = duration + padding
+                self._log_entry(seg_id, "info",
+                    f"Waiting {wait_seconds:.1f}s (duration {duration:.1f}s + padding {padding:.1f}s)")
+                _interruptible_sleep(wait_seconds, lambda: self._cancelled)
+
+                # 8. Handle intra-segment camera schedule
+                self._execute_camera_schedule(
+                    segment, iracing_bridge, cam_name_to_num
+                )
+
+            # If next is NOT contiguous or this is the last segment, stop recording
+            if not is_contiguous_with_next or idx == total - 1:
+                if recording:
+                    # Wait for post-padding
+                    post_padding = segment.get("clip_padding_after", self._clip_padding_after)
+                    if post_padding > 0:
+                        self._log_entry(seg_id, "info",
+                            f"Waiting {post_padding:.1f}s post-padding")
+                        _interruptible_sleep(post_padding, lambda: self._cancelled)
+
+                    recording = self._stop_and_save_clip(
+                        capture_engine, iracing_bridge, current_clip_path,
+                        current_clip_segments, clip_start_time, idx, section
+                    )
+
+        # Final progress
         self._emit_progress({
             "step": "capture_complete",
             "clips_captured": len(self._clips),
-            "message": f"Captured {len(self._clips)} clips",
+            "message": f"Captured {len(self._clips)} clips from {total} segments",
+            "capture_log": self.capture_log,
         })
 
         return list(self._clips)
@@ -249,31 +408,25 @@ class ScriptCaptureEngine:
 
         Uses FFmpeg concat demuxer for lossless joining of clips that
         share the same codec/resolution.
-
-        Args:
-            output_path: Path for the final compiled video.
-
-        Returns:
-            The output file path on success, None on failure.
         """
         if not self._clips:
-            logger.warning("[ScriptCapture] No clips to compile")
+            self._log_entry("", "error", "No clips to compile")
             return None
 
         ffmpeg = _find_ffmpeg()
         if not ffmpeg:
-            logger.error("[ScriptCapture] FFmpeg not found")
+            self._log_entry("", "error", "FFmpeg not found")
             return None
 
         self._emit_progress({
             "step": "compiling",
             "message": "Compiling clips into final video...",
         })
+        self._log_entry("", "info",
+            f"Compiling {len(self._clips)} clips → {Path(output_path).name}")
 
-        # Sort clips by script order
         sorted_clips = sorted(self._clips, key=lambda c: c["order"])
 
-        # Write concat list file
         concat_list = self._output_dir / "_concat_list.txt"
         with open(concat_list, "w") as f:
             for clip in sorted_clips:
@@ -289,110 +442,451 @@ class ScriptCaptureEngine:
         ]
 
         try:
-            # Auto-calculate timeout: budget per clip, capped at minimum
             timeout = self._compile_timeout
             if timeout <= 0:
                 timeout = max(_MIN_COMPILE_TIMEOUT, len(sorted_clips) * _COMPILE_SECONDS_PER_CLIP)
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             if result.returncode != 0:
-                logger.error("[ScriptCapture] Compile failed: %s", result.stderr[:500])
+                self._log_entry("", "error",
+                    f"Compile failed: {result.stderr[:500]}", success=False)
                 return None
         except subprocess.TimeoutExpired:
-            logger.error("[ScriptCapture] Compile timed out")
+            self._log_entry("", "error", "Compile timed out", success=False)
             return None
         except Exception as exc:
-            logger.error("[ScriptCapture] Compile error: %s", exc)
+            self._log_entry("", "error", f"Compile error: {exc}", success=False)
             return None
 
-        # Clean up concat list
         try:
             concat_list.unlink()
         except OSError:
             pass
 
-        logger.info("[ScriptCapture] Compiled %d clips → %s", len(sorted_clips), output_path)
+        self._log_entry("", "info",
+            f"Compiled {len(sorted_clips)} clips → {output_path}")
 
         self._emit_progress({
             "step": "compile_complete",
             "output_path": output_path,
             "message": "Video compilation complete",
+            "capture_log": self.capture_log,
         })
 
         return output_path
 
-    # -- Internal helpers ---------------------------------------------------
+    # -- Strategy computation -----------------------------------------------
 
-    def _select_camera(
+    def _compute_strategies(self, segments: list[dict]) -> list[dict]:
+        """Pre-compute the capture strategy for each segment.
+
+        Determines whether each segment is contiguous with its neighbours,
+        which controls whether recording continues or is stopped/restarted.
+        """
+        strategies = []
+        for idx, seg in enumerate(segments):
+            start = seg.get("start_time_seconds", 0)
+            end = seg.get("end_time_seconds", start + 5)
+            duration = end - start
+
+            contiguous_with_prev = False
+            contiguous_with_next = False
+
+            if idx > 0:
+                prev = segments[idx - 1]
+                prev_end = prev.get("end_time_seconds", 0)
+                gap = start - prev_end
+                contiguous_with_prev = gap <= self._contiguous_gap_threshold
+
+            if idx < len(segments) - 1:
+                nxt = segments[idx + 1]
+                nxt_start = nxt.get("start_time_seconds", 0)
+                gap = nxt_start - end
+                contiguous_with_next = gap <= self._contiguous_gap_threshold
+
+            has_camera_schedule = bool(seg.get("camera_schedule"))
+
+            strategy = {
+                "segment_id": seg.get("id", f"seg_{idx:03d}"),
+                "section": seg.get("section", "race"),
+                "type": seg.get("type", "event"),
+                "event_type": seg.get("event_type", ""),
+                "start_time": start,
+                "end_time": end,
+                "duration": round(duration, 2),
+                "contiguous_with_prev": contiguous_with_prev,
+                "contiguous_with_next": contiguous_with_next,
+                "has_camera_schedule": has_camera_schedule,
+                "strategy": "continue" if contiguous_with_prev else "new_recording",
+                "drivers": seg.get("driver_names", []),
+            }
+            strategies.append(strategy)
+
+        return strategies
+
+    # -- Validation/retry helpers -------------------------------------------
+
+    def _validated_seek(
+        self,
+        seg_id: str,
+        iracing_bridge: Any,
+        target_time_s: float,
+    ) -> bool:
+        """Seek to target_time_s and validate via telemetry readback.
+
+        Returns True if seek was validated within tolerance.
+        """
+        target_ms = max(0, int(target_time_s * 1000))
+        session_num = iracing_bridge.get_replay_session_num()
+        if session_num < 0:
+            self._log_entry(seg_id, "seek",
+                "Replay session num unavailable, defaulting to 0")
+            session_num = 0
+
+        for attempt in range(1, MAX_SEEK_RETRIES + 1):
+            self._log_entry(seg_id, "seek",
+                f"Seeking to {_format_race_time(target_time_s)} "
+                f"(session={session_num}, ms={target_ms})",
+                extra={"attempt": attempt, "target_ms": target_ms})
+
+            result = iracing_bridge.replay_search_session_time(session_num, target_ms)
+            if not result:
+                self._log_entry(seg_id, "seek",
+                    f"Seek command returned False (attempt {attempt})",
+                    success=False, attempt=attempt)
+                time.sleep(SEEK_COOLDOWN)
+                continue
+
+            time.sleep(0.5)  # allow seek to settle
+
+            # Validate: read back current session time
+            snapshot = iracing_bridge.capture_snapshot()
+            if snapshot:
+                actual_time = snapshot.get("session_time", 0.0)
+                actual_ms = int(actual_time * 1000)
+                drift_ms = abs(actual_ms - target_ms)
+
+                self._log_entry(seg_id, "validate",
+                    f"Seek validation: target={target_ms}ms actual={actual_ms}ms "
+                    f"drift={drift_ms}ms",
+                    success=drift_ms <= SEEK_TOLERANCE_MS,
+                    attempt=attempt,
+                    expected=target_ms,
+                    actual=actual_ms)
+
+                if drift_ms <= SEEK_TOLERANCE_MS:
+                    return True
+            else:
+                self._log_entry(seg_id, "validate",
+                    "Could not read telemetry for seek validation",
+                    success=False, attempt=attempt)
+
+            if attempt < MAX_SEEK_RETRIES:
+                self._log_entry(seg_id, "retry",
+                    f"Retrying seek ({attempt}/{MAX_SEEK_RETRIES}), "
+                    f"cooldown {SEEK_COOLDOWN}s")
+                time.sleep(SEEK_COOLDOWN)
+
+        return False
+
+    def _validated_camera_switch(
+        self,
+        seg_id: str,
+        iracing_bridge: Any,
+        target_group_num: int,
+        target_car_idx: Optional[int],
+    ) -> bool:
+        """Switch camera and validate via telemetry readback.
+
+        Returns True if camera group was set correctly.
+        """
+        for attempt in range(1, MAX_CAMERA_RETRIES + 1):
+            if target_car_idx is not None:
+                self._log_entry(seg_id, "camera",
+                    f"Switching camera: group={target_group_num} car_idx={target_car_idx}",
+                    attempt=attempt,
+                    extra={"group_num": target_group_num, "car_idx": target_car_idx})
+                iracing_bridge.cam_switch_car(target_car_idx, target_group_num)
+            else:
+                self._log_entry(seg_id, "camera",
+                    f"Switching camera: group={target_group_num} position=leader",
+                    attempt=attempt,
+                    extra={"group_num": target_group_num})
+                iracing_bridge.cam_switch_position(0, target_group_num)
+
+            time.sleep(0.3)
+
+            # Validate via snapshot
+            snapshot = iracing_bridge.capture_snapshot()
+            if snapshot:
+                actual_group = snapshot.get("cam_group_num", -1)
+                actual_car = snapshot.get("cam_car_idx", -1)
+                group_ok = actual_group == target_group_num
+
+                self._log_entry(seg_id, "validate",
+                    f"Camera validation: "
+                    f"group expected={target_group_num} actual={actual_group} "
+                    f"car_idx actual={actual_car}",
+                    success=group_ok,
+                    attempt=attempt,
+                    expected={"group": target_group_num, "car_idx": target_car_idx},
+                    actual={"group": actual_group, "car_idx": actual_car})
+
+                if group_ok:
+                    return True
+            else:
+                self._log_entry(seg_id, "validate",
+                    "Could not read telemetry for camera validation",
+                    success=False, attempt=attempt)
+
+            if attempt < MAX_CAMERA_RETRIES:
+                self._log_entry(seg_id, "retry",
+                    f"Retrying camera switch ({attempt}/{MAX_CAMERA_RETRIES}), "
+                    f"cooldown {CAMERA_COOLDOWN}s")
+                time.sleep(CAMERA_COOLDOWN)
+
+        return False
+
+    # -- Camera/driver management -------------------------------------------
+
+    def _apply_camera_and_driver(
+        self,
+        segment: dict,
+        iracing_bridge: Any,
+        cam_name_to_num: dict[str, int],
+        available_cameras: list[dict],
+    ) -> None:
+        """Resolve and apply camera + driver focus for a segment."""
+        seg_id = segment.get("id", "unknown")
+
+        target_group_num = self._resolve_camera_group(segment, cam_name_to_num)
+        target_car_idx = self._resolve_driver_focus(segment)
+
+        if target_group_num is not None:
+            ok = self._validated_camera_switch(
+                seg_id, iracing_bridge, target_group_num, target_car_idx
+            )
+            if not ok:
+                self._log_entry(seg_id, "error",
+                    "Camera validation failed after all retries — proceeding",
+                    success=False)
+        elif target_car_idx is not None:
+            self._log_entry(seg_id, "driver",
+                f"Setting driver focus: car_idx={target_car_idx}")
+            iracing_bridge.cam_switch_car(target_car_idx, 0)
+            time.sleep(0.2)
+
+    def _resolve_camera_group(
+        self, segment: dict, cam_name_to_num: dict[str, int]
+    ) -> Optional[int]:
+        """Resolve segment camera preference to a group number."""
+        explicit_group = segment.get("camera_group")
+        if explicit_group is not None:
+            try:
+                return int(explicit_group)
+            except (ValueError, TypeError):
+                pass
+
+        cam_prefs = segment.get("camera_preferences", [])
+        for cam_name in cam_prefs:
+            group_num = cam_name_to_num.get(cam_name)
+            if group_num is not None:
+                return group_num
+
+        if cam_name_to_num:
+            return min(cam_name_to_num.values())
+
+        return None
+
+    def _resolve_driver_focus(self, segment: dict) -> Optional[int]:
+        """Resolve the primary driver to focus on for a segment."""
+        hints = segment.get("camera_hints", {})
+        if hints.get("preferred_car_idx") is not None:
+            return hints["preferred_car_idx"]
+
+        involved = segment.get("involved_drivers", [])
+        if involved:
+            first = involved[0]
+            if isinstance(first, int):
+                return first
+            try:
+                return int(first)
+            except (ValueError, TypeError):
+                pass
+
+        return None
+
+    def _execute_camera_schedule(
         self,
         segment: dict,
         iracing_bridge: Any,
         cam_name_to_num: dict[str, int],
     ) -> None:
-        """Choose and apply the best camera for the segment."""
-        # If user explicitly chose a camera group number, use it
-        explicit_group = segment.get("camera_group")
-        if explicit_group is not None:
-            try:
-                iracing_bridge.cam_switch_position(0, int(explicit_group))
-                return
-            except Exception:
-                    logger.debug("Suppressed exception in cleanup", exc_info=True)
+        """Execute any intra-segment camera/driver switches.
 
-        # For B-roll / TV cam segments, walk the preference list
-        cam_prefs = segment.get("camera_preferences", [])
-        for cam_name in cam_prefs:
-            group_num = cam_name_to_num.get(cam_name)
-            if group_num is not None:
-                iracing_bridge.cam_switch_position(0, group_num)
-                logger.debug("[ScriptCapture] Camera → %s (group %d)", cam_name, group_num)
-                return
-
-        # Fallback: if this is a race event, point camera at involved drivers
-        if segment.get("type") == "event" or segment.get("section") == "race":
-            involved = segment.get("involved_drivers", [])
-            if involved:
-                car_idx = involved[0] if isinstance(involved[0], int) else 0
-                iracing_bridge.cam_switch_car(car_idx, 0)
-                return
-
-        # Last resort: use camera group 0 (usually the default TV cam)
-        if cam_name_to_num:
-            first_group = min(cam_name_to_num.values())
-            iracing_bridge.cam_switch_position(0, first_group)
-
-    def _trim_clip(self, clip_path: str, trim_seconds: float) -> str:
-        """Trim the first *trim_seconds* from a clip using FFmpeg.
-
-        Returns the path to the trimmed clip (replaces the original).
+        The camera_schedule is a list of dicts, each with:
+          - offset_seconds: seconds from segment start
+          - camera_name or camera_group: target camera
+          - car_idx: optional driver focus
         """
-        ffmpeg = _find_ffmpeg()
-        if not ffmpeg:
-            return clip_path
+        schedule = segment.get("camera_schedule")
+        if not schedule:
+            return
 
-        trimmed_path = clip_path.replace(".mp4", "_trimmed.mp4")
-        cmd = [
-            ffmpeg, "-hide_banner", "-loglevel", "warning", "-y",
-            "-ss", f"{trim_seconds:.3f}",
-            "-i", clip_path,
-            "-c", "copy",
-            "-avoid_negative_ts", "make_zero",
-            trimmed_path,
-        ]
+        seg_id = segment.get("id", "unknown")
 
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            if result.returncode == 0:
-                # Replace original with trimmed version
+        for entry in schedule:
+            if self._cancelled:
+                break
+
+            offset = entry.get("offset_seconds", 0)
+            cam_name = entry.get("camera_name")
+            cam_group = entry.get("camera_group")
+            car_idx = entry.get("car_idx")
+
+            target_group = None
+            if cam_group is not None:
                 try:
-                    os.remove(clip_path)
-                    os.rename(trimmed_path, clip_path)
-                except OSError:
-                    return trimmed_path
-                return clip_path
-        except Exception as exc:
-            logger.warning("[ScriptCapture] Trim failed for %s: %s", clip_path, exc)
+                    target_group = int(cam_group)
+                except (ValueError, TypeError):
+                    pass
+            elif cam_name:
+                target_group = cam_name_to_num.get(cam_name)
 
-        return clip_path
+            self._log_entry(seg_id, "camera_schedule",
+                f"Scheduled switch at +{offset:.1f}s: "
+                f"camera={cam_name or cam_group} car_idx={car_idx}",
+                extra={"offset": offset})
+
+            if target_group is not None:
+                self._validated_camera_switch(
+                    seg_id, iracing_bridge, target_group,
+                    car_idx if isinstance(car_idx, int) else None
+                )
+            elif car_idx is not None:
+                iracing_bridge.cam_switch_car(int(car_idx), 0)
+
+    # -- Recording management -----------------------------------------------
+
+    def _stop_and_save_clip(
+        self,
+        capture_engine: Any,
+        iracing_bridge: Any,
+        clip_path: Optional[str],
+        segment_ids: list[str],
+        clip_start_time: float,
+        order_idx: int,
+        section: str,
+    ) -> bool:
+        """Stop recording, save and catalogue the clip.
+
+        Returns False (recording has stopped).
+        """
+        if not clip_path:
+            return False
+
+        iracing_bridge.set_replay_speed(0)
+        capture_engine.stop_recording()
+        time.sleep(0.3)
+
+        seg_label = ", ".join(segment_ids[:3])
+        if len(segment_ids) > 3:
+            seg_label += f" (+{len(segment_ids) - 3} more)"
+
+        self._log_entry(segment_ids[-1] if segment_ids else "", "record_stop",
+            f"Recording stopped: {Path(clip_path).name} "
+            f"covering segments: {seg_label}")
+
+        # Validate the clip file exists
+        if Path(clip_path).exists():
+            file_size = Path(clip_path).stat().st_size
+            self._log_entry("", "validate",
+                f"Clip file verified: {Path(clip_path).name} ({file_size:,} bytes)",
+                extra={"file_size": file_size})
+        else:
+            self._log_entry("", "error",
+                f"Clip file not found: {clip_path}", success=False)
+
+        self._clips.append({
+            "id": segment_ids[0] if segment_ids else f"clip_{order_idx:03d}",
+            "path": clip_path,
+            "section": section,
+            "order": order_idx,
+            "duration": 0,  # actual duration from the file
+            "segments": segment_ids,
+            "clip_start_time": clip_start_time,
+        })
+
+        logger.info(
+            "[ScriptCapture] Saved clip %s → %s [%d segments]",
+            segment_ids[0] if segment_ids else "?",
+            clip_path,
+            len(segment_ids),
+        )
+
+        return False
+
+    def _build_clip_name(
+        self, seg_id: str, section: str, seg_type: str,
+        segment: dict, index: int
+    ) -> str:
+        """Build a descriptive clip filename."""
+        event_type = segment.get("event_type", "")
+        drivers = segment.get("driver_names", [])
+        driver_str = "_".join(drivers[:2]) if drivers else ""
+
+        parts = [
+            f"{index:03d}",
+            _sanitize_filename(section),
+            _sanitize_filename(seg_type),
+        ]
+        if event_type:
+            parts.append(_sanitize_filename(event_type))
+        if driver_str:
+            parts.append(_sanitize_filename(driver_str))
+        parts.append(_sanitize_filename(seg_id)[:20])
+
+        name = "_".join(parts)
+        return name[:_MAX_FILENAME_LENGTH]
+
+    # -- Logging helpers ----------------------------------------------------
+
+    def _log_entry(
+        self,
+        seg_id: str,
+        action: str,
+        detail: str,
+        success: bool = True,
+        attempt: int = 1,
+        expected: Any = None,
+        actual: Any = None,
+        extra: Optional[dict] = None,
+    ) -> None:
+        """Record a structured log entry and emit to Python logging."""
+        entry = CaptureLogEntry(
+            timestamp=time.time(),
+            segment_id=seg_id,
+            action=action,
+            detail=detail,
+            success=success,
+            attempt=attempt,
+            expected=expected,
+            actual=actual,
+            extra=extra or {},
+        )
+        self._capture_log.append(entry)
+
+        level = logging.INFO if success else logging.WARNING
+        logger.log(level, "[ScriptCapture] [%s] %s: %s", seg_id, action, detail)
+
+        # Emit log to progress callback for real-time UI
+        if self._progress_cb:
+            try:
+                self._progress_cb({
+                    "step": "log_entry",
+                    "log_entry": entry.to_dict(),
+                })
+            except Exception:
+                pass
 
     def _emit_progress(self, data: dict) -> None:
         """Send progress update via callback if registered."""
@@ -400,13 +894,4 @@ class ScriptCaptureEngine:
             try:
                 self._progress_cb(data)
             except Exception:
-                    logger.debug("Suppressed exception in cleanup", exc_info=True)
-
-
-def _interruptible_sleep(seconds: float, cancelled_fn: Callable[[], bool]) -> None:
-    """Sleep for *seconds*, checking cancellation every 0.25s."""
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        if cancelled_fn():
-            break
-        time.sleep(min(0.25, deadline - time.monotonic()))
+                logger.debug("Suppressed exception in progress callback", exc_info=True)

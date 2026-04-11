@@ -1217,17 +1217,22 @@ class PipelineService:
 
         def progress_cb(data: dict) -> None:
             pct = 10.0
+            step = data.get("step", "")
             seg_idx = data.get("segment_index", 0)
             seg_total = data.get("segment_total", 1)
-            if seg_total > 0:
+            if step == "capturing" and seg_total > 0:
                 pct = 10.0 + (seg_idx / seg_total) * 80.0
+            elif step == "strategy_computed":
+                pct = 8.0
             self._update_step_progress(StepName.CAPTURE, pct, data)
 
         try:
             engine = ScriptCaptureEngine(
                 output_dir=clips_dir,
                 clip_padding=clip_padding,
+                clip_padding_after=config.get("clip_padding_after", 5.0),
                 progress_callback=progress_cb,
+                contiguous_gap_threshold=config.get("contiguous_gap_threshold", 1.0),
             )
 
             clips = engine.capture_script(
