@@ -32,19 +32,19 @@ export function getStepIcon(step) {
  * Returns the Tailwind color class for a pipeline step's state.
  */
 export function getStepColor(step) {
-  if (!step) return 'text-slate-500'
+  if (!step) return 'text-text-disabled'
   switch (step.state) {
     case 'completed':
-      return 'text-green-500'
+      return 'text-success'
     case 'running':
-      return 'text-blue-500'
+      return 'text-accent'
     case 'failed':
-      return 'text-red-500'
+      return 'text-danger'
     case 'skipped':
-      return 'text-amber-500'
+      return 'text-warning'
     case 'paused':
-      return 'text-amber-500'
+      return 'text-warning'
     default:
-      return 'text-slate-500'
+      return 'text-text-disabled'
   }
 }

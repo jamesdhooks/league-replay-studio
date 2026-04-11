@@ -154,13 +154,13 @@ function ScriptTimeline({ strategies, currentSegmentId, completedIndex, totalSeg
           = contiguous
         </span>
         {Object.values(segmentStates || {}).some(s => s.capture_state === 'captured') && (
-          <span className="flex items-center gap-1 text-xxs text-green-400">
+          <span className="flex items-center gap-1 text-xxs text-success">
             <CheckCircle2 className="w-2.5 h-2.5" />
             = captured
           </span>
         )}
         {Object.values(segmentStates || {}).some(s => s.capture_state === 'invalidated') && (
-          <span className="flex items-center gap-1 text-xxs text-amber-400">
+          <span className="flex items-center gap-1 text-xxs text-warning">
             <AlertTriangle className="w-2.5 h-2.5" />
             = invalidated
           </span>
