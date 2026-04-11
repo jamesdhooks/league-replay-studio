@@ -160,6 +160,10 @@ class ScriptCaptureRequest(BaseModel):
     clip_padding_after: float = 5.0
     output_filename: str = "highlight_compiled.mp4"
     contiguous_gap_threshold: float = 1.0
+    # ── Partial capture support ──────────────────────────────────────────
+    capture_mode: str = "all"           # all, uncaptured_only, specific_segments, time_range
+    segment_ids: list[str] | None = None  # for specific_segments mode
+    time_range: dict | None = None        # {start, end} for time_range mode
 
 
 @router.post("/script-capture", status_code=202)
@@ -194,23 +198,11 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 status_code=409,
                 detail="A script capture is already in progress",
             )
-        _script_capture_state.update({
-            "running": True,
-            "cancelled": False,
-            "project_id": body.project_id,
-            "total_segments": len([s for s in body.script if s.get("type") != "transition"]),
-            "completed_segments": 0,
-            "clips": [],
-            "compiled_path": None,
-            "error": None,
-            "started_at": time.time(),
-            "strategies": [],
-            "capture_log": [],
-            "current_segment": None,
-        })
 
-    from server.services.project_service import project_service
+    # ── Filter segments based on capture mode ─────────────────────────────
     from server.services.iracing_bridge import bridge as iracing_bridge
+    from server.services.project_service import project_service
+    from server.services.script_state_service import script_state_service
 
     project = project_service.get_project(body.project_id)
     if not project:
@@ -243,11 +235,47 @@ async def start_script_capture(body: ScriptCaptureRequest):
 
     clips_dir = str(Path(project_dir) / "clips")
     cameras = getattr(iracing_bridge, "cameras", []) or []
-    script = list(body.script)
+
+    # ── Apply capture mode filter ─────────────────────────────────────────
+    filtered_script = script_state_service.filter_segments_by_mode(
+        project_dir,
+        body.script,
+        mode=body.capture_mode,
+        segment_ids=body.segment_ids,
+        time_range=body.time_range,
+    )
+    # Preserve transition segments between captured segments
+    script = []
+    filtered_ids = {s.get("id", s.get("segment_id", "")) for s in filtered_script}
+    for seg in body.script:
+        if seg.get("type") == "transition":
+            script.append(seg)
+        elif seg.get("id", seg.get("segment_id", "")) in filtered_ids:
+            script.append(seg)
+
     clip_padding = body.clip_padding
     clip_padding_after = body.clip_padding_after
     output_filename = body.output_filename
     contiguous_gap = body.contiguous_gap_threshold
+    capture_mode = body.capture_mode
+
+    # Now init state after filtering is done
+    with _script_capture_lock:
+        _script_capture_state.update({
+            "running": True,
+            "cancelled": False,
+            "project_id": body.project_id,
+            "total_segments": len([s for s in script if s.get("type") != "transition"]),
+            "completed_segments": 0,
+            "clips": [],
+            "compiled_path": None,
+            "error": None,
+            "started_at": time.time(),
+            "strategies": [],
+            "capture_log": [],
+            "current_segment": None,
+            "capture_mode": capture_mode,
+        })
 
     def _progress_cb(data: dict) -> None:
         """Called by ScriptCaptureEngine on progress updates."""
@@ -260,14 +288,18 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 "project_id": body.project_id,
             })
         elif step == "capturing":
+            seg_id = data.get("segment_id", "")
             with _script_capture_lock:
                 _script_capture_state["completed_segments"] = data.get("segment_index", 0)
                 _script_capture_state["current_segment"] = {
-                    "segment_id": data.get("segment_id"),
+                    "segment_id": seg_id,
                     "section": data.get("section"),
                     "segment_type": data.get("segment_type"),
                     "strategy": data.get("strategy"),
                 }
+            # Track per-segment capture state
+            if seg_id and project_dir:
+                script_state_service.mark_capturing(project_dir, seg_id)
             _do_broadcast(EventType.CAPTURE_SCRIPT_PROGRESS, {
                 **data,
                 "project_id": body.project_id,
@@ -390,6 +422,13 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 capture_engine=recorder,
                 available_cameras=cameras,
             )
+
+            # Mark each captured segment in persistent state
+            for clip in clips:
+                clip_path = clip.get("path", "")
+                for seg_id_in_clip in clip.get("segments", []):
+                    if clip_path:
+                        script_state_service.mark_captured(project_dir, seg_id_in_clip, clip_path)
 
             with _script_capture_lock:
                 _script_capture_state["clips"] = clips
