@@ -173,6 +173,7 @@ export default function HighlightTimeline({ onInspect }) {
   const [optimisticEditTime, setOptimisticEditTime] = useState(null)
   const scriptClockRef   = useRef(null)   // browser-authoritative playback clock during execution
   const scriptTickRef    = useRef(null)   // interval handle for the 50 ms UI-refresh tick
+  const scrubResyncRef   = useRef(null)   // { editTime } set by scrub during execution to skip loop forward
   const [scriptEditTime, setScriptEditTime] = useState(null) // edit-time broadcast during execution
   const replayStateRef   = useRef(null)   // latest polled iRacing state (for drift check)
   const raceSessionNumRef = useRef(0)     // stable ref so ticker can seek without stale closure
@@ -560,7 +561,19 @@ export default function HighlightTimeline({ onInspect }) {
     } catch { /* non-fatal */ }
 
     try { await apiPost('/iracing/replay/pause') } catch { /* non-fatal */ }
-  }, [resolveSegmentAtEditTime, sessionData, raceSessionNum, getFocusCarIdx, cameraOverrides])
+
+    // Log the seek event so the event feed captures manual scrubs
+    pushScriptAction({
+      id:          `seek_${Date.now()}`,
+      ts:          Date.now(),
+      eventType:   'seek',
+      section:     seg.section || 'race',
+      cameraLabel: null,
+      driverName:  null,
+      raceTime:    sessionTime,
+      involvedDrivers: [],
+    })
+  }, [resolveSegmentAtEditTime, sessionData, raceSessionNum, getFocusCarIdx, cameraOverrides, pushScriptAction])
 
   const handlePlayheadPointerDown = useCallback((e) => {
     if (!hasData || e.button !== 0) return
@@ -568,6 +581,10 @@ export default function HighlightTimeline({ onInspect }) {
     // Other rows (camera, driver, events) need their own click handlers.
     e.preventDefault()
     e.stopPropagation()
+
+    // Mark clock as user-scrubbing so the 50ms ticker won't fight our UI updates
+    const clk = scriptClockRef.current
+    if (clk) clk.userScrubbing = true
 
     const applyDrag = (clientX) => {
       const editTime = getEditTimeFromClientX(clientX)
@@ -592,6 +609,28 @@ export default function HighlightTimeline({ onInspect }) {
       const finalEditTime = getEditTimeFromClientX(up.clientX)
       setScrubSegId(null)
       setOptimisticEditTime(finalEditTime)
+      
+      // Re-anchor the clock to the new scrub position so it resumes from here
+      const clk = scriptClockRef.current
+      if (clk) {
+        clk.startWallMs = performance.now()
+        clk.startEditTime = finalEditTime
+        clk.accPausedMs = 0
+        clk.userScrubbing = false
+        // Update segStartSec if we're in the middle of a segment for drift detection
+        const resolved = resolveSegmentAtEditTime(finalEditTime)
+        if (resolved?.seg) {
+          clk.segStartSec = resolved.seg.start_time_seconds
+          clk.segStartWallMs = performance.now()
+          clk.segAccPausedMsAtSegStart = 0
+        }
+      }
+      
+      // If executing, tell the loop to jump forward without cycling through intermediate segments
+      if (scriptClockRef.current) {
+        scrubResyncRef.current = { editTime: finalEditTime }
+      }
+
       await seekScriptPosition(finalEditTime)
 
       // Keep optimistic line briefly so UI feels immediate while replay-state poll catches up.
@@ -713,13 +752,16 @@ export default function HighlightTimeline({ onInspect }) {
     // push the playhead while the script is running.
     const startEditTime = editSegments[fromIndex]?.editStart ?? 0
     scriptClockRef.current = {
-      startWallMs:   performance.now(),
+      startWallMs:         performance.now(),
       startEditTime,
       speed,
-      accPausedMs:   0,
-      paused:        false,
-      pauseWallMs:   0,
-      pauseEditTime: startEditTime,
+      accPausedMs:         0,
+      paused:              false,
+      pauseWallMs:         0,
+      pauseEditTime:       startEditTime,
+      userScrubbing:       false,  // set true while user drags the playhead
+      expectedCamGroupNum: null,   // last commanded camera group; validated by ticker
+      expectedCarIdx:      null,   // last commanded car idx; validated by ticker
     }
 
     // Thresholds for drift correction.
@@ -732,6 +774,8 @@ export default function HighlightTimeline({ onInspect }) {
       const clk = scriptClockRef.current
       if (!clk) return
       const wallNow = performance.now()
+      // Skip UI update if user is manually scrubbing — let optimisticEditTime handle it
+      if (clk.userScrubbing) return
       const t = clk.paused
         ? clk.pauseEditTime
         : clk.startEditTime + ((wallNow - clk.startWallMs - clk.accPausedMs) / 1000) * clk.speed
@@ -756,13 +800,52 @@ export default function HighlightTimeline({ onInspect }) {
           }
         }
       }
+
+      // ── Play / speed validation ─────────────────────────────────────────
+      if (!clk.paused && !clk.userScrubbing) {
+        const rs = replayStateRef.current
+        const expectedSpeed = Math.max(1, Math.round(clk.speed))
+
+        if (rs != null) {
+          // iRacing is paused but should be playing — re-issue play
+          if (rs.replay_speed === 0 && wallNow - (clk.lastPlayMs || 0) > 2000) {
+            clk.lastPlayMs = wallNow
+            apiPost('/iracing/replay/play').catch(() => {})
+          }
+
+          // iRacing is running but at the wrong speed — re-issue speed + play
+          if (rs.replay_speed !== 0 && rs.replay_speed !== expectedSpeed
+              && wallNow - (clk.lastSpeedMs || 0) > 2000) {
+            clk.lastSpeedMs = wallNow
+            apiPost('/iracing/replay/speed', { speed: expectedSpeed })
+              .then(() => apiPost('/iracing/replay/play'))
+              .catch(() => {})
+          }
+
+          // ── Camera/driver validation ────────────────────────────────────
+          if (clk.expectedCamGroupNum != null) {
+            const camMismatch = rs.cam_group_num !== clk.expectedCamGroupNum
+              || (clk.expectedCarIdx != null && rs.cam_car_idx !== clk.expectedCarIdx)
+            if (camMismatch && wallNow - (clk.lastCamMs || 0) > 1500) {
+              clk.lastCamMs = wallNow
+              apiPost('/iracing/replay/camera', {
+                group_num: clk.expectedCamGroupNum,
+                ...(clk.expectedCarIdx != null ? { car_idx: clk.expectedCarIdx } : { position: 1 }),
+              }).catch(() => {})
+            }
+          }
+        }
+      }
     }, 50)
 
     // Resolves once the browser clock reaches targetEditTime.
     // While paused the promise waits without resolving.
+    // Bails out immediately if a scrub resync is pending so the loop can jump forward.
     const waitForEditTime = (targetEditTime) => new Promise(resolve => {
       const check = setInterval(() => {
         if (abort.cancelled) { clearInterval(check); resolve(); return }
+        // Scrub resync pending — bail so the for-loop can skip to the correct segment
+        if (scrubResyncRef.current != null) { clearInterval(check); resolve(); return }
         const clk = scriptClockRef.current
         if (!clk) { resolve(); return }
         if (clk.paused) return
@@ -774,6 +857,14 @@ export default function HighlightTimeline({ onInspect }) {
 
     for (const seg of segs) {
       if (abort.cancelled) break
+
+      // Scrub resync: skip segments that fall entirely before the target position
+      // without firing any API commands. When we reach the segment that contains
+      // the target time, clear the resync flag and execute that segment normally.
+      if (scrubResyncRef.current != null) {
+        if (seg.editEnd <= scrubResyncRef.current.editTime) continue
+        scrubResyncRef.current = null  // this segment contains the target; proceed normally
+      }
 
       // Bridges are zero-duration cut markers — skip all API calls.
       // The next real segment handles its own seek + camera; firing bridge
@@ -834,6 +925,8 @@ export default function HighlightTimeline({ onInspect }) {
                   group_num: cam.group_num,
                   ...(carIdx != null ? { car_idx: carIdx } : { position: 1 }),
                 })
+                const clk2 = scriptClockRef.current
+                if (clk2) { clk2.expectedCamGroupNum = cam.group_num; clk2.expectedCarIdx = carIdx }
               } catch { /* non-fatal */ }
               pushScriptAction({
                 id: `${seg.id}_w${win.start}`,
@@ -864,11 +957,14 @@ export default function HighlightTimeline({ onInspect }) {
             const carIdx = getFocusCarIdx(seg, startSec)
             const drvNames = seg.driver_names || []
             const drvIdx   = (seg.involved_drivers || []).indexOf(carIdx)
+            appliedCamLabel = camLabel
             appliedDriverName = drvIdx >= 0 ? drvNames[drvIdx] : (drvNames[0] || null)
             await apiPost('/iracing/replay/camera', {
               group_num: cam.group_num,
               ...(carIdx != null ? { car_idx: carIdx } : { position: 1 }),
             })
+            const clk2 = scriptClockRef.current
+            if (clk2) { clk2.expectedCamGroupNum = cam.group_num; clk2.expectedCarIdx = carIdx }
           }
         } catch { /* non-fatal */ }
 
@@ -895,6 +991,7 @@ export default function HighlightTimeline({ onInspect }) {
     setPaused(false)
     setExecuting(false)
     setActiveSegId(null)
+    scrubResyncRef.current = null
     // Clean up browser clock, UI ticker, and drift display.
     clearInterval(scriptTickRef.current)
     scriptTickRef.current = null
@@ -935,6 +1032,7 @@ export default function HighlightTimeline({ onInspect }) {
     setPaused(false)
     setExecuting(false)
     setActiveSegId(null)
+    scrubResyncRef.current = null
     // Clean up browser clock, UI ticker, and drift display.
     clearInterval(scriptTickRef.current)
     scriptTickRef.current = null
@@ -1630,9 +1728,11 @@ export default function HighlightTimeline({ onInspect }) {
                       const section = seg.section || 'race'
                       const sectionMeta = SECTION_META[section] || SECTION_META.race
 
-                      // Colour: event type for race clips, section colour for non-race
-                      const color = section === 'race' && !isFillerSegment(seg)
-                        ? (EVENT_COLORS[seg.event_type] || '#f97316')
+                      // Colour: always prefer true event-type color when available,
+                      // including context/filler clips. This keeps context windows
+                      // visually tied to the event they belong to.
+                      const color = seg.event_type && EVENT_COLORS[seg.event_type]
+                        ? EVENT_COLORS[seg.event_type]
                         : sectionMeta.border.replace('0.40', '0.80').replace('0.45', '0.80')
                                              .replace('0.48', '0.80').replace('0.55', '0.80')
 

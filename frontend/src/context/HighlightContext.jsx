@@ -921,6 +921,7 @@ export function HighlightProvider({ children }) {
     filterType, filterInclusion, filterSeverityRange,
     drivers,
     replayMode, setReplayMode,
+    scriptActionLog,
   ])
 
   // ── Cleanup: ensure flush timer and queues are cleared ───────────────
