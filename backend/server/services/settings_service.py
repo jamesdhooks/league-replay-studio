@@ -65,7 +65,7 @@ def _deobfuscate(value: str) -> str:
 # Missing keys are allowed (they keep their current value).
 
 VALID_THEMES = {"dark", "light", "system"}
-VALID_CAPTURE_SOFTWARE = {"obs", "shadowplay", "relive", "manual"}
+VALID_CAPTURE_SOFTWARE = {"native", "obs", "shadowplay", "relive", "manual"}
 VALID_PRIVACY = {"public", "unlisted", "private"}
 VALID_ENCODING_PRESETS = {
     "youtube_1080p", "youtube_1440p", "youtube_4k",

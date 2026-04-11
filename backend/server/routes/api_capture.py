@@ -21,7 +21,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -211,7 +211,6 @@ async def start_script_capture(body: ScriptCaptureRequest):
 
     from server.services.project_service import project_service
     from server.services.iracing_bridge import bridge as iracing_bridge
-    from server.utils.script_capture import ScriptCaptureEngine
 
     project = project_service.get_project(body.project_id)
     if not project:
@@ -294,27 +293,92 @@ async def start_script_capture(body: ScriptCaptureRequest):
 
     def _run_capture() -> None:
         global _script_capture_engine
-        from server.utils.capture_engine import CaptureEngine
+        from server.services.settings_service import settings_service
+
+        software = settings_service.get("capture_software") or "native"
 
         _do_broadcast(EventType.CAPTURE_SCRIPT_STARTED, {
             "project_id": body.project_id,
             "total_segments": _script_capture_state["total_segments"],
+            "capture_mode": software,
         })
 
-        capture_engine = CaptureEngine()
-        started_engine = False
+        # Build the recorder backend based on the configured capture software.
+        #
+        # • "native"  — LRS built-in DXCam capture (CaptureEngine).  Output
+        #               path is known in advance; no file polling needed.
+        # • anything else — Hotkey-based capture (OBS / ShadowPlay / ReLive /
+        #               manual).  HotkeyRecorderAdapter sends hotkeys and polls
+        #               the capture software's output folder for the new file.
+        from server.utils.script_capture import ScriptCaptureEngine, HotkeyRecorderAdapter
+
+        native_engine = None
+        started_native = False
+        recorder: Any
+
+        if software == "native":
+            from server.utils.capture_engine import CaptureEngine
+            native_engine = CaptureEngine()
+            try:
+                if not native_engine.is_running:
+                    native_engine.start(fps=30, quality=80, max_width=1920)
+                    started_native = True
+            except Exception as exc:
+                logger.error("[Capture API] Failed to start native engine: %s", exc)
+                with _script_capture_lock:
+                    _script_capture_state["error"] = str(exc)
+                    _script_capture_state["running"] = False
+                _do_broadcast(EventType.CAPTURE_SCRIPT_ERROR, {
+                    "project_id": body.project_id,
+                    "error": str(exc),
+                })
+                return
+            recorder = native_engine
+        else:
+            hotkeys = capture_service.get_hotkeys()
+            watch_dir = capture_service.get_watch_directory()
+
+            if not hotkeys.get("start"):
+                err = f"No start hotkey configured for '{software}' mode"
+                logger.error("[Capture API] %s", err)
+                with _script_capture_lock:
+                    _script_capture_state["error"] = err
+                    _script_capture_state["running"] = False
+                _do_broadcast(EventType.CAPTURE_SCRIPT_ERROR, {
+                    "project_id": body.project_id,
+                    "error": err,
+                })
+                return
+
+            if not watch_dir:
+                err = (
+                    f"No video output folder found for '{software}'. "
+                    "Configure the output path in Settings → Capture."
+                )
+                logger.error("[Capture API] %s", err)
+                with _script_capture_lock:
+                    _script_capture_state["error"] = err
+                    _script_capture_state["running"] = False
+                _do_broadcast(EventType.CAPTURE_SCRIPT_ERROR, {
+                    "project_id": body.project_id,
+                    "error": err,
+                })
+                return
+
+            recorder = HotkeyRecorderAdapter(
+                watch_folder=watch_dir,
+                start_hotkey=hotkeys["start"],
+                stop_hotkey=hotkeys.get("stop") or hotkeys["start"],
+            )
 
         try:
-            if not capture_engine.is_running:
-                capture_engine.start(fps=30, quality=80, max_width=1920)
-                started_engine = True
-
             engine = ScriptCaptureEngine(
                 output_dir=clips_dir,
                 clip_padding=clip_padding,
                 clip_padding_after=clip_padding_after,
                 progress_callback=_progress_cb,
                 contiguous_gap_threshold=contiguous_gap,
+                capture_mode=software,
             )
 
             with _script_capture_lock:
@@ -323,7 +387,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
             clips = engine.capture_script(
                 script=script,
                 iracing_bridge=iracing_bridge,
-                capture_engine=capture_engine,
+                capture_engine=recorder,
                 available_cameras=cameras,
             )
 
@@ -357,8 +421,8 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 "error": str(exc),
             })
         finally:
-            if started_engine:
-                capture_engine.stop()
+            if started_native and native_engine is not None:
+                native_engine.stop()
             with _script_capture_lock:
                 _script_capture_engine = None
 

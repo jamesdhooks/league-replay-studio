@@ -9,8 +9,9 @@ For each segment in the script, the engine:
   3. Switches to the appropriate iRacing camera / driver focus
   4. **Validates** seek position, camera, and driver via iRacing telemetry
   5. Retries commands with cooldown until confirmed (configurable max retries)
-  6. Simultaneously starts native capture and resumes the replay
-  7. Processes intra-segment camera/driver schedule switches at their timestamps
+  6. Simultaneously starts the recorder and resumes the replay
+  7. Fires intra-segment camera/driver schedule switches at their exact offsets
+     *during* playback (not after), using _wait_with_schedule()
   8. Determines if the next segment is contiguous or has a gap:
      - **Contiguous**: keeps recording, sends camera/driver switch only
      - **Gap**: stops recording, validates clip file, catalogues it with
@@ -19,14 +20,30 @@ For each segment in the script, the engine:
 
 After all segments are captured, clips are compiled using FFmpeg concat.
 
+Two recording backends are supported:
+  - **Native (LRS)**: uses CaptureEngine directly; output path is controlled.
+  - **Hotkey (OBS/ShadowPlay/ReLive)**: uses HotkeyRecorderAdapter which sends
+    configurable hotkeys, then polls a watch folder for the new file and renames
+    it into the project clips directory.
+
 All commands and their outcomes are recorded in a structured capture log
 for full auditability and debugging.
+
+Clock injection
+~~~~~~~~~~~~~~~
+Pass ``_now`` (monotonic clock) and ``_sleep`` (sleep function) to the
+constructor to replace ``time.monotonic`` and ``time.sleep``.  This lets unit
+tests drive the engine without real wall-clock delays::
+
+    clock = FakeClock()
+    engine = ScriptCaptureEngine(..., _now=clock.now, _sleep=clock.sleep)
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -39,14 +56,17 @@ logger = logging.getLogger(__name__)
 
 # ── Configuration defaults ──────────────────────────────────────────────────
 
-DEFAULT_CLIP_PADDING = 2.0        # seconds before each clip
-DEFAULT_CLIP_PADDING_AFTER = 5.0  # seconds after each clip
-MAX_SEEK_RETRIES = 5              # attempts to validate a seek command
-MAX_CAMERA_RETRIES = 3            # attempts to validate camera/driver switch
-SEEK_COOLDOWN = 0.8               # seconds between seek retry attempts
-CAMERA_COOLDOWN = 0.5             # seconds between camera retry attempts
-SEEK_TOLERANCE_MS = 3000          # ±ms tolerance for seek validation
-CONTIGUOUS_GAP_THRESHOLD = 1.0    # max gap (seconds) to treat segments as contiguous
+DEFAULT_CLIP_PADDING = 2.0          # seconds before each clip
+DEFAULT_CLIP_PADDING_AFTER = 5.0    # seconds after each clip
+MAX_SEEK_RETRIES = 5                # attempts to validate a seek command
+MAX_CAMERA_RETRIES = 3              # attempts to validate camera/driver switch
+SEEK_COOLDOWN = 0.8                 # seconds between seek retry attempts
+CAMERA_COOLDOWN = 0.5               # seconds between camera retry attempts
+SEEK_TOLERANCE_MS = 3000            # ±ms tolerance for seek validation
+CONTIGUOUS_GAP_THRESHOLD = 1.0      # max gap (seconds) to treat segments as contiguous
+OBS_POLL_INTERVAL = 1.0             # seconds between file-size stability checks
+OBS_STABLE_CHECKS = 3               # consecutive stable-size checks before moving file
+OBS_PRE_HOTKEY_TOLERANCE = 2.0      # seconds before hotkey to scan for files (timing fuzz)
 
 _MAX_FILENAME_LENGTH = 64
 _MIN_COMPILE_TIMEOUT = 120
@@ -138,6 +158,159 @@ def _interruptible_sleep(
         _sleep(min(0.25, remaining))
 
 
+# ── Hotkey recorder adapter (OBS / ShadowPlay / ReLive) ─────────────────────
+
+class HotkeyRecorderAdapter:
+    """Recording backend that drives OBS Studio, NVIDIA ShadowPlay, or AMD
+    ReLive via configurable keyboard hotkeys.
+
+    Implements the same duck-typed interface as ``CaptureEngine``
+    (``start_recording`` / ``stop_recording``) so it can be passed directly
+    to :class:`ScriptCaptureEngine`.
+
+    After the stop hotkey is sent, :meth:`stop_recording` polls
+    *watch_folder* for a new video file that appeared since recording started,
+    waits for the file size to stabilise (indicating the capture software has
+    finished writing), then moves (renames) it to the *target_path* that was
+    given to :meth:`start_recording`.
+
+    Args:
+        watch_folder: Directory where the capture software writes its output.
+        start_hotkey: Hotkey string sent to begin recording, e.g. ``"F9"``.
+        stop_hotkey: Hotkey string sent to stop recording.  May equal
+            *start_hotkey* for toggle-style software like OBS.
+        poll_timeout: Maximum seconds to wait for the output file after
+            sending the stop hotkey (default 30 s).
+        stable_checks: Number of consecutive stable-size polls required
+            before treating the file as fully written (default 3).
+        _sleep: Sleep function — inject ``FakeClock.sleep`` in tests.
+        _wall_time: Wall-clock function — inject ``FakeClock.wall`` in tests.
+    """
+
+    is_running: bool = True  # always ready; matches CaptureEngine attribute
+
+    def __init__(
+        self,
+        watch_folder: str,
+        start_hotkey: str,
+        stop_hotkey: str,
+        poll_timeout: float = 30.0,
+        stable_checks: int = OBS_STABLE_CHECKS,
+        _sleep: Callable[[float], None] = time.sleep,
+        _wall_time: Callable[[], float] = time.time,
+    ) -> None:
+        self._watch_folder = watch_folder
+        self._start_hotkey = start_hotkey
+        self._stop_hotkey = stop_hotkey
+        self._poll_timeout = poll_timeout
+        self._stable_checks = stable_checks
+        self._sleep = _sleep
+        self._wall_time = _wall_time
+        self._target_path: Optional[str] = None
+        self._recording_started_at: float = 0.0
+
+    # -- CaptureEngine-compatible interface ----------------------------------
+
+    def start_recording(self, target_path: str, **_kwargs) -> None:
+        """Send the start hotkey and record the current wall-clock timestamp."""
+        self._target_path = target_path
+        self._recording_started_at = self._wall_time()
+        if platform.system() == "Windows":
+            from server.utils.obs_integration import send_hotkey
+            sent = send_hotkey(self._start_hotkey)
+            if not sent:
+                logger.warning(
+                    "[HotkeyRecorder] Start hotkey '%s' may not have been sent",
+                    self._start_hotkey,
+                )
+        else:
+            logger.info(
+                "[HotkeyRecorder] (non-Windows) Would send start hotkey: %s",
+                self._start_hotkey,
+            )
+
+    def stop_recording(self) -> None:
+        """Send the stop hotkey, then poll the watch folder for the output file
+        and move it to the target path that was set by :meth:`start_recording`.
+        """
+        if platform.system() == "Windows":
+            from server.utils.obs_integration import send_hotkey
+            send_hotkey(self._stop_hotkey)
+        else:
+            logger.info(
+                "[HotkeyRecorder] (non-Windows) Would send stop hotkey: %s",
+                self._stop_hotkey,
+            )
+
+        if self._target_path:
+            ok = self._poll_and_move(self._target_path)
+            if not ok:
+                logger.error(
+                    "[HotkeyRecorder] Timed out — clip may not have been saved to %s",
+                    self._target_path,
+                )
+
+    # -- Internal polling logic ---------------------------------------------
+
+    def _poll_and_move(self, target_path: str) -> bool:
+        """Poll *watch_folder* for a new stable video file and move it.
+
+        Returns True if a file was successfully moved to *target_path*.
+        """
+        from server.utils.obs_integration import get_recent_video_files
+
+        # Scan for files created no earlier than OBS_PRE_HOTKEY_TOLERANCE
+        # seconds before the start hotkey (accommodates timestamp fuzz).
+        since = self._recording_started_at - OBS_PRE_HOTKEY_TOLERANCE
+        deadline = self._wall_time() + self._poll_timeout
+
+        # Track per-file size and stability counter
+        last_size: dict[str, int] = {}
+        stable_count: dict[str, int] = {}
+
+        logger.info(
+            "[HotkeyRecorder] Polling '%s' for new clip (timeout=%gs)…",
+            self._watch_folder,
+            self._poll_timeout,
+        )
+
+        while self._wall_time() < deadline:
+            self._sleep(OBS_POLL_INTERVAL)
+
+            new_files = get_recent_video_files(self._watch_folder, since)
+            for f in new_files:
+                path = f["path"]
+                size = f["size_bytes"]
+                prev = last_size.get(path, -1)
+
+                if size > 0 and size == prev:
+                    stable_count[path] = stable_count.get(path, 0) + 1
+                    if stable_count[path] >= self._stable_checks:
+                        # File is fully written — move to target
+                        try:
+                            Path(target_path).parent.mkdir(parents=True, exist_ok=True)
+                            shutil.move(path, target_path)
+                            logger.info(
+                                "[HotkeyRecorder] Clip ready: %s → %s",
+                                Path(path).name, target_path,
+                            )
+                            return True
+                        except OSError as exc:
+                            logger.error(
+                                "[HotkeyRecorder] Failed to move clip: %s", exc
+                            )
+                            return False
+                else:
+                    last_size[path] = size
+                    stable_count[path] = 0
+
+        logger.warning(
+            "[HotkeyRecorder] Timed out (%gs) waiting for clip in '%s'",
+            self._poll_timeout, self._watch_folder,
+        )
+        return False
+
+
 # ── Main Engine ─────────────────────────────────────────────────────────────
 
 class ScriptCaptureEngine:
@@ -146,9 +319,13 @@ class ScriptCaptureEngine:
     final highlight video.
 
     This class coordinates the iRacing bridge (for replay/camera control)
-    and the CaptureEngine (for recording) but does NOT depend on the
-    CaptureService (OBS hotkey layer).  It uses the CaptureEngine's
-    start_recording / stop_recording directly for precise clip control.
+    and a recorder backend (for recording), supporting two modes:
+
+    - **Native (LRS)**: pass a ``CaptureEngine`` instance — the engine writes
+      directly to the given output path.
+    - **Hotkey (OBS/ShadowPlay/ReLive)**: pass a :class:`HotkeyRecorderAdapter`
+      — hotkeys drive the capture software; the adapter polls the watch folder
+      for the output file and renames it into the project directory.
 
     Key features:
     - **Validation**: Every seek/camera/driver command is verified via
@@ -159,12 +336,15 @@ class ScriptCaptureEngine:
       contiguous timing share a single recording pass.  Only actual gaps
       trigger stop/start of recording.
     - **Intra-segment scheduling**: Camera and driver switches within a
-      segment are executed at their scheduled timestamps.
+      segment are fired at their exact ``offset_seconds`` *during* playback
+      via :meth:`_wait_with_schedule`, not after the segment finishes.
     - **Structured logging**: Every command sent, validation result, retry,
       and failure is recorded in a structured capture log.
     - **Clip management**: Each clip is named descriptively with section,
       event type, and driver info.  A manifest links clip files to script
       segments.
+    - **Clock injection**: Pass ``_now`` and ``_sleep`` for deterministic
+      unit testing without real wall-clock delays.
     """
 
     def __init__(
@@ -175,8 +355,7 @@ class ScriptCaptureEngine:
         progress_callback: Optional[Callable[[dict], None]] = None,
         compile_timeout: int = 0,
         contiguous_gap_threshold: float = CONTIGUOUS_GAP_THRESHOLD,
-        video_watch_folder: Optional[str] = None,
-        clip_poll_timeout: float = 30.0,
+        capture_mode: str = "native",
         _now: Optional[Callable[[], float]] = None,
         _sleep: Optional[Callable[[float], None]] = None,
     ) -> None:
@@ -190,16 +369,13 @@ class ScriptCaptureEngine:
                 0 = auto-calculated from clip count.
             contiguous_gap_threshold: Max gap in seconds to treat consecutive
                 segments as contiguous (keeps recording running).
-            video_watch_folder: When using OBS/ShadowPlay hotkey recording the
-                capture software writes to its own configured folder.  Set this
-                to that folder so the engine can poll for the new file and move
-                it into the project clips directory.  Leave None (default) when
-                using native CaptureEngine recording where the output path is
-                known in advance.
-            clip_poll_timeout: Seconds to poll *video_watch_folder* for a new
-                clip before giving up (default 30 s).
-            _now: Clock function returning monotonic seconds.  Defaults to
-                ``time.monotonic``.  Inject a fake for unit tests.
+            capture_mode: Informational label for the recording backend being
+                used — ``"native"`` (LRS built-in), ``"obs"``, ``"shadowplay"``,
+                ``"relive"``, or ``"manual"``.  Only affects log messages; the
+                actual backend is determined by whichever recorder object is
+                passed to :meth:`capture_script`.
+            _now: Monotonic clock function.  Defaults to ``time.monotonic``.
+                Inject a fake for unit tests (see :class:`FakeClock`).
             _sleep: Sleep function.  Defaults to ``time.sleep``.  Inject a
                 fake for unit tests.
         """
@@ -210,16 +386,13 @@ class ScriptCaptureEngine:
         self._progress_cb = progress_callback
         self._compile_timeout = compile_timeout
         self._contiguous_gap_threshold = contiguous_gap_threshold
-        self._video_watch_folder = video_watch_folder
-        self._clip_poll_timeout = clip_poll_timeout
+        self._capture_mode = capture_mode
         self._now: Callable[[], float] = _now or time.monotonic
         self._sleep: Callable[[float], None] = _sleep or time.sleep
         self._clips: list[dict] = []
         self._capture_log: list[CaptureLogEntry] = []
         self._cancelled = False
         self._segment_strategies: list[dict] = []
-        # Wall-clock time when the current recording started (used for OBS polling)
-        self._recording_wall_start: float = 0.0
 
     # -- Public API ---------------------------------------------------------
 
@@ -272,7 +445,9 @@ class ScriptCaptureEngine:
         if total == 0:
             return []
 
-        self._log_entry("", "info", f"Starting script capture: {total} segments")
+        self._log_entry("", "info",
+            f"Starting script capture: {total} segments "
+            f"[mode={self._capture_mode}]")
 
         # Cache camera groups
         if available_cameras is None:
@@ -291,6 +466,7 @@ class ScriptCaptureEngine:
             "step": "strategy_computed",
             "strategies": strategies,
             "total_segments": total,
+            "capture_mode": self._capture_mode,
             "message": f"Computed capture strategy for {total} segments",
         })
 
@@ -338,14 +514,12 @@ class ScriptCaptureEngine:
                 )
                 current_clip_segments.append(seg_id)
 
-                # Wait for this segment's duration
+                # Wait for segment duration, firing any schedule at their offsets.
+                # pre_roll=0 because replay is already at this segment's start.
                 self._log_entry(seg_id, "info",
                     f"Waiting {duration:.1f}s for segment duration")
-                _interruptible_sleep(duration, lambda: self._cancelled)
-
-                # Handle intra-segment camera schedule
-                self._execute_camera_schedule(
-                    segment, iracing_bridge, cam_name_to_num
+                self._wait_with_schedule(
+                    duration, 0.0, segment, iracing_bridge, cam_name_to_num
                 )
 
             else:
@@ -362,7 +536,7 @@ class ScriptCaptureEngine:
                 # 1. Pause replay
                 self._log_entry(seg_id, "seek", "Pausing replay")
                 iracing_bridge.set_replay_speed(0)
-                time.sleep(0.2)
+                self._sleep(0.2)
 
                 # 2. Seek to start time minus padding buffer
                 padding = segment.get("clip_padding", self._clip_padding)
@@ -389,7 +563,8 @@ class ScriptCaptureEngine:
                 try:
                     capture_engine.start_recording(current_clip_path, mode="auto")
                     self._log_entry(seg_id, "record_start",
-                        f"Recording started → {Path(current_clip_path).name}")
+                        f"Recording started [{self._capture_mode}] → "
+                        f"{Path(current_clip_path).name}")
                     recording = True
                 except Exception as exc:
                     self._log_entry(seg_id, "error",
@@ -400,15 +575,15 @@ class ScriptCaptureEngine:
                 iracing_bridge.set_replay_speed(1)
                 self._log_entry(seg_id, "info", "Replay resumed at 1×")
 
-                # 7. Wait for segment duration + padding
+                # 7. Wait for (pre-roll padding + segment duration), firing any
+                #    scheduled camera switches at their exact offsets.
+                #    pre_roll=padding so offset_seconds is relative to segment start.
                 wait_seconds = duration + padding
                 self._log_entry(seg_id, "info",
-                    f"Waiting {wait_seconds:.1f}s (duration {duration:.1f}s + padding {padding:.1f}s)")
-                _interruptible_sleep(wait_seconds, lambda: self._cancelled)
-
-                # 8. Handle intra-segment camera schedule
-                self._execute_camera_schedule(
-                    segment, iracing_bridge, cam_name_to_num
+                    f"Waiting {wait_seconds:.1f}s "
+                    f"(duration {duration:.1f}s + padding {padding:.1f}s)")
+                self._wait_with_schedule(
+                    wait_seconds, padding, segment, iracing_bridge, cam_name_to_num
                 )
 
             # If next is NOT contiguous or this is the last segment, stop recording
@@ -419,7 +594,10 @@ class ScriptCaptureEngine:
                     if post_padding > 0:
                         self._log_entry(seg_id, "info",
                             f"Waiting {post_padding:.1f}s post-padding")
-                        _interruptible_sleep(post_padding, lambda: self._cancelled)
+                        _interruptible_sleep(
+                            post_padding, lambda: self._cancelled,
+                            _now=self._now, _sleep=self._sleep,
+                        )
 
                     recording = self._stop_and_save_clip(
                         capture_engine, iracing_bridge, current_clip_path,
@@ -586,10 +764,10 @@ class ScriptCaptureEngine:
                 self._log_entry(seg_id, "seek",
                     f"Seek command returned False (attempt {attempt})",
                     success=False, attempt=attempt)
-                time.sleep(SEEK_COOLDOWN)
+                self._sleep(SEEK_COOLDOWN)
                 continue
 
-            time.sleep(0.5)  # allow seek to settle
+            self._sleep(0.5)  # allow seek to settle
 
             # Validate: read back current session time
             snapshot = iracing_bridge.capture_snapshot()
@@ -617,7 +795,7 @@ class ScriptCaptureEngine:
                 self._log_entry(seg_id, "retry",
                     f"Retrying seek ({attempt}/{MAX_SEEK_RETRIES}), "
                     f"cooldown {SEEK_COOLDOWN}s")
-                time.sleep(SEEK_COOLDOWN)
+                self._sleep(SEEK_COOLDOWN)
 
         return False
 
@@ -646,7 +824,7 @@ class ScriptCaptureEngine:
                     extra={"group_num": target_group_num})
                 iracing_bridge.cam_switch_position(0, target_group_num)
 
-            time.sleep(0.3)
+            self._sleep(0.3)
 
             # Validate via snapshot
             snapshot = iracing_bridge.capture_snapshot()
@@ -675,7 +853,7 @@ class ScriptCaptureEngine:
                 self._log_entry(seg_id, "retry",
                     f"Retrying camera switch ({attempt}/{MAX_CAMERA_RETRIES}), "
                     f"cooldown {CAMERA_COOLDOWN}s")
-                time.sleep(CAMERA_COOLDOWN)
+                self._sleep(CAMERA_COOLDOWN)
 
         return False
 
@@ -706,7 +884,7 @@ class ScriptCaptureEngine:
             self._log_entry(seg_id, "driver",
                 f"Setting driver focus: car_idx={target_car_idx}")
             iracing_bridge.cam_switch_car(target_car_idx, 0)
-            time.sleep(0.2)
+            self._sleep(0.2)
 
     def _resolve_camera_group(
         self, segment: dict, cam_name_to_num: dict[str, int]
@@ -748,55 +926,98 @@ class ScriptCaptureEngine:
 
         return None
 
-    def _execute_camera_schedule(
+    def _wait_with_schedule(
         self,
+        total_wait: float,
+        pre_roll: float,
         segment: dict,
         iracing_bridge: Any,
         cam_name_to_num: dict[str, int],
     ) -> None:
-        """Execute any intra-segment camera/driver switches.
+        """Wait *total_wait* seconds while firing scheduled camera/driver switches
+        at their correct offsets during playback.
 
-        The camera_schedule is a list of dicts, each with:
-          - offset_seconds: seconds from segment start
-          - camera_name or camera_group: target camera
-          - car_idx: optional driver focus
+        Args:
+            total_wait: Total real-time seconds to wait.
+            pre_roll: Seconds of pre-roll padding already included in the wait
+                before the segment's ``start_time_seconds`` is reached.  For a
+                new recording pass this equals the clip padding; for a contiguous
+                segment it is 0.
+            segment: The segment dict, which may contain a ``camera_schedule``
+                list of ``{offset_seconds, camera_name|camera_group, car_idx}``.
+            iracing_bridge: iRacing bridge for camera commands.
+            cam_name_to_num: Mapping of camera name → group number.
         """
-        schedule = segment.get("camera_schedule")
-        if not schedule:
-            return
-
+        schedule = segment.get("camera_schedule") or []
         seg_id = segment.get("id", "unknown")
 
-        for entry in schedule:
+        # Sort entries; skip any whose fire time is at or beyond the end of the wait.
+        entries = sorted(
+            [e for e in schedule if isinstance(e, dict)],
+            key=lambda e: e.get("offset_seconds", 0),
+        )
+        valid_entries = [
+            e for e in entries
+            if pre_roll + e.get("offset_seconds", 0) < total_wait
+        ]
+
+        elapsed = 0.0
+        for entry in valid_entries:
             if self._cancelled:
-                break
-
-            offset = entry.get("offset_seconds", 0)
-            cam_name = entry.get("camera_name")
-            cam_group = entry.get("camera_group")
-            car_idx = entry.get("car_idx")
-
-            target_group = None
-            if cam_group is not None:
-                try:
-                    target_group = int(cam_group)
-                except (ValueError, TypeError):
-                    pass
-            elif cam_name:
-                target_group = cam_name_to_num.get(cam_name)
-
-            self._log_entry(seg_id, "camera_schedule",
-                f"Scheduled switch at +{offset:.1f}s: "
-                f"camera={cam_name or cam_group} car_idx={car_idx}",
-                extra={"offset": offset})
-
-            if target_group is not None:
-                self._validated_camera_switch(
-                    seg_id, iracing_bridge, target_group,
-                    car_idx if isinstance(car_idx, int) else None
+                return
+            fire_at = pre_roll + entry.get("offset_seconds", 0)
+            to_sleep = fire_at - elapsed
+            if to_sleep > 0:
+                _interruptible_sleep(
+                    to_sleep, lambda: self._cancelled,
+                    _now=self._now, _sleep=self._sleep,
                 )
-            elif car_idx is not None:
-                iracing_bridge.cam_switch_car(int(car_idx), 0)
+                elapsed += to_sleep
+            if self._cancelled:
+                return
+            self._fire_schedule_entry(seg_id, entry, iracing_bridge, cam_name_to_num)
+
+        remaining = total_wait - elapsed
+        if remaining > 0 and not self._cancelled:
+            _interruptible_sleep(
+                remaining, lambda: self._cancelled,
+                _now=self._now, _sleep=self._sleep,
+            )
+
+    def _fire_schedule_entry(
+        self,
+        seg_id: str,
+        entry: dict,
+        iracing_bridge: Any,
+        cam_name_to_num: dict[str, int],
+    ) -> None:
+        """Execute a single camera_schedule entry (camera/driver switch)."""
+        offset = entry.get("offset_seconds", 0)
+        cam_name = entry.get("camera_name")
+        cam_group = entry.get("camera_group")
+        car_idx = entry.get("car_idx")
+
+        target_group: Optional[int] = None
+        if cam_group is not None:
+            try:
+                target_group = int(cam_group)
+            except (ValueError, TypeError):
+                pass
+        elif cam_name:
+            target_group = cam_name_to_num.get(cam_name)
+
+        self._log_entry(seg_id, "camera_schedule",
+            f"Scheduled switch at +{offset:.1f}s: "
+            f"camera={cam_name or cam_group} car_idx={car_idx}",
+            extra={"offset": offset})
+
+        if target_group is not None:
+            self._validated_camera_switch(
+                seg_id, iracing_bridge, target_group,
+                car_idx if isinstance(car_idx, int) else None,
+            )
+        elif car_idx is not None:
+            iracing_bridge.cam_switch_car(int(car_idx), 0)
 
     # -- Recording management -----------------------------------------------
 
@@ -819,7 +1040,7 @@ class ScriptCaptureEngine:
 
         iracing_bridge.set_replay_speed(0)
         capture_engine.stop_recording()
-        time.sleep(0.3)
+        self._sleep(0.3)
 
         seg_label = ", ".join(segment_ids[:3])
         if len(segment_ids) > 3:

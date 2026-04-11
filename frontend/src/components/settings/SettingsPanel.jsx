@@ -249,6 +249,7 @@ function CameraSettings({ value, onChange }) {
           value={value('capture_software')}
           onChange={(v) => onChange('capture_software', v)}
           options={[
+            { value: 'native', label: 'Native (LRS Built-in)' },
             { value: 'obs', label: 'OBS Studio' },
             { value: 'shadowplay', label: 'NVIDIA ShadowPlay' },
             { value: 'relive', label: 'AMD ReLive' },
