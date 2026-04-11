@@ -13,7 +13,7 @@ REST endpoints for the video composition pipeline.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -32,9 +32,9 @@ class StartCompositionRequest(BaseModel):
     project_id: int
     script: list[dict[str, Any]]
     clips_manifest: list[dict[str, Any]]
-    overlay_config: Optional[dict[str, Any]] = None
-    transition_config: Optional[dict[str, Any]] = None
-    trim_config: Optional[dict[str, Any]] = None
+    overlay_config: dict[str, Any] | None = None
+    transition_config: dict[str, Any] | None = None
+    trim_config: dict[str, Any] | None = None
     output_dir: str
     preset_id: str = "youtube_1080p60"
 
