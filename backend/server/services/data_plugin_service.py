@@ -272,11 +272,23 @@ class DataPluginService:
                 "success": False,
                 "error": f"HTTP {exc.response.status_code}: {exc.response.text[:200]}",
             }
-        except Exception as exc:
+        except httpx.ConnectError:
             plugin["last_test"] = time.time()
             plugin["last_test_ok"] = False
             self._save_plugins()
-            return {"success": False, "error": str(exc)}
+            return {"success": False, "error": "Connection failed — check the endpoint URL"}
+        except httpx.TimeoutException:
+            plugin["last_test"] = time.time()
+            plugin["last_test_ok"] = False
+            self._save_plugins()
+            return {"success": False, "error": "Connection timed out (10s limit)"}
+        except Exception as exc:
+            logger.warning("[DataPlugin] Test failed for %s: %s", plugin_id, exc)
+            plugin["last_test"] = time.time()
+            plugin["last_test_ok"] = False
+            self._save_plugins()
+            # Return only the exception class name to avoid leaking stack traces
+            return {"success": False, "error": f"Connection failed: {type(exc).__name__}"}
 
     # ── Data fetching ────────────────────────────────────────────────────────
 
