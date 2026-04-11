@@ -625,6 +625,59 @@ CREATE TABLE lap_completions (
 CREATE INDEX idx_lc_car ON lap_completions(car_idx);
 
 -- ═══════════════════════════════════════════════════════════════════
+-- ANALYSIS STATE & INCIDENT TRACKING
+-- ═══════════════════════════════════════════════════════════════════
+
+-- Incident log from CarIdxIncidentCount deltas during Phase ① scan
+-- (watches for iRacing incident point increments per frame)
+CREATE TABLE incident_log (
+    id          INTEGER PRIMARY KEY,
+    tick_id     INTEGER NOT NULL REFERENCES race_ticks(id),
+    car_idx     INTEGER NOT NULL,
+    session_time REAL NOT NULL,
+    replay_frame INTEGER NOT NULL,
+    incident_type TEXT,            -- from SessionLog if available
+    description  TEXT              -- raw iRacing incident text
+);
+
+-- Ground-truth incidents from iRacing's API pre-pass (Phase ①b)
+-- replay_search(RpySrchMode.next_incident) results
+CREATE TABLE incidents_api (
+    id          INTEGER PRIMARY KEY,
+    frame       INTEGER NOT NULL,
+    session_time REAL NOT NULL,
+    car_idx     INTEGER NOT NULL,
+    lap         INTEGER,
+    user_name   TEXT
+);
+
+-- Metadata for each analysis run
+CREATE TABLE analysis_runs (
+    id          INTEGER PRIMARY KEY,
+    started_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status      TEXT DEFAULT 'running',  -- 'running', 'scan_complete', 'completed', 'failed', 'cancelled'
+    tick_count  INTEGER DEFAULT 0,
+    event_count INTEGER DEFAULT 0,
+    duration_seconds REAL,
+    errors      TEXT                      -- JSON array of error messages
+);
+
+-- Key-value analysis metadata store
+-- Holds: session fingerprint, race_start_frame, avg_lap_time, tuning params
+CREATE TABLE analysis_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+-- Highlight scoring configuration (weights, overrides, target duration)
+CREATE TABLE highlight_config (
+    id          INTEGER PRIMARY KEY,
+    config_key  TEXT NOT NULL UNIQUE,
+    config_value TEXT NOT NULL,          -- JSON value
+    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ═══════════════════════════════════════════════════════════════════
 -- TrackSurface enum reference (for car_states.surface):
 --   -1 = NotInWorld   (car hasn't spawned or has disconnected)
 --    0 = OffTrack     (in grass/gravel)
@@ -1024,12 +1077,21 @@ Analysis is explicitly split into **two independent phases** that can be trigger
 **Phase ①: Telemetry Collection (16× Scan)**
 - Jump directly to the race session via `replay_search_session_time(race_session_num, 0)`
 - Set replay to 16× speed and sample every 20ms (50Hz)
-- Write each sample to `race_ticks` + `car_states` tables
+- Write each sample to `race_ticks` + `car_states` + `lap_completions` tables
+- Track `CarIdxIncidentCount` deltas → insert rows into `incident_log` table
+- Store session fingerprint (track, subsession ID, driver roster) in `analysis_meta` for replay validation
 - Status `scan_complete` in `analysis_runs` indicates telemetry is ready for detection
 - Falls back to legacy frame-0 scan if session jumping is unavailable
 
+**Phase ①b: iRacing API Incident Pre-Pass (optional, requires iRacing)**
+- Runs after telemetry scan while iRacing is still connected
+- Uses `replay_search(RpySrchMode.next_incident = 9)` to walk iRacing's built-in incident log
+- Populates `incidents_api` table with ground-truth incident frames
+- `IncidentDetector` prefers this data over surface-transition heuristics
+- Graceful fallback if iRacing disconnects during pre-pass
+
 **Phase ②: Event Detection (detector pass)**
-- Runs all 13 event detectors sequentially on cached SQLite data
+- Runs all 17 event detectors sequentially on cached SQLite data (in thread pool to avoid blocking async event loop)
 - No iRacing connection required — entirely computed from stored telemetry
 - Results populate the `race_events` table
 - Can be re-run instantly by adjusting tuning parameters and clicking "Re-analyze"
@@ -1057,16 +1119,24 @@ PUT  /api/projects/{id}/analysis/tuning  — Save tuning parameters (without re-
 
 Detection thresholds are user-tunable per project and persisted to `analysis_meta`. The tuning panel in the Analysis step exposes these controls; they are also settable via `PUT /api/projects/{id}/analysis/tuning`.
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `incident_lead_in` | 2.0s | Seconds of footage before the incident anchor moment |
-| `incident_follow_out` | 8.0s | Seconds of footage after the incident anchor moment |
-| `incident_dedup_seconds` | 15.0s | Minimum gap between two incidents for the same car to be separate events |
-| `battle_gap_threshold` | 0.5s | Max time gap between adjacent-position cars to be in a battle |
-| `close_call_proximity_pct` | 0.02 | Max lap-fraction gap between the off-track car and a nearby on-track car |
-| `close_call_max_time_loss` | 2.0s | Max `est_time` degradation during a single off-track frame for a close-call |
+| Parameter | Default | Used By | Description |
+|-----------|---------|---------|-------------|
+| `battle_gap_threshold` | 0.5s | BattleDetector | Max time gap (seconds) for adjacent cars to be "close" |
+| `incident_dedup_seconds` | 15.0s | IncidentDetector | Minimum gap between two incidents for the same car to be separate events |
+| `close_call_proximity_pct` | 0.02 | CloseCallDetector | Max lap-fraction gap between off-track car and nearby on-track car |
+| `close_call_max_off_track` | 3.0s | CloseCallDetector | Max off-track duration to qualify as a recovery (not a crash) |
+| `close_call_max_time_loss` | 2.0s | CloseCallDetector | Max `est_time` degradation during a single off-track frame |
+| `contact_time_window` | 2.0s | ContactDetector | Time window for car contact proximity detection |
+| `contact_proximity` | 0.05 | ContactDetector | Proximity gap (lap fraction) to detect contact |
+| `crash_min_time_loss` | 10.0s | ContactDetector | Minimum time loss to classify as a crash |
+| `crash_min_off_track_duration` | 3.0s | ContactDetector | Off-track window to mark as crash |
+| `spinout_min_time_loss` | 2.0s | ContactDetector | Minimum time loss for spinout |
+| `spinout_max_time_loss` | 10.0s | ContactDetector | Maximum plausible spinout time loss |
+| `avg_lap_time` | 90.0s | Most detectors | Used to convert time gaps to lap fractions |
 
-> **Note:** `incident_lead_in` and `incident_follow_out` are also adjustable **post-detection** in the Event Inspector panel for individual events. The `incident_time` anchor is stored in each incident event's `metadata` JSON, so the clip window can be resized without re-running detection.
+All parameters are passed to detectors via the `session_info` dict during Phase ②. The `avg_lap_time` is estimated automatically during Phase ① from telemetry and stored in `analysis_meta`.
+
+> **Note:** `incident_lead_in` and `incident_follow_out` are adjustable **post-detection** in the Event Inspector panel for individual events. The `incident_time` anchor is stored in each incident event's `metadata` JSON, so the clip window can be resized without re-running detection.
 
 #### Telemetry Data Model
 
@@ -1193,74 +1263,76 @@ class TelemetryWriter:
 
 #### Event Detectors
 
-Because telemetry is now normalised, detectors can use **SQL queries** instead of Python loops with JSON parsing. This is dramatically faster and more readable.
+Because telemetry is now normalised, detectors use **SQL queries** instead of Python loops with JSON parsing. The key architectural innovation is **continuous lap distance** (`cont_dist = lap + lap_pct`), which provides sub-second positional accuracy — unlike `CarIdxPosition`, which only updates when cars cross the start/finish line (~60–90s latency for a typical lap).
 
 ```python
 class IncidentDetector:
     """
-    Detects incidents by watching for iRacing's auto-director switching
-    CamCarIdx to a car that is off-track. Mirrors legacy Incident.cs.
-    
-    With normalised data, the core query is a single JOIN — no JSON parsing.
+    Two-path incident detection:
+    1. Primary: incidents_api table from iRacing's MoveToNextIncident API pre-pass
+    2. Fallback: CarIdxTrackSurface ON→OFF transitions from telemetry
+
+    Multi-car enrichment: for each incident, nearby cars within ±3 seconds
+    and ±6% lap position are added as co-involved, with severity bonus.
     """
-    def scan(self, db: sqlite3.Connection, session_info: dict) -> List[RaceEvent]:
-        # Find all ticks where the auto-director switched to a new car
-        # AND that car's surface was OffTrack (0) at that moment
+    DEDUP_SECONDS = 15
+    MIN_SPEED_MS = 8.0
+
+    def detect(self, db: sqlite3.Connection, session_info: dict) -> List[RaceEvent]:
+        api_count = db.execute("SELECT COUNT(*) FROM incidents_api").fetchone()[0]
+        if api_count > 0:
+            return self._detect_from_api(db, session_info)   # ground-truth API path
+        return self._detect_from_surface(db, session_info)   # surface-transition fallback
+
+    def _detect_from_surface(self, db, session_info):
+        """Fallback: find on-track → off-track transitions via LAG window."""
         rows = db.execute("""
-            WITH cam_changes AS (
-                SELECT t.id AS tick_id, t.session_time, t.replay_frame,
-                       t.cam_car_idx,
-                       LAG(t.cam_car_idx) OVER (ORDER BY t.id) AS prev_cam
-                FROM race_ticks t
-                WHERE t.session_state IN (4, 5)  -- Racing or Checkered
+            WITH transitions AS (
+                SELECT car_idx, tick_id,
+                       surface,
+                       LAG(surface) OVER (PARTITION BY car_idx ORDER BY tick_id) AS prev_surface,
+                       speed_ms
+                FROM car_states
             )
-            SELECT cc.session_time, cc.replay_frame, cc.cam_car_idx, cs.surface
-            FROM cam_changes cc
-            JOIN car_states cs ON cs.tick_id = cc.tick_id 
-                              AND cs.car_idx = cc.cam_car_idx
-            WHERE cc.cam_car_idx != cc.prev_cam   -- camera switched
-              AND cs.surface = 0                   -- OffTrack
-            ORDER BY cc.session_time
-        """).fetchall()
-        
-        # Group consecutive off-track cam switches into incident windows
-        events = []
-        for session_time, replay_frame, car_idx, surface in rows:
-            if not events or session_time - events[-1]['end_time'] > 15.0:
-                events.append({
-                    'car_idx':    car_idx,
-                    'start_time': session_time - 1.0,   # 1s lead-in
-                    'end_time':   session_time + 8.0,    # 8s follow
-                    'start_frame': replay_frame,
-                    'end_frame':   replay_frame,
-                })
-            else:
-                events[-1]['end_time'] = session_time + 8.0
-                events[-1]['end_frame'] = replay_frame
-        
-        return [RaceEvent(event_type='incident', **e) for e in events]
+            SELECT cs.car_idx, t.session_time, t.replay_frame, cs.speed_ms
+            FROM transitions cs
+            JOIN race_ticks t ON cs.tick_id = t.id
+            WHERE cs.surface = 0          -- now OffTrack
+              AND cs.prev_surface = 3     -- was OnTrack
+              AND cs.speed_ms > ?         -- filter slow pit-entry moves
+              AND t.session_state IN (4, 5)
+            ORDER BY t.session_time
+        """, (self.MIN_SPEED_MS,)).fetchall()
+        # ... group into incident events with DEDUP_SECONDS merging,
+        # then enrich with nearby cars
 
 
 class BattleDetector:
     """
-    Detects close battles by computing time gaps between adjacent positions.
-    Mirrors legacy Battle.cs / RuleBattle.cs.
+    Per-pair battle detection using continuous lap distance (cont_dist = lap + lap_pct).
     
-    With normalised data, gap calculation is a self-JOIN on car_states —
-    no Python loops, no JSON parsing.
+    Avoids the 'mega-battle' problem of chain-based approaches by tracking
+    each adjacent pair independently. Long battles (>MAX_SEGMENT) extract
+    sub-segments focused on lead changes and tightest gaps.
     """
-    def scan(self, db: sqlite3.Connection, session_info: dict,
-             battle_gap_seconds: float = 1.5) -> List[RaceEvent]:
-        avg_lap_time = float(
-            session_info['SessionInfo']['Sessions'][0]['ResultsAverageLapTime']
-        ) / 1e4
+    MIN_DURATION = 10    # seconds
+    MERGE_GAP = 5        # merge battles separated by < 5s
+    MAX_SEGMENT = 45     # extract sub-segments for battles longer than this
 
-        # Find all tick+pair combinations where gap < threshold
+    def detect(self, db: sqlite3.Connection, session_info: dict,
+               battle_gap_seconds: float = 0.5) -> List[RaceEvent]:
+        avg_lap_time = session_info.get('avg_lap_time', 90.0)
+
+        # Compute continuous lap distance for each car at each tick
+        # cont_dist = lap + lap_pct → monotonically increasing, sub-second accuracy
         rows = db.execute("""
             SELECT t.session_time, t.replay_frame,
                    leader.car_idx AS leader_idx,
                    follower.car_idx AS follower_idx,
-                   ABS(leader.lap_pct - follower.lap_pct) * ? AS gap
+                   leader.lap + leader.lap_pct AS leader_dist,
+                   follower.lap + follower.lap_pct AS follower_dist,
+                   ABS((leader.lap + leader.lap_pct) - 
+                       (follower.lap + follower.lap_pct)) * ? AS gap_seconds
             FROM car_states leader
             JOIN car_states follower ON follower.tick_id = leader.tick_id
               AND follower.position = leader.position + 1
@@ -1268,110 +1340,117 @@ class BattleDetector:
             WHERE t.session_state IN (4, 5)
               AND leader.surface = 3 AND follower.surface = 3
               AND leader.position > 0
-              AND ABS(leader.lap_pct - follower.lap_pct) * ? < ?
+            HAVING gap_seconds < ?
             ORDER BY t.session_time
-        """, (avg_lap_time, avg_lap_time, battle_gap_seconds)).fetchall()
+        """, (avg_lap_time, battle_gap_seconds)).fetchall()
 
-        # Group consecutive close-gap ticks into battle events
-        open_battles: dict[tuple, dict] = {}
-        events = []
-        seen_this_tick: set[tuple] = set()
-        prev_time = None
-
-        for session_time, replay_frame, leader_idx, follower_idx, gap in rows:
-            pair = (leader_idx, follower_idx)
-            
-            if session_time != prev_time:
-                # Close any battles not seen in the current tick
-                for stale_pair in list(open_battles.keys()):
-                    if stale_pair not in seen_this_tick:
-                        b = open_battles.pop(stale_pair)
-                        if session_time - b['start_time'] >= 3.0:
-                            events.append(RaceEvent(
-                                event_type='battle',
-                                start_time_seconds=b['start_time'],
-                                end_time_seconds=prev_time,
-                                start_frame=b['start_frame'],
-                                end_frame=b['end_frame'],
-                                involved_drivers=[b['leader'], b['follower']],
-                            ))
-                seen_this_tick.clear()
-                prev_time = session_time
-
-            seen_this_tick.add(pair)
-            if pair not in open_battles:
-                open_battles[pair] = {
-                    'start_time':  session_time,
-                    'start_frame': replay_frame,
-                    'end_frame':   replay_frame,
-                    'leader':      leader_idx,
-                    'follower':    follower_idx,
-                }
-            else:
-                open_battles[pair]['end_frame'] = replay_frame
-
-        return events
-# Extended in v2: After the adjacent-pair SQL query runs, a Python
-# post-processing step builds a graph of qualifying pairs and finds
-# connected components (N-car chains). A 4-car train produces a single
-# battle event with chain_length in metadata. The narrative bonus formula
-# log(chain_length + 1) * 0.5 now has accurate input.
+        # Per-pair grouping into battle windows, then:
+        # 1. Merge windows separated by < MERGE_GAP
+        # 2. Filter out battles shorter than MIN_DURATION
+        # 3. Extract sub-segments for battles > MAX_SEGMENT
+        # 4. Union-find graph for N-car chain detection (chain_length in metadata)
+        # ...
 ```
 
-#### Full Detector List
+#### Full Detector List (17 active detectors)
 
-| Detector | Primary signal | Notes |
-|----------|---------------|-------|
-| `IncidentDetector` | `incidents_api` table (iRacing API pre-pass); falls back to `CarIdxTrackSurface` ON→OFF transitions | Two-path routing; stores `incident_time` anchor in metadata |
-| `IncidentLogDetector` | `SessionInfo` YAML `SessionLog` section | Emits `car_contact`, `contact`, `lost_control`, `off_track`, `turn_cutting` event types |
-| `BattleDetector` | Self-JOIN `car_states` on adjacent positions, gap calc using `lap_pct` | N-car chain detection via union-find; pair-level windows |
-| `OvertakeDetector` | `LAG(position) OVER` window on `car_states` per `car_idx` | Requires position-change + proximity confirmation |
-| `CloseCallDetector` | Single-frame off-track (prev=on, curr=off, next=on) + nearby car proximity | Suppresses if `incident_log` records nearby incident |
-| `PitStopDetector` | `car_states.surface IN (1, 2)` duration grouping | Tracks in/out times, deduplicates multi-sample pit dwell |
-| `FastestLapDetector` | `car_states.best_lap_time` minimum change per car | Per-car personal-best tracking |
-| `LeaderChangeDetector` | `car_states.position = 1` car_idx change over ticks | Deduplicates short leadership changes |
-| `FirstLapDetector` | `race_ticks.session_state = 4 AND race_laps = 1` time window | Emits one event spanning the full first-lap period |
-| `LastLapDetector` | `race_ticks.race_laps >= results_laps_complete` | Emits one event from the last lap start to finish |
-| `PaceLapDetector` | `race_ticks.session_state` in pace-lap states before racing | Emits a pace-lap event covering the formation period |
-| `RaceStartDetector` | First `session_state = 4` (Racing) transition | Single event at the green flag moment |
-| `RaceFinishDetector` | `session_state = 5` (Checkered) + last car finishes | Covers the finish window through final car crossing |
-| `UndercutDetector` | Pit timing cross-reference: car that pits earlier emerges ahead | Requires `PitStopDetector` data |
-| `OvercutDetector` | Pit timing cross-reference: car that stays out emerges ahead | Requires `PitStopDetector` data |
-| `PitBattleDetector` | Position battles that start or end in the pit window | Combines PitStop + Battle data |
+All detectors operate on cached SQLite data during Phase ②. Detectors that use positional data employ **continuous lap distance** (`cont_dist = lap + lap_pct`) rather than `CarIdxPosition` (which only updates at the start/finish line), giving sub-second accuracy for overtake, battle, and leader-change detection.
+
+| # | Detector | Event Type(s) | Primary Signal | Notes |
+|---|----------|---------------|----------------|-------|
+| 1 | `IncidentDetector` | `incident` | `incidents_api` table (iRacing API pre-pass); falls back to `CarIdxTrackSurface` ON→OFF transitions | Two-path routing; multi-car enrichment (±3s, ±6% lap); `DEDUP_SECONDS=15`, `MIN_SPEED_MS=8`; stores `incident_time` anchor in metadata |
+| 2 | `BattleDetector` | `battle` | Per-pair `cont_dist` gap tracking between adjacent cars | `MIN_DURATION=10s`, `MERGE_GAP=5s`, `MAX_SEGMENT=45s`; long battles extract sub-segments around lead changes; N-car chain detection via union-find |
+| 3 | `OvertakeDetector` | `overtake` | `cont_dist` cross-over between adjacent cars | `HOLD_SECONDS=5` (passer stays ahead with ≥1 car-length gap); marks crash-caused, pit-related, and in-battle context |
+| 4 | `PitStopDetector` | `pit_stop` | `car_states.surface IN (1, 2)` duration grouping | `MIN_PIT_DURATION=5s`; groups consecutive pit-surface frames |
+| 5 | `LeaderChangeDetector` | `leader_change` | `cont_dist`-based P1 shifts | `DEDUP_SECONDS=5`; guards S/F boundary, pit-lane shortcut, impossible gaps; scores pit-related changes lower |
+| 6 | `RaceStartDetector` | `race_start` | First `session_state = 4` (Racing) transition | Mandatory; severity=10 |
+| 7 | `RaceFinishDetector` | `race_finish` | `session_state = 5` (Checkered) + last car finishes | Mandatory; includes P1 car; severity=10 |
+| 8 | `PaceLapDetector` | `pace_lap` | `race_ticks.session_state` in pace-lap states before racing | Mandatory; severity=4; B-roll context |
+| 9 | `YellowFlagDetector` | `yellow_flag`, `restart` | `flag_yellow` state changes + session state transitions | Tracks full-course yellows, cautions, and restarts |
+| 10 | `FinishSequenceDetector` | `finish_crossing` | Lap completions for P2–P10 at race end | Extracts exciting final-crossing moments |
+| 11 | `FirstLapDetector` | `first_lap` | `race_ticks.session_state = 4 AND race_laps ≤ 1` time window | Non-mandatory; severity=6; events here weighted higher in highlight scoring |
+| 12 | `LastLapDetector` | `last_lap` | `race_ticks.race_laps >= results_laps_complete` | Non-mandatory; severity=6; context for finish events |
+| 13 | `CloseCallDetector` | `close_call` | Brief off-track (surface 0) with nearby on-track car within `PROXIMITY_PCT=0.02` lap | `MAX_TIME_LOSS=2s`; suppressed if either car has a logged incident |
+| 14 | `UndercutDetector` | `undercut` | Pit timing cross-reference: earlier pitter gains position | Requires `PitStopDetector` data; tunable |
+| 15 | `OvercutDetector` | `overcut` | Pit timing cross-reference: later pitter gains/holds position | Requires `PitStopDetector` data; tunable |
+| 16 | `PitBattleDetector` | `pit_battle` | Side-by-side pit exits within `PROXIMITY_TIME=2s` | Combines PitStop + on-track proximity data |
+| 17 | `IncidentLogDetector` | `car_contact`, `contact`, `lost_control`, `off_track`, `turn_cutting` | `SessionInfo` YAML `SessionLog` section / `CarIdxIncidentCount` deltas | **Currently disabled for replay mode** — `CarIdxIncidentCount` returns None during replay; active for live sessions only |
+
+**Severity scoring is multi-factor:** base 0–10 scale, position bonus (top-5 weighted higher), duration bonus for long battles, lead-change bonus, speed-based (incident detector uses reference 70 m/s = 250 km/h), and time-loss weighting for race-impact events.
 
 ### 4.5 Camera Direction Engine
 
-Replaces the legacy rule-based system with a more sophisticated priority engine:
+Camera direction is integrated into the **Video Composition Script generation** (`pipeline.py`), not a standalone class. Each segment in the script receives camera and driver assignments via a **recency-weighted probabilistic selection** algorithm, controlled by user-tuneable parameters from `HighlightContext`.
+
+#### Camera Selection — `_pick_camera()`
+
+Each camera starts with its **user-configured weight** (0–100), then is penalized by how recently it was used via exponential decay:
 
 ```python
-class CameraDirector:
-    """Intelligent camera direction engine."""
-    
-    rules = [
-        RuleLastLap(priority=100),          # Highest priority — always show final lap
-        RuleFirstLap(priority=95),          # Race start is must-see
-        RuleIncident(priority=90),          # Incidents override most things
-        RuleRestart(priority=85),           # Restarts are important
-        RuleBattleForPosition(priority=70), # Close battles for position
-        RuleLeaderFocus(priority=50),       # Show the leader periodically
-        RulePreferredDriver(priority=40),   # User's favourite driver
-        RuleRandomVariety(priority=10),     # Scenic / variety shots
-    ]
-    
-    def generate_camera_plan(
-        self,
-        events: List[RaceEvent],
-        track_cameras: TrackCameraConfig,
-        preferences: DirectorPreferences
-    ) -> List[CameraAssignment]:
-        """Generate a complete camera assignment plan for the timeline."""
-        # 1. Place mandatory assignments (first lap, last lap)
-        # 2. Place event-driven assignments (incidents, battles)
-        # 3. Fill gaps with preference-weighted random selection
-        # 4. Apply camera sticky period (min time before switching)
-        # 5. Apply transition preferences (cuts, fades)
-        ...
+def _pick_camera(seg_time: float, force_new: bool = False) -> str:
+    """Weighted-random camera selection with recency penalty."""
+    effective: dict[str, float] = {}
+    for cam in _cam_names:
+        base = max(0.0, camera_weights[cam])
+        last_t = _cam_last_used.get(cam)
+        if last_t is not None and camera_recency_decay > 0:
+            elapsed = max(0.0, seg_time - last_t)
+            penalty_factor = 1.0 - camera_recency_penalty * math.exp(
+                -elapsed / camera_recency_decay
+            )
+        else:
+            penalty_factor = 1.0
+        effective[cam] = base * max(0.0, penalty_factor)
+    if force_new and _cam_last_chosen and _cam_last_chosen in effective:
+        effective[_cam_last_chosen] = 0.0
+    # weighted-random pick from effective weights
+    ...
 ```
+
+#### Driver Selection — `_pick_driver()`
+
+Same exponential-decay recency penalty, gated by `driverChangeProbability` — the driver only *potentially* switches on each cut:
+
+```python
+def _pick_driver(candidates, seg_time, current) -> int | None:
+    for d in candidates:
+        elapsed = max(0.0, seg_time - _drv_last_used[d])
+        penalty = 1.0 - _driver_recency_penalty * math.exp(
+            -elapsed / _driver_recency_decay
+        )
+        effective[d] = max(0.01, penalty)
+    if random.random() >= _driver_change_prob:
+        return current  # keep current driver
+    # weighted-random pick excluding current
+    ...
+```
+
+#### Camera Schedule for Long Segments
+
+When a segment is **≥ 1.2× `cameraStickyPeriod`**, it is sliced into sub-windows, each getting its own camera and driver via the probabilistic selectors. The segment stays as one entry in the script — `camera_schedule` is metadata for the frontend to render sub-blocks in the Camera track.
+
+```python
+if seg_dur >= _camera_sticky * 1.2:
+    windows = []
+    while remaining > max(0.5, _camera_sticky * 0.2):
+        hold = _camera_sticky + random.uniform(-variability, +variability)
+        windows.append({"start": t, "end": t + actual,
+                        "camera": None, "driver_idx": None})
+        ...
+    if len(windows) >= 2:
+        seg["camera_schedule"] = windows
+```
+
+#### Tuning Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `cameraStickyPeriod` | 20s | Minimum hold before switching cameras. Also determines when to generate a `camera_schedule` (≥ 1.2×). |
+| `cameraRecencyPenalty` | 0.5 | Strength of exponential decay penalty for recently-used cameras (0 = no penalty, 1 = maximum). |
+| `driverChangeProbability` | 0.3 | Probability gate: on each cut, the driver only potentially switches if `random() < prob`. |
+| `driverRecencyPenalty` | 0.5 | Same as camera recency penalty, applied to driver selection. |
+
+At **capture time**, `_select_camera()` in `script_capture.py` walks the pre-computed `camera_preferences` list and applies the first available camera in iRacing — all intelligent selection has already been done by the pipeline.
 
 ### 4.6 Encoding Engine
 
