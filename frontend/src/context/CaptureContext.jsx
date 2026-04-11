@@ -142,10 +142,13 @@ export function CaptureProvider({ children }) {
   // ── Script capture state ───────────────────────────────────────────────
   const [scriptCaptureRunning, setScriptCaptureRunning] = useState(false)
   const [scriptCaptureProgress, setScriptCaptureProgress] = useState(null)
-  // { percentage, segment_id, section, message, segment_index, segment_total }
+  // { percentage, segment_id, section, message, segment_index, segment_total, strategy }
   const [scriptCaptureClips, setScriptCaptureClips] = useState([])
   const [scriptCompiledPath, setScriptCompiledPath] = useState(null)
   const [scriptCaptureError, setScriptCaptureError] = useState(null)
+  const [scriptCaptureLog, setScriptCaptureLog] = useState([])
+  const [scriptCaptureStrategies, setScriptCaptureStrategies] = useState([])
+  const [scriptCurrentSegment, setScriptCurrentSegment] = useState(null)
 
   // ── Script capture actions ──────────────────────────────────────────────
   const startScriptCapture = useCallback(async (projectId, script, options = {}) => {
@@ -154,12 +157,17 @@ export function CaptureProvider({ children }) {
     setScriptCaptureClips([])
     setScriptCompiledPath(null)
     setScriptCaptureError(null)
+    setScriptCaptureLog([])
+    setScriptCaptureStrategies([])
+    setScriptCurrentSegment(null)
     try {
       const result = await apiPost('/capture/script-capture', {
         project_id: projectId,
         script,
-        clip_padding: options.clipPadding ?? 0.5,
+        clip_padding: options.clipPadding ?? 2.0,
+        clip_padding_after: options.clipPaddingAfter ?? 5.0,
         output_filename: options.outputFilename ?? 'highlight_compiled.mp4',
+        contiguous_gap_threshold: options.contiguousGapThreshold ?? 1.0,
       })
       return result
     } catch (err) {
@@ -216,6 +224,9 @@ export function CaptureProvider({ children }) {
       wsClient.subscribe('capture:script_started', (data) => {
         setScriptCaptureRunning(true)
         setScriptCaptureError(null)
+        setScriptCaptureLog([])
+        setScriptCaptureStrategies([])
+        setScriptCurrentSegment(null)
         setScriptCaptureProgress({
           percentage: 0,
           message: 'Starting...',
@@ -224,20 +235,50 @@ export function CaptureProvider({ children }) {
         })
       }),
       wsClient.subscribe('capture:script_progress', (data) => {
-        setScriptCaptureProgress({
-          percentage: data.percentage || 0,
-          message: data.message || '',
-          segment_id: data.segment_id,
-          section: data.section,
-          segment_index: data.segment_index || 0,
-          segment_total: data.segment_total || 0,
-          step: data.step,
-        })
+        const step = data.step
+        if (step === 'strategy_computed') {
+          setScriptCaptureStrategies(data.strategies || [])
+          setScriptCaptureProgress(prev => ({
+            ...prev,
+            message: data.message || 'Strategy computed',
+            strategies: data.strategies,
+          }))
+        } else if (step === 'log_entry') {
+          setScriptCaptureLog(prev => [...prev, data.log_entry])
+        } else if (step === 'capturing') {
+          setScriptCurrentSegment({
+            segment_id: data.segment_id,
+            section: data.section,
+            segment_type: data.segment_type,
+            strategy: data.strategy,
+          })
+          setScriptCaptureProgress({
+            percentage: data.percentage || 0,
+            message: data.message || '',
+            segment_id: data.segment_id,
+            section: data.section,
+            segment_index: data.segment_index || 0,
+            segment_total: data.segment_total || 0,
+            step: data.step,
+            strategy: data.strategy,
+          })
+        } else {
+          setScriptCaptureProgress(prev => ({
+            ...prev,
+            message: data.message || prev?.message || '',
+            step: data.step,
+          }))
+        }
       }),
       wsClient.subscribe('capture:script_completed', (data) => {
         setScriptCaptureRunning(false)
         setScriptCaptureClips(data.clips || [])
         setScriptCompiledPath(data.compiled_path || null)
+        setScriptCaptureStrategies(data.strategies || [])
+        if (data.capture_log) {
+          setScriptCaptureLog(data.capture_log)
+        }
+        setScriptCurrentSegment(null)
         setScriptCaptureProgress({
           percentage: 100,
           message: `Completed — ${data.total_clips} clips`,
@@ -247,6 +288,7 @@ export function CaptureProvider({ children }) {
       wsClient.subscribe('capture:script_error', (data) => {
         setScriptCaptureRunning(false)
         setScriptCaptureError(data.error || 'Script capture failed')
+        setScriptCurrentSegment(null)
       }),
     ]
 
@@ -274,6 +316,9 @@ export function CaptureProvider({ children }) {
     scriptCaptureClips,
     scriptCompiledPath,
     scriptCaptureError,
+    scriptCaptureLog,
+    scriptCaptureStrategies,
+    scriptCurrentSegment,
 
     // Actions
     detectSoftware,
@@ -288,6 +333,7 @@ export function CaptureProvider({ children }) {
     software, activeSoftware, hotkeys, watchDir,
     captureState, elapsedSeconds, filePath, fileSize, error, testResult, loading,
     scriptCaptureRunning, scriptCaptureProgress, scriptCaptureClips, scriptCompiledPath, scriptCaptureError,
+    scriptCaptureLog, scriptCaptureStrategies, scriptCurrentSegment,
     detectSoftware, fetchStatus, testHotkey, startCapture, stopCapture, resetCapture,
     startScriptCapture, cancelScriptCapture,
   ])
