@@ -403,6 +403,12 @@ async def build_frame_data_endpoint(project_id: int, body: FrameDataRequest):
             series_name=series_name,
             track_name=track_name,
         )
+
+        # Enrich with 3rd party data plugin data (if any plugins are configured)
+        from server.services.data_plugin_service import data_plugin_service
+        subsession_id = int(project.get("subsession_id", 0) or 0)
+        frame_data = await data_plugin_service.enrich_frame_data(frame_data, subsession_id)
+
         return {"frame_data": frame_data, "project_id": project_id}
     except Exception as exc:
         logger.error("[Overlay API] Frame data build failed: %s", exc)

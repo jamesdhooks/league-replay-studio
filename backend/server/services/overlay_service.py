@@ -131,54 +131,217 @@ BUILTIN_TEMPLATES: list[dict[str, Any]] = [
 
 
 # ── Sample frame data for editor preview ────────────────────────────────────
+# This dict defines the full overlay variable schema.  Every key is available
+# as ``{{ frame.<key> }}`` inside Jinja2 overlay templates.  The grouping
+# comments are consumed by the frontend DataContextInspector to create
+# labelled collapsible sections.
 
 SAMPLE_FRAME_DATA: dict[str, Any] = {
+    # ── Core session variables ───────────────────────────────────────────────
     "section": "race",
     "series_name": "IMSA SportsCar Championship",
     "track_name": "Daytona International Speedway",
     "current_lap": 7,
     "total_laps": 20,
     "session_time": "01:23:45",
+    "flag": "green",
+
+    # ── Focused driver variables ─────────────────────────────────────────────
     "driver_name": "Max Verstappen",
     "car_name": "Dallara P217 LMP2",
+    "car_number": "1",
     "position": 3,
+    "class_position": 1,
     "irating": 5421,
+    "iracing_cust_id": 12345,
     "team_color": "#E10600",
     "last_lap_time": "1:34.567",
     "best_lap_time": "1:33.891",
-    "flag": "green",
     "incident_count": 2,
+
+    # ── Computed telemetry (per focused driver) ──────────────────────────────
+    "relative_gap": "+1.234",
+    "speed_kph": 245.3,
+    "lap_pct": 0.672,
+    "fuel_level": 42.1,
+    "fuel_used_lap": 2.35,
+    "fuel_avg_lap": 2.28,
+    "fuel_laps_remaining": 18.5,
+    "fuel_laps_remaining_conservative": 16.2,
+    "fuel_delta": 3.8,
+    "pit_window_start": 12,
+    "pit_window_end": 18,
+
+    # ── Standings (race position order) ──────────────────────────────────────
     "standings": [
-        {"position": 1, "driver_name": "Lewis Hamilton", "gap": "Leader", "is_player": False, "car_number": "44"},
-        {"position": 2, "driver_name": "Charles Leclerc", "gap": "+1.234", "is_player": False, "car_number": "16"},
-        {"position": 3, "driver_name": "Max Verstappen", "gap": "+2.567", "is_player": True, "car_number": "1"},
-        {"position": 4, "driver_name": "Lando Norris", "gap": "+4.891", "is_player": False, "car_number": "4"},
-        {"position": 5, "driver_name": "Carlos Sainz", "gap": "+6.123", "is_player": False, "car_number": "55"},
-        {"position": 6, "driver_name": "Oscar Piastri", "gap": "+8.456", "is_player": False, "car_number": "81"},
-        {"position": 7, "driver_name": "George Russell", "gap": "+10.789", "is_player": False, "car_number": "63"},
-        {"position": 8, "driver_name": "Fernando Alonso", "gap": "+12.012", "is_player": False, "car_number": "14"},
+        {
+            "position": 1, "driver_name": "Lewis Hamilton", "gap": "Leader",
+            "relative": None, "is_player": False, "car_number": "44",
+            "iracing_cust_id": 11111, "nickname": None, "avatar": None,
+        },
+        {
+            "position": 2, "driver_name": "Charles Leclerc", "gap": "+1.234",
+            "relative": "+0.812", "is_player": False, "car_number": "16",
+            "iracing_cust_id": 22222, "nickname": None, "avatar": None,
+        },
+        {
+            "position": 3, "driver_name": "Max Verstappen", "gap": "+2.567",
+            "relative": "+1.333", "is_player": True, "car_number": "1",
+            "iracing_cust_id": 12345, "nickname": "MaxV", "avatar": "a_abc123def456",
+        },
+        {
+            "position": 4, "driver_name": "Lando Norris", "gap": "+4.891",
+            "relative": "+2.324", "is_player": False, "car_number": "4",
+            "iracing_cust_id": 33333, "nickname": None, "avatar": None,
+        },
+        {
+            "position": 5, "driver_name": "Carlos Sainz", "gap": "+6.123",
+            "relative": "+1.232", "is_player": False, "car_number": "55",
+            "iracing_cust_id": 44444, "nickname": None, "avatar": None,
+        },
+        {
+            "position": 6, "driver_name": "Oscar Piastri", "gap": "+8.456",
+            "relative": "+2.333", "is_player": False, "car_number": "81",
+            "iracing_cust_id": 55555, "nickname": None, "avatar": None,
+        },
+        {
+            "position": 7, "driver_name": "George Russell", "gap": "+10.789",
+            "relative": "+2.333", "is_player": False, "car_number": "63",
+            "iracing_cust_id": 66666, "nickname": None, "avatar": None,
+        },
+        {
+            "position": 8, "driver_name": "Fernando Alonso", "gap": "+12.012",
+            "relative": "+1.223", "is_player": False, "car_number": "14",
+            "iracing_cust_id": 77777, "nickname": None, "avatar": None,
+        },
     ],
+
+    # ── Championship standings (from 3rd party data plugin) ──────────────────
+    "championship_standings": [
+        {
+            "championship_position": 1, "driver_name": "Lewis Hamilton",
+            "iracing_cust_id": 11111, "total_points": 285, "points_delta": 25,
+            "position_delta": 0, "participated": True,
+            "nickname": None, "avatar": None,
+        },
+        {
+            "championship_position": 2, "driver_name": "Max Verstappen",
+            "iracing_cust_id": 12345, "total_points": 270, "points_delta": 18,
+            "position_delta": 1, "participated": True,
+            "nickname": "MaxV", "avatar": "a_abc123def456",
+        },
+    ],
+
+    # ── 3rd party enrichment (from data plugins) ─────────────────────────────
+    "race_season": "2025 Season 2",
+    "race_week": 5,
+    "race_date": "2025-03-15",
+    "venue_display_name": "Daytona International Speedway — Road Course",
+    "driver_nickname": "MaxV",
+    "driver_avatar": "a_abc123def456",
 }
 
+# ── Variable documentation ──────────────────────────────────────────────────
+# Keys should match ``frame.<key>`` path.  Nested dict entries (standings,
+# championship_standings) are documented with the ``frame.standings[].key``
+# convention so the frontend inspector can render them properly.
+
 VARIABLE_DOCS: dict[str, str] = {
+    # Core session
     "frame.section": "Active video section: 'intro', 'qualifying_results', 'race', or 'race_results'",
     "frame.series_name": "Name of the racing series (e.g., 'IMSA SportsCar Championship')",
     "frame.track_name": "Name of the track (e.g., 'Daytona International Speedway')",
     "frame.current_lap": "Current lap number (integer)",
     "frame.total_laps": "Total laps in the race (integer)",
     "frame.session_time": "Elapsed session time (string, HH:MM:SS format)",
+    "frame.flag": "Current flag status: 'green', 'yellow', 'red', or 'checkered'",
+
+    # Focused driver
     "frame.driver_name": "Name of the focused driver",
     "frame.car_name": "Name/model of the car",
-    "frame.position": "Current race position (integer)",
+    "frame.car_number": "Car number (string)",
+    "frame.position": "Current overall race position (integer)",
+    "frame.class_position": "Position within car class (integer)",
     "frame.irating": "Driver's iRating (integer)",
-    "frame.team_color": "Hex color code for the driver's team",
+    "frame.iracing_cust_id": "iRacing customer ID for the focused driver (integer)",
+    "frame.team_color": "Hex color code for the driver's team (e.g., '#E10600')",
     "frame.last_lap_time": "Last completed lap time (string, M:SS.mmm format)",
-    "frame.best_lap_time": "Best lap time in session (string)",
-    "frame.flag": "Current flag status ('green', 'yellow', 'red', 'checkered')",
-    "frame.incident_count": "Number of incidents (integer)",
-    "frame.standings": "Array of standing entries with position, driver_name, gap, is_player, car_number",
+    "frame.best_lap_time": "Best lap time in session (string, M:SS.mmm format)",
+    "frame.incident_count": "Number of incidents for the focused driver (integer)",
+
+    # Computed telemetry
+    "frame.relative_gap": (
+        "Gap to the car directly ahead in seconds (string, e.g., '+1.234'). "
+        "Computed via mini-sector interpolation when available, falling back to "
+        "position-based estimation. None when the driver is leading."
+    ),
+    "frame.speed_kph": "Current speed of the focused driver in km/h (float)",
+    "frame.lap_pct": "Track position as a fraction 0.0–1.0 (float)",
+    "frame.fuel_level": "Current fuel level in litres (float). Requires fuel telemetry capture.",
+    "frame.fuel_used_lap": "Fuel consumed on the last completed lap in litres (float)",
+    "frame.fuel_avg_lap": "Session average fuel consumption per lap in litres (float)",
+    "frame.fuel_laps_remaining": "Estimated laps of fuel remaining at average consumption (float)",
+    "frame.fuel_laps_remaining_conservative": "Worst-case laps remaining using max recent consumption (float)",
+    "frame.fuel_delta": (
+        "Fuel surplus/deficit in litres (float). Positive = enough to finish, "
+        "negative = need to refuel."
+    ),
+    "frame.pit_window_start": "Earliest optimal lap to pit (integer). Based on tank capacity estimation.",
+    "frame.pit_window_end": "Latest safe lap to pit before running dry (integer)",
+
+    # Standings array
+    "frame.standings": (
+        "Array of race-position entries. Each entry has: position, driver_name, "
+        "gap (string), relative (gap to car ahead), is_player (bool), car_number, "
+        "iracing_cust_id, nickname (from 3rd party), avatar (URL or Discord hash)"
+    ),
+
+    # Championship standings (from 3rd party data plugin)
+    "frame.championship_standings": (
+        "Array of championship standing entries from a configured data plugin. "
+        "Each entry has: championship_position, driver_name, iracing_cust_id, "
+        "total_points, points_delta, position_delta, participated (bool), "
+        "nickname, avatar"
+    ),
+
+    # 3rd party enrichment
+    "frame.race_season": "Season name from the data plugin (e.g., '2025 Season 2')",
+    "frame.race_week": "Week number within the season (integer)",
+    "frame.race_date": "Date of the race (ISO 8601 string, e.g., '2025-03-15')",
+    "frame.venue_display_name": "Formatted venue name from the data plugin",
+    "frame.driver_nickname": "Display nickname for the focused driver from the data plugin",
+    "frame.driver_avatar": "Avatar for the focused driver — a URL or Discord avatar hash (e.g., 'a_abc123def456')",
+
+    # Resolution (always available)
     "resolution.width": "Rendering width in pixels (integer)",
     "resolution.height": "Rendering height in pixels (integer)",
+}
+
+# ── Variable source metadata ────────────────────────────────────────────────
+# Maps each variable key to its data source, used by the frontend
+# DataContextInspector to display source badges and group variables.
+
+VARIABLE_SOURCES: dict[str, str] = {
+    # Core session — from telemetry
+    "section": "telemetry", "series_name": "telemetry", "track_name": "telemetry",
+    "current_lap": "telemetry", "total_laps": "telemetry", "session_time": "telemetry",
+    "flag": "telemetry",
+    # Focused driver — from telemetry
+    "driver_name": "telemetry", "car_name": "telemetry", "car_number": "telemetry",
+    "position": "telemetry", "class_position": "telemetry", "irating": "telemetry",
+    "iracing_cust_id": "telemetry", "team_color": "telemetry",
+    "last_lap_time": "telemetry", "best_lap_time": "telemetry", "incident_count": "telemetry",
+    # Computed telemetry
+    "relative_gap": "computed", "speed_kph": "computed", "lap_pct": "computed",
+    "fuel_level": "computed", "fuel_used_lap": "computed", "fuel_avg_lap": "computed",
+    "fuel_laps_remaining": "computed", "fuel_laps_remaining_conservative": "computed",
+    "fuel_delta": "computed", "pit_window_start": "computed", "pit_window_end": "computed",
+    # Standings
+    "standings": "telemetry",
+    # Championship + 3rd party
+    "championship_standings": "plugin", "race_season": "plugin", "race_week": "plugin",
+    "race_date": "plugin", "venue_display_name": "plugin",
+    "driver_nickname": "plugin", "driver_avatar": "plugin",
 }
 
 
@@ -505,8 +668,9 @@ class OverlayService:
     def get_template_context(self, template_id: str) -> Optional[dict[str, Any]]:
         """Get available Jinja2 template variables with sample values.
 
-        Returns a dict describing all template variables and their sample values
-        that the editor can use for live preview.
+        Returns a dict describing all template variables, their sample values,
+        documentation, and source metadata that the editor can use for live
+        preview and the DataContextInspector.
         """
         template = self.get_template(template_id)
         if not template:
@@ -516,6 +680,7 @@ class OverlayService:
             "template_id": template_id,
             "variables": SAMPLE_FRAME_DATA,
             "variable_docs": VARIABLE_DOCS,
+            "variable_sources": VARIABLE_SOURCES,
         }
 
     def start_batch_render(

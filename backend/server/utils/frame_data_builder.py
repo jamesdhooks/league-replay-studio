@@ -61,24 +61,55 @@ def _format_session_time(session_time: float) -> str:
 
 
 def _empty_frame_data(section: str) -> dict[str, Any]:
-    """Return a minimal frame_data dict when telemetry is unavailable."""
+    """Return a minimal frame_data dict when telemetry is unavailable.
+
+    Includes all keys from ``SAMPLE_FRAME_DATA`` so templates can reference
+    them safely without undefined-variable errors.
+    """
     return {
+        # Core session
         "section": section,
         "series_name": "",
         "track_name": "",
         "current_lap": 0,
         "total_laps": 0,
         "session_time": "00:00:00",
+        "flag": "green",
+        # Focused driver
         "driver_name": None,
         "car_name": None,
+        "car_number": "",
         "position": None,
+        "class_position": None,
         "irating": 0,
+        "iracing_cust_id": 0,
         "team_color": "#3B82F6",
         "last_lap_time": None,
         "best_lap_time": None,
-        "flag": "green",
         "incident_count": 0,
+        # Computed telemetry
+        "relative_gap": None,
+        "speed_kph": 0.0,
+        "lap_pct": 0.0,
+        "fuel_level": None,
+        "fuel_used_lap": None,
+        "fuel_avg_lap": None,
+        "fuel_laps_remaining": None,
+        "fuel_laps_remaining_conservative": None,
+        "fuel_delta": None,
+        "pit_window_start": None,
+        "pit_window_end": None,
+        # Standings
         "standings": [],
+        # Championship (from 3rd party data plugin)
+        "championship_standings": [],
+        # 3rd party enrichment
+        "race_season": None,
+        "race_week": None,
+        "race_date": None,
+        "venue_display_name": None,
+        "driver_nickname": None,
+        "driver_avatar": None,
     }
 
 
@@ -178,12 +209,14 @@ def build_frame_data(
 
         focused_driver = drivers.get(focused_car_idx or -1, {})
 
-        # ── 5. Build standings with gap-to-leader ────────────────────────────
+        # ── 5. Build standings with gap-to-leader + relative ────────────────
         # CarIdxEstTime is the estimated time remaining to complete the
         # current lap.  The difference between P1's est_time and another
         # car's est_time gives a reasonable in-race gap proxy.
         standings: list[dict[str, Any]] = []
         leader_est: Optional[float] = None
+        # Build ordered list so we can compute car-to-car relative later
+        cs_est_times: list[Optional[float]] = []
 
         for cs in car_states[:20]:
             if cs["position"] == 1:
@@ -198,15 +231,22 @@ def build_frame_data(
                 "driver_name": driver_name,
                 "car_number": drv.get("car_number", ""),
                 "is_player": cs["car_idx"] == focused_car_idx,
+                "iracing_cust_id": drv.get("iracing_cust_id", 0),
                 "gap": "Leader",
+                "relative": None,
+                # Placeholders for 3rd party enrichment
+                "nickname": None,
+                "avatar": None,
             })
+            cs_est_times.append(cs.get("est_time"))
 
-        # Fill in gaps once we know the leader's est_time
-        for cs, entry in zip(car_states[:20], standings):
-            if cs["position"] == 1:
-                continue
+        # Fill in gaps and relative (car-to-car-ahead) once we know est_times
+        for i, (cs, entry) in enumerate(zip(car_states[:20], standings)):
             est = cs.get("est_time")
-            if leader_est is not None and est is not None and est >= leader_est:
+            # Gap to leader
+            if cs["position"] == 1:
+                entry["gap"] = "Leader"
+            elif leader_est is not None and est is not None and est >= leader_est:
                 gap_secs = est - leader_est
                 entry["gap"] = (
                     f"+{gap_secs:.3f}"
@@ -215,6 +255,24 @@ def build_frame_data(
                 )
             else:
                 entry["gap"] = "---"
+
+            # Relative to car directly ahead (position-based ordering)
+            if i > 0 and est is not None:
+                prev_est = cs_est_times[i - 1]
+                if prev_est is not None:
+                    rel_secs = est - prev_est
+                    if 0 <= rel_secs < _GAP_PRECISION_THRESHOLD:
+                        entry["relative"] = f"+{rel_secs:.3f}"
+                    elif rel_secs >= _GAP_PRECISION_THRESHOLD:
+                        entry["relative"] = f"+{rel_secs:.1f}"
+
+        # ── 5b. Compute relative_gap for the focused driver ──────────────────
+        focused_relative: Optional[str] = None
+        if focused_state:
+            for entry in standings:
+                if entry.get("is_player"):
+                    focused_relative = entry.get("relative")
+                    break
 
         # ── 6. Derive flag status ────────────────────────────────────────────
         if tick.get("flag_checkered"):
@@ -232,8 +290,18 @@ def build_frame_data(
             raw_best = focused_state.get("best_lap_time", -1.0) or -1.0
             best_lap_time = _format_lap_time(raw_best)
 
-        # ── 8. Assemble final frame_data dict ────────────────────────────────
+        # ── 8. Compute speed in kph from speed_ms ────────────────────────────
+        speed_kph = 0.0
+        lap_pct_val = 0.0
+        if focused_state:
+            raw_speed = focused_state.get("speed_ms")
+            if raw_speed is not None and raw_speed > 0:
+                speed_kph = round(raw_speed * 3.6, 1)
+            lap_pct_val = focused_state.get("lap_pct", 0.0) or 0.0
+
+        # ── 9. Assemble final frame_data dict ────────────────────────────────
         frame_data: dict[str, Any] = {
+            # Core session
             "section": section,
             "series_name": series_name or "",
             "track_name": track_name or "",
@@ -241,23 +309,51 @@ def build_frame_data(
             "total_laps": 0,       # not stored in DB; caller may override
             "session_time": _format_session_time(session_time),
             "flag": flag,
-            "standings": standings,
-            # Focused-driver fields — populated below if we have state
+            # Focused driver — populated below if we have state
             "driver_name": None,
             "car_name": None,
+            "car_number": "",
             "position": None,
+            "class_position": None,
             "irating": 0,
+            "iracing_cust_id": 0,
             "team_color": "#3B82F6",
             "last_lap_time": None,   # not captured in DB schema
             "best_lap_time": best_lap_time,
             "incident_count": 0,     # not stored per-tick
+            # Computed telemetry
+            "relative_gap": focused_relative,
+            "speed_kph": speed_kph,
+            "lap_pct": round(lap_pct_val, 4),
+            "fuel_level": None,        # requires fuel telemetry (not yet captured)
+            "fuel_used_lap": None,
+            "fuel_avg_lap": None,
+            "fuel_laps_remaining": None,
+            "fuel_laps_remaining_conservative": None,
+            "fuel_delta": None,
+            "pit_window_start": None,
+            "pit_window_end": None,
+            # Standings
+            "standings": standings,
+            # Championship (populated by data plugin layer)
+            "championship_standings": [],
+            # 3rd party enrichment (populated by data plugin layer)
+            "race_season": None,
+            "race_week": None,
+            "race_date": None,
+            "venue_display_name": None,
+            "driver_nickname": None,
+            "driver_avatar": None,
         }
 
         if focused_state and focused_driver:
             frame_data.update({
                 "driver_name": focused_driver.get("user_name") or None,
                 "car_name": focused_driver.get("car_class_name") or None,
+                "car_number": focused_driver.get("car_number", ""),
                 "position": focused_state.get("position"),
+                "class_position": focused_state.get("class_position"),
+                "iracing_cust_id": focused_driver.get("iracing_cust_id", 0),
             })
 
         return frame_data

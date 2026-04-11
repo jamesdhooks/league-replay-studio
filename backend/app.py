@@ -59,6 +59,7 @@ from server.routes.api_llm import router as llm_router
 from server.routes.api_collection import router as collection_router
 from server.routes.api_composition import router as composition_router
 from server.routes.api_script_state import router as script_state_router
+from server.routes.api_data_plugins import router as data_plugins_router
 
 # Services
 from server.services.iracing_bridge import bridge as iracing_bridge
@@ -239,6 +240,7 @@ app.include_router(llm_router)
 app.include_router(collection_router)
 app.include_router(composition_router)
 app.include_router(script_state_router)
+app.include_router(data_plugins_router)
 
 
 # ── WebSocket endpoint ──────────────────────────────────────────────────────
