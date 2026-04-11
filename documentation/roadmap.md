@@ -247,6 +247,8 @@ Core race event detection: incidents, battles, overtakes, pit stops, fastest lap
 
 **v5 — Collect Tab & Live Telemetry Explorer:** A dedicated **Collect** step tab added to the app shell. Features: `CollectionControl` for start/stop recording of live iRacing variables; `DataStreamViz` — a canvas-based particle animation showing 5 colour-coded variable categories (Motion, Engine, Lap, Tyres, Session) with labeled particles, oscilloscope lanes, and HUD; `TelemetryExplorer` for reviewing recorded `.parquet`/JSON variable files.
 
+**v6 — Continuous Lap Distance, New Detectors & Career Stats:** Detector count grows from 14 to **17 active detectors**. `BattleDetector`, `OvertakeDetector`, and `LeaderChangeDetector` now use **continuous lap distance** (`cont_dist = lap + lap_pct`) instead of `lap_pct × avg_lap_time` — gives sub-second positional accuracy vs. the ~60–90s latency of `CarIdxPosition`. Battle detection rewritten as per-pair tracking with `MIN_DURATION=10s`, `MERGE_GAP=5s`, `MAX_SEGMENT=45s`; battles longer than 45s extract sub-segments around lead changes. Multi-car incident enrichment adds nearby cars within ±3s and ±6% lap position as co-involved. New detectors added: `YellowFlagDetector`, `FinishSequenceDetector`, `UndercutDetector`, `OvercutDetector`, `PitBattleDetector`. `IncidentLogDetector` implemented but **disabled for replay mode** (`CarIdxIncidentCount` returns None during replay). New `incident_log` table populated during Phase ① from `CarIdxIncidentCount` deltas. **Career stats service** added: global `data/career_stats.db` with background priority-queue hydration of iRating, safety rating, starts, wins, top-5 per category (oval/road/dirt_oval/dirt_road/sports_car).
+
 **Acceptance Criteria**
 - [x] Analysis connects to iRacing and scans the replay at 16× speed
 - [x] Incidents are detected with 15-second deduplication per car
@@ -279,6 +281,19 @@ Core race event detection: incidents, battles, overtakes, pit stops, fastest lap
 - [x] Post-checkered event filtering: events starting after the checkered flag are automatically removed (except race_finish, last_lap, etc.)
 - [x] Pipeline step indicator shows progress bar under the active step during analysis
 - [x] Event fetch limit increased from 1000 to 50000 to prevent timeline/sidebar event truncation in dense races
+
+**v6 Criteria:**
+- [x] 17 active event detectors: 5 new detectors added (YellowFlagDetector, FinishSequenceDetector, UndercutDetector, OvercutDetector, PitBattleDetector)
+- [x] BattleDetector, OvertakeDetector, and LeaderChangeDetector use `cont_dist = lap + lap_pct` for sub-second positional accuracy
+- [x] Battle detection tracks each adjacent pair independently; long battles (>45s) extract sub-segments around lead changes
+- [x] Battle parameters: `MIN_DURATION=10s`, `MERGE_GAP=5s`, `MAX_SEGMENT=45s`
+- [x] Multi-car incident enrichment: nearby cars within ±3s and ±6% lap position added as co-involved with severity bonus
+- [x] `incident_log` table populated from `CarIdxIncidentCount` deltas during Phase ①
+- [x] `incidents_api` table populated via `MoveToNextIncident` pre-pass in Phase ①b
+- [x] `IncidentLogDetector` present but disabled for replay mode (`CarIdxIncidentCount` returns None in replay)
+- [x] Career stats service: global `data/career_stats.db` hydrated via background priority queue on project open
+- [x] Career stats cover iRating, safety rating, starts, wins, top-5 per category (oval/road/dirt_oval/dirt_road/sports_car)
+- [x] `GET/POST /api/career-stats/{cust_id}` and `/api/career-stats/hydration-status` endpoints
 
 ---
 
@@ -353,6 +368,31 @@ Canvas-based multi-track timeline: Camera, Events, Overlays, Cuts, Audio tracks.
 - [x] Section markers visible on NLE timeline canvas (dashed boundaries + labels)
 - [x] Inline section editor for duration/camera/start time of non-race sections
 - [x] Configurable clip-start padding (trimmed post-capture)
+
+**v3 — Browser-Authoritative Execution Engine & 5-Track NLE Timeline:** Script execution engine rewritten as **browser-authoritative**: `scriptClockRef` owns timing and iRacing is commanded but the UI never waits for confirmation — ensures smooth playhead animation and instant feedback. 50ms ticker validates play state, speed, camera, and driver against `replayStateRef` with cooldown-gated re-commands. Drift detection corrects divergence >2.0s with a corrective `seek-time` call (3s cooldown). Scrub-during-execution via `scrubResyncRef` skips the execution loop forward without re-issuing past commands. NLE timeline redesigned from 2 to **5 tracks**: Section (colour-coded section bands), Camera (with `camera_schedule` sub-window bands for long segments), Driver (per-segment driver focus), Events (clip blocks by type), Tick Ruler (edit-time axis). Segments displayed in edit order with zero gaps — not race-time. Bidirectional edit-time ↔ race-time mapping via `mapSessionTimeToEditTime` / `mapEditTimeToRaceTime`. Camera choreography with recency-weighted probabilistic selection for both cameras and drivers (exponential decay penalty). `HighlightPreview` event feed overlay shows real-time action log during execution (Time, Event, Camera, Driver; colour-coded, 1200ms amber glow pulse). Full `HighlightContext` tuning system: **20 event-type weights** and **21 camera/detection parameters** (see §7.8.8 of master-plan.md).
+
+**v3 Criteria:**
+- [x] `scriptClockRef` is the authoritative clock during script execution; iRacing is commanded asynchronously
+- [x] 50ms ticker validates all 4 execution properties: play state, replay speed, camera assignment, driver focus
+- [x] Drift detection: `|actual - expected| > 2.0s` triggers corrective seek (3s cooldown between seeks)
+- [x] Play state and speed validation re-command iRacing with 2s cooldown when state diverges
+- [x] Camera/driver validation re-commands with 1.5s cooldown when state diverges
+- [x] Scrub-during-execution (`scrubResyncRef`) skips execution loop to playhead without replaying past commands
+- [x] NLE HighlightTimeline renders 5 tracks: Section, Camera, Driver, Events, Tick Ruler
+- [x] Section track shows colour-coded bands: Intro (purple), Qualifying (cyan), Race (orange), Results (green)
+- [x] Camera track shows sub-window bands when `camera_schedule` is present (segments ≥ 1.2× `cameraStickyPeriod`)
+- [x] Driver track shows per-segment driver focus with sub-window bands for multi-driver segments
+- [x] Segments displayed in edit order (by section, then time) with zero gaps — not race-time order
+- [x] `mapSessionTimeToEditTime` handles multi-overlap disambiguation via `preferredSegId`
+- [x] `mapEditTimeToRaceTime` clamps to total edit duration and returns race-time via ratio interpolation
+- [x] Per-segment camera group and driver focus overrides; reset when `videoScript` changes
+- [x] `HighlightPreview` event feed: entries colour-coded by event type, animated with 1200ms amber glow pulse
+- [x] Live indicator ("LIVE" pulsing dot) when new feed entries arrive
+- [x] Events table (`HighlightEventTable`): capture state badge per row from `ScriptStateContext`
+- [x] 20 event type weights in `DEFAULT_WEIGHTS` (race_start/finish at 100, down to turn_cutting at 15)
+- [x] 21 detection/camera parameters in `DEFAULT_PARAMS` including `cameraRecencyPenalty`, `driverChangeProbability`, `lateRaceMultiplier`, `pipThreshold`, `paddingBefore/After`, etc.
+- [x] `driverChangeProbability` (default 0.3) gates driver focus switches on each cut
+- [x] Camera recency penalty uses exponential decay: `1 - penalty × e^(-elapsed / decay)` with 30s half-life default
 
 ---
 

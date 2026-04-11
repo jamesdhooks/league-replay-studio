@@ -1378,6 +1378,37 @@ All detectors operate on cached SQLite data during Phase ②. Detectors that use
 
 **Severity scoring is multi-factor:** base 0–10 scale, position bonus (top-5 weighted higher), duration bonus for long battles, lead-change bonus, speed-based (incident detector uses reference 70 m/s = 250 km/h), and time-loss weighting for race-impact events.
 
+### 4.4.3 Career Stats Service
+
+A separate background service hydrates per-driver iRacing career statistics (iRating, safety rating, series starts, wins, top-5 finishes) from the iRacing API. Stats are stored in a **global SQLite database** (`data/career_stats.db`) shared across all projects, so each driver's stats are fetched once and reused.
+
+**Architecture:**
+
+```
+career_stats.db (global, not per-project)
+├── drivers           — cust_id, name, last_fetched, last_updated
+└── driver_stats      — cust_id, category, irating, safety_rating,
+                        starts, wins, top5, avg_finish, last_fetched
+```
+
+**Background Hydration Queue:**
+- On project open, the backend queues all drivers in the race's driver roster
+- A priority queue processes drivers in order: unknown drivers first, then stalest refresh date
+- Requests are rate-limited to respect the iRacing API (configurable delay between requests)
+- Once hydrated, stats are available to the overlay engine (for lower-third graphics) and the career stats dashboard tile
+
+**Categories:** iRacing tracks stats per racing category — oval, road, dirt_oval, dirt_road, sports_car. Each category has its own iRating + safety rating.
+
+**API Endpoints:**
+```
+GET  /api/projects/{id}/career-stats                  — All drivers in race (from global DB)
+GET  /api/career-stats/{cust_id}                      — Single driver stats
+POST /api/career-stats/{cust_id}/refresh              — Force re-fetch from iRacing API
+GET  /api/career-stats/hydration-status               — Queue progress (pending / done / error counts)
+```
+
+**Frontend usage:** The career stats are surfaced in the stats dashboard panel and can be used in overlay templates via `{{ driver.career.irating }}`, `{{ driver.career.safety_rating }}`, etc.
+
 ### 4.5 Camera Direction Engine
 
 Camera direction is integrated into the **Video Composition Script generation** (`pipeline.py`), not a standalone class. Each segment in the script receives camera and driver assignments via a **recency-weighted probabilistic selection** algorithm, controlled by user-tuneable parameters from `HighlightContext`.
@@ -2985,151 +3016,162 @@ The Preset Designer (`PresetDesigner.jsx`) provides:
 
 ### 7.8 Highlight Editing Suite ⭐ (Crown Jewel Feature)
 
-The highlight editing suite is the **primary differentiator** of League Replay Studio. Rather than a black-box algorithm that produces a fixed highlight reel, LRS exposes the entire event selection pipeline as an interactive, tuneable, real-time editing environment.
+The highlight editing suite is the **primary differentiator** of League Replay Studio. Rather than a black-box algorithm that produces a fixed highlight reel, LRS exposes the entire event selection pipeline as an interactive, tuneable, real-time editing environment — plus a **browser-authoritative script execution engine** that commands iRacing in real-time to play out the produced script.
 
 **Core Concept:** The UI is a visual map of **Time (vertical) × Importance (horizontal)** — a histogram-based event organizer that lets you see the race structure instantly, understand algorithm decisions at a glance, and edit highlights intuitively via direct manipulation.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  CONFIG BAR  [Presets ▾]  [A/B]                    [Apply to Timeline →]    │
-├────────┬──────────────────┬────────────────────────────────┬─────────────────┤
-│        │  HIGHLIGHT       │   SCORE HISTOGRAM              │  RESULT         │
-│ EVENTS │  TUNING          │                                │  TIMELINE       │
-│ Inspec │                  │  1 │ 2 │ 3 │ 4 │ 5 │…│ 9 │10  │                 │
-│ History│  Incidents  ───  │    │   │   │   │   │ │[S]│    │  [First Lap]    │
-│ Files  │  Battles    ──   │[C] │   │   │   │   │ │   │    │  1:35 · S · 20  │
-│        │  Overtakes  ─── │    │[C]│   │   │   │ │   │    │  ──────────────  │
-│        │  Pit Stops  ─   │    │   │[C]│   │   │ │   │    │  [Battles]      │
-│        │  ...            │    │   │   │[C]│   │ │   │    │  28s · C · 2.2  │
-│        │  Min Sev: 3     │    │   │   │   │[C]│ │   │    │  ──────────────  │
-│        │  Target: 420s   │    │   │   │   │   │ │   │[S] │  [Last Lap]     │
-│        │                  │                                │  1:32 · S · 28  │
-│        │  METRICS         │  ← Low score  High score →    │                 │
-│        │  11 clips · 7:30 │  Columns = score buckets 1–10 │                 │
-│        │  Coverage: 62%   │  Time flows ↓                 │                 │
-├────────┴──────────────────┴────────────────────────────────┴─────────────────┤
-│  PREVIEW                                                                     │
-├──────────────────────────────────────────────────────────────────────────────┤
-│  NLE TIMELINE  (Camera · Events tracks, full race, zoomable)                │
+├────────┬──────────────────┬────────────────────────────────────┬─────────────┤
+│        │  HIGHLIGHT       │   SCORE HISTOGRAM                  │  RESULT     │
+│ EVENTS │  TUNING          │                                    │  TIMELINE   │
+│ Inspec │                  │  1 │ 2 │ 3 │ 4 │ 5 │…│ 9 │10      │             │
+│ History│  Incidents ── 80 │    │   │   │   │   │ │[S]│        │ [First Lap] │
+│ Files  │  Battles  ── 60  │[C] │   │   │   │   │ │   │        │ 1:35 · S    │
+│        │  Overtakes ─ 70  │    │[C]│   │   │   │ │   │        │ ─────────── │
+│        │  Pit Stops ─ 20  │    │   │[C]│   │   │ │   │        │ [Battles]   │
+│        │  ClosCall ── 40  │    │   │   │[C]│   │ │   │        │ 28s · C     │
+│        │  Undercut ── 50  │    │   │   │   │[C]│ │   │        │ ─────────── │
+│        │  Min Sev: 0      │    │   │   │   │   │ │   │[S]     │ [Last Lap]  │
+│        │  Target: 720s    │                                    │ 1:32 · S    │
+│        │  METRICS         │  ← Low score  High score →        │             │
+│        │  11 clips · 8:40 │  Columns = score buckets 1–10     │             │
+├────────┴──────────────────┼────────────────────────────────────┴─────────────┤
+│  HIGHLIGHT PREVIEW        │  Event feed overlay (real-time action log)      │
+├───────────────────────────┴──────────────────────────────────────────────────┤
+│  NLE TIMELINE  (5 tracks: Section · Camera · Driver · Events · Ruler)       │
+│  ┌──────┬──────────────────────────────────────────────────────────────┐     │
+│  │Sect. │[Intro][Quals][          Race                  ][Results]     │     │
+│  │Camera│[TV3  ][Pit  ][Chase][TV1        ][Scenic][TV3             ] │     │
+│  │Driver│[#42  ][#18  ][#42  ][#7         ][#42   ][#18             ] │     │
+│  │Events│[FL][Battle ][Overtake][Incident  ][Battle ][LL             ]│     │
+│  │Ruler │ 0:00  1:00  2:00  3:00  4:00  5:00  6:00  7:00  8:00      │     │
+│  └──────┴──────────────────────────────────────────────────────────────┘     │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Score Histogram (Left Panel):**
+**Score Histogram:**
 - 10 columns (score buckets 1–10, low→high left→right)
 - Time flows top→bottom (race start → finish) on the vertical axis
 - Each event is a colour-coded tile: vertical position = race time, column = score bucket, height ∝ duration
-- Tile opacity encodes inclusion state: full opacity = selected, 50 % = full-video, 20 % = excluded
+- Tile opacity encodes inclusion state: full opacity = selected, 50% = full-video, 20% = excluded
 - Tier S/A/B/C badges, narrative-anchor stars (★), PIP diagonal stripes
 - Time gutter with lap/minute markers; column headers labelled 1–10
 
-**Result Timeline (Right Panel):**
+**Result Timeline:**
 - Vertical list of selected events in chronological order
 - Each entry shows: colour strip, event type, duration, tier badge, score, and segment type (event / PIP / B-roll / transition)
 - Updated immediately on any parameter change or manual override
 
-**Rule Weight Tuning:**
-- Interactive sliders for each event type's priority weight (0–100)
-- Minimum severity threshold slider (events below this are auto-excluded)
-- Target duration control — algorithm adjusts inclusion to hit target
-- "Auto-Balance" button — algorithm optimizes weights to distribute coverage evenly
-- **All changes trigger instant reprocessing** — the event selection table and metrics update in real-time as you drag sliders
+**Rule Weight Tuning (`HighlightPanel`):**
+- Interactive sliders for each event type's priority weight (0–100 for 20 event types)
+- Minimum severity threshold, target duration (default 720s / 12 min), padding controls
+- All weight changes trigger instant reprocessing — event selection and metrics update in real-time
+- Preset save/load; A/B compare mode
 
-**Event Selection Table:**
-- Full list of all detected race events with computed scores
-- Checkbox column for manual include/exclude override
-- Score column shows the algorithm's computed importance score for each event
-- "Reason" column explains why the algorithm included or excluded each event
-- Sort by score, type, lap, duration, severity
-- Filter by event type, inclusion status, severity range
-- Overridden events highlighted in a different color
-- Click any event → timeline playhead jumps to that moment with live preview
+**Event Selection Table (`HighlightEventTable`):**
+- Sortable columns: Score, Severity, Duration, Type, Time, Reason
+- Filter by type (all 20 event types) and inclusion state (highlight / full-video / excluded)
+- Override checkboxes cycle: auto → force-include → force-exclude → auto
+- Capture state badge per row (pending / captured / error) from `ScriptStateContext`
+- Click row → `jumpToEvent()` moves NLE playhead to that event
 
-**Manual Overrides:**
-- ☑ Check/uncheck events to force-include or force-exclude from highlights
-- Drag event edges in the timeline to adjust included duration per event
-- Add custom "manual" events that don't come from the algorithm
-- Reorder events in the highlight reel (drag to re-sequence)
-- Override gets a visual indicator so you know what's auto vs. manual
-
-**Live Metrics Dashboard:**
-- **Total Duration** — Current highlight length vs. target (with over/under warning)
-- **Event Counts by Type** — Breakdown of included events per category
-- **Coverage %** — What percentage of the race is represented
-- **Balance Score** — How well-distributed are the events across the race (avoid front-loading)
-- **Pacing Score** — How well the highlight flows (no two incidents back-to-back, breathing room)
-- **Driver Coverage** — What % of drivers appear in the highlight
+**Live Metrics:**
+- Total duration vs. target, event counts per type, driver coverage
 - All metrics update in real-time as rule weights or manual selections change
 
-**Reprocessing:**
-- "Reprocess Now" button triggers the event selection algorithm with current weights
-- Results update within milliseconds (algorithm runs on cached telemetry data, not iRacing replay)
-- Full history of reprocessing runs — can compare different weight configurations
-- "A/B Compare" mode — save two different configurations and switch between them
+### 7.8.0 Multi-Track NLE Timeline (`HighlightTimeline`)
 
-```python
-class HighlightEditor:
-    """The highlight editing suite backend logic.
-    
-    Uses the multi-pass scoring pipeline (scoring_v3):
-      Stage 1: Base score by event type
-      Stage 2: Position importance multiplier  
-      Stage 3: Position change multiplier
-      Stage 4: Consequence weighting (speed_ms, positions lost, race impact)
-      Stage 5: Narrative bonus (chain length, recency)
-      Stage 6: Exposure adjustment (driver screen-time balance)
-      Stage 7: User weight override
-      Stage 8: Tier classification (S/A/B/C)
-    
-    Plus multi-pass timeline allocation:
-      Pass 1: Must-have events (mandatory types + Tier S)
-      Pass 2: Bucket fill (intro/early/mid/late)
-      Pass 3: Smoothing (repetition, spacing, exposure rebalance)
-    """
-    
-    async def reprocess(
-        self,
-        project: Project,
-        rule_weights: Dict[str, float],  # event_type -> weight (0-100)
-        min_severity: int,
-        target_duration_seconds: int,
-        manual_overrides: List[ManualOverride],
-        constraints: Dict = None,
-        llm_enabled: bool = False,
-    ) -> HighlightResult:
-        """Reprocess event selection with the v2 multi-pass pipeline.
-        Returns instantly from cached telemetry data."""
-        
-        from scoring_engine import generate_highlights
-        
-        # Run the full 8-stage scoring pipeline with multi-pass allocation
-        result = generate_highlights(
-            events=project.race_events,
-            target_duration=target_duration_seconds,
-            weights=rule_weights,
-            constraints=constraints or {},
-            overrides={o.event_id: o.action for o in manual_overrides},
-            race_info={
-                'duration': project.race_duration,
-                'num_drivers': project.num_drivers,
-            },
-        )
-        
-        # Optional LLM editorial refinement
-        if llm_enabled:
-            result = await self._apply_llm_editorial(result)
-        
-        # Build Video Composition Script (replaces EDL)
-        script = result['script']
-        
-        return HighlightResult(
-            selected_events=result['scored_events'],
-            all_events=result['scored_events'],
-            metrics=result['metrics'],
-            script=script,  # Video Composition Script (replaces EDL)
-        )
+The NLE timeline renders 5 tracks in **edit order** (sequential sections, not race-time):
+
+| Track | Height | Description |
+|-------|--------|-------------|
+| **Section** | 18px | Colour-coded bands: Intro (purple), Qualifying (cyan), Race (orange), Results (green) |
+| **Camera** | 34px | iRacing camera group per clip; segments with `camera_schedule` show sub-window bands |
+| **Driver** | 44px | Driver focus per clip with sub-window bands for multi-driver segments |
+| **Events** | 46px+ | Clip blocks colour-coded by event type; stretches to fill available height |
+| **Tick Ruler** | 24px | Edit-time axis (final video mm:ss) at `EDIT_PX_PER_SEC = 20` (overridden by range slider zoom) |
+
+**Edit-Time vs Race-Time Mapping:**
+
+`editSegments` are constructed by sorting segments by `SECTION_ORDER` index, then by `start_time_seconds` within each section, and assigning sequential edit positions with zero gaps (cursor-based). Padding is applied: `clipStartTime = rawStart - clip_padding`, `clipEndTime = rawEnd + clip_padding_after`. Bridge/transition segments get `editDur = 0`.
+
+- **`mapSessionTimeToEditTime(sessionTime, preferredSegId)`** — finds all `editSegments` whose clip window contains `sessionTime`, disambiguates by `preferredSegId`, returns `seg.editStart + offset`
+- **`mapEditTimeToRaceTime(editTime)`** — clamps to total edit duration, finds containing segment, returns `clipStart + ratio × (clipEnd - clipStart)`
+
+**Per-Segment Overrides:** Camera group and driver focus can be overridden per-segment. Overrides reset when `videoScript` changes.
+
+**Zoom/Pan:** Range slider controls `rangeStart`/`rangeEnd` (0–1). `pixelsPerSecond` in `TimelineContext` drives the NLE track zoom (0.2–60 range).
+
+### 7.8.1 Browser-Authoritative Script Execution Engine
+
+The execution engine is **browser-authoritative**: `scriptClockRef` owns the timing and iRacing is commanded but the UI never waits for confirmation. This ensures smooth playhead animation and instant feedback regardless of iRacing latency.
+
+```js
+// scriptClockRef — initialised when execution begins
+{
+  startWallMs:         performance.now(),
+  startEditTime,          // edit-time at execution start
+  speed,                  // replay speed multiplier (1, 2, 4 …)
+  accPausedMs:         0, // accumulated pause time in ms
+  paused:              false,
+  pauseWallMs:         0,
+  pauseEditTime:       startEditTime,
+  userScrubbing:       false,             // true while user drags playhead
+  expectedCamGroupNum: null,              // last commanded camera group
+  expectedCarIdx:      null,              // last commanded car idx
+}
 ```
 
-### 7.8.1 LLM Editorial Layer (New in v2)
+**50ms Ticker (`scriptTickRef`)** — fires every 50ms during execution:
+
+1. **Playhead update** — `editTime = startEditTime + ((wallNow - startWallMs - accPausedMs) / 1000) × speed`. Skipped when `userScrubbing`.
+
+2. **Drift detection & auto-correction** — computes `expectedRaceTime = segStartSec + segElapsed × speed`, reads `actual` from `replayStateRef`, derives `driftS`. If `|drift| > 2.0s` and cooldown of 3000ms elapsed: issues corrective `seek-time` API call.
+
+3. **Play state validation** — if iRacing is paused but should be playing: re-issues `play` (2s cooldown); if wrong speed: re-issues `speed` + `play`.
+
+4. **Camera/driver validation** — if `expectedCamGroupNum` / `expectedCarIdx` mismatch iRacing state: re-issues camera command (1.5s cooldown).
+
+**Scrub Resync (`scrubResyncRef`)** — set on mouseup during scrub-while-executing. The execution loop skips all segments before `scrubResyncRef.current.editTime` without issuing API calls, and `waitForEditTime` bails immediately when a resync is pending.
+
+### 7.8.2 Event Feed Overlay (`HighlightPreview`)
+
+Real-time action log overlay displayed during script execution:
+
+| Column | Content |
+|--------|---------|
+| Time | Edit-time `mm:ss` |
+| Event | Event type label |
+| Camera | iRacing camera group name |
+| Driver | Driver name / number |
+
+Entries are colour-coded by event type (`EVENT_COLORS` from `TimelineContext`) or by section accent colour. New entries animate with translateY + scale and a 1200ms amber glow pulse. Green pulsing "LIVE" indicator shows when new entries arrive. Entries are pushed via a 50ms flush queue, capped at 20 visible entries.
+
+### 7.8.3 8-Stage Scoring Pipeline
+
+The backend scoring pipeline (`scoring_engine/`) runs fully from cached SQLite data — no iRacing connection needed:
+
+| Stage | Name | Description |
+|-------|------|-------------|
+| 1 | **Base** | `event_type_weight × base_severity` |
+| 2 | **Position** | Multiplier for front-of-field position (`1/P` curve, configurable `battleFrontBias`) |
+| 3 | **Position Change** | Bonus for overtakes, position gains/losses |
+| 4 | **Consequence** | `speed_ms`, positions lost, race-impact metrics from telemetry |
+| 5 | **Narrative** | `log(chain_length + 1) × 0.5` bonus; recency penalty for same-type repetition |
+| 6 | **Exposure** | Driver screen-time rebalance (preferred driver boost, preferred-only filter) |
+| 7 | **User Weight** | `× (rule_weights[event_type] / 50)` — normalised around default 50 |
+| 8 | **Tier** | S (≥8.5) / A (≥7.0) / B (≥5.5) / C (<5.5) |
+
+Multi-pass timeline allocation follows scoring:
+- **Pass 1** — Must-have events: `MANDATORY_TYPES = {'race_start', 'race_finish', 'restart'}` + all Tier S
+- **Pass 2** — Bucket fill: intro / early / mid / late race buckets filled proportionally to target duration
+- **Pass 3** — Smoothing: repetition limits, minimum spacing, driver exposure rebalance
+
+PIP resolution: overlapping events where both score ≥ `pipThreshold` (default 7.0) produce a `pip` segment instead of two separate cuts.
+
+### 7.8.4 LLM Editorial Layer
 
 The LLM editorial layer operates after the deterministic scoring pipeline has produced a candidate timeline. It does not replace the algorithmic selection — it refines the narrative, adds segment notes, and can swap events within a tier without changing the overall structure. Implemented as the `EditorialSkill` in `llm_skills.py`, registered with the `LLMService` (see Section 7.14).
 
@@ -3143,7 +3185,7 @@ The LLM editorial layer operates after the deterministic scoring pipeline has pr
 
 **API:** `POST /api/llm/editorial` — accepts timeline, scored events, metrics, race info, and user prompt. Returns modifications array. See Section 7.14.3 for full details.
 
-### 7.8.2 Video Composition Script (New in v2)
+### 7.8.5 Video Composition Script
 
 The Video Composition Script replaces the EDL (Edit Decision List) as the declarative render contract. It is a fully validated JSON document containing:
 - `meta` — title, source_race_id, algorithm_version, llm metadata
@@ -3157,7 +3199,7 @@ Segment types in the timeline:
 - **transition** — cut/fade/crossfade/whip/zoom between clips
 - **broll** — Gap filler from track-side cameras (inserted for gaps ≥ 8s)
 
-### 7.8.3 Four-Section Video Structure
+### 7.8.6 Four-Section Video Structure
 
 The highlight video is composed of four ordered sections:
 
@@ -3177,15 +3219,15 @@ Each section carries:
 - `clip_padding` — Seconds of pre-roll before each clip (trimmed post-capture)
 - `editable` — Whether the user can adjust timing/camera in the frontend
 
-The `generate_video_script()` function in `scoring_engine.py` wraps `generate_highlights()` with intro, qualifying, and results B-roll sections. The frontend shows these as color-coded regions in both the **Score Histogram** result timeline and the NLE TimelineCanvas.
+The `generate_video_script()` function in `scoring_engine.py` wraps `generate_highlights()` with intro, qualifying, and results B-roll sections. The frontend shows these as colour-coded section bands in the **NLE Timeline** Section track and the histogram result panel.
 
-### 7.8.4 Script-Based Capture Engine
+### 7.8.7 Script-Based Capture Engine
 
 The `ScriptCaptureEngine` (in `script_capture.py`) processes each Video Composition Script segment independently:
 
 1. Pause the replay
 2. Seek to the segment's start time minus configurable padding
-3. Switch to the appropriate iRacing camera (from preferences or user override)
+3. Switch to the appropriate iRacing camera (from `camera_preferences` list or user override)
 4. Start recording via `CaptureEngine.start_recording()`
 5. Resume replay at 1× speed
 6. Wait for segment duration + padding
@@ -3194,6 +3236,51 @@ The `ScriptCaptureEngine` (in `script_capture.py`) processes each Video Composit
 9. Save the clip with a filename matching the script segment ID
 
 After all segments are captured, `compile_clips()` concatenates them using FFmpeg's concat demuxer. The pipeline service uses this engine when a `video_script` is present in the capture config.
+
+### 7.8.8 HighlightContext Tuning Parameters
+
+All tuning parameters live in `HighlightContext` and are persisted to `localStorage` per project key. Sent to the backend on every `/highlights/video-script` call.
+
+**Event Type Weights (`DEFAULT_WEIGHTS`, 0–100):**
+
+| Event Type | Default | Event Type | Default |
+|------------|---------|------------|---------|
+| `race_start` | 100 | `race_finish` | 100 |
+| `leader_change` | 90 | `car_contact` | 85 |
+| `incident` | 80 | `overtake` | 70 |
+| `first_lap` | 70 | `last_lap` | 70 |
+| `battle` | 60 | `contact` | 60 |
+| `fastest_lap` | 50 | `pace_lap` | 50 |
+| `overcut` | 50 | `undercut` | 50 |
+| `pit_battle` | 50 | `lost_control` | 50 |
+| `close_call` | 40 | `pit_stop` | 20 |
+| `off_track` | 25 | `turn_cutting` | 15 |
+
+**Detection & Camera Parameters (`DEFAULT_PARAMS`):**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `targetDuration` | `720` s | Target highlight reel duration (12 min) |
+| `minSeverity` | `0` | Minimum severity to include an event |
+| `battleStickyPeriod` | `15` s | Seconds to track one battle before switching |
+| `cameraStickyPeriod` | `20` s | Minimum camera hold; triggers `camera_schedule` at ≥ 1.2× |
+| `overtakeBoost` | `1.5` | Score multiplier for overtake events |
+| `incidentPositionCutoff` | `0` | Ignore incidents below this position (0 = off) |
+| `battleFrontBias` | `1.0` | Extra multiplier for front-of-field battles (1.0 = off) |
+| `preferredDriverBoost` | `1.3` | Score multiplier for preferred driver events |
+| `preferredDriversOnly` | `false` | Exclude events with no preferred driver |
+| `lateRaceThreshold` | `0.9` | Race fraction after which late-race bonus activates |
+| `lateRaceMultiplier` | `1.2` | Score multiplier for events past `lateRaceThreshold` |
+| `pipThreshold` | `7.0` | Min score for PiP with overlapping events |
+| `paddingBefore` | `2.0` s | Default pre-roll before each event |
+| `paddingAfter` | `5.0` s | Default post-roll after each event |
+| `cameraRecencyPenalty` | `0.5` | Exponential decay strength for recently-used cameras |
+| `cameraRecencyDecay` | `30.0` s | Half-life of camera recency penalty |
+| `driverChangeProbability` | `0.3` | Gate probability for driver focus switch on cut |
+| `driverRecencyPenalty` | `0.5` | Exponential decay strength for recently-shown drivers |
+| `driverRecencyDecay` | `60.0` s | Half-life of driver recency penalty |
+| `ignoreIncidentsDuringFirstLap` | `false` | Suppress incidents in first-lap bucket |
+| `maxRaceFinishes` | `0` | Max `race_finish` events (0 = all) |
 
 ### 7.9 Settings System
 
