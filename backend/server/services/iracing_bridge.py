@@ -189,6 +189,23 @@ class IRacingBridge:
             logger.error("[IRacingBridge] cam_switch_car error: %s", exc)
             return False
 
+    def cam_set_state(self, state_flags: int) -> bool:
+        """Set iRacing camera state flags via BroadcastMsg.CamSetState.
+
+        Common flags (pyirsdk CameraState):
+          0x0004 (cam_tool_active)         → user camera/tool control
+          0x0010 (use_auto_shot_selection) → iRacing auto camera selection
+        """
+        if not self._connected or self._ir is None:
+            return False
+        try:
+            self._ir.cam_set_state(state_flags)
+            logger.debug("[IRacingBridge] cam_set_state -> 0x%04x", state_flags)
+            return True
+        except Exception as exc:
+            logger.error("[IRacingBridge] cam_set_state error: %s", exc)
+            return False
+
     def replay_search(self, mode: int) -> bool:
         """Execute a replay search command (next_session, prev_session, etc.).
 
@@ -503,6 +520,7 @@ class IRacingBridge:
             session_type = ""
             sessions = session_info.get("Sessions", [])
             race_session_num = None
+            parsed_session_results: list[dict] = []
             if sessions:
                 session_type = sessions[0].get("SessionType", "")
                 # Find the race session index
@@ -511,6 +529,72 @@ class IRacingBridge:
                     if stype in ("race", "race1", "race2"):
                         race_session_num = i
                         break
+
+                # Persist authoritative session standings from YAML so analysis
+                # can build qualifying/final overlays without telemetry heuristics.
+                for i, s in enumerate(sessions):
+                    rows = []
+                    for rp in s.get("ResultsPositions") or []:
+                        if not isinstance(rp, dict):
+                            continue
+                        try:
+                            car_idx = int(rp.get("CarIdx", -1))
+                        except (ValueError, TypeError):
+                            continue
+                        if car_idx < 0:
+                            continue
+                        try:
+                            pos = int(rp.get("Position", 0) or 0)
+                        except (ValueError, TypeError):
+                            pos = 0
+                        try:
+                            class_pos_val = int(rp.get("ClassPosition", 0) or 0)
+                        except (ValueError, TypeError):
+                            class_pos_val = 0
+                        try:
+                            lap_val = int(rp.get("Lap", 0) or 0)
+                        except (ValueError, TypeError):
+                            lap_val = 0
+                        try:
+                            incidents_val = int(rp.get("Incidents", 0) or 0)
+                        except (ValueError, TypeError):
+                            incidents_val = 0
+                        try:
+                            fastest_time_val = float(rp.get("FastestTime", -1) or -1)
+                        except (ValueError, TypeError):
+                            fastest_time_val = -1.0
+                        try:
+                            total_time_val = float(rp.get("Time", -1) or -1)
+                        except (ValueError, TypeError):
+                            total_time_val = -1.0
+                        try:
+                            interval_val = float(rp.get("Interval", -1) or -1)
+                        except (ValueError, TypeError):
+                            interval_val = -1.0
+                        try:
+                            gap_val = float(rp.get("Gap", -1) or -1)
+                        except (ValueError, TypeError):
+                            gap_val = -1.0
+
+                        rows.append({
+                            "car_idx": car_idx,
+                            "position": pos,
+                            "class_position": class_pos_val,
+                            "lap": lap_val,
+                            "incidents": incidents_val,
+                            "fastest_time": fastest_time_val,
+                            "total_time": total_time_val,
+                            "interval": interval_val,
+                            "gap": gap_val,
+                            "reason_out": str(rp.get("ReasonOutStr", "") or ""),
+                        })
+
+                    parsed_session_results.append({
+                        "session_num": i,
+                        "session_type": s.get("SessionType", "") or "",
+                        "session_name": s.get("SessionName", "") or "",
+                        "results_positions": rows,
+                    })
             avg_lap_time = 0.0
             if sessions:
                 try:
@@ -588,6 +672,7 @@ class IRacingBridge:
                     {"index": i, "type": s.get("SessionType", ""), "name": s.get("SessionName", "")}
                     for i, s in enumerate(sessions)
                 ],
+                "session_results": parsed_session_results,
                 "incident_log": incident_log,
             }
 

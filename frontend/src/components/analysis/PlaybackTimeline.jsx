@@ -1,9 +1,10 @@
 import { useState, useRef, memo } from 'react'
-import { Minus, Plus, SkipBack, Rewind, Play, Pause, FastForward, SkipForward } from 'lucide-react'
+import { Minus, Plus } from 'lucide-react'
 import { EVENT_COLORS } from '../../context/TimelineContext'
 import { apiPost } from '../../services/api'
 import { EVENT_CONFIG, formatTime } from './analysisConstants'
 import EventControlsBar from '../ui/EventControlsBar'
+import PlaybackControls from '../ui/PlaybackControls'
 
 /**
  * PlaybackTimeline — scrubber + event markers + transport controls + focused event header.
@@ -21,6 +22,7 @@ export default memo(function PlaybackTimeline({
   handlePlayPause, handleSetSpeed, handleReplaySearch,
   handleSwitchDriver,
   overrides, toggleOverride,
+  className = '',
 }) {
   const scrubberRef = useRef(null)
   const [scrubbing, setScrubbing] = useState(false)
@@ -31,7 +33,7 @@ export default memo(function PlaybackTimeline({
   if (!isConnected || isAnalyzing) return null
 
   return (
-    <div className="shrink-0 bg-[#0f0f13] border-t border-white/10 px-4 py-3">
+    <div className={`bg-[#0f0f13] border-t border-white/10 px-4 py-3 flex flex-col min-h-0 ${className}`}>
       {/* Focused event controls bar */}
       {focusedEvent && (
         <div className="mb-2 pb-2 border-b border-white/10">
@@ -61,7 +63,7 @@ export default memo(function PlaybackTimeline({
 
       {/* Timeline scrubber */}
       {raceDuration > 0 && replayState && (
-        <div className="mb-2">
+        <div className="mb-2 flex-1 min-h-[68px] flex flex-col justify-center">
           {(() => {
             let viewStart, viewEnd
             if (focusedEvent) {
@@ -85,34 +87,7 @@ export default memo(function PlaybackTimeline({
 
             return (
               <>
-              {/* Event dot timeline — separate strip above the scrub bar */}
-              {markerEvents.length > 0 && (
-                <div className="relative h-3 mb-1">
-                  <div className="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-px bg-white/10" />
-                  {markerEvents.map((ev, i) => {
-                    const time = ev.startTime ?? ev.start_time_seconds ?? 0
-                    if (time <= 0) return null
-                    const pct = toPct(time) * 100
-                    const markerColor = EVENT_COLORS[ev.event_type] || '#ffffff'
-                    return (
-                      <div key={`dot-${i}`}
-                        className="absolute top-1/2 w-2 h-2 rounded-full cursor-pointer
-                                   hover:w-2.5 hover:h-2.5 transition-all duration-150 z-10
-                                   hover:shadow-[0_0_6px_rgba(255,255,255,0.5)]"
-                        style={{ left: `${pct}%`, backgroundColor: markerColor, opacity: 0.85, transform: 'translate(-50%, -50%)' }}
-                        onClick={(e) => { e.stopPropagation(); setTooltipEvent(null); seekToEvent(ev) }}
-                        onMouseEnter={(e) => {
-                          const rect = e.currentTarget.getBoundingClientRect()
-                          setTooltipEvent(ev)
-                          setTooltipPos({ x: rect.left + rect.width / 2, y: rect.top })
-                        }}
-                        onMouseLeave={() => setTooltipEvent(null)}
-                      />
-                    )
-                  })}
-                </div>
-              )}
-              <div ref={scrubberRef} className="relative h-5 group cursor-pointer select-none"
+              <div ref={scrubberRef} className="relative h-10 group cursor-pointer select-none"
                 onMouseDown={(e) => {
                   const rect = e.currentTarget.getBoundingClientRect()
                   const pctToTime = (clientX) => {
@@ -143,7 +118,7 @@ export default memo(function PlaybackTimeline({
                   document.addEventListener('mouseup', onUp)
                 }}
               >
-                <div className="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-1.5 bg-white/8 rounded-full overflow-hidden">
+                <div className="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-2 bg-white/8 rounded-full overflow-hidden">
                   {focusedEvent && (
                     <div className="absolute top-0 bottom-0 rounded-sm" style={{ left: `${evLeftPct}%`, width: `${evWidthPct}%` }}>
                       <div className={`w-full h-full rounded-sm opacity-20 ${focusedCfg.bg || 'bg-white/15'}`} />
@@ -155,6 +130,28 @@ export default memo(function PlaybackTimeline({
                     <div className="absolute top-0 left-0 h-full bg-gradient-to-r from-gradient-from via-gradient-via to-gradient-to rounded-full opacity-70"
                       style={{ width: `${toPct(optimisticTime) * 100}%` }} />
                   )}
+
+                  {/* Event dots are integrated directly into this dynamic timeline lane. */}
+                  {!focusedEvent && markerEvents.map((ev, i) => {
+                    const time = ev.startTime ?? ev.start_time_seconds ?? 0
+                    if (time <= 0) return null
+                    const pct = toPct(time) * 100
+                    const markerColor = EVENT_COLORS[ev.event_type] || '#ffffff'
+                    return (
+                      <div
+                        key={`dot-${i}`}
+                        className="absolute top-1/2 w-2 h-2 rounded-full cursor-pointer hover:w-2.5 hover:h-2.5 transition-all duration-150 z-10 hover:shadow-[0_0_6px_rgba(255,255,255,0.5)]"
+                        style={{ left: `${pct}%`, backgroundColor: markerColor, opacity: 0.95, transform: 'translate(-50%, -50%)' }}
+                        onClick={(e) => { e.stopPropagation(); setTooltipEvent(null); seekToEvent(ev) }}
+                        onMouseEnter={(e) => {
+                          const rect = e.currentTarget.getBoundingClientRect()
+                          setTooltipEvent(ev)
+                          setTooltipPos({ x: rect.left + rect.width / 2, y: rect.top })
+                        }}
+                        onMouseLeave={() => setTooltipEvent(null)}
+                      />
+                    )
+                  })}
                 </div>
                 <div className={`absolute top-1/2 w-3 h-3 rounded-full bg-accent border-2 border-white shadow-md
                   ${scrubbing ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-opacity pointer-events-none`}
@@ -199,65 +196,40 @@ export default memo(function PlaybackTimeline({
         </div>
       )}
 
-      {/* Transport row: time/lap on left, controls center-right */}
+      {/* Transport row */}
       {replayState && (
-        <div className="flex items-center gap-4">
-          {/* Time + lap on the left */}
-          <div className="flex items-center gap-3 shrink-0">
-            <span className="text-sm text-white/70 font-mono font-semibold tabular-nums">
-              {formatTime(replayState.session_time)}
-            </span>
-            {replayState.race_laps > 0 && (
-              <span className="flex items-center gap-1.5 text-white/60">
-                <button onClick={() => handleReplaySearch('prev_lap')} title="Previous lap"
-                  className="w-6 h-6 rounded-md flex items-center justify-center bg-white/8 hover:bg-white/15 text-white/50 hover:text-white/90 border border-white/10 transition-colors">
-                  <Minus size={12} />
-                </button>
-                <span className="text-sm font-semibold font-mono tabular-nums min-w-[52px] text-center">Lap {replayState.race_laps}</span>
-                <button onClick={() => handleReplaySearch('next_lap')} title="Next lap"
-                  className="w-6 h-6 rounded-md flex items-center justify-center bg-white/8 hover:bg-white/15 text-white/50 hover:text-white/90 border border-white/10 transition-colors">
-                  <Plus size={12} />
-                </button>
-              </span>
-            )}
-          </div>
-
-          {/* Transport controls */}
-          <div className="flex items-center justify-center gap-1.5 flex-1">
-            <button onClick={() => navigateEvent('prev')} disabled={!filteredEvents.length} title="Previous event"
-              className="p-2 rounded-lg hover:bg-white/10 text-white/50 hover:text-white/90 transition-colors disabled:opacity-30">
-              <SkipBack size={18} />
-            </button>
-            <button onClick={() => handleReplaySearch('prev_lap')} title="Previous lap"
-              className="p-2 rounded-lg hover:bg-white/10 text-white/50 hover:text-white/90 transition-colors">
-              <Rewind size={18} />
-            </button>
-            <button onClick={() => handleSetSpeed(-4)} title="Rewind 4×"
-              className={`px-2.5 py-1.5 rounded-lg text-xs font-mono transition-colors
-                ${replaySpeed === -4 ? 'bg-accent/15 text-accent' : 'hover:bg-white/10 text-white/50 hover:text-white/90'}`}>
-              ◀◀
-            </button>
-            <button onClick={handlePlayPause} title={isPlaying ? 'Pause' : 'Play'}
-              className="p-2.5 rounded-xl bg-gradient-to-r from-gradient-from to-gradient-to text-white hover:from-gradient-via hover:to-gradient-from transition-all duration-200 shadow-glow-sm mx-1">
-              {isPlaying ? <Pause size={20} /> : <Play size={20} />}
-            </button>
-            {[1, 2, 4, 8, 16].map(spd => (
-              <button key={spd} onClick={() => handleSetSpeed(spd)} title={`${spd}× speed`}
-                className={`px-2.5 py-1.5 rounded-lg text-xs font-mono transition-colors
-                  ${replaySpeed === spd ? 'bg-accent/15 text-accent font-bold' : 'hover:bg-white/10 text-white/50 hover:text-white/90'}`}>
-                {spd}×
-              </button>
-            ))}
-            <button onClick={() => handleReplaySearch('next_lap')} title="Next lap"
-              className="p-2 rounded-lg hover:bg-white/10 text-white/50 hover:text-white/90 transition-colors">
-              <FastForward size={18} />
-            </button>
-            <button onClick={() => navigateEvent('next')} disabled={!filteredEvents.length} title="Next event"
-              className="p-2 rounded-lg hover:bg-white/10 text-white/50 hover:text-white/90 transition-colors disabled:opacity-30">
-              <SkipForward size={18} />
-            </button>
-          </div>
-        </div>
+        <PlaybackControls
+          leftSlot={
+            <div className="flex items-center gap-2 shrink-0">
+              {replayState.race_laps > 0 && (
+                <span className="flex items-center gap-1 text-text-secondary">
+                  <button onClick={() => handleReplaySearch('prev_lap')} title="Previous lap"
+                    className="p-0.5 rounded hover:bg-bg-secondary text-text-disabled hover:text-text-primary transition-colors">
+                    <Minus size={10} />
+                  </button>
+                  <span className="text-xxs font-semibold font-mono tabular-nums">Lap {replayState.race_laps}</span>
+                  <button onClick={() => handleReplaySearch('next_lap')} title="Next lap"
+                    className="p-0.5 rounded hover:bg-bg-secondary text-text-disabled hover:text-text-primary transition-colors">
+                    <Plus size={10} />
+                  </button>
+                </span>
+              )}
+            </div>
+          }
+          onPrev={() => navigateEvent('prev')}
+          prevDisabled={!filteredEvents.length}
+          prevTitle="Previous event"
+          onNext={() => navigateEvent('next')}
+          nextDisabled={!filteredEvents.length}
+          nextTitle="Next event"
+          isPlaying={isPlaying}
+          onPlayPause={handlePlayPause}
+          timeDisplay={formatTime(replayState.session_time)}
+          speeds={[1, 2, 4, 8, 16]}
+          activeSpeed={replaySpeed}
+          onSpeedChange={handleSetSpeed}
+          className="border-t-0 border-b-0"
+        />
       )}
     </div>
   )

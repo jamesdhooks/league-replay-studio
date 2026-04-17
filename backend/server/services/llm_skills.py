@@ -867,6 +867,104 @@ def _validate_element_fields(el: dict) -> tuple[bool, str]:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  Skill 4 — Overlay HTML Edit
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class OverlayHtmlEditSkill(LLMSkill):
+    """Modify a full overlay HTML template via natural language.
+
+    Unlike the element-level overlay skills, this skill receives an entire
+    Jinja2/HTML template and a modification request, and returns the full
+    modified HTML plus a brief explanation.
+    """
+
+    skill_id = "overlay_html_edit"
+    name = "Overlay HTML Editor"
+    description = (
+        "Modify a full overlay HTML template using a natural-language "
+        "instruction. Returns the complete modified HTML."
+    )
+
+    # ── prompt ──────────────────────────────────────────────────────────
+
+    def build_system_prompt(self, context: dict) -> str:
+        current_html = context.get("current_html", "")
+        section = context.get("section", "race")
+        template_id = context.get("template_id", "unknown")
+
+        return textwrap.dedent(f"""\
+            You are an expert HTML/CSS/Jinja2 broadcast overlay designer
+            for motorsport productions in League Replay Studio.
+
+            Your task is to MODIFY the given overlay HTML template based on
+            the user's natural-language instruction.  Return the full
+            modified HTML plus a brief explanation of the changes.
+
+            ═══════════════════════════════════════════════════════
+            {_TEMPLATE_VARIABLE_REFERENCE}
+            ═══════════════════════════════════════════════════════
+
+            TEMPLATE RULES
+            ==============
+            • The template uses Jinja2 syntax ({{{{ var }}}}, {{% if %}}, etc.).
+            • body MUST have background: transparent or background: none so
+              the overlay composites correctly over video.
+            • Do NOT add external scripts except the Tailwind CDN
+              (https://cdn.tailwindcss.com) if already present.
+            • Preserve ALL existing Jinja2 template variables
+              ({{{{ frame.* }}}}, {{{{ resolution.* }}}}, etc.) unless the
+              user explicitly asks to remove one.
+            • Preserve the overall document structure (<!DOCTYPE html>,
+              <html>, <head>, <body>) if present.
+            • Apply the user's requested change precisely.
+
+            CURRENT SECTION: {section}
+            TEMPLATE ID:     {template_id}
+
+            CURRENT HTML TEMPLATE
+            =====================
+            {current_html}
+
+            OUTPUT FORMAT
+            =============
+            Return a single JSON object (no markdown fences, no extra text):
+
+            {{
+              "html": "<full modified HTML string>",
+              "explanation": "Brief description of what was changed."
+            }}
+        """)
+
+    # ── schema ──────────────────────────────────────────────────────────
+
+    def get_response_schema(self) -> dict:
+        return {
+            "type": "object",
+            "required": ["html", "explanation"],
+            "properties": {
+                "html": {"type": "string"},
+                "explanation": {"type": "string"},
+            },
+        }
+
+    # ── validation ──────────────────────────────────────────────────────
+
+    def validate_output(self, output: dict) -> tuple[bool, str]:
+        if "html" not in output:
+            logger.warning("[OverlayHtmlEditSkill] validation failed: Missing 'html' key")
+            return False, "Missing 'html' key."
+        if not isinstance(output["html"], str) or not output["html"].strip():
+            logger.warning("[OverlayHtmlEditSkill] validation failed: 'html' is empty")
+            return False, "'html' must be a non-empty string."
+        if "explanation" not in output:
+            logger.warning("[OverlayHtmlEditSkill] validation failed: Missing 'explanation' key")
+            return False, "Missing 'explanation' key."
+        logger.info("[OverlayHtmlEditSkill] validation passed")
+        return True, ""
+
+
 def register_default_skills():
     """Register all built-in LLM skills with the service."""
     from server.services.llm_service import llm_service
@@ -874,3 +972,4 @@ def register_default_skills():
     llm_service.register_skill(EditorialSkill())
     llm_service.register_skill(OverlayDesignSkill())
     llm_service.register_skill(OverlayAugmentSkill())
+    llm_service.register_skill(OverlayHtmlEditSkill())

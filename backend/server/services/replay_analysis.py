@@ -64,6 +64,10 @@ SURFACE_OFF_TRACK = 0
 SURFACE_IN_PIT    = 1
 SURFACE_PIT_APRON = 2
 
+# iRacing CameraState flags (pyirsdk)
+CAM_STATE_USER_CONTROL = 0x0004
+CAM_STATE_AUTO_SHOT = 0x0010
+
 
 # ── Telemetry Writer ─────────────────────────────────────────────────────────
 
@@ -445,6 +449,8 @@ class ReplayAnalyzer:
 
             # Save driver data from session info
             self._save_drivers(conn)
+            self._save_session_results(conn)
+            self._save_session_results(conn)
 
             # Pass 1: Scan telemetry
             scan_start = time.monotonic()
@@ -1071,6 +1077,12 @@ class ReplayAnalyzer:
             "progress_percent": 8,
         })
 
+        # Hand camera control to the viewer during the telemetry scan so they can
+        # switch cars/camera groups while replay runs at 16×.
+        camera_control_enabled = False
+        if iracing_bridge.is_connected:
+            camera_control_enabled = iracing_bridge.cam_set_state(CAM_STATE_USER_CONTROL)
+
         while not self._cancelled:
             if not iracing_bridge.is_connected:
                 logger.warning("[Analysis] iRacing disconnected during scan")
@@ -1189,6 +1201,11 @@ class ReplayAnalyzer:
 
         # Pause replay
         iracing_bridge.set_replay_speed(0)
+
+        # Restore iRacing's automatic camera sequencer now that telemetry scan is done.
+        # Incident pre-pass uses replay_search() and expects auto shot behavior.
+        if camera_control_enabled and iracing_bridge.is_connected:
+            iracing_bridge.cam_set_state(CAM_STATE_AUTO_SHOT)
 
         return writer.total_ticks
 
@@ -1626,6 +1643,80 @@ class ReplayAnalyzer:
         )
         conn.commit()
         logger.info("[Analysis] Saved %d drivers", len(rows))
+
+    def _save_session_results(self, conn: sqlite3.Connection) -> None:
+        """Save authoritative per-session standings from SessionInfo YAML."""
+        sessions = self.session_info.get("session_results", [])
+        if not sessions and iracing_bridge.is_connected:
+            sessions = iracing_bridge.session_data.get("session_results", [])
+
+        if not sessions:
+            logger.info("[Analysis] No session results available to persist")
+            return
+
+        def _to_int(value: object, default: int = 0) -> int:
+            try:
+                return int(value)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                return default
+
+        def _to_float(value: object, default: float = -1.0) -> float:
+            try:
+                return float(value)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                return default
+
+        rows: list[tuple] = []
+        for sess in sessions:
+            if not isinstance(sess, dict):
+                continue
+
+            session_num = _to_int(sess.get("session_num", sess.get("index", 0)), 0)
+            session_type = str(sess.get("session_type", sess.get("type", "")) or "")
+            session_name = str(sess.get("session_name", sess.get("name", "")) or "")
+            results_positions = sess.get("results_positions") or sess.get("ResultsPositions") or []
+
+            if not isinstance(results_positions, list):
+                continue
+
+            for rp in results_positions:
+                if not isinstance(rp, dict):
+                    continue
+                car_idx = _to_int(rp.get("car_idx", rp.get("CarIdx", -1)), -1)
+                if car_idx < 0:
+                    continue
+
+                rows.append((
+                    session_num,
+                    session_type,
+                    session_name,
+                    car_idx,
+                    _to_int(rp.get("position", rp.get("Position", 0)), 0),
+                    _to_int(rp.get("class_position", rp.get("ClassPosition", 0)), 0),
+                    _to_float(rp.get("fastest_time", rp.get("FastestTime", -1)), -1.0),
+                    _to_float(rp.get("total_time", rp.get("Time", -1)), -1.0),
+                    _to_int(rp.get("lap", rp.get("Lap", 0)), 0),
+                    _to_int(rp.get("incidents", rp.get("Incidents", 0)), 0),
+                    str(rp.get("reason_out", rp.get("ReasonOutStr", "")) or ""),
+                    _to_float(rp.get("interval", rp.get("Interval", -1)), -1.0),
+                    _to_float(rp.get("gap", rp.get("Gap", -1)), -1.0),
+                    1,
+                ))
+
+        if not rows:
+            logger.info("[Analysis] Session results payload contained no usable rows")
+            return
+
+        conn.executemany(
+            """INSERT OR REPLACE INTO session_results
+               (session_num, session_type, session_name, car_idx, position,
+                class_position, fastest_time, total_time, lap, incidents,
+                reason_out, interval, gap, is_final_snapshot)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+        conn.commit()
+        logger.info("[Analysis] Saved %d session_results rows", len(rows))
 
     @staticmethod
     def _estimate_avg_lap_time(conn: sqlite3.Connection) -> float:

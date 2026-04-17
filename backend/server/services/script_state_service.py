@@ -118,6 +118,9 @@ class ScriptStateService:
             "segments": {},           # segment_id → {hash, capture_state, clip_path, ...}
             "capture_range": None,    # {start: float, end: float} or None
             "trash": [],              # list of {segment_id, clip_path, invalidated_at, reason}
+            "overlay_ui_config": {
+                "ui_zoom": 1.0,
+            },
             "pip_config": {           # PiP overlay configuration
                 "enabled": False,
                 "position": "bottom-right",   # top-left, top-right, bottom-left, bottom-right
@@ -511,6 +514,37 @@ class ScriptStateService:
         return False
 
     # ── PiP Configuration ───────────────────────────────────────────────────
+
+    def get_overlay_ui_config(self, project_dir: str) -> dict:
+        """Get persisted overlay preview UI configuration."""
+        state = self.load_state(project_dir)
+        config = state.get("overlay_ui_config", {})
+        defaults = self._default_state()["overlay_ui_config"]
+        ui_zoom = config.get("ui_zoom", defaults["ui_zoom"])
+        try:
+            ui_zoom = float(ui_zoom)
+        except (TypeError, ValueError):
+            ui_zoom = defaults["ui_zoom"]
+        ui_zoom = max(0.5, min(2.0, ui_zoom))
+        return {
+            "ui_zoom": ui_zoom,
+        }
+
+    def update_overlay_ui_config(self, project_dir: str, updates: dict) -> dict:
+        """Update persisted overlay preview UI configuration."""
+        state = self.load_state(project_dir)
+        current = self.get_overlay_ui_config(project_dir)
+
+        if "ui_zoom" in updates and updates["ui_zoom"] is not None:
+            try:
+                zoom_value = float(updates["ui_zoom"])
+            except (TypeError, ValueError):
+                zoom_value = current["ui_zoom"]
+            current["ui_zoom"] = max(0.5, min(2.0, zoom_value))
+
+        state["overlay_ui_config"] = current
+        self.save_state(project_dir, state)
+        return current
 
     def get_pip_config(self, project_dir: str) -> dict:
         """Get PiP overlay configuration."""

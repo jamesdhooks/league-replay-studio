@@ -64,6 +64,13 @@ class OverlayAugmentRequest(BaseModel):
     element_id: str | None = None
 
 
+class OverlayEditHtmlRequest(BaseModel):
+    prompt: str
+    html_content: str
+    template_id: str | None = None
+    section: str = "race"
+
+
 # ── Status / discovery ─────────────────────────────────────────────────────
 
 
@@ -178,6 +185,32 @@ async def generate_overlay_element(body: OverlayGenerateRequest):
 
 # ── Overlay augmentation shortcut ──────────────────────────────────────────
 
+# ── Overlay HTML edit shortcut ─────────────────────────────────────────────
+
+
+@router.post("/overlay/edit-html")
+async def edit_overlay_html(body: OverlayEditHtmlRequest):
+    """Shortcut for overlay_html_edit skill — modify a full overlay HTML template."""
+    logger.info("[LLM API] Overlay edit-html prompt='%s'", body.prompt[:80])
+    context = {
+        "current_html": body.html_content,
+        "section": body.section,
+        "template_id": body.template_id,
+    }
+    try:
+        result = await llm_service.execute_skill(
+            skill_id="overlay_html_edit",
+            user_prompt=body.prompt,
+            context=context,
+        )
+    except LLMNotAvailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except LLMSkillError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except LLMProviderError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return result
+
 
 @router.post("/overlay/augment")
 async def augment_overlay_element(body: OverlayAugmentRequest):
@@ -190,13 +223,14 @@ async def augment_overlay_element(body: OverlayAugmentRequest):
         if not preset:
             raise HTTPException(status_code=404, detail="Preset not found")
         context["preset_variables"] = preset.get("variables", {})
+        elements = preset.get("sections", {}).get(body.section, [])
+        context["existing_elements"] = elements
 
         if body.element_id:
-            elements = preset.get("sections", {}).get(body.section, [])
             element = next((e for e in elements if e.get("id") == body.element_id), None)
             if not element:
                 raise HTTPException(status_code=404, detail="Element not found in preset section")
-            context["element"] = element
+            context["target_element"] = element
 
     try:
         result = await llm_service.execute_skill(

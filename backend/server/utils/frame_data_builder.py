@@ -74,6 +74,9 @@ def _empty_frame_data(section: str) -> dict[str, Any]:
         "current_lap": 0,
         "total_laps": 0,
         "session_time": "00:00:00",
+        "session_time_seconds": 0.0,
+        "replay_frame": 0,
+        "frame_timestamp_ms": 0,
         "flag": "green",
         # Focused driver
         "driver_name": None,
@@ -158,6 +161,64 @@ def build_frame_data(
         return _empty_frame_data(section)
 
     try:
+        def load_tick_standings(tick_id: int) -> list[dict[str, Any]]:
+            rows = conn.execute(
+                """
+                SELECT * FROM car_states
+                WHERE tick_id = ?
+                ORDER BY position ASC
+                """,
+                (tick_id,),
+            ).fetchall()
+            states = [dict(r) for r in rows]
+            if not states:
+                return []
+
+            entries: list[dict[str, Any]] = []
+            leader_est_local: Optional[float] = None
+            est_times: list[Optional[float]] = []
+            for state in states[:20]:
+                if state.get("position") == 1:
+                    leader_est_local = state.get("est_time")
+                drv = drivers.get(state.get("car_idx", -1), {})
+                entries.append({
+                    "position": state.get("position", 0),
+                    "driver_name": drv.get("user_name") or f"Car #{drv.get('car_number') or state.get('car_idx', '?')}",
+                    "car_number": drv.get("car_number", ""),
+                    "is_player": state.get("car_idx") == focused_car_idx,
+                    "iracing_cust_id": drv.get("iracing_cust_id", 0),
+                    "gap": "Leader",
+                    "relative": None,
+                    "best_lap_time": _format_lap_time(state.get("best_lap_time", -1.0) or -1.0),
+                    "nickname": None,
+                    "avatar": None,
+                })
+                est_times.append(state.get("est_time"))
+
+            for idx, (state, entry) in enumerate(zip(states[:20], entries)):
+                est = state.get("est_time")
+                if state.get("position") == 1:
+                    entry["gap"] = "Leader"
+                elif leader_est_local is not None and est is not None and est >= leader_est_local:
+                    gap_secs = est - leader_est_local
+                    entry["gap"] = (
+                        f"+{gap_secs:.3f}"
+                        if gap_secs < _GAP_PRECISION_THRESHOLD
+                        else f"+{gap_secs:.1f}"
+                    )
+                else:
+                    entry["gap"] = "---"
+
+                if idx > 0 and est is not None:
+                    prev_est = est_times[idx - 1]
+                    if prev_est is not None:
+                        rel_secs = est - prev_est
+                        if 0 <= rel_secs < _GAP_PRECISION_THRESHOLD:
+                            entry["relative"] = f"+{rel_secs:.3f}"
+                        elif rel_secs >= _GAP_PRECISION_THRESHOLD:
+                            entry["relative"] = f"+{rel_secs:.1f}"
+            return entries
+
         # ── 1. Find the nearest recorded tick ────────────────────────────────
         tick_row = conn.execute(
             """
@@ -191,6 +252,122 @@ def build_frame_data(
             "SELECT * FROM drivers WHERE is_spectator = 0"
         ).fetchall()
         drivers: dict[int, dict] = {r["car_idx"]: dict(r) for r in driver_rows}
+
+        has_session_results = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_results'"
+        ).fetchone() is not None
+
+        def load_session_results_standings(
+            session_type_token: str,
+            pick: str,
+            time_field: str,
+        ) -> list[dict[str, Any]]:
+            if not has_session_results:
+                return []
+
+            where_like = f"%{session_type_token.lower()}%"
+            order = "ASC" if pick == "first" else "DESC"
+            session_row = conn.execute(
+                """
+                SELECT session_num
+                FROM session_results
+                WHERE LOWER(session_type) LIKE ?
+                GROUP BY session_num
+                ORDER BY session_num """ + order + """
+                LIMIT 1
+                """,
+                (where_like,),
+            ).fetchone()
+            if not session_row:
+                return []
+
+            rows = conn.execute(
+                """
+                SELECT sr.*, d.user_name, d.car_number, d.iracing_cust_id
+                FROM session_results sr
+                LEFT JOIN drivers d ON d.car_idx = sr.car_idx
+                WHERE sr.session_num = ?
+                ORDER BY sr.position ASC
+                """,
+                (int(session_row["session_num"]),),
+            ).fetchall()
+            results = [dict(r) for r in rows if (r["position"] or 0) > 0]
+            if not results:
+                return []
+
+            entries: list[dict[str, Any]] = []
+            metric_vals: list[Optional[float]] = []
+            leader_metric: Optional[float] = None
+
+            for row in results[:20]:
+                metric = row.get(time_field)
+                if metric is not None and metric >= 0:
+                    if leader_metric is None:
+                        leader_metric = metric
+                else:
+                    metric = None
+
+                metric_vals.append(metric)
+                drv = drivers.get(row.get("car_idx", -1), {})
+                entries.append({
+                    "position": row.get("position", 0),
+                    "driver_name": (
+                        row.get("user_name")
+                        or drv.get("user_name")
+                        or f"Car #{row.get('car_idx', '?')}"
+                    ),
+                    "car_number": row.get("car_number") or drv.get("car_number", ""),
+                    "is_player": row.get("car_idx") == focused_car_idx,
+                    "iracing_cust_id": row.get("iracing_cust_id") or drv.get("iracing_cust_id", 0),
+                    "gap": "Leader",
+                    "relative": None,
+                    "best_lap_time": _format_lap_time(row.get("fastest_time", -1.0) or -1.0),
+                    "nickname": None,
+                    "avatar": None,
+                })
+
+            for idx, (row, entry) in enumerate(zip(results[:20], entries)):
+                metric = metric_vals[idx]
+                if idx == 0:
+                    entry["gap"] = "Leader"
+                elif metric is not None and leader_metric is not None and metric >= leader_metric:
+                    gap_secs = metric - leader_metric
+                    entry["gap"] = (
+                        f"+{gap_secs:.3f}"
+                        if gap_secs < _GAP_PRECISION_THRESHOLD
+                        else f"+{gap_secs:.1f}"
+                    )
+                else:
+                    # Fallback to iRacing YAML gap/interval fields if present.
+                    raw_gap = row.get("gap")
+                    if raw_gap is not None and raw_gap >= 0:
+                        entry["gap"] = (
+                            f"+{raw_gap:.3f}"
+                            if raw_gap < _GAP_PRECISION_THRESHOLD
+                            else f"+{raw_gap:.1f}"
+                        )
+                    else:
+                        entry["gap"] = "---"
+
+                if idx > 0:
+                    prev_metric = metric_vals[idx - 1]
+                    if metric is not None and prev_metric is not None and metric >= prev_metric:
+                        rel_secs = metric - prev_metric
+                        entry["relative"] = (
+                            f"+{rel_secs:.3f}"
+                            if rel_secs < _GAP_PRECISION_THRESHOLD
+                            else f"+{rel_secs:.1f}"
+                        )
+                    else:
+                        raw_interval = row.get("interval")
+                        if raw_interval is not None and raw_interval >= 0:
+                            entry["relative"] = (
+                                f"+{raw_interval:.3f}"
+                                if raw_interval < _GAP_PRECISION_THRESHOLD
+                                else f"+{raw_interval:.1f}"
+                            )
+
+            return entries
 
         # ── 4. Determine focused car ─────────────────────────────────────────
         if focused_car_idx is None:
@@ -274,6 +451,53 @@ def build_frame_data(
                     focused_relative = entry.get("relative")
                     break
 
+        # ── 5c. Build section-specific standings snapshots ───────────────────
+        # Qualifying snapshot: earliest tick in captured race session where
+        # positions are assigned (typically pre-grid / opening moments).
+        # Final snapshot: latest tick with assigned positions.
+        qualifying_authoritative = load_session_results_standings(
+            session_type_token="qual",
+            pick="first",
+            time_field="fastest_time",
+        )
+        final_authoritative = load_session_results_standings(
+            session_type_token="race",
+            pick="last",
+            time_field="total_time",
+        )
+
+        qualifying_tick_row = conn.execute(
+            """
+            SELECT DISTINCT rt.id
+            FROM race_ticks rt
+            JOIN car_states cs ON cs.tick_id = rt.id
+            WHERE cs.position > 0
+            ORDER BY rt.session_time ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        qualifying_tick_standings = load_tick_standings(int(qualifying_tick_row["id"])) if qualifying_tick_row else []
+        qualifying_standings = qualifying_authoritative or qualifying_tick_standings
+
+        final_tick_row = conn.execute(
+            """
+            SELECT DISTINCT rt.id
+            FROM race_ticks rt
+            JOIN car_states cs ON cs.tick_id = rt.id
+            WHERE cs.position > 0
+            ORDER BY rt.session_time DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        final_tick_standings = load_tick_standings(int(final_tick_row["id"])) if final_tick_row else []
+        final_standings = final_authoritative or final_tick_standings
+
+        section_standings = standings
+        if section in {"qualifying", "qualifying_results"} and qualifying_standings:
+            section_standings = qualifying_standings
+        elif section in {"results", "race_results"} and final_standings:
+            section_standings = final_standings
+
         # ── 6. Derive flag status ────────────────────────────────────────────
         if tick.get("flag_checkered"):
             flag = "checkered"
@@ -308,6 +532,9 @@ def build_frame_data(
             "current_lap": tick.get("race_laps", 0),
             "total_laps": 0,       # not stored in DB; caller may override
             "session_time": _format_session_time(session_time),
+            "session_time_seconds": round(float(session_time), 3),
+            "replay_frame": tick.get("replay_frame", 0),
+            "frame_timestamp_ms": int(round(float(session_time) * 1000.0)),
             "flag": flag,
             # Focused driver — populated below if we have state
             "driver_name": None,
@@ -334,7 +561,9 @@ def build_frame_data(
             "pit_window_start": None,
             "pit_window_end": None,
             # Standings
-            "standings": standings,
+            "standings": section_standings,
+            "qualifying_standings": qualifying_standings,
+            "final_standings": final_standings,
             # Championship (populated by data plugin layer)
             "championship_standings": [],
             # 3rd party enrichment (populated by data plugin layer)

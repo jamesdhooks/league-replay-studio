@@ -79,8 +79,25 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM ── Playwright Chromium runtime ────────────────────────────
+echo [2/6] Ensuring Playwright Chromium is available...
+
+set "PLAYWRIGHT_BROWSERS_DIR=%LOCALAPPDATA%\ms-playwright"
+dir /b "%PLAYWRIGHT_BROWSERS_DIR%\chromium-*" >nul 2>&1
+if errorlevel 1 (
+    echo       Installing Playwright Chromium...
+    python -m playwright install chromium
+    if errorlevel 1 (
+        echo ERROR: Failed to install Playwright Chromium.
+        pause
+        exit /b 1
+    )
+) else (
+    echo       Playwright Chromium already installed.
+)
+
 REM ── Native C++ capture service ─────────────────────────────
-echo [2/6] Native capture service...
+echo [3/6] Native capture service...
 
 set "NATIVE_SRC=%BACKEND%\native_capture"
 set "NATIVE_EXE=%NATIVE_SRC%\build\Release\lrs_capture.exe"
@@ -129,7 +146,7 @@ echo       lrs_capture.exe built successfully.
 :native_done
 
 REM ── Node.js dependencies ───────────────────────────────────
-echo [3/6] Setting up Node.js environment...
+echo [4/6] Setting up Node.js environment...
 
 cd /d "%FRONTEND%"
 if not exist "node_modules" (
@@ -145,7 +162,7 @@ if not exist "node_modules" (
 )
 
 REM ── Build frontend ─────────────────────────────────────────
-echo [4/6] Building frontend...
+echo [5/6] Building frontend...
 
 if "%DEV_WEB_HMR%"=="1" (
     echo       Dev mode detected (^--web ^--reload^) - starting Vite HMR server on 3189...
@@ -160,7 +177,7 @@ if "%DEV_WEB_HMR%"=="1" (
 )
 
 REM ── Launch application ─────────────────────────────────────
-echo [5/6] Launching League Replay Studio...
+echo [6/6] Launching League Replay Studio...
 echo.
 
 cd /d "%BACKEND%"
@@ -173,7 +190,7 @@ python app.py %RUN_ARGS%
 REM Capture Python exit code and clean up remaining processes
 set "PYTHON_EXIT_CODE=%ERRORLEVEL%"
 echo.
-echo [5/6] Cleaning up after exit...
+echo [6/6] Cleaning up after exit...
 
 REM Force-kill any remaining LRS processes on ports 6177 and 3189
 REM (in case Python didn't terminate or Ctrl+C orphaned child processes)

@@ -27,6 +27,7 @@ class WebSocketClient {
    * Connect to the WebSocket server.
    */
   connect() {
+    this._shouldReconnect = true
     if (this._ws && this._ws.readyState === WebSocket.OPEN) return
 
     try {

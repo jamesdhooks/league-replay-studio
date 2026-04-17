@@ -1,0 +1,14 @@
+{
+  "id": "custom_44f0c045",
+  "name": "Broadcast (Copy)",
+  "description": "Full broadcast overlay with driver standings, lap counter, and timing tower",
+  "style": "broadcast",
+  "is_builtin": false,
+  "version": "1.0.0",
+  "resolutions": [
+    "1080p",
+    "1440p",
+    "4k"
+  ],
+  "preview_image": null
+}

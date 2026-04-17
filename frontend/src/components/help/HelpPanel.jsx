@@ -84,7 +84,7 @@ const CONTENT = {
   workflow: (
     <div className="space-y-4">
       <h2 className="text-base font-semibold text-text-primary">Pipeline Workflow</h2>
-      <p className="text-sm text-text-secondary">Projects progress through five steps. You can jump back to any completed step.</p>
+      <p className="text-sm text-text-secondary">Projects progress through six steps. You can jump back to any completed step.</p>
       <div className="space-y-3">
         {[
           { step: '1', icon: BarChart3, label: 'Analysis',    color: 'text-event-battle',   desc: 'LRS drives the replay at 16× speed and reads iRacing telemetry every ~20ms. It builds a SQLite database of every car position, surface state, and camera switch, then runs 8 event detectors across that data.' },

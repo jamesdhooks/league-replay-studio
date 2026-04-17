@@ -4,6 +4,7 @@ import { useHighlight } from '../../context/HighlightContext'
 import { useToast } from '../../context/ToastContext'
 import { useIRacing } from '../../context/IRacingContext'
 import { EVENT_TYPE_LABELS } from '../../context/HighlightContext'
+import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { apiPost } from '../../services/api'
 import { formatTimePrecise, formatTime } from '../../utils/time'
 import EventControlsBar from '../ui/EventControlsBar'
@@ -47,8 +48,16 @@ export default function EventInspectorPanel({ projectId }) {
   const [previewSeeking, setPreviewSeeking] = useState(false)
   const [previewError, setPreviewError] = useState(null)
   const [streamKey, setStreamKey] = useState(0)
+  const [streamFps] = useLocalStorage('lrs:stream:fps', 15)
+  const [mjpegQuality] = useLocalStorage('lrs:stream:mjpegQuality', 85)
+  const [mjpegMaxWidth] = useLocalStorage('lrs:stream:mjpegMaxWidth', 1280)
   const imgRef = useRef(null)
   const seekAbortRef = useRef(null)
+
+  const previewStreamUrl = useMemo(
+    () => `/api/iracing/stream?fps=${streamFps}&quality=${mjpegQuality}&max_width=${mjpegMaxWidth}&_k=${streamKey}`,
+    [streamFps, mjpegQuality, mjpegMaxWidth, streamKey],
+  )
 
   // ── Find the selected event ──────────────────────────────────────────────
   const selectedEvent = useMemo(
@@ -396,7 +405,7 @@ export default function EventInspectorPanel({ projectId }) {
             <img
               key={streamKey}
               ref={imgRef}
-              src={`/api/iracing/stream?fps=15&quality=65&max_width=640`}
+              src={previewStreamUrl}
               alt="Live preview"
               className="w-full h-full object-cover"
               onLoad={() => setPreviewError(null)}

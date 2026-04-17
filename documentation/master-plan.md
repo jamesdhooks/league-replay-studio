@@ -2140,8 +2140,8 @@ src/
 │   │   ├── CameraPreview.jsx      # Camera angle preview
 │   │   └── CameraTimeline.jsx     # Camera assignment timeline
 │   ├── overlays/
+│   │   ├── OverlayStudio.jsx      # Unified overlay workflow (Preview / Design / Build / Data / PiP)
 │   │   ├── OverlayEditor.jsx      # Split-pane Monaco HTML editor + live preview
-│   │   ├── OverlayPanel.jsx       # Template library browser + preset section launcher
 │   │   ├── EditorPreview.jsx      # Live overlay preview composited on video
 │   │   ├── DataContextInspector.jsx # Template variable browser with live sample data
 │   │   ├── AnimationPicker.jsx    # CSS keyframe animation generator

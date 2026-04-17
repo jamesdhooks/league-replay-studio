@@ -14,6 +14,7 @@ import {
   Video,
   BarChart2,
   Scissors,
+  Clapperboard,
   Upload as UploadIcon,
   Youtube,
 } from 'lucide-react'
@@ -70,7 +71,8 @@ function PipelinePanel() {
     { id: 'capture', label: 'Capture', icon: Video, description: 'Record replay video' },
     { id: 'analysis', label: 'Analysis', icon: BarChart2, description: 'Detect race events' },
     { id: 'editing', label: 'Editing', icon: Scissors, description: 'Apply highlight config' },
-    { id: 'export', label: 'Export', icon: UploadIcon, description: 'Encode video' },
+    { id: 'compose', label: 'Compose', icon: Clapperboard, description: 'Trim, overlay & stitch clips' },
+    { id: 'export', label: 'Export', icon: UploadIcon, description: 'Encode for delivery' },
     { id: 'upload', label: 'Upload', icon: Youtube, description: 'Upload to YouTube' },
   ], [])
 
@@ -148,7 +150,7 @@ function PipelinePanel() {
     const completed = Object.values(steps).filter(
       s => s.state === 'completed' || s.state === 'skipped'
     ).length
-    return Math.round((completed / 5) * 100)
+    return Math.round((completed / 6) * 100)
   }, [steps])
 
   return (

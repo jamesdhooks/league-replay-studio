@@ -228,6 +228,19 @@ export function OverlayProvider({ children }) {
     }
   }, [])
 
+  // ── Auto-initialize engine on mount ─────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false
+    const autoInit = async () => {
+      const status = await fetchStatus()
+      if (!cancelled && status && !status.engine_initialized) {
+        await initEngine()
+      }
+    }
+    autoInit()
+    return () => { cancelled = true }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── WebSocket subscriptions ──────────────────────────────────────────────
   useEffect(() => {
     const unsubs = [

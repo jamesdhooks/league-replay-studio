@@ -436,7 +436,7 @@ const LLM_PROVIDERS = [
   { value: 'none', label: 'Disabled' },
   { value: 'openai', label: 'OpenAI (GPT-4o, GPT-4o-mini)' },
   { value: 'anthropic', label: 'Anthropic (Claude 3.5 Sonnet, Haiku)' },
-  { value: 'google', label: 'Google (Gemini 1.5 Pro, Flash)' },
+  { value: 'google', label: 'Google (Gemini 2.5 Pro, Flash)' },
   { value: 'custom', label: 'Custom (OpenAI-compatible endpoint)' },
 ]
 
@@ -451,8 +451,8 @@ const LLM_MODEL_SUGGESTIONS = {
     { value: 'claude-3-5-haiku-20241022', label: 'Claude 3.5 Haiku (faster, cheaper)' },
   ],
   google: [
-    { value: 'gemini-1.5-pro', label: 'Gemini 1.5 Pro (recommended)' },
-    { value: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash (faster, cheaper)' },
+    { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (recommended)' },
+    { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (faster, cheaper)' },
   ],
   custom: [],
   none: [],

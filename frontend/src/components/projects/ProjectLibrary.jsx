@@ -283,22 +283,11 @@ function ProjectLibrary({ onOpenProject }) {
 function EmptyState({ onNewProject }) {
   return (
     <div className="flex flex-col items-center justify-center py-20 space-y-5">
-      <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-gradient-from via-gradient-via to-gradient-to
-                      flex items-center justify-center shadow-glow">
-        <svg
-          className="w-10 h-10 text-white"
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-          strokeWidth={1.5}
-        >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347a1.125 1.125 0 0 1-1.667-.986V5.653Z"
-          />
-        </svg>
-      </div>
+      <img
+        src="/assets/logo_2048.png"
+        alt="League Replay Studio"
+        className="w-20 h-20 object-contain drop-shadow-[0_0_10px_rgba(255,255,255,0.22)]"
+      />
       <h2 className="text-2xl font-extrabold text-gradient">
         League Replay Studio
       </h2>

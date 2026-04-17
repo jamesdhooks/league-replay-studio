@@ -12,12 +12,15 @@ import { Loader2, ZoomIn, ZoomOut, Maximize2, Move, MousePointer2 } from 'lucide
  */
 export default function EditorPreview({
   previewData,
+  previewError,
   isRendering,
   renderTime,
   resolution,
   elementPickerActive,
   onToggleElementPicker,
   onElementSelected,
+  previewSection = 'race',
+  onSectionChange,
 }) {
   const [zoom, setZoom] = useState(0.5)
   const containerRef = useRef(null)
@@ -58,6 +61,25 @@ export default function EditorPreview({
       <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-bg-secondary/50">
         <div className="flex items-center gap-2">
           <span className="text-xs font-medium text-text-secondary">Preview</span>
+
+          {/* Section picker */}
+          {onSectionChange && (
+            <div className="flex items-center gap-0.5 bg-bg-primary rounded p-0.5">
+              {[{v:'intro',l:'Intro'},{v:'qualifying_results',l:'Qual'},{v:'race',l:'Race'},{v:'race_results',l:'Results'}].map(({v, l}) => (
+                <button
+                  key={v}
+                  onClick={() => onSectionChange(v)}
+                  className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
+                    previewSection === v
+                      ? 'bg-accent text-white'
+                      : 'text-text-tertiary hover:text-text-primary'
+                  }`}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
+          )}
 
           {/* Render timing */}
           {renderTime != null && (
@@ -130,6 +152,14 @@ export default function EditorPreview({
               <>
                 <Loader2 className="w-8 h-8 animate-spin text-blue-400" />
                 <span className="text-sm">Rendering preview…</span>
+              </>
+            ) : previewError ? (
+              <>
+                <div className="w-24 h-14 rounded border-2 border-dashed border-danger/50 flex items-center justify-center">
+                  <Move className="w-6 h-6 text-danger/60" />
+                </div>
+                <span className="text-sm text-danger">Preview render failed</span>
+                <span className="text-xs text-text-tertiary max-w-md text-center">{previewError}</span>
               </>
             ) : (
               <>

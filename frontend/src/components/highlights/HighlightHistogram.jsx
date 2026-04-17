@@ -5,12 +5,13 @@ import { useTimeline, EVENT_COLORS } from '../../context/TimelineContext'
 import { useToast } from '../../context/ToastContext'
 import { useIRacing } from '../../context/IRacingContext'
 import { formatTime, formatDuration } from '../../utils/time'
-import { Columns3, ArrowRight, RotateCw, ChevronDown, ChevronRight, Download, FileText, Loader2, Zap } from 'lucide-react'
+import { Columns3, ArrowRight, RotateCw, Download, FileText, Loader2, Zap } from 'lucide-react'
 import ScoringReportModal from './ScoringReportModal'
 import EventTile from './EventTile'
 import ProductionColumn from './ProductionColumn'
 import RangeSlider from '../ui/RangeSlider'
 import { TimeGutter, TimeGutterH } from './TimeGutter'
+import SectionCollapseHeader from '../ui/SectionCollapseHeader'
 
 /**
  * HighlightHistogram — Unified score histogram + result timeline.
@@ -291,86 +292,76 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
     <div className="flex flex-col h-full min-h-0 overflow-hidden">
 
       {/* ── Header bar ─────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-bg-secondary shrink-0">
-        <button
-          onClick={() => onToggle ? onToggle() : _setLocalCollapsed(v => !v)}
-          className="flex items-center gap-2 shrink-0 hover:text-text-primary transition-colors"
-        >
-          {histogramCollapsed ? <ChevronRight className="w-3 h-3 text-text-tertiary" /> : <ChevronDown className="w-3 h-3 text-text-tertiary" />}
-          <Columns3 size={13} className="text-accent shrink-0" />
-          <span className="text-xs font-semibold text-text-primary uppercase tracking-wider whitespace-nowrap">
-            Score Histogram
-          </span>
-        </button>
-        {!histogramCollapsed && (
-          <>
-        <span className="text-xs text-text-disabled">
-          {allEvents.length} events · {formatDuration(totalDuration)}
-        </span>
-        <div className="flex-1" />
-        {/* Horizontal / Vertical toggle */}
-        <button
-          onClick={() => setHorizontal(v => !v)}
-          className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium border transition-colors
-            ${horizontal
-              ? 'bg-accent/15 text-accent border-accent/30'
-              : 'text-text-tertiary border-border-subtle hover:text-text-secondary hover:border-border'}`}
-        >
-          <RotateCw size={11} />
-          {horizontal ? 'Horizontal' : 'Vertical'}
-        </button>
-        <button
-          onClick={() => setCompress(v => !v)}
-          className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium border transition-colors
-            ${compress
-              ? 'bg-accent/15 text-accent border-accent/30'
-              : 'text-text-tertiary border-border-subtle hover:text-text-secondary hover:border-border'}`}
-        >
-          ⇟ {compress ? 'Compressed' : 'Compress'}
-        </button>
-        <div className="w-px h-4 bg-border-subtle mx-1" />
-        <ArrowRight size={12} className="text-accent shrink-0" />
-        <span className="text-xs font-semibold text-text-primary uppercase tracking-wider whitespace-nowrap">
-          Production
-        </span>
-        <span className="text-xs text-text-disabled">
-          {productionTimeline?.metrics?.segmentCount || 0} segs · {formatDuration(productionTimeline?.metrics?.duration || 0)}
-          {(productionTimeline?.metrics?.mergeCount || 0) > 0 && ` · ${productionTimeline.metrics.mergeCount} merged`}
-          {(productionTimeline?.metrics?.pipCount || 0) > 0 && ` · ${productionTimeline.metrics.pipCount} PIP`}
-        </span>
-        <div className="w-px h-4 bg-border-subtle mx-1" />
-        <button
-          onClick={() => setShowReport(true)}
-          className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium border transition-colors
-            text-text-tertiary border-border-subtle hover:text-text-secondary hover:border-border"
-        >
-          <FileText size={11} />
-          View Report
-        </button>
-        <button
-          onClick={() => setAutoGenerate(v => !v)}
-          title={autoGenerate ? 'Auto-generate on — click to disable' : 'Auto-generate script on changes'}
-          className={`p-1.5 rounded transition-colors ${
-            autoGenerate
-              ? 'text-accent bg-accent/15 hover:bg-accent/25'
-              : 'text-text-tertiary hover:text-text-secondary hover:bg-bg-primary/50'
-          }`}
-        >
-          <Zap className="w-3.5 h-3.5" />
-        </button>
-        <button
-          onClick={handleApply}
-          disabled={serverScoring}
-          className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium
-                     bg-accent hover:bg-accent-hover disabled:opacity-60 text-white rounded transition-colors"
-        >
-          {serverScoring ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-          {serverScoring ? 'Generating...' : 'Generate Script'}
-        </button>
-          </>
-        )}
-        {histogramCollapsed && <div className="flex-1" />}
-      </div>
+      <SectionCollapseHeader
+        open={!histogramCollapsed}
+        onToggle={() => onToggle ? onToggle() : _setLocalCollapsed(v => !v)}
+        icon={Columns3}
+        title="Score Histogram"
+        subtitle={!histogramCollapsed ? `${allEvents.length} events · ${formatDuration(totalDuration)}` : null}
+        className="border-b border-border bg-bg-secondary"
+        right={!histogramCollapsed ? (
+          <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
+            <button
+              onClick={() => setHorizontal(v => !v)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium border transition-colors
+                ${horizontal
+                  ? 'bg-accent/15 text-accent border-accent/30'
+                  : 'text-text-tertiary border-border-subtle hover:text-text-secondary hover:border-border'}`}
+            >
+              <RotateCw size={11} />
+              {horizontal ? 'Horizontal' : 'Vertical'}
+            </button>
+            <button
+              onClick={() => setCompress(v => !v)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium border transition-colors
+                ${compress
+                  ? 'bg-accent/15 text-accent border-accent/30'
+                  : 'text-text-tertiary border-border-subtle hover:text-text-secondary hover:border-border'}`}
+            >
+              ⇟ {compress ? 'Compressed' : 'Compress'}
+            </button>
+            <div className="w-px h-4 bg-border-subtle mx-1" />
+            <ArrowRight size={12} className="text-accent shrink-0" />
+            <span className="text-xs font-semibold text-text-primary uppercase tracking-wider whitespace-nowrap">
+              Production
+            </span>
+            <span className="text-xs text-text-disabled whitespace-nowrap">
+              {productionTimeline?.metrics?.segmentCount || 0} segs · {formatDuration(productionTimeline?.metrics?.duration || 0)}
+              {(productionTimeline?.metrics?.mergeCount || 0) > 0 && ` · ${productionTimeline.metrics.mergeCount} merged`}
+              {(productionTimeline?.metrics?.pipCount || 0) > 0 && ` · ${productionTimeline.metrics.pipCount} PIP`}
+            </span>
+            <div className="w-px h-4 bg-border-subtle mx-1" />
+            <button
+              onClick={() => setShowReport(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium border transition-colors
+                text-text-tertiary border-border-subtle hover:text-text-secondary hover:border-border"
+            >
+              <FileText size={11} />
+              View Report
+            </button>
+            <button
+              onClick={() => setAutoGenerate(v => !v)}
+              title={autoGenerate ? 'Auto-generate on — click to disable' : 'Auto-generate script on changes'}
+              className={`p-1.5 rounded transition-colors ${
+                autoGenerate
+                  ? 'text-accent bg-accent/15 hover:bg-accent/25'
+                  : 'text-text-tertiary hover:text-text-secondary hover:bg-bg-primary/50'
+              }`}
+            >
+              <Zap className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={handleApply}
+              disabled={serverScoring}
+              className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium
+                         bg-accent hover:bg-accent-hover disabled:opacity-60 text-white rounded transition-colors"
+            >
+              {serverScoring ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+              {serverScoring ? 'Generating...' : 'Generate Script'}
+            </button>
+          </div>
+        ) : null}
+      />
 
       {!histogramCollapsed && (
       <>

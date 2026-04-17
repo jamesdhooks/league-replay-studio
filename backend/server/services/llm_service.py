@@ -17,7 +17,7 @@ All provider communication goes through raw ``httpx`` async HTTP calls
 
 * **openai**    — GPT-4o, GPT-4o-mini, etc.
 * **anthropic** — Claude 3.5 Sonnet, Claude 3 Haiku, etc.
-* **google**    — Gemini 1.5 Pro, Gemini 1.5 Flash, etc.
+* **google**    — Gemini 2.5 Pro, Gemini 2.5 Flash, etc.
 * **custom**    — Any OpenAI-compatible endpoint.
 * **none**      — LLM features disabled.
 

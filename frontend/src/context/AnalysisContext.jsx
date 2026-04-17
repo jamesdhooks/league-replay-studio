@@ -292,6 +292,20 @@ export function AnalysisProvider({ children }) {
     }
   }, [])
 
+  // ── Fallback poll — syncs isAnalyzing/isScanning if WS pipeline:completed is missed ──
+  // Covers the case where the WebSocket reconnects mid-scan and the completion event
+  // is lost. fetchAnalysisStatus resets isAnalyzing/isScanning when the backend
+  // reports status !== 'running', so the UI unblocks within ~10 s.
+  useEffect(() => {
+    if (!isAnalyzing && !isScanning) return
+    const interval = setInterval(() => {
+      if (activeProjectRef.current) {
+        fetchAnalysisStatus(activeProjectRef.current)
+      }
+    }, 10_000)
+    return () => clearInterval(interval)
+  }, [isAnalyzing, isScanning, fetchAnalysisStatus])
+
   // ── Fetch events ────────────────────────────────────────────────────────
   const fetchEvents = useCallback(async (projectId, options = {}) => {
     try {

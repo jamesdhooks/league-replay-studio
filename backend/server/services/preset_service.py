@@ -104,11 +104,13 @@ DEFAULT_ELEMENTS: dict[str, list[dict[str, Any]]] = {
     color: var(--color-accent, #3B82F6);">
     Starting Grid
   </div>
-  {% for entry in frame.standings[:10] %}
+    {% for entry in frame.standings[page_start:page_end] %}
   <div style="display:flex; align-items:center; gap: 0.5em; padding: 0.25em 0.5em;
     margin-bottom: 2px; border-radius: 4px;
     background: {% if entry.is_player %}rgba(59,130,246,0.6){% else %}rgba(0,0,0,0.65){% endif %};
-    font-size: clamp(0.5rem, 0.9vw, 0.9rem);">
+        font-size: clamp(0.5rem, 0.9vw, 0.9rem);"
+        id="grid-row-{{ page_key }}-{{ entry.position | default(loop.index + page_start) }}"
+        data-page-key="{{ page_key }}">
     <span style="font-weight:700; min-width:1.5em; text-align:right;">{{ entry.position }}</span>
     <span style="flex:1; font-weight:{% if entry.is_player %}700{% else %}400{% endif %};">{{ entry.driver_name }}</span>
     <span style="opacity:0.7; font-variant-numeric:tabular-nums;">{{ entry.car_number }}</span>
@@ -116,6 +118,7 @@ DEFAULT_ELEMENTS: dict[str, list[dict[str, Any]]] = {
   {% endfor %}
 </div>""",
             "position": {"x": 5, "y": 10, "w": 25, "h": 80},
+                        "pagination": {"enabled": True, "items_per_page": 10, "cycle_duration_seconds": 0},
             "z_index": 10,
             "visible": True,
         },
@@ -148,7 +151,7 @@ DEFAULT_ELEMENTS: dict[str, list[dict[str, Any]]] = {
             "template": """<div style="position:absolute; left:{{pos.x}}%; top:{{pos.y}}%; width:{{pos.w}}%; height:{{pos.h}}%;
   display:flex; align-items:flex-end; gap:0.8em;
   font-family: var(--font-primary, 'Inter', sans-serif); color: var(--color-primary, #ffffff);">
-  <div style="width:4px; height:70%; border-radius:2px; background: {{ frame.team_color | default(var(--color-accent, '#3B82F6')) }};"></div>
+    <div style="width:4px; height:70%; border-radius:2px; background: {{ frame.team_color | default('#3B82F6') }};"></div>
   <div>
     <div style="font-size: clamp(1.2rem, 2.5vw, 3rem); font-weight:900;
       text-shadow: 0 2px 16px rgba(0,0,0,0.8);">
@@ -205,11 +208,13 @@ DEFAULT_ELEMENTS: dict[str, list[dict[str, Any]]] = {
     color: var(--color-accent, #F59E0B);">
     Race Results
   </div>
-  {% for entry in frame.standings %}
+    {% for entry in frame.standings[page_start:page_end] %}
   <div style="display:flex; align-items:center; gap:0.5em; padding:0.3em 0.6em;
     margin-bottom:2px; border-radius:4px;
     background: {% if entry.position == 1 %}rgba(245,158,11,0.5){% elif entry.is_player %}rgba(59,130,246,0.6){% else %}rgba(0,0,0,0.65){% endif %};
-    font-size: clamp(0.5rem, 0.9vw, 0.9rem);">
+        font-size: clamp(0.5rem, 0.9vw, 0.9rem);"
+        id="results-row-{{ page_key }}-{{ entry.position | default(loop.index + page_start) }}"
+        data-page-key="{{ page_key }}">
     <span style="font-weight:700; min-width:1.5em; text-align:right;">{{ entry.position }}</span>
     <span style="flex:1; font-weight:{% if entry.is_player or entry.position == 1 %}700{% else %}400{% endif %};">{{ entry.driver_name }}</span>
     <span style="opacity:0.7; font-variant-numeric:tabular-nums;">{{ entry.gap }}</span>
@@ -217,6 +222,7 @@ DEFAULT_ELEMENTS: dict[str, list[dict[str, Any]]] = {
   {% endfor %}
 </div>""",
             "position": {"x": 25, "y": 10, "w": 50, "h": 80},
+                        "pagination": {"enabled": True, "items_per_page": 10, "cycle_duration_seconds": 0},
             "z_index": 10,
             "visible": True,
         },
@@ -237,7 +243,13 @@ DEFAULT_VARIABLES: dict[str, Any] = {
 
 # ── Built-in presets ─────────────────────────────────────────────────────────
 
-def _make_builtin_preset(preset_id: str, name: str, description: str, variables: dict | None = None) -> dict[str, Any]:
+def _make_builtin_preset(
+    preset_id: str,
+    name: str,
+    description: str,
+    variables: dict | None = None,
+    template_id: str | None = None,
+) -> dict[str, Any]:
     return {
         "id": preset_id,
         "name": name,
@@ -247,16 +259,23 @@ def _make_builtin_preset(preset_id: str, name: str, description: str, variables:
         "sections": {section: DEFAULT_ELEMENTS.get(section, []) for section in VIDEO_SECTIONS},
         "variables": variables or dict(DEFAULT_VARIABLES),
         "intro_video_path": None,
+        "template_id": template_id,
     }
 
 
 BUILTIN_PRESETS: list[dict[str, Any]] = [
-    _make_builtin_preset("broadcast_preset", "Broadcast", "Full broadcast-style overlay with timing tower, driver card, and lap counter"),
+    _make_builtin_preset(
+        "broadcast_preset",
+        "Broadcast",
+        "Full broadcast-style overlay with timing tower, driver card, and lap counter",
+        template_id="broadcast",
+    ),
     _make_builtin_preset("minimal_preset", "Minimal", "Clean minimal overlay — position badge and driver name only",
                          variables={
                              **DEFAULT_VARIABLES,
                              "--color-accent": {"value": "#10B981", "type": "color", "label": "Accent Color"},
-                         }),
+                         },
+                         template_id="minimal"),
 ]
 
 
@@ -298,6 +317,7 @@ class PresetService:
             "sections": data.get("sections", {section: [] for section in VIDEO_SECTIONS}),
             "variables": data.get("variables", dict(DEFAULT_VARIABLES)),
             "intro_video_path": data.get("intro_video_path"),
+            "template_id": data.get("template_id"),
         }
 
         self._save_preset(preset)
@@ -312,7 +332,7 @@ class PresetService:
         if not preset or preset.get("is_builtin"):
             return None
 
-        for key in ("name", "description", "sections", "variables", "intro_video_path"):
+        for key in ("name", "description", "sections", "variables", "intro_video_path", "template_id"):
             if key in updates:
                 preset[key] = updates[key]
 
@@ -548,6 +568,7 @@ class PresetService:
             try:
                 data = json.loads(preset_path.read_text(encoding="utf-8"))
                 data["is_builtin"] = False
+                data.setdefault("template_id", None)
                 self._custom_presets.append(data)
             except (json.JSONDecodeError, OSError) as exc:
                 logger.warning("[Preset] Failed to load %s: %s", preset_path, exc)

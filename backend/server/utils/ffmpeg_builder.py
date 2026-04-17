@@ -393,6 +393,39 @@ def get_video_duration(ffprobe_path: str, input_file: str) -> Optional[float]:
     return None
 
 
+def get_video_fps(ffprobe_path: str, input_file: str) -> Optional[float]:
+    """Get the primary video stream frame rate using ffprobe."""
+    try:
+        result = subprocess.run(
+            [
+                ffprobe_path,
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=avg_frame_rate,r_frame_rate",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                input_file,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+
+        for line in result.stdout.splitlines():
+            token = (line or "").strip()
+            if not token or token == "0/0":
+                continue
+            if "/" in token:
+                numerator, denominator = token.split("/", 1)
+                fps = float(numerator) / float(denominator)
+            else:
+                fps = float(token)
+            if fps > 0:
+                return fps
+    except (subprocess.SubprocessError, ValueError, OSError, ZeroDivisionError) as exc:
+        logger.warning("[FFmpeg] Failed to get FPS for %s: %s", input_file, exc)
+    return None
+
+
 def validate_output_file(file_path: str, ffprobe_path: Optional[str] = None) -> dict[str, Any]:
     """Validate an encoded output file.
 

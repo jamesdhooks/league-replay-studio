@@ -134,9 +134,32 @@ class ProjectService:
             row = conn.execute(
                 "SELECT * FROM projects WHERE id = ?", (project_id,)
             ).fetchone()
-            return row_to_dict(row) if row else None
+            if not row:
+                return None
+
+            project = row_to_dict(row)
+            # Enrich with persisted per-project metadata (script, clips manifest, etc.).
+            meta = self._load_project_json(project.get("project_dir", ""))
+            for key in (
+                "script",
+                "script_sections",
+                "script_generated_at",
+                "clips_manifest",
+                "capture_manifest",
+            ):
+                if key in meta:
+                    project[key] = meta[key]
+            return project
         finally:
             conn.close()
+
+    def save_project_metadata(self, project_id: int, updates: dict) -> bool:
+        """Persist arbitrary metadata keys into a project's project.json."""
+        project = self.get_project(project_id)
+        if not project:
+            return False
+        self._update_project_json(project["project_dir"], updates)
+        return True
 
     # ── Create ────────────────────────────────────────────────────────────────
 
@@ -228,23 +251,32 @@ class ProjectService:
         if not project:
             return None
 
-        allowed = {"name", "track_name", "session_type", "num_drivers",
-                    "num_laps", "replay_file", "current_step"}
-        filtered = {k: v for k, v in updates.items() if k in allowed}
-        if not filtered:
+        allowed_db = {
+            "name", "track_name", "session_type", "num_drivers",
+            "num_laps", "replay_file", "current_step",
+        }
+        allowed_meta = {
+            "script", "script_sections", "script_generated_at",
+            "clips_manifest", "capture_manifest",
+        }
+
+        db_updates = {k: v for k, v in updates.items() if k in allowed_db}
+        meta_updates = {k: v for k, v in updates.items() if k in allowed_meta}
+
+        if not db_updates and not meta_updates:
             return project
 
-        if "current_step" in filtered and filtered["current_step"] not in WORKFLOW_STEPS:
-            raise ValueError(f"Invalid step: {filtered['current_step']}")
+        if "current_step" in db_updates and db_updates["current_step"] not in WORKFLOW_STEPS:
+            raise ValueError(f"Invalid step: {db_updates['current_step']}")
 
         now = datetime.now(timezone.utc).isoformat()
-        filtered["updated_at"] = now
+        db_updates["updated_at"] = now
 
         # Build SET clause using only validated column names from the allowlist.
         # Keys are guaranteed to be in `allowed` by the filter above.
         # nosemgrep: python.lang.security.audit.formatted-sql-query
-        set_clause = ", ".join(f"{k} = ?" for k in filtered)  # noqa: S608
-        values = list(filtered.values()) + [project_id]
+        set_clause = ", ".join(f"{k} = ?" for k in db_updates)  # noqa: S608
+        values = list(db_updates.values()) + [project_id]
 
         conn = get_connection()
         try:
@@ -254,9 +286,12 @@ class ProjectService:
             conn.commit()
 
             # Update project.json too
-            self._update_project_json(project["project_dir"], filtered)
+            self._update_project_json(project["project_dir"], {
+                **db_updates,
+                **meta_updates,
+            })
 
-            logger.info("[Projects] Updated project #%d: %s", project_id, list(filtered.keys()))
+            logger.info("[Projects] Updated project #%d: %s", project_id, list({**db_updates, **meta_updates}.keys()))
             return self.get_project(project_id)
         finally:
             conn.close()
@@ -553,6 +588,19 @@ class ProjectService:
             meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("[Projects] Failed to update project.json: %s", exc)
+
+    @staticmethod
+    def _load_project_json(project_dir: str) -> dict:
+        """Load raw project.json metadata for a project directory."""
+        if not project_dir:
+            return {}
+        meta_path = Path(project_dir) / "project.json"
+        if not meta_path.exists():
+            return {}
+        try:
+            return json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
 
 
 def _safe_dirname(name: str) -> str:

@@ -19,7 +19,7 @@ GET    /api/replays/discover                  — auto-discover .rpy files
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, PlainTextResponse
@@ -50,6 +50,11 @@ class ProjectUpdate(BaseModel):
     num_laps: Optional[int] = Field(None, ge=0)
     replay_file: Optional[str] = None
     current_step: Optional[str] = None
+    script: Optional[list[dict[str, Any]]] = None
+    script_sections: Optional[dict[str, Any]] = None
+    script_generated_at: Optional[str] = None
+    clips_manifest: Optional[list[dict[str, Any]]] = None
+    capture_manifest: Optional[list[dict[str, Any]]] = None
 
 
 class StepUpdate(BaseModel):

@@ -1,10 +1,11 @@
 import { memo, useState, useEffect, useRef } from 'react'
-import { Eye, WifiOff, ChevronDown, ChevronRight, Zap } from 'lucide-react'
+import { Eye, WifiOff, Zap } from 'lucide-react'
 import { useIRacing } from '../../context/IRacingContext'
 import { useHighlight, EVENT_TYPE_LABELS } from '../../context/HighlightContext'
 import { EVENT_COLORS } from '../../context/TimelineContext'
 import PreviewPlayer from '../analysis/PreviewPlayer'
 import { formatTime } from '../../utils/time'
+import SectionCollapseHeader from '../ui/SectionCollapseHeader'
 
 // Section accent colours — mirrors SECTION_STYLES in HighlightTimeline
 const SECTION_TEXT_COLORS = {
@@ -96,23 +97,17 @@ export default memo(function HighlightPreview({ collapsed, onToggle }) {
 
       <div className="h-full flex flex-col overflow-hidden border-b border-border bg-bg-secondary">
         {/* ── Preview header ───────────────────────────────────────────── */}
-        <button
-          onClick={onToggle}
-          className="flex items-center gap-2 px-3 py-2 w-full text-left hover:bg-bg-primary/40 transition-colors shrink-0"
-        >
-          {collapsed
-            ? <ChevronRight className="w-3 h-3 text-text-tertiary shrink-0" />
-            : <ChevronDown  className="w-3 h-3 text-text-tertiary shrink-0" />}
-          <Eye className="w-3.5 h-3.5 text-accent shrink-0" />
-          <span className="text-xs font-semibold text-text-primary uppercase tracking-wider flex-1">
-            Preview
-          </span>
-          {!isConnected && (
-            <span className="flex items-center gap-1 text-xxs text-text-disabled">
-              <WifiOff className="w-3 h-3" /> Not connected
-            </span>
-          )}
-        </button>
+          <SectionCollapseHeader
+            open={!collapsed}
+            onToggle={onToggle}
+            icon={Eye}
+            title="Preview"
+            right={!isConnected ? (
+              <span className="flex items-center gap-1 text-xxs text-text-disabled">
+                <WifiOff className="w-3 h-3" /> Not connected
+              </span>
+            ) : null}
+          />
 
         {/* ── Expanded body ────────────────────────────────────────────── */}
         {!collapsed && (
@@ -123,19 +118,14 @@ export default memo(function HighlightPreview({ collapsed, onToggle }) {
             {/* ── Event feed overlay (bottom-right) ───────────────────── */}
             <div className="absolute right-3 bottom-3 w-[320px] max-w-[calc(100%-1.5rem)] border border-border rounded-lg bg-bg-primary shadow-xl">
               <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-border-subtle/70 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setFeedCollapsed(v => !v)}
-                  className="flex items-center gap-1.5 min-w-0 flex-1 text-left hover:text-text-primary transition-colors"
-                >
-                  {feedCollapsed
-                    ? <ChevronRight className="w-3 h-3 text-text-tertiary shrink-0" />
-                    : <ChevronDown  className="w-3 h-3 text-text-tertiary shrink-0" />}
-                  <Zap className="w-3.5 h-3.5 text-yellow-400 shrink-0" />
-                  <span className="text-[10px] font-semibold text-text-primary uppercase tracking-wide flex-1">
-                    Event Feed
-                  </span>
-                </button>
+                <SectionCollapseHeader
+                  open={!feedCollapsed}
+                  onToggle={() => setFeedCollapsed(v => !v)}
+                  icon={Zap}
+                  title="Event Feed"
+                  className="min-w-0 flex-1"
+                  buttonClassName="px-0 py-0 gap-1.5 hover:bg-transparent"
+                />
                 {scriptActionLog.length > 0 && (
                   <span className="text-[10px] text-text-tertiary font-mono">
                     {scriptActionLog.length}

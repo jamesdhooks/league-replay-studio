@@ -34,11 +34,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Optional
+
+from server.utils.ffmpeg_builder import get_video_duration, get_video_fps
+from server.utils.overlay_animation import (
+    build_render_signature,
+    compute_frame_data_diff,
+    compute_profile_window_ms,
+    merge_animation_windows,
+    window_indices_for_time_range,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +63,15 @@ def _find_ffmpeg() -> Optional[str]:
     except Exception:
         import shutil
         return shutil.which("ffmpeg")
+
+
+def _find_ffprobe() -> Optional[str]:
+    try:
+        from server.utils.gpu_detection import find_ffprobe
+        return find_ffprobe()
+    except Exception:
+        import shutil
+        return shutil.which("ffprobe")
 
 
 # Allowed extensions for each class of file the compositor handles.
@@ -123,6 +142,98 @@ class OverlayCompositor:
     many times as needed.  The overlay engine (``overlay_engine`` parameter)
     must already be initialised before calling the async methods.
     """
+
+    def __init__(self) -> None:
+        self._last_diagnostics: dict[str, Any] = {}
+
+    @property
+    def last_diagnostics(self) -> dict[str, Any]:
+        return dict(self._last_diagnostics)
+
+    def _set_last_diagnostics(self, diagnostics: dict[str, Any]) -> None:
+        self._last_diagnostics = dict(diagnostics)
+
+    @staticmethod
+    def _probe_clip_timing(clip_path: str) -> tuple[float, float]:
+        ffprobe = _find_ffprobe()
+        if not ffprobe:
+            return 0.0, 0.0
+        duration = get_video_duration(ffprobe, clip_path) or 0.0
+        fps = get_video_fps(ffprobe, clip_path) or 0.0
+        return max(0.0, duration), max(0.0, fps)
+
+    @staticmethod
+    def _resolve_page_index(schedule: list[dict[str, float | int]], elapsed: float) -> int | None:
+        for item in schedule:
+            start = float(item.get("start", 0.0) or 0.0)
+            end = float(item.get("end", start) or start)
+            if start <= elapsed < end or math.isclose(elapsed, end):
+                return int(item.get("page_index", 0) or 0)
+        if schedule:
+            return int(schedule[-1].get("page_index", 0) or 0)
+        return None
+
+    @staticmethod
+    def _build_frame_samples(
+        clip_duration_seconds: float,
+        fps: float,
+        frame_builder: Any,
+    ) -> list[dict[str, Any]]:
+        if clip_duration_seconds <= 0 or fps <= 0:
+            return []
+
+        total_frames = max(1, int(math.ceil(clip_duration_seconds * fps)))
+        samples: list[dict[str, Any]] = []
+        for frame_index in range(total_frames):
+            elapsed = min(clip_duration_seconds, frame_index / fps)
+            frame_data = dict(frame_builder(elapsed))
+            frame_data.setdefault("overlay_clip_elapsed_seconds", round(elapsed, 4))
+            frame_data.setdefault("overlay_clip_duration_seconds", round(clip_duration_seconds, 4))
+            samples.append({
+                "frame_index": frame_index,
+                "elapsed": elapsed,
+                "frame_data": frame_data,
+            })
+        return samples
+
+    def _build_animation_windows(
+        self,
+        samples: list[dict[str, Any]],
+        fps: float,
+        animation_profile: dict[str, Any],
+        trigger_sensitivity: float,
+        cooldown_frames: int,
+        max_animated_seconds: float,
+    ) -> list[dict[str, Any]]:
+        if not samples or fps <= 0:
+            return []
+
+        animation_window_seconds = max(0.0, compute_profile_window_ms(animation_profile) / 1000.0)
+        if max_animated_seconds > 0:
+            animation_window_seconds = min(animation_window_seconds, max_animated_seconds)
+        if animation_window_seconds <= 0:
+            return []
+
+        cooldown_seconds = max(0.0, float(cooldown_frames or 0) / fps)
+        clip_end = samples[-1]["elapsed"] if samples else 0.0
+        windows: list[dict[str, Any]] = []
+        previous_frame_data: dict[str, Any] | None = None
+
+        for sample in samples:
+            frame_data = sample["frame_data"]
+            diff = compute_frame_data_diff(previous_frame_data, frame_data, sensitivity=trigger_sensitivity)
+            frame_data["changed_keys"] = diff.get("changed_keys", [])
+            if diff.get("significant"):
+                start = float(sample["elapsed"])
+                end = min(clip_end, start + animation_window_seconds + cooldown_seconds)
+                windows.append({
+                    "start": start,
+                    "end": end,
+                    "reasons": diff.get("changed_keys") or ["data_change"],
+                })
+            previous_frame_data = frame_data
+
+        return merge_animation_windows(windows)
 
     # ── Low-level FFmpeg compositing ─────────────────────────────────────────
 
@@ -211,6 +322,293 @@ class OverlayCompositor:
         logger.info("[OverlayCompositor] Composited → %s", safe_output)
         return safe_output
 
+    def composite_clip_with_timed_overlays(
+        self,
+        clip_path: str,
+        timed_overlays: list[dict[str, float | str]],
+        output_path: str,
+        crf: int = 18,
+        preset: str = "fast",
+        timeout: int = 300,
+    ) -> Optional[str]:
+        """Composite multiple PNG overlays over specific time windows.
+
+        Each overlay item must contain:
+          - ``path``: PNG path
+          - ``start``: start time in seconds (inclusive)
+          - ``end``: end time in seconds (inclusive)
+        """
+        ffmpeg = _find_ffmpeg()
+        if not ffmpeg:
+            logger.error("[OverlayCompositor] FFmpeg not found")
+            return None
+
+        try:
+            safe_clip = _safe_video_path(clip_path)
+            safe_output = _safe_output_path(output_path)
+        except ValueError as exc:
+            logger.error("[OverlayCompositor] Invalid path: %s", exc)
+            return None
+
+        if not Path(safe_clip).is_file():
+            logger.error("[OverlayCompositor] Clip not found: %s", safe_clip)
+            return None
+
+        safe_overlays: list[dict[str, float | str]] = []
+        for entry in timed_overlays:
+            try:
+                path = _safe_image_path(str(entry.get("path", "")))
+                start = max(0.0, float(entry.get("start", 0.0) or 0.0))
+                end = max(start, float(entry.get("end", start) or start))
+            except (ValueError, TypeError):
+                logger.warning("[OverlayCompositor] Skipping invalid timed overlay entry: %s", entry)
+                continue
+            if not Path(path).is_file():
+                logger.warning("[OverlayCompositor] Timed overlay PNG not found: %s", path)
+                continue
+            safe_overlays.append({"path": path, "start": start, "end": end})
+
+        if not safe_overlays:
+            logger.error("[OverlayCompositor] No valid timed overlays supplied")
+            return None
+
+        # Build FFmpeg inputs and chained overlay filters.
+        # Overlay #i is enabled only for [start,end] to flip pages over time.
+        cmd = [ffmpeg, "-hide_banner", "-loglevel", "warning", "-y", "-i", safe_clip]
+        for overlay in safe_overlays:
+            cmd.extend(["-loop", "1", "-i", str(overlay["path"])])
+
+        filter_parts: list[str] = []
+        prev_stream = "[0:v]"
+        for idx, overlay in enumerate(safe_overlays, start=1):
+            out_stream = f"[v{idx}]"
+            filter_parts.append(
+                f"{prev_stream}[{idx}:v]overlay=0:0:enable='between(t,{float(overlay['start']):.3f},{float(overlay['end']):.3f})'{out_stream}"
+            )
+            prev_stream = out_stream
+
+        cmd.extend([
+            "-filter_complex", ";".join(filter_parts),
+            "-map", prev_stream,
+            "-map", "0:a?",
+            "-codec:a", "copy",
+            "-codec:v", "libx264",
+            "-preset", preset,
+            "-crf", str(crf),
+            safe_output,
+        ])
+
+        try:
+            result = subprocess.run(  # lgtm[py/command-line-injection]
+                cmd, capture_output=True, text=True, timeout=timeout,
+            )
+            if result.returncode != 0:
+                logger.error(
+                    "[OverlayCompositor] Timed FFmpeg overlay failed (rc=%d): %s",
+                    result.returncode,
+                    result.stderr[:500],
+                )
+                return None
+        except subprocess.TimeoutExpired:
+            logger.error("[OverlayCompositor] Timed FFmpeg overlay timed out after %ds", timeout)
+            return None
+        except Exception as exc:
+            logger.error("[OverlayCompositor] Timed FFmpeg overlay error: %s", exc)
+            return None
+
+        logger.info("[OverlayCompositor] Timed composited → %s", safe_output)
+        return safe_output
+
+    def composite_clip_with_timeline_overlays(
+        self,
+        clip_path: str,
+        timeline_overlays: list[dict[str, Any]],
+        output_path: str,
+        crf: int = 18,
+        preset: str = "fast",
+        timeout: int = 300,
+    ) -> Optional[str]:
+        """Composite a mix of static PNGs and frame sequences over timed windows."""
+        ffmpeg = _find_ffmpeg()
+        if not ffmpeg:
+            logger.error("[OverlayCompositor] FFmpeg not found")
+            return None
+
+        try:
+            safe_clip = _safe_video_path(clip_path)
+            safe_output = _safe_output_path(output_path)
+        except ValueError as exc:
+            logger.error("[OverlayCompositor] Invalid path: %s", exc)
+            return None
+
+        if not Path(safe_clip).is_file():
+            logger.error("[OverlayCompositor] Clip not found: %s", safe_clip)
+            return None
+
+        validated: list[dict[str, Any]] = []
+        for entry in timeline_overlays:
+            start = max(0.0, float(entry.get("start", 0.0) or 0.0))
+            end = max(start, float(entry.get("end", start) or start))
+            kind = str(entry.get("type") or "static")
+            validated_entry: dict[str, Any] = {"start": start, "end": end, "type": kind}
+
+            if kind == "sequence":
+                pattern = str(entry.get("pattern") or "")
+                if "%" not in pattern:
+                    logger.warning("[OverlayCompositor] Invalid sequence pattern: %s", pattern)
+                    continue
+                first_frame = pattern % int(entry.get("start_number", 0) or 0)
+                try:
+                    safe_first = _safe_image_path(first_frame)
+                except ValueError:
+                    logger.warning("[OverlayCompositor] Invalid sequence frame path: %s", first_frame)
+                    continue
+                if not Path(safe_first).is_file():
+                    logger.warning("[OverlayCompositor] Sequence first frame missing: %s", safe_first)
+                    continue
+                validated_entry.update({
+                    "pattern": str(Path(pattern).resolve()),
+                    "fps": max(1.0, float(entry.get("fps", 30.0) or 30.0)),
+                    "start_number": int(entry.get("start_number", 0) or 0),
+                })
+            else:
+                try:
+                    path = _safe_image_path(str(entry.get("path", "")))
+                except ValueError:
+                    logger.warning("[OverlayCompositor] Invalid timed overlay PNG: %s", entry)
+                    continue
+                if not Path(path).is_file():
+                    logger.warning("[OverlayCompositor] Timed overlay PNG not found: %s", path)
+                    continue
+                validated_entry["path"] = path
+
+            validated.append(validated_entry)
+
+        if not validated:
+            logger.error("[OverlayCompositor] No valid timeline overlays supplied")
+            return None
+
+        cmd = [ffmpeg, "-hide_banner", "-loglevel", "warning", "-y", "-i", safe_clip]
+        for overlay in validated:
+            if overlay["type"] == "sequence":
+                cmd.extend([
+                    "-framerate", f"{float(overlay['fps']):.6f}",
+                    "-start_number", str(int(overlay["start_number"])),
+                    "-i", str(overlay["pattern"]),
+                ])
+            else:
+                cmd.extend(["-loop", "1", "-i", str(overlay["path"])])
+
+        filter_parts: list[str] = []
+        prev_stream = "[0:v]"
+        for idx, overlay in enumerate(validated, start=1):
+            prepared_stream = f"[ov{idx}]"
+            out_stream = f"[v{idx}]"
+            if overlay["type"] == "sequence":
+                filter_parts.append(
+                    f"[{idx}:v]setpts=PTS+{float(overlay['start']):.3f}/TB{prepared_stream}"
+                )
+            else:
+                filter_parts.append(f"[{idx}:v]setpts=PTS{prepared_stream}")
+            filter_parts.append(
+                f"{prev_stream}{prepared_stream}overlay=0:0:enable='between(t,{float(overlay['start']):.3f},{float(overlay['end']):.3f})'{out_stream}"
+            )
+            prev_stream = out_stream
+
+        cmd.extend([
+            "-filter_complex", ";".join(filter_parts),
+            "-map", prev_stream,
+            "-map", "0:a?",
+            "-codec:a", "copy",
+            "-codec:v", "libx264",
+            "-preset", preset,
+            "-crf", str(crf),
+            safe_output,
+        ])
+
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout,
+            )
+            if result.returncode != 0:
+                logger.error(
+                    "[OverlayCompositor] Timeline FFmpeg overlay failed (rc=%d): %s",
+                    result.returncode,
+                    result.stderr[:500],
+                )
+                return None
+        except subprocess.TimeoutExpired:
+            logger.error("[OverlayCompositor] Timeline FFmpeg overlay timed out after %ds", timeout)
+            return None
+        except Exception as exc:
+            logger.error("[OverlayCompositor] Timeline FFmpeg overlay error: %s", exc)
+            return None
+
+        logger.info("[OverlayCompositor] Timeline composited → %s", safe_output)
+        return safe_output
+
+    @staticmethod
+    def _build_pagination_schedule(
+        preset: dict[str, Any],
+        section: str,
+        frame_data: dict[str, Any],
+        clip_duration_seconds: float,
+    ) -> list[dict[str, float | int]]:
+        """Build time windows and page indices for paginated preset rendering."""
+        if clip_duration_seconds <= 0:
+            return []
+
+        standings = frame_data.get("standings", [])
+        if not isinstance(standings, list) or not standings:
+            return []
+
+        elements = preset.get("sections", {}).get(section, [])
+        pagination: Optional[dict[str, Any]] = None
+        for element in elements:
+            pag = element.get("pagination")
+            if isinstance(pag, dict) and pag.get("enabled"):
+                pagination = pag
+                break
+        if not pagination:
+            return []
+
+        try:
+            items_per_page = int(pagination.get("items_per_page", 10) or 10)
+        except (TypeError, ValueError):
+            items_per_page = 10
+        items_per_page = max(1, items_per_page)
+
+        total_pages = max(1, math.ceil(len(standings) / items_per_page))
+        if total_pages <= 1:
+            return []
+
+        try:
+            cycle_seconds = float(pagination.get("cycle_duration_seconds", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            cycle_seconds = 0.0
+
+        if cycle_seconds > 0:
+            interval = cycle_seconds
+        else:
+            interval = clip_duration_seconds / total_pages
+        interval = max(0.001, interval)
+
+        segment_count = max(1, math.ceil(clip_duration_seconds / interval))
+        schedule: list[dict[str, float | int]] = []
+        for idx in range(segment_count):
+            start = idx * interval
+            if start >= clip_duration_seconds:
+                break
+            end = min(clip_duration_seconds, (idx + 1) * interval)
+            schedule.append({
+                "start": start,
+                "end": end,
+                "page_index": idx % total_pages,
+                "total_pages": total_pages,
+                "interval_seconds": interval,
+            })
+        return schedule
+
     # ── High-level: render + composite ──────────────────────────────────────
 
     async def render_and_composite(
@@ -227,6 +625,11 @@ class OverlayCompositor:
         series_name: str = "",
         track_name: str = "",
         temp_dir: Optional[str] = None,
+        clip_duration_seconds: float = 0.0,
+        animation_orchestration: bool = True,
+        trigger_sensitivity: float = 1.0,
+        cooldown_frames: int = 12,
+        max_animated_seconds: float = 6.0,
     ) -> Optional[str]:
         """Render an overlay PNG and composite it over a video clip.
 
@@ -254,12 +657,23 @@ class OverlayCompositor:
         Returns:
             ``output_path`` on success, ``None`` on failure.
         """
+        diagnostics: dict[str, Any] = {
+            "mode": "static",
+            "template_id": template_id,
+            "section": section,
+            "clip_duration_seconds": float(clip_duration_seconds or 0.0),
+            "trigger_sensitivity": float(trigger_sensitivity or 1.0),
+            "cooldown_frames": int(cooldown_frames or 0),
+            "max_animated_seconds": float(max_animated_seconds or 0.0),
+        }
+
         # 1. Build frame_data from telemetry if not provided
         if frame_data is None:
             if not project_dir:
                 logger.error(
                     "[OverlayCompositor] Either frame_data or project_dir must be provided"
                 )
+                self._set_last_diagnostics({**diagnostics, "error": "missing_frame_data"})
                 return None
             from server.utils.frame_data_builder import build_frame_data
             frame_data = build_frame_data(
@@ -282,10 +696,21 @@ class OverlayCompositor:
         png_path = str(png_dir / f"overlay_{clip_stem}.png")
 
         try:
+            clip_duration = max(0.0, float(clip_duration_seconds or 0.0))
+            clip_fps = 0.0
+            if clip_duration <= 0 or animation_orchestration:
+                probed_duration, probed_fps = self._probe_clip_timing(clip_path)
+                if clip_duration <= 0:
+                    clip_duration = probed_duration
+                clip_fps = probed_fps
+            diagnostics["clip_duration_seconds"] = round(clip_duration, 3)
+            diagnostics["clip_fps"] = round(clip_fps, 3) if clip_fps > 0 else None
+
             render_result = await overlay_engine.render_frame(
                 template_id=template_id,
                 frame_data=frame_data,
                 output_path=png_path,
+                analyze_animations=animation_orchestration,
             )
 
             resolved_png = Path(png_path).resolve()  # lgtm[py/path-injection]
@@ -293,15 +718,199 @@ class OverlayCompositor:
                 logger.error(
                     "[OverlayCompositor] Overlay render failed for template %s", template_id
                 )
+                self._set_last_diagnostics({**diagnostics, "error": "render_failed"})
                 return None
 
-            # 3. Composite the validated PNG over the clip
-            return self.composite_clip(clip_path, str(resolved_png), output_path)
+            animation_profile = render_result.get("animation_profile") or {}
+            diagnostics["animation_profile"] = animation_profile
+
+            static_path = self.composite_clip(clip_path, str(resolved_png), output_path)
+            if not animation_orchestration:
+                diagnostics["reason"] = "animation_orchestration_disabled"
+                self._set_last_diagnostics(diagnostics)
+                return static_path
+
+            if not animation_profile.get("has_keyframes"):
+                diagnostics["reason"] = "no_keyframe_animations_detected"
+                self._set_last_diagnostics(diagnostics)
+                return static_path
+
+            if not animation_profile.get("supports_timeline_seek"):
+                diagnostics["reason"] = "animations_not_seekable"
+                self._set_last_diagnostics(diagnostics)
+                return static_path
+
+            if not project_dir:
+                diagnostics["reason"] = "project_dir_required_for_animation_sampling"
+                self._set_last_diagnostics(diagnostics)
+                return static_path
+
+            if clip_duration <= 0 or clip_fps <= 0:
+                diagnostics["reason"] = "clip_timing_unavailable"
+                self._set_last_diagnostics(diagnostics)
+                return static_path
+
+            from server.utils.frame_data_builder import build_frame_data
+
+            def build_sample_frame(elapsed: float) -> dict[str, Any]:
+                sampled = build_frame_data(
+                    project_dir=project_dir,
+                    session_time=session_time + elapsed,
+                    section=section,
+                    focused_car_idx=focused_car_idx,
+                    series_name=series_name,
+                    track_name=track_name,
+                )
+                sampled["overlay_clip_elapsed_seconds"] = round(elapsed, 4)
+                sampled["overlay_clip_duration_seconds"] = round(clip_duration, 4)
+                return sampled
+
+            samples = self._build_frame_samples(clip_duration, clip_fps, build_sample_frame)
+            if not samples:
+                diagnostics["reason"] = "no_samples_generated"
+                self._set_last_diagnostics(diagnostics)
+                return static_path
+
+            windows = self._build_animation_windows(
+                samples=samples,
+                fps=clip_fps,
+                animation_profile=animation_profile,
+                trigger_sensitivity=trigger_sensitivity,
+                cooldown_frames=cooldown_frames,
+                max_animated_seconds=max_animated_seconds,
+            )
+            if not windows:
+                diagnostics["reason"] = "no_significant_frame_changes"
+                self._set_last_diagnostics(diagnostics)
+                return static_path
+
+            timeline_overlays: list[dict[str, Any]] = []
+            static_cache: dict[str, str] = {
+                build_render_signature(frame_data): str(resolved_png),
+            }
+            cursor_time = 0.0
+
+            for window_index, window in enumerate(windows):
+                window_start = float(window.get("start", 0.0) or 0.0)
+                window_end = min(clip_duration, float(window.get("end", window_start) or window_start))
+                if window_end <= window_start:
+                    continue
+
+                if window_start > cursor_time:
+                    static_idx = min(len(samples) - 1, max(0, int(math.floor(cursor_time * clip_fps))))
+                    static_frame = dict(samples[static_idx]["frame_data"])
+                    static_signature = build_render_signature(static_frame)
+                    if static_signature not in static_cache:
+                        static_png_path = str(png_dir / f"overlay_{clip_stem}_static_{len(static_cache):02d}.png")
+                        static_render = await overlay_engine.render_frame(
+                            template_id=template_id,
+                            frame_data=static_frame,
+                            output_path=static_png_path,
+                        )
+                        resolved_static = Path(static_png_path).resolve()
+                        if not static_render.get("success") or not resolved_static.is_file():
+                            diagnostics["reason"] = "static_segment_render_failed"
+                            self._set_last_diagnostics(diagnostics)
+                            return static_path
+                        static_cache[static_signature] = str(resolved_static)
+
+                    timeline_overlays.append({
+                        "type": "static",
+                        "path": static_cache[static_signature],
+                        "start": cursor_time,
+                        "end": window_start,
+                    })
+
+                start_index, end_index = window_indices_for_time_range(window_start, window_end, clip_fps)
+                sequence_dir = png_dir / f"overlay_{clip_stem}_seq_{window_index:02d}"
+                sequence_dir.mkdir(parents=True, exist_ok=True)
+
+                frame_counter = 0
+                for sample in samples[start_index:min(len(samples), end_index + 1)]:
+                    progress_ms = max(0.0, (float(sample["elapsed"]) - window_start) * 1000.0)
+                    animated_frame = dict(sample["frame_data"])
+                    animated_frame["animation_triggers"] = list(window.get("reasons") or [])
+                    animated_frame["animation_state"] = {
+                        "active": True,
+                        "progress_ms": round(progress_ms, 2),
+                        "reason": list(window.get("reasons") or []),
+                    }
+                    frame_png_path = str(sequence_dir / f"frame_{frame_counter:06d}.png")
+                    sequence_render = await overlay_engine.render_frame(
+                        template_id=template_id,
+                        frame_data=animated_frame,
+                        output_path=frame_png_path,
+                        animation_time_ms=progress_ms,
+                    )
+                    resolved_frame = Path(frame_png_path).resolve()
+                    if not sequence_render.get("success") or not resolved_frame.is_file():
+                        diagnostics["reason"] = "animated_sequence_render_failed"
+                        self._set_last_diagnostics(diagnostics)
+                        return static_path
+                    frame_counter += 1
+
+                if frame_counter > 0:
+                    timeline_overlays.append({
+                        "type": "sequence",
+                        "pattern": str((sequence_dir / "frame_%06d.png").resolve()),
+                        "start_number": 0,
+                        "fps": clip_fps,
+                        "start": window_start,
+                        "end": window_end,
+                    })
+
+                cursor_time = window_end
+
+            if cursor_time < clip_duration:
+                static_idx = min(len(samples) - 1, max(0, int(math.floor(cursor_time * clip_fps))))
+                trailing_frame = dict(samples[static_idx]["frame_data"])
+                trailing_signature = build_render_signature(trailing_frame)
+                if trailing_signature not in static_cache:
+                    trailing_png_path = str(png_dir / f"overlay_{clip_stem}_static_tail.png")
+                    trailing_render = await overlay_engine.render_frame(
+                        template_id=template_id,
+                        frame_data=trailing_frame,
+                        output_path=trailing_png_path,
+                    )
+                    resolved_trailing = Path(trailing_png_path).resolve()
+                    if not trailing_render.get("success") or not resolved_trailing.is_file():
+                        diagnostics["reason"] = "trailing_static_render_failed"
+                        self._set_last_diagnostics(diagnostics)
+                        return static_path
+                    static_cache[trailing_signature] = str(resolved_trailing)
+
+                timeline_overlays.append({
+                    "type": "static",
+                    "path": static_cache[trailing_signature],
+                    "start": cursor_time,
+                    "end": clip_duration,
+                })
+
+            result_path = self.composite_clip_with_timeline_overlays(
+                clip_path=clip_path,
+                timeline_overlays=timeline_overlays,
+                output_path=output_path,
+            )
+            diagnostics.update({
+                "mode": "animated",
+                "reason": "timeline_windows_rendered",
+                "window_count": len(windows),
+                "timeline_overlay_count": len(timeline_overlays),
+                "windows": windows,
+            })
+            self._set_last_diagnostics(diagnostics)
+            return result_path or static_path
 
         finally:
             # Clean up temp PNG
             try:
-                Path(png_path).resolve().unlink(missing_ok=True)
+                for file_path in png_dir.rglob("*.png"):
+                    file_path.resolve().unlink(missing_ok=True)
+                for dir_path in sorted(
+                    [path for path in png_dir.rglob("*") if path.is_dir()],
+                    reverse=True,
+                ):
+                    dir_path.resolve().rmdir()
                 if use_temp and tmp_dir_obj:
                     Path(tmp_dir_obj).resolve().rmdir()
             except OSError:
@@ -320,7 +929,12 @@ class OverlayCompositor:
         focused_car_idx: Optional[int] = None,
         series_name: str = "",
         track_name: str = "",
+        clip_duration_seconds: float = 0.0,
         temp_dir: Optional[str] = None,
+        animation_orchestration: bool = True,
+        trigger_sensitivity: float = 1.0,
+        cooldown_frames: int = 12,
+        max_animated_seconds: float = 6.0,
     ) -> Optional[str]:
         """Render a preset's elements and composite over a video clip.
 
@@ -347,16 +961,28 @@ class OverlayCompositor:
         from server.services.preset_service import preset_service
         from server.utils.element_renderer import compose_preset_html
 
+        diagnostics: dict[str, Any] = {
+            "mode": "static",
+            "preset_id": preset_id,
+            "section": section,
+            "clip_duration_seconds": float(clip_duration_seconds or 0.0),
+            "trigger_sensitivity": float(trigger_sensitivity or 1.0),
+            "cooldown_frames": int(cooldown_frames or 0),
+            "max_animated_seconds": float(max_animated_seconds or 0.0),
+        }
+
         # 1. Get the preset
         preset = preset_service.get_preset(preset_id)
         if not preset:
             logger.error("[OverlayCompositor] Preset not found: %s", preset_id)
+            self._set_last_diagnostics({**diagnostics, "error": "preset_not_found"})
             return None
 
         # 2. Build frame_data if not provided
         if frame_data is None:
             if not project_dir:
                 logger.error("[OverlayCompositor] Either frame_data or project_dir required")
+                self._set_last_diagnostics({**diagnostics, "error": "missing_frame_data"})
                 return None
             from server.utils.frame_data_builder import build_frame_data
             frame_data = build_frame_data(
@@ -368,16 +994,17 @@ class OverlayCompositor:
                 track_name=track_name,
             )
 
-        # 3. Compose the preset's elements into a single HTML document
-        resolution = overlay_engine.resolution
-        html_content = compose_preset_html(
+        # 3. Build pagination schedule (if enabled for this section).
+        schedule = self._build_pagination_schedule(
             preset=preset,
             section=section,
             frame_data=frame_data,
-            resolution=resolution,
+            clip_duration_seconds=max(0.0, float(clip_duration_seconds or 0.0)),
         )
 
-        # 4. Render HTML to PNG via overlay engine
+        # 4. Render HTML page(s) to PNG via overlay engine
+        resolution = overlay_engine.resolution
+
         use_temp = temp_dir is None
         tmp_dir_obj = tempfile.mkdtemp() if use_temp else None
         png_dir = Path(tmp_dir_obj or temp_dir).resolve()  # lgtm[py/path-injection]
@@ -385,20 +1012,319 @@ class OverlayCompositor:
         png_path = str(png_dir / f"preset_overlay_{clip_stem}.png")
 
         try:
+            clip_duration = max(0.0, float(clip_duration_seconds or 0.0))
+            clip_fps = 0.0
+            if clip_duration <= 0 or animation_orchestration:
+                probed_duration, probed_fps = self._probe_clip_timing(clip_path)
+                if clip_duration <= 0:
+                    clip_duration = probed_duration
+                clip_fps = probed_fps
+            diagnostics["clip_duration_seconds"] = round(clip_duration, 3)
+            diagnostics["clip_fps"] = round(clip_fps, 3) if clip_fps > 0 else None
+
+            initial_page_index = self._resolve_page_index(schedule, 0.0) if schedule else None
+            initial_frame_data = {
+                **frame_data,
+                "overlay_clip_elapsed_seconds": 0.0,
+                "overlay_clip_duration_seconds": round(clip_duration, 4),
+            }
+            if initial_page_index is not None:
+                initial_frame_data["overlay_page_index"] = initial_page_index
+
+            html_content = compose_preset_html(
+                preset=preset,
+                section=section,
+                frame_data=initial_frame_data,
+                resolution=resolution,
+                page_index=initial_page_index,
+            )
             render_result = await overlay_engine.render_raw_html(
-                html_content, frame_data, output_path=png_path
+                html_content,
+                initial_frame_data,
+                output_path=png_path,
+                analyze_animations=animation_orchestration,
             )
 
             resolved_png = Path(png_path).resolve()  # lgtm[py/path-injection]
             if not render_result.get("success") or not resolved_png.is_file():
                 logger.error("[OverlayCompositor] Preset render failed for %s", preset_id)
+                self._set_last_diagnostics({**diagnostics, "error": "render_failed"})
                 return None
 
-            return self.composite_clip(clip_path, str(resolved_png), output_path)
+            animation_profile = render_result.get("animation_profile") or {}
+            diagnostics["animation_profile"] = animation_profile
+
+            # Pagination without animation orchestration keeps the existing static-per-page path.
+            if schedule and (
+                not animation_orchestration
+                or not animation_profile.get("has_keyframes")
+                or not animation_profile.get("supports_timeline_seek")
+                or clip_duration <= 0
+                or clip_fps <= 0
+            ):
+                page_png_paths: dict[int, str] = {}
+                timed_overlays: list[dict[str, float | str]] = []
+
+                for item in schedule:
+                    page_index = int(item["page_index"])
+                    if page_index not in page_png_paths:
+                        page_png = str(png_dir / f"preset_overlay_{clip_stem}_p{page_index}.png")
+                        page_frame_data = {
+                            **frame_data,
+                            "overlay_clip_elapsed_seconds": float(item["start"]),
+                            "overlay_clip_duration_seconds": float(clip_duration),
+                            "overlay_page_index": page_index,
+                        }
+                        page_html = compose_preset_html(
+                            preset=preset,
+                            section=section,
+                            frame_data=page_frame_data,
+                            resolution=resolution,
+                            page_index=page_index,
+                        )
+                        page_result = await overlay_engine.render_raw_html(
+                            page_html, page_frame_data, output_path=page_png
+                        )
+                        resolved_page_png = Path(page_png).resolve()
+                        if not page_result.get("success") or not resolved_page_png.is_file():
+                            logger.error(
+                                "[OverlayCompositor] Preset paginated render failed for %s page %d",
+                                preset_id,
+                                page_index,
+                            )
+                            self._set_last_diagnostics({**diagnostics, "error": "pagination_render_failed"})
+                            return None
+                        page_png_paths[page_index] = str(resolved_page_png)
+
+                    timed_overlays.append({
+                        "path": page_png_paths[page_index],
+                        "start": float(item["start"]),
+                        "end": float(item["end"]),
+                    })
+
+                diagnostics["reason"] = (
+                    "pagination_static" if schedule else "static"
+                )
+                diagnostics["window_count"] = len(timed_overlays)
+                self._set_last_diagnostics(diagnostics)
+                return self.composite_clip_with_timed_overlays(
+                    clip_path=clip_path,
+                    timed_overlays=timed_overlays,
+                    output_path=output_path,
+                )
+
+            static_path = self.composite_clip(clip_path, str(resolved_png), output_path)
+            if not animation_orchestration:
+                diagnostics["reason"] = "animation_orchestration_disabled"
+                self._set_last_diagnostics(diagnostics)
+                return static_path
+
+            if not animation_profile.get("has_keyframes"):
+                diagnostics["reason"] = "no_keyframe_animations_detected"
+                self._set_last_diagnostics(diagnostics)
+                return static_path
+
+            if not animation_profile.get("supports_timeline_seek"):
+                diagnostics["reason"] = "animations_not_seekable"
+                self._set_last_diagnostics(diagnostics)
+                return static_path
+
+            if clip_duration <= 0 or clip_fps <= 0:
+                diagnostics["reason"] = "clip_timing_unavailable"
+                self._set_last_diagnostics(diagnostics)
+                return static_path
+
+            from server.utils.frame_data_builder import build_frame_data
+
+            def build_sample_frame(elapsed: float) -> dict[str, Any]:
+                if project_dir:
+                    sampled = build_frame_data(
+                        project_dir=project_dir,
+                        session_time=session_time + elapsed,
+                        section=section,
+                        focused_car_idx=focused_car_idx,
+                        series_name=series_name,
+                        track_name=track_name,
+                    )
+                else:
+                    sampled = dict(frame_data)
+                sampled["overlay_clip_elapsed_seconds"] = round(elapsed, 4)
+                sampled["overlay_clip_duration_seconds"] = round(clip_duration, 4)
+                page_index = self._resolve_page_index(schedule, elapsed) if schedule else None
+                if page_index is not None:
+                    sampled["overlay_page_index"] = page_index
+                return sampled
+
+            samples = self._build_frame_samples(clip_duration, clip_fps, build_sample_frame)
+            if not samples:
+                diagnostics["reason"] = "no_samples_generated"
+                self._set_last_diagnostics(diagnostics)
+                return static_path
+
+            windows = self._build_animation_windows(
+                samples=samples,
+                fps=clip_fps,
+                animation_profile=animation_profile,
+                trigger_sensitivity=trigger_sensitivity,
+                cooldown_frames=cooldown_frames,
+                max_animated_seconds=max_animated_seconds,
+            )
+            if not windows:
+                diagnostics["reason"] = "no_significant_frame_changes"
+                self._set_last_diagnostics(diagnostics)
+                return static_path
+
+            timeline_overlays: list[dict[str, Any]] = []
+            static_cache: dict[str, str] = {
+                build_render_signature(initial_frame_data): str(resolved_png),
+            }
+            cursor_time = 0.0
+
+            for window_index, window in enumerate(windows):
+                window_start = float(window.get("start", 0.0) or 0.0)
+                window_end = min(clip_duration, float(window.get("end", window_start) or window_start))
+                if window_end <= window_start:
+                    continue
+
+                if window_start > cursor_time:
+                    static_idx = min(len(samples) - 1, max(0, int(math.floor(cursor_time * clip_fps))))
+                    static_frame = dict(samples[static_idx]["frame_data"])
+                    static_signature = build_render_signature(static_frame)
+                    if static_signature not in static_cache:
+                        page_index = static_frame.get("overlay_page_index")
+                        static_png_path = str(png_dir / f"preset_overlay_{clip_stem}_static_{len(static_cache):02d}.png")
+                        static_html = compose_preset_html(
+                            preset=preset,
+                            section=section,
+                            frame_data=static_frame,
+                            resolution=resolution,
+                            page_index=page_index,
+                        )
+                        static_render = await overlay_engine.render_raw_html(
+                            static_html,
+                            static_frame,
+                            output_path=static_png_path,
+                        )
+                        resolved_static = Path(static_png_path).resolve()
+                        if not static_render.get("success") or not resolved_static.is_file():
+                            diagnostics["reason"] = "static_segment_render_failed"
+                            self._set_last_diagnostics(diagnostics)
+                            return static_path
+                        static_cache[static_signature] = str(resolved_static)
+
+                    timeline_overlays.append({
+                        "type": "static",
+                        "path": static_cache[static_signature],
+                        "start": cursor_time,
+                        "end": window_start,
+                    })
+
+                start_index, end_index = window_indices_for_time_range(window_start, window_end, clip_fps)
+                sequence_dir = png_dir / f"preset_overlay_{clip_stem}_seq_{window_index:02d}"
+                sequence_dir.mkdir(parents=True, exist_ok=True)
+
+                frame_counter = 0
+                for sample in samples[start_index:min(len(samples), end_index + 1)]:
+                    progress_ms = max(0.0, (float(sample["elapsed"]) - window_start) * 1000.0)
+                    animated_frame = dict(sample["frame_data"])
+                    animated_frame["animation_triggers"] = list(window.get("reasons") or [])
+                    animated_frame["animation_state"] = {
+                        "active": True,
+                        "progress_ms": round(progress_ms, 2),
+                        "reason": list(window.get("reasons") or []),
+                    }
+                    page_index = animated_frame.get("overlay_page_index")
+                    frame_html = compose_preset_html(
+                        preset=preset,
+                        section=section,
+                        frame_data=animated_frame,
+                        resolution=resolution,
+                        page_index=page_index,
+                    )
+                    frame_png_path = str(sequence_dir / f"frame_{frame_counter:06d}.png")
+                    sequence_render = await overlay_engine.render_raw_html(
+                        frame_html,
+                        animated_frame,
+                        output_path=frame_png_path,
+                        animation_time_ms=progress_ms,
+                    )
+                    resolved_frame = Path(frame_png_path).resolve()
+                    if not sequence_render.get("success") or not resolved_frame.is_file():
+                        diagnostics["reason"] = "animated_sequence_render_failed"
+                        self._set_last_diagnostics(diagnostics)
+                        return static_path
+                    frame_counter += 1
+
+                if frame_counter > 0:
+                    timeline_overlays.append({
+                        "type": "sequence",
+                        "pattern": str((sequence_dir / "frame_%06d.png").resolve()),
+                        "start_number": 0,
+                        "fps": clip_fps,
+                        "start": window_start,
+                        "end": window_end,
+                    })
+
+                cursor_time = window_end
+
+            if cursor_time < clip_duration:
+                static_idx = min(len(samples) - 1, max(0, int(math.floor(cursor_time * clip_fps))))
+                trailing_frame = dict(samples[static_idx]["frame_data"])
+                trailing_signature = build_render_signature(trailing_frame)
+                if trailing_signature not in static_cache:
+                    page_index = trailing_frame.get("overlay_page_index")
+                    trailing_png_path = str(png_dir / f"preset_overlay_{clip_stem}_static_tail.png")
+                    trailing_html = compose_preset_html(
+                        preset=preset,
+                        section=section,
+                        frame_data=trailing_frame,
+                        resolution=resolution,
+                        page_index=page_index,
+                    )
+                    trailing_render = await overlay_engine.render_raw_html(
+                        trailing_html,
+                        trailing_frame,
+                        output_path=trailing_png_path,
+                    )
+                    resolved_trailing = Path(trailing_png_path).resolve()
+                    if not trailing_render.get("success") or not resolved_trailing.is_file():
+                        diagnostics["reason"] = "trailing_static_render_failed"
+                        self._set_last_diagnostics(diagnostics)
+                        return static_path
+                    static_cache[trailing_signature] = str(resolved_trailing)
+
+                timeline_overlays.append({
+                    "type": "static",
+                    "path": static_cache[trailing_signature],
+                    "start": cursor_time,
+                    "end": clip_duration,
+                })
+
+            result_path = self.composite_clip_with_timeline_overlays(
+                clip_path=clip_path,
+                timeline_overlays=timeline_overlays,
+                output_path=output_path,
+            )
+            diagnostics.update({
+                "mode": "animated",
+                "reason": "timeline_windows_rendered",
+                "window_count": len(windows),
+                "timeline_overlay_count": len(timeline_overlays),
+                "windows": windows,
+                "pagination_schedule": schedule,
+            })
+            self._set_last_diagnostics(diagnostics)
+            return result_path or static_path
 
         finally:
             try:
-                Path(png_path).resolve().unlink(missing_ok=True)
+                for file_path in png_dir.rglob("*.png"):
+                    file_path.resolve().unlink(missing_ok=True)
+                for dir_path in sorted(
+                    [path for path in png_dir.rglob("*") if path.is_dir()],
+                    reverse=True,
+                ):
+                    dir_path.resolve().rmdir()
                 if use_temp and tmp_dir_obj:
                     Path(tmp_dir_obj).resolve().rmdir()
             except OSError:
@@ -507,6 +1433,10 @@ class OverlayCompositor:
         track_name: str = "",
         focused_car_idx: Optional[int] = None,
         progress_callback: Optional[Any] = None,
+        animation_orchestration: bool = True,
+        trigger_sensitivity: float = 1.0,
+        cooldown_frames: int = 12,
+        max_animated_seconds: float = 6.0,
     ) -> list[dict]:
         """Composite overlays onto all clips in a script capture result.
 
@@ -540,6 +1470,15 @@ class OverlayCompositor:
             clip_path = clip.get("path", "")
             section = clip.get("section", "race")
             session_time = clip.get("start_time_seconds", 0.0)
+            clip_duration_seconds = float(clip.get("duration_seconds") or 0.0)
+            if clip_duration_seconds <= 0:
+                try:
+                    start = float(clip.get("start_time_seconds") or 0.0)
+                    end = float(clip.get("end_time_seconds") or 0.0)
+                    if end > start:
+                        clip_duration_seconds = end - start
+                except (TypeError, ValueError):
+                    clip_duration_seconds = 0.0
             template_id = clip.get("overlay_template_id", "broadcast")
 
             if progress_callback:
@@ -584,6 +1523,11 @@ class OverlayCompositor:
                     focused_car_idx=focused_car_idx,
                     series_name=series_name,
                     track_name=track_name,
+                    clip_duration_seconds=clip_duration_seconds,
+                    animation_orchestration=animation_orchestration,
+                    trigger_sensitivity=trigger_sensitivity,
+                    cooldown_frames=cooldown_frames,
+                    max_animated_seconds=max_animated_seconds,
                 )
             else:
                 result_path = await self.render_and_composite(
@@ -597,9 +1541,18 @@ class OverlayCompositor:
                     focused_car_idx=focused_car_idx,
                     series_name=series_name,
                     track_name=track_name,
+                    clip_duration_seconds=clip_duration_seconds,
+                    animation_orchestration=animation_orchestration,
+                    trigger_sensitivity=trigger_sensitivity,
+                    cooldown_frames=cooldown_frames,
+                    max_animated_seconds=max_animated_seconds,
                 )
 
-            results.append({**clip, "composited_path": result_path})
+            results.append({
+                **clip,
+                "composited_path": result_path,
+                "overlay_diagnostics": self.last_diagnostics,
+            })
 
         return results
 

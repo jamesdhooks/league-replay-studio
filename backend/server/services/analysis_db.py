@@ -107,6 +107,26 @@ CREATE TABLE IF NOT EXISTS analysis_meta (
     value   TEXT NOT NULL
 );
 
+-- Authoritative per-session standings/results extracted from SessionInfo YAML
+CREATE TABLE IF NOT EXISTS session_results (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_num     INTEGER NOT NULL,
+    session_type    TEXT    NOT NULL DEFAULT '',
+    session_name    TEXT    NOT NULL DEFAULT '',
+    car_idx         INTEGER NOT NULL,
+    position        INTEGER NOT NULL DEFAULT 0,
+    class_position  INTEGER NOT NULL DEFAULT 0,
+    fastest_time    REAL    NOT NULL DEFAULT -1.0,
+    total_time      REAL    NOT NULL DEFAULT -1.0,
+    lap             INTEGER NOT NULL DEFAULT 0,
+    incidents       INTEGER NOT NULL DEFAULT 0,
+    reason_out      TEXT    NOT NULL DEFAULT '',
+    interval        REAL    NOT NULL DEFAULT -1.0,
+    gap             REAL    NOT NULL DEFAULT -1.0,
+    is_final_snapshot INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(session_num, car_idx)
+);
+
 -- Highlight configuration (one active row per project)
 CREATE TABLE IF NOT EXISTS highlight_config (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,6 +173,9 @@ CREATE INDEX IF NOT EXISTS idx_incident_log_time ON incident_log(session_time);
 CREATE INDEX IF NOT EXISTS idx_incident_log_car  ON incident_log(car_idx);
 CREATE INDEX IF NOT EXISTS idx_incidents_api_time ON incidents_api(session_time);
 CREATE INDEX IF NOT EXISTS idx_incidents_api_car  ON incidents_api(car_idx);
+CREATE INDEX IF NOT EXISTS idx_session_results_session ON session_results(session_num);
+CREATE INDEX IF NOT EXISTS idx_session_results_type ON session_results(session_type);
+CREATE INDEX IF NOT EXISTS idx_session_results_pos ON session_results(position);
 """
 
 
@@ -263,6 +286,7 @@ def clear_analysis_data(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM race_events")
     conn.execute("DELETE FROM incident_log")
     conn.execute("DELETE FROM incidents_api")
+    conn.execute("DELETE FROM session_results")
     conn.execute("DELETE FROM drivers")
     conn.commit()
     logger.info("[AnalysisDB] Cleared previous analysis data")
@@ -277,6 +301,7 @@ def clear_telemetry_data(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM race_events")
     conn.execute("DELETE FROM incident_log")
     conn.execute("DELETE FROM incidents_api")
+    conn.execute("DELETE FROM session_results")
     conn.execute("DELETE FROM drivers")
     conn.commit()
     logger.info("[AnalysisDB] Cleared telemetry and dependent event data")

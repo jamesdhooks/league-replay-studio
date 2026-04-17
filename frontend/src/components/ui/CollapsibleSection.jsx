@@ -1,3 +1,5 @@
+import SectionCollapseHeader from './SectionCollapseHeader'
+
 /**
  * CollapsibleSection — reusable collapsible header + content block.
  *
@@ -24,18 +26,17 @@ export default function CollapsibleSection({
 }) {
   return (
     <div className="px-3 py-2 border-t border-border-subtle shrink-0">
-      <button
-        onClick={onToggle}
-        className="flex items-center gap-1.5 w-full text-left"
-      >
-        {Icon && <Icon className={`w-3 h-3 shrink-0 ${iconColor}`} />}
-        <h4 className="text-xxs font-semibold text-text-tertiary uppercase tracking-wider flex-1">
-          {label}
-        </h4>
-        {right}
-        <span className="text-xxs text-text-disabled">{open ? '▾' : '▸'}</span>
-      </button>
-      {open && children}
+      <SectionCollapseHeader
+        open={open}
+        onToggle={onToggle}
+        icon={Icon}
+        title={label}
+        right={right}
+        buttonClassName="px-0 py-0"
+        iconClassName={iconColor}
+        titleClassName="text-text-tertiary"
+      />
+      {open && <div className="pt-2">{children}</div>}
     </div>
   )
 }

@@ -2,12 +2,19 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import Editor from '@monaco-editor/react'
 import { useOverlay } from '../../context/OverlayContext'
 import { useToast } from '../../context/ToastContext'
+import { useLLM } from '../../context/LLMContext'
+import { apiPost } from '../../services/api'
 import EditorPreview from './EditorPreview'
 import DataContextInspector from './DataContextInspector'
 import AnimationPicker from './AnimationPicker'
+import AIPromptComposer from '../ui/AIPromptComposer'
+import AIDesignerToggleButton from '../ui/AIDesignerToggleButton'
+import AIDesignerPanelMeta from '../ui/AIDesignerPanelMeta'
+import ResizableSplitPane from '../ui/ResizableSplitPane'
+import ResizableRowPane from '../ui/ResizableRowPane'
 import {
   Save, RotateCcw, X, Columns, BookOpen, Sparkles,
-  Loader2, GripVertical,
+  Loader2,
 } from 'lucide-react'
 
 /**
@@ -34,25 +41,44 @@ export default function OverlayEditor({ templateId, onClose }) {
     engineStatus, initEngine,
   } = useOverlay()
   const { addToast } = useToast()
+  const { isAvailable } = useLLM()
 
   // ── State ────────────────────────────────────────────────────────────────
   const [htmlContent, setHtmlContent] = useState('')
   const [savedContent, setSavedContent] = useState('')
   const [templateMeta, setTemplateMeta] = useState(null)
   const [previewData, setPreviewData] = useState(null)
+  const [previewError, setPreviewError] = useState(null)
   const [isRendering, setIsRendering] = useState(false)
   const [renderTime, setRenderTime] = useState(null)
   const [isDirty, setIsDirty] = useState(false)
   const [loading, setLoading] = useState(true)
   const [activePanel, setActivePanel] = useState(null) // 'context' | 'animations' | null
+  const [aiPrompt, setAiPrompt] = useState('')
+  const [aiLoading, setAiLoading] = useState(false)
+  const [aiError, setAiError] = useState(null)
   const [elementPickerActive, setElementPickerActive] = useState(false)
-  const [splitRatio, setSplitRatio] = useState(50)
   const [dataContext, setDataContext] = useState(null)
+  const [previewSection, setPreviewSection] = useState('race')
 
   const editorRef = useRef(null)
   const previewTimerRef = useRef(null)
-  const containerRef = useRef(null)
-  const isDraggingRef = useRef(false)
+
+  const FALLBACK_FRAME_DATA = {
+    section: 'race',
+    series_name: 'iRacing Series',
+    track_name: 'Track Name',
+    current_lap: 1,
+    total_laps: 20,
+    session_time: '00:00:00',
+    driver_name: 'Driver Name',
+    position: 1,
+    car_name: 'Car',
+    irating: 0,
+    team_color: '#3B82F6',
+    standings: [],
+    flag: 'green',
+  }
 
   // ── Load template on mount ───────────────────────────────────────────────
   useEffect(() => {
@@ -93,23 +119,42 @@ export default function OverlayEditor({ templateId, onClose }) {
 
   // ── Debounced preview rendering ──────────────────────────────────────────
   const triggerPreview = useCallback(async (content) => {
-    if (!content) return
+    const html = content || ''
+    if (!html.trim()) {
+      setPreviewData(null)
+      setPreviewError(null)
+      setRenderTime(null)
+      return
+    }
 
     setIsRendering(true)
-    const result = await renderEditorPreview(
-      templateId,
-      content,
-      dataContext?.variables || {},
-    )
+    setPreviewError(null)
 
-    if (result?.success) {
-      setPreviewData(result.png_base64)
-      setRenderTime(result.elapsed_ms)
+    try {
+      const baseFrame = dataContext?.variables || FALLBACK_FRAME_DATA
+      const result = await renderEditorPreview(
+        templateId,
+        html,
+        { ...baseFrame, section: previewSection },
+      )
+
+      if (result?.success && result?.png_base64) {
+        setPreviewData(result.png_base64)
+        setRenderTime(result.elapsed_ms)
+        setPreviewError(null)
+      } else {
+        setPreviewError(result?.error || 'Preview render failed')
+        setPreviewData(null)
+      }
+    } catch (err) {
+      setPreviewError(err?.message || 'Preview render failed')
+      setPreviewData(null)
+    } finally {
+      setIsRendering(false)
     }
-    setIsRendering(false)
-  }, [templateId, dataContext, renderEditorPreview])
+  }, [templateId, dataContext, renderEditorPreview, previewSection])
 
-  // Trigger preview on content change (200ms debounce)
+  // Trigger preview on content change or section change (200ms debounce)
   useEffect(() => {
     if (loading) return
 
@@ -125,7 +170,7 @@ export default function OverlayEditor({ templateId, onClose }) {
         clearTimeout(previewTimerRef.current)
       }
     }
-  }, [htmlContent, triggerPreview, loading])
+  }, [htmlContent, triggerPreview, loading, previewSection])
 
   // ── Track dirty state ────────────────────────────────────────────────────
   useEffect(() => {
@@ -309,29 +354,38 @@ export default function OverlayEditor({ templateId, onClose }) {
     addToast(`Animation inserted. Apply with: ${usage}`, 'info')
   }, [insertAtCursor, addToast])
 
-  // ── Split pane resize ────────────────────────────────────────────────────
-  const handleDragStart = useCallback((e) => {
-    e.preventDefault()
-    isDraggingRef.current = true
-
-    const handleDrag = (moveE) => {
-      if (!isDraggingRef.current || !containerRef.current) return
-      const rect = containerRef.current.getBoundingClientRect()
-      const pct = ((moveE.clientX - rect.left) / rect.width) * 100
-      setSplitRatio(Math.max(20, Math.min(80, pct)))
-    }
-
-    const handleDragEnd = () => {
-      isDraggingRef.current = false
-      document.removeEventListener('mousemove', handleDrag)
-      document.removeEventListener('mouseup', handleDragEnd)
-    }
-
-    document.addEventListener('mousemove', handleDrag)
-    document.addEventListener('mouseup', handleDragEnd)
-  }, [])
-
   // ── Keyboard shortcuts ───────────────────────────────────────────────────
+
+  // ── AI edit handler ──────────────────────────────────────────────────────
+  const handleAiEdit = useCallback(async () => {
+    if (!aiPrompt.trim() || aiLoading) return
+    setAiLoading(true)
+    setAiError(null)
+    try {
+      const result = await apiPost('/llm/overlay/edit-html', {
+        prompt: aiPrompt.trim(),
+        html_content: htmlContent,
+        template_id: templateId,
+        section: previewSection,
+      })
+      if (result?.html) {
+        setHtmlContent(result.html)
+        if (editorRef.current) {
+          editorRef.current.setValue(result.html)
+        }
+        setAiPrompt('')
+        addToast(result.explanation || 'AI edit applied', 'success')
+      } else {
+        setAiError('No HTML returned from AI')
+      }
+    } catch (err) {
+      const msg = err?.detail || err?.message || 'AI edit failed'
+      setAiError(msg)
+    } finally {
+      setAiLoading(false)
+    }
+  }, [aiPrompt, aiLoading, htmlContent, templateId, previewSection, addToast])
+
   useEffect(() => {
     const handler = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
@@ -354,6 +408,107 @@ export default function OverlayEditor({ templateId, onClose }) {
   }
 
   const resolution = engineStatus.resolution || { width: 1920, height: 1080 }
+
+  const mainWorkspace = (
+    <ResizableSplitPane
+      storageKey="lrs:overlay:editorSplitWidth"
+      defaultLeftWidth={880}
+      minLeft={420}
+      maxLeftPct={0.8}
+      containerClassName="flex h-full min-h-0 overflow-hidden relative"
+      leftClassName="h-full min-h-0 overflow-hidden"
+      rightClassName="h-full min-h-0 overflow-hidden"
+      left={(
+        <div className="h-full min-h-0 flex flex-col overflow-hidden bg-bg-primary">
+          <Editor
+            height="100%"
+            defaultLanguage="html"
+            value={htmlContent}
+            onChange={handleEditorChange}
+            onMount={handleEditorMount}
+            theme="vs-dark"
+            options={{
+              minimap: { enabled: false },
+              fontSize: 13,
+              wordWrap: 'on',
+              lineNumbers: 'on',
+              scrollBeyondLastLine: false,
+              automaticLayout: true,
+              tabSize: 2,
+              renderWhitespace: 'selection',
+              bracketPairColorization: { enabled: true },
+              padding: { top: 8 },
+              suggest: {
+                showClasses: true,
+                showColors: true,
+                showKeywords: true,
+              },
+            }}
+          />
+        </div>
+      )}
+      right={(
+        <div className="h-full min-h-0 flex flex-col overflow-hidden bg-bg-primary">
+          <EditorPreview
+            previewData={previewData}
+            previewError={previewError}
+            isRendering={isRendering}
+            renderTime={renderTime}
+            resolution={resolution}
+            elementPickerActive={elementPickerActive}
+            onToggleElementPicker={() => setElementPickerActive(!elementPickerActive)}
+            onElementSelected={(coords) => {
+              addToast(`Element at (${coords.x}, ${coords.y})`, 'info')
+              setElementPickerActive(false)
+            }}
+            previewSection={previewSection}
+            onSectionChange={setPreviewSection}
+          />
+        </div>
+      )}
+    />
+  )
+
+  const bottomPanel = activePanel ? (
+    <div className="h-full overflow-hidden flex-shrink-0 border-t border-border bg-bg-primary">
+      {activePanel === 'context' && (
+        <DataContextInspector
+          variables={dataContext?.variables || {}}
+          variableDocs={dataContext?.variable_docs || {}}
+          variableSources={dataContext?.variable_sources || {}}
+          onInsertVariable={insertAtCursor}
+        />
+      )}
+      {activePanel === 'animations' && (
+        <AnimationPicker onInsertAnimation={handleInsertAnimation} />
+      )}
+      {activePanel === 'ai' && (
+        <div className="flex flex-col h-full bg-bg-primary p-3 gap-2">
+          <AIDesignerPanelMeta subtitle="describe what to change in this template" />
+          <AIPromptComposer
+            value={aiPrompt}
+            onChange={setAiPrompt}
+            onSubmit={handleAiEdit}
+            loading={aiLoading}
+            submitLabel="Generate"
+            loadingLabel="Generating..."
+            multiline
+            rows={3}
+            shortcut="mod+enter"
+            placeholder="e.g. Make the standings table wider and increase the font size..."
+            className="flex-1 min-h-0"
+          />
+          {aiError && (
+            <p className="text-[11px] text-red-400 truncate" title={aiError}>{aiError}</p>
+          )}
+          <AIDesignerPanelMeta
+            helper="Ctrl+Enter to generate - AI rewrites the full HTML"
+            showHeader={false}
+          />
+        </div>
+      )}
+    </div>
+  ) : null
 
   return (
     <div className="flex flex-col h-full bg-bg-primary">
@@ -401,6 +556,14 @@ export default function OverlayEditor({ templateId, onClose }) {
           >
             <Sparkles className="w-3 h-3" /> Animations
           </button>
+          {isAvailable() && (
+            <AIDesignerToggleButton
+              active={activePanel === 'ai'}
+              onClick={() => setActivePanel(activePanel === 'ai' ? null : 'ai')}
+              title="AI Designer"
+              label="AI Designer"
+            />
+          )}
 
           <div className="w-px h-4 bg-border mx-1" />
 
@@ -431,78 +594,20 @@ export default function OverlayEditor({ templateId, onClose }) {
         </div>
       </div>
 
-      {/* ── Split pane: Editor + Preview ──────────────────────────────────── */}
-      <div ref={containerRef} className="flex flex-1 overflow-hidden">
-        {/* Left pane: Monaco Editor */}
-        <div style={{ width: `${splitRatio}%` }} className="flex flex-col overflow-hidden">
-          <Editor
-            height="100%"
-            defaultLanguage="html"
-            value={htmlContent}
-            onChange={handleEditorChange}
-            onMount={handleEditorMount}
-            theme="vs-dark"
-            options={{
-              minimap: { enabled: false },
-              fontSize: 13,
-              wordWrap: 'on',
-              lineNumbers: 'on',
-              scrollBeyondLastLine: false,
-              automaticLayout: true,
-              tabSize: 2,
-              renderWhitespace: 'selection',
-              bracketPairColorization: { enabled: true },
-              padding: { top: 8 },
-              suggest: {
-                showClasses: true,
-                showColors: true,
-                showKeywords: true,
-              },
-            }}
-          />
-        </div>
-
-        {/* Resize handle */}
-        <div
-          onMouseDown={handleDragStart}
-          className="w-1 bg-border hover:bg-blue-500 cursor-col-resize flex items-center justify-center transition-colors group flex-shrink-0"
-        >
-          <GripVertical className="w-3 h-3 text-text-tertiary opacity-0 group-hover:opacity-100 transition-opacity" />
-        </div>
-
-        {/* Right pane: Preview */}
-        <div style={{ width: `${100 - splitRatio}%` }} className="flex flex-col overflow-hidden">
-          <EditorPreview
-            previewData={previewData}
-            isRendering={isRendering}
-            renderTime={renderTime}
-            resolution={resolution}
-            elementPickerActive={elementPickerActive}
-            onToggleElementPicker={() => setElementPickerActive(!elementPickerActive)}
-            onElementSelected={(coords) => {
-              addToast(`Element at (${coords.x}, ${coords.y})`, 'info')
-              setElementPickerActive(false)
-            }}
-          />
-        </div>
+      <div className="flex-1 min-h-0 overflow-hidden">
+        <ResizableRowPane
+          storageKey="lrs:overlay:editorBottomHeight"
+          defaultBottomHeight={240}
+          minBottom={120}
+          maxBottom={420}
+          collapsed={!activePanel}
+          collapsedBottomHeight={0}
+          containerClassName="flex flex-col h-full min-h-0 overflow-hidden"
+          bottomClassName="overflow-hidden"
+          top={mainWorkspace}
+          bottom={bottomPanel || <div />}
+        />
       </div>
-
-      {/* ── Bottom panel (conditional) ───────────────────────────────────── */}
-      {activePanel && (
-        <div className="h-56 border-t border-border overflow-hidden flex-shrink-0">
-          {activePanel === 'context' && (
-            <DataContextInspector
-              variables={dataContext?.variables || {}}
-              variableDocs={dataContext?.variable_docs || {}}
-              variableSources={dataContext?.variable_sources || {}}
-              onInsertVariable={insertAtCursor}
-            />
-          )}
-          {activePanel === 'animations' && (
-            <AnimationPicker onInsertAnimation={handleInsertAnimation} />
-          )}
-        </div>
-      )}
     </div>
   )
 }

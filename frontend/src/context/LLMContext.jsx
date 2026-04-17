@@ -84,7 +84,8 @@ export function LLMProvider({ children }) {
   }, [showSuccess, showError])
 
   // ── Augment an existing overlay element ─────────────────────────────────
-  const augmentElement = useCallback(async (prompt, section, presetId, elementId) => {
+  const augmentElement = useCallback(async (prompt, section, presetId, elementId, options = {}) => {
+    const { silent = false } = options
     setLoading(true)
     setError(null)
     try {
@@ -95,12 +96,16 @@ export function LLMProvider({ children }) {
         element_id: elementId,
       })
       setLastResult(data)
-      showSuccess(data.explanation || 'Element updated by AI')
+      if (!silent) {
+        showSuccess(data.explanation || 'Element updated by AI')
+      }
       return data
     } catch (err) {
       const msg = err.message || 'Element augmentation failed'
       setError(msg)
-      showError(msg)
+      if (!silent) {
+        showError(msg)
+      }
       return null
     } finally {
       setLoading(false)

@@ -1,4 +1,30 @@
-import { useRef, useEffect } from 'react'
+import { useRef, useEffect, useState } from 'react'
+
+const MATH_GIFS = [
+  '/assets/math_1.gif',
+  '/assets/math_2.gif',
+  '/assets/math_3.gif',
+  '/assets/math_4.gif',
+]
+
+const SPECTRAL_PROFILES = {
+  ridiculous: {
+    spawnDelayMs: [4200, 9800],
+    durationMs: [4500, 7800],
+    sizePx: [360, 620],
+    alpha: [0.44, 0.66],
+    blurPx: [0.4, 1.4],
+    maxActive: 8,
+  },
+  normal: {
+    spawnDelayMs: [9600, 18000],
+    durationMs: [7000, 11000],
+    sizePx: [90, 170],
+    alpha: [0.12, 0.22],
+    blurPx: [0.15, 0.7],
+    maxActive: 4,
+  },
+}
 
 // ── Variable pool with category ────────────────────────────────────────────────
 const VARS = [
@@ -438,6 +464,10 @@ function drawHUD(ctx, W, H, isCollecting, tickCount, hz, label) {
 export default function DataStreamViz({ isCollecting = false, tickCount = 0, hz = 4, label = '' }) {
   const canvasRef = useRef(null)
   const propsRef  = useRef({ isCollecting, tickCount, hz, label })
+  const modeRef = useRef('ridiculous')
+  const lastGifRef = useRef(null)
+  const [spectralMode, setSpectralMode] = useState('ridiculous')
+  const [spectralSprites, setSpectralSprites] = useState([])
   const stateRef  = useRef({
     particles:      [],
     pulses:         [],
@@ -449,6 +479,93 @@ export default function DataStreamViz({ isCollecting = false, tickCount = 0, hz 
 
   // Keep latest props accessible inside rAF without restarting the loop
   propsRef.current = { isCollecting, tickCount, hz, label }
+  modeRef.current = spectralMode
+
+  useEffect(() => {
+    let cancelled = false
+    let spawnTimer = null
+    let firstSpawn = true
+    const removeTimers = new Set()
+
+    setSpectralSprites([])
+    if (spectralMode === 'none') {
+      const state = stateRef.current
+      state.particles = []
+      state.pulses = []
+      state.savingFrames = 0
+    }
+
+    if (spectralMode !== 'ridiculous') {
+      return () => {
+        removeTimers.forEach((timerId) => window.clearTimeout(timerId))
+      }
+    }
+
+    const profile = SPECTRAL_PROFILES[spectralMode]
+    const random = (min, max) => min + Math.random() * (max - min)
+    const clamp = (value, min, max) => Math.max(min, Math.min(max, value))
+    const pickGif = () => {
+      if (MATH_GIFS.length <= 1) return MATH_GIFS[0]
+
+      let next = MATH_GIFS[Math.floor(Math.random() * MATH_GIFS.length)]
+      let guard = 0
+      while (next === lastGifRef.current && guard < 8) {
+        next = MATH_GIFS[Math.floor(Math.random() * MATH_GIFS.length)]
+        guard++
+      }
+      lastGifRef.current = next
+      return next
+    }
+
+    const scheduleSpawn = () => {
+      const nextDelay = firstSpawn
+        ? Math.floor(random(550, 1200))
+        : Math.floor(random(profile.spawnDelayMs[0], profile.spawnDelayMs[1]))
+      spawnTimer = window.setTimeout(() => {
+        if (cancelled) return
+
+        firstSpawn = false
+        const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        const fromLeft = Math.random() > 0.5
+        const startY = random(10, 78)
+        const endY = clamp(startY + random(-10, 10), 8, 82)
+        const sprite = {
+          id,
+          src: pickGif(),
+          durationMs: Math.floor(random(profile.durationMs[0], profile.durationMs[1])),
+          sizePx: Math.floor(random(profile.sizePx[0], profile.sizePx[1])),
+          startX: fromLeft ? `${Math.floor(random(-10, 6))}%` : `${Math.floor(random(94, 110))}%`,
+          endX: fromLeft ? `${Math.floor(random(28, 62))}%` : `${Math.floor(random(38, 72))}%`,
+          startY: `${startY.toFixed(1)}%`,
+          endY: `${endY.toFixed(1)}%`,
+          rotateStart: `${random(-7, 7).toFixed(2)}deg`,
+          rotateEnd: `${random(-10, 10).toFixed(2)}deg`,
+          scale: random(0.75, 1.25).toFixed(3),
+          maxAlpha: random(profile.alpha[0], profile.alpha[1]).toFixed(3),
+          blurPx: random(profile.blurPx[0], profile.blurPx[1]).toFixed(2),
+        }
+
+        setSpectralSprites((prev) => [...prev.slice(-(profile.maxActive - 1)), sprite])
+
+        const removeTimer = window.setTimeout(() => {
+          setSpectralSprites((prev) => prev.filter((item) => item.id !== id))
+          removeTimers.delete(removeTimer)
+        }, sprite.durationMs + 300)
+        removeTimers.add(removeTimer)
+
+        scheduleSpawn()
+      }, nextDelay)
+    }
+
+    scheduleSpawn()
+
+    return () => {
+      cancelled = true
+      if (spawnTimer) window.clearTimeout(spawnTimer)
+      removeTimers.forEach((timerId) => window.clearTimeout(timerId))
+      removeTimers.clear()
+    }
+  }, [spectralMode])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -469,6 +586,9 @@ export default function DataStreamViz({ isCollecting = false, tickCount = 0, hz 
 
     const tick = () => {
       const { isCollecting, tickCount, hz, label } = propsRef.current
+      const mode = modeRef.current
+      const showFullViz = mode === 'ridiculous'
+      const showProgressOnly = mode === 'normal'
       const dpr = window.devicePixelRatio || 1
       const W   = canvas.offsetWidth
       const H   = canvas.offsetHeight
@@ -477,15 +597,18 @@ export default function DataStreamViz({ isCollecting = false, tickCount = 0, hz 
 
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
-      // ── Transition: idle → collecting (big bang) ──────────────────────
+      // ── Transition: idle → collecting ─────────────────────────────────
       if (isCollecting && !state.wasCollecting) {
-        for (let i = 0; i < 55 && state.particles.length < LIVE_MAX; i++) {
-          state.particles.push(makeParticle(W, H, true))
+        if (showFullViz) {
+          for (let i = 0; i < 55 && state.particles.length < LIVE_MAX; i++) {
+            state.particles.push(makeParticle(W, H, true))
+          }
+          state.pulses.push(makePulse(cx, cy, W, H, true))
+          state.pulses.push(makePulse(cx, cy, W, H, true))
         }
-        state.pulses.push(makePulse(cx, cy, W, H, true))
-        state.pulses.push(makePulse(cx, cy, W, H, true))
         state.lastTickCount = tickCount
       }
+
       // ── Transition: collecting → done (brief save-phase flash) ─────
       if (!isCollecting && state.wasCollecting) {
         if (state.savingFrames === 0) state.savingFrames = 160
@@ -493,8 +616,8 @@ export default function DataStreamViz({ isCollecting = false, tickCount = 0, hz 
       if (state.savingFrames > 0) state.savingFrames--
       state.wasCollecting = isCollecting
 
-      // ── New tick burst ────────────────────────────────────────────────
-      if (isCollecting && tickCount !== state.lastTickCount) {
+      // ── Full visualization updates only in Ridiculous mode ───────────
+      if (showFullViz && isCollecting && tickCount !== state.lastTickCount) {
         const newTicks = Math.max(tickCount - state.lastTickCount, 1)
         const burst    = Math.min(newTicks * 3, 14)
         for (let i = 0; i < burst && state.particles.length < LIVE_MAX; i++) {
@@ -504,8 +627,7 @@ export default function DataStreamViz({ isCollecting = false, tickCount = 0, hz 
         state.lastTickCount = tickCount
       }
 
-      // ── Passive spawn ─────────────────────────────────────────────────
-      if (state.frame % (isCollecting ? 12 : 90) === 0) {
+      if (showFullViz && state.frame % (isCollecting ? 12 : 90) === 0) {
         const maxP = isCollecting ? LIVE_MAX : IDLE_MAX
         if (state.particles.length < maxP) {
           state.particles.push(makeParticle(W, H, isCollecting))
@@ -514,7 +636,28 @@ export default function DataStreamViz({ isCollecting = false, tickCount = 0, hz 
 
       state.frame++
 
-      // ── Render ────────────────────────────────────────────────────────
+      // ── Render: none (immediate hide) ────────────────────────────────
+      if (mode === 'none') {
+        ctx.clearRect(0, 0, W, H)
+        state.particles = []
+        state.pulses = []
+        state.savingFrames = 0
+        animId = requestAnimationFrame(tick)
+        return
+      }
+
+      // ── Render: normal (progress area + status HUD only) ─────────────
+      if (showProgressOnly) {
+        ctx.clearRect(0, 0, W, H)
+        state.particles = []
+        state.pulses = []
+        drawPhaseTrack(ctx, W, H, isCollecting, tickCount, state.frame, state.savingFrames)
+        drawHUD(ctx, W, H, isCollecting, tickCount, hz, label)
+        animId = requestAnimationFrame(tick)
+        return
+      }
+
+      // ── Render: ridiculous (full visualization) ──────────────────────
       drawBackground(ctx, W, H)
       drawWaves(ctx, W, H, isCollecting, state.frame)
       drawPulses(ctx, state.pulses)
@@ -566,9 +709,78 @@ export default function DataStreamViz({ isCollecting = false, tickCount = 0, hz 
   }, [])   // run once — live values read via propsRef inside rAF
 
   return (
-    <canvas
-      ref={canvasRef}
-      className="w-full h-full block"
-    />
+    <div className="relative w-full h-full overflow-hidden">
+      <canvas
+        ref={canvasRef}
+        className="absolute inset-0 w-full h-full block"
+      />
+
+      <div className="absolute inset-0 pointer-events-none overflow-hidden" aria-hidden="true">
+        {spectralSprites.map((sprite) => (
+          <div
+            key={sprite.id}
+            className="lrs-math-spectral"
+            style={{
+              width: `${sprite.sizePx}px`,
+              '--lrs-math-start-x': sprite.startX,
+              '--lrs-math-end-x': sprite.endX,
+              '--lrs-math-start-y': sprite.startY,
+              '--lrs-math-end-y': sprite.endY,
+              '--lrs-math-rotate-start': sprite.rotateStart,
+              '--lrs-math-rotate-end': sprite.rotateEnd,
+              '--lrs-math-scale': sprite.scale,
+              '--lrs-math-max-alpha': sprite.maxAlpha,
+              '--lrs-math-blur': `${sprite.blurPx}px`,
+              animationDuration: `${sprite.durationMs}ms`,
+            }}
+          >
+            <img src={sprite.src} alt="" className="lrs-math-spectral-img" draggable={false} />
+          </div>
+        ))}
+      </div>
+
+      <div className="absolute top-3 right-3 z-20 pointer-events-auto select-none">
+        <div className="rounded-xl border border-border-strong/70 bg-bg-secondary/70 px-1.5 py-1.5 backdrop-blur-sm">
+          <div className="px-1 pb-1 text-[9px] font-semibold uppercase tracking-[0.11em] text-text-secondary">
+            Viz Intensity
+          </div>
+          <div className="inline-flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setSpectralMode('ridiculous')}
+              className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] transition-colors ${
+                spectralMode === 'ridiculous'
+                  ? 'bg-danger/25 text-danger-text'
+                  : 'text-text-secondary hover:bg-surface-hover/80 hover:text-text-primary'
+              }`}
+            >
+              Ridiculous
+            </button>
+            <button
+              type="button"
+              onClick={() => setSpectralMode('normal')}
+              className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] transition-colors ${
+                spectralMode === 'normal'
+                  ? 'bg-info/25 text-info-text'
+                  : 'text-text-secondary hover:bg-surface-hover/80 hover:text-text-primary'
+              }`}
+            >
+              Normal
+            </button>
+            <button
+              type="button"
+              onClick={() => setSpectralMode('none')}
+              className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] transition-colors ${
+                spectralMode === 'none'
+                  ? 'bg-surface-active text-text-primary'
+                  : 'text-text-secondary hover:bg-surface-hover/80 hover:text-text-primary'
+              }`}
+            >
+              None
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   )
 }

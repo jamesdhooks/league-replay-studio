@@ -16,6 +16,7 @@ Resolution-Independent Design:
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Optional
 
 from jinja2 import Environment, BaseLoader, select_autoescape
@@ -85,12 +86,12 @@ def render_element_template(
     if pagination and pagination.get("enabled"):
         items_per_page = pagination.get("items_per_page", 10)
 
-    page_start = page_index * items_per_page
-    page_end = page_start + items_per_page
-
-    # Total pages based on standings length (primary paginated list)
     standings = frame_data.get("standings", [])
     total_pages = max(1, -(-len(standings) // items_per_page))  # ceil division
+    safe_page_index = page_index % total_pages
+    page_start = safe_page_index * items_per_page
+    page_end = page_start + items_per_page
+    page_key = f"page-{safe_page_index + 1}-rows-{page_start}-{min(page_end, len(standings))}"
 
     try:
         template = _jinja_env.from_string(template_str)
@@ -100,12 +101,73 @@ def render_element_template(
             vars=var_values,
             page_start=page_start,
             page_end=page_end,
-            page_index=page_index,
+            page_index=safe_page_index,
             total_pages=total_pages,
+            page_key=page_key,
         )
     except Exception as exc:
         logger.warning("[ElementRenderer] Template render error: %s", exc)
         return f'<!-- Template error: {exc} -->'
+
+
+def _resolve_auto_page_index(
+    elements: list[dict[str, Any]],
+    frame_data: dict[str, Any],
+) -> int:
+    """Resolve page index from section elapsed time and pagination settings.
+
+    Uses the first enabled pagination config in the section.
+    """
+    standings = frame_data.get("standings", [])
+    if not isinstance(standings, list) or not standings:
+        return 0
+
+    pagination = None
+    for element in elements:
+        pag = element.get("pagination")
+        if isinstance(pag, dict) and pag.get("enabled"):
+            pagination = pag
+            break
+
+    if not pagination:
+        return 0
+
+    try:
+        items_per_page = int(pagination.get("items_per_page", 10) or 10)
+    except (TypeError, ValueError):
+        items_per_page = 10
+    items_per_page = max(1, items_per_page)
+
+    total_pages = max(1, math.ceil(len(standings) / items_per_page))
+    if total_pages <= 1:
+        return 0
+
+    elapsed = frame_data.get("overlay_section_elapsed_seconds", frame_data.get("overlay_clip_elapsed_seconds", 0.0))
+    duration = frame_data.get("overlay_section_duration_seconds", frame_data.get("overlay_clip_duration_seconds", 0.0))
+
+    try:
+        elapsed_seconds = max(0.0, float(elapsed or 0.0))
+    except (TypeError, ValueError):
+        elapsed_seconds = 0.0
+    try:
+        duration_seconds = max(0.0, float(duration or 0.0))
+    except (TypeError, ValueError):
+        duration_seconds = 0.0
+
+    try:
+        fixed_interval = float(pagination.get("cycle_duration_seconds", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        fixed_interval = 0.0
+
+    if fixed_interval > 0:
+        interval = fixed_interval
+    elif duration_seconds > 0:
+        interval = duration_seconds / total_pages
+    else:
+        interval = 1.0
+
+    interval = max(0.001, interval)
+    return int(elapsed_seconds / interval) % total_pages
 
 
 def compose_preset_html(
@@ -115,7 +177,7 @@ def compose_preset_html(
     resolution: dict[str, int] | None = None,
     asset_base_url: str = "/api/presets",
     element_filter: str | None = None,
-    page_index: int = 0,
+    page_index: int | None = None,
 ) -> str:
     """Compose all visible elements for a section into a single HTML document.
 
@@ -140,16 +202,20 @@ def compose_preset_html(
     Returns:
         Complete HTML document string.
     """
-    logger.debug(
-        "[ElementRenderer] compose_preset_html: section=%s, preset=%s, page=%d",
-        section, preset.get("id", "?"), page_index,
-    )
-    if resolution is None:
-        resolution = {"width": 1920, "height": 1080}
-
     # Get elements for this section
     sections = preset.get("sections", {})
     elements = sections.get(section, [])
+
+    resolved_page_index = page_index
+    if resolved_page_index is None:
+        resolved_page_index = _resolve_auto_page_index(elements, frame_data)
+
+    logger.debug(
+        "[ElementRenderer] compose_preset_html: section=%s, preset=%s, page=%d",
+        section, preset.get("id", "?"), resolved_page_index,
+    )
+    if resolution is None:
+        resolution = {"width": 1920, "height": 1080}
 
     # Filter to specific element if requested
     if element_filter:
@@ -209,7 +275,7 @@ def compose_preset_html(
         rendered_content = render_element_template(
             template_str, frame_data, pos, variables,
             pagination=elem.get("pagination"),
-            page_index=page_index,
+            page_index=resolved_page_index,
         )
 
         html_parts.append(

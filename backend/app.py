@@ -100,6 +100,38 @@ class ConnectionManager:
 
 ws_manager = ConnectionManager()
 
+
+def _install_windows_asyncio_accept_filter(loop: asyncio.AbstractEventLoop) -> None:
+    """Suppress known benign Proactor accept errors on Windows.
+
+    On some Windows setups, asyncio's Proactor loop can emit:
+    "Accept failed on a socket" with WinError 87 during transient listener
+    state changes. This is noisy and typically non-fatal, so we downgrade just
+    this exact case and leave all other loop errors unchanged.
+    """
+    if not sys.platform.startswith("win"):
+        return
+
+    previous_handler = loop.get_exception_handler()
+
+    def _handler(current_loop: asyncio.AbstractEventLoop, context: dict) -> None:
+        message = str(context.get("message", ""))
+        exception = context.get("exception")
+        if (
+            message == "Accept failed on a socket"
+            and isinstance(exception, OSError)
+            and getattr(exception, "winerror", None) == 87
+        ):
+            logger.debug("[App] Ignoring benign Windows accept error (WinError 87)")
+            return
+
+        if previous_handler:
+            previous_handler(current_loop, context)
+        else:
+            current_loop.default_exception_handler(context)
+
+    loop.set_exception_handler(_handler)
+
 # ── FastAPI app ──────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -113,7 +145,8 @@ async def lifespan(app: FastAPI):
         logger.info("[App] Created default config.json")
 
     # ── Start iRacing bridge ────────────────────────────────────────────────
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
+    _install_windows_asyncio_accept_filter(loop)
 
     async def _broadcast_iracing(message: dict) -> None:
         await ws_manager.broadcast(message)
@@ -441,6 +474,14 @@ async def global_exception_handler(request, exc):
 
 def _get_icon_path() -> str:
     """Return the path to the application icon."""
+    preferred = (
+        BUNDLE_DIR / "assets" / "logo_2048.png",
+        STATIC_DIR / "assets" / "logo_2048.png",
+    )
+    for icon in preferred:
+        if icon.exists():
+            return str(icon)
+
     for name in ("icon.ico", "icon.png", "icon.svg"):
         # Check next to the executable / bundle root
         icon = BUNDLE_DIR / name
@@ -470,6 +511,11 @@ def _apply_app_user_model_id() -> None:
 def start_server(port: int = 6177, reload_enabled: bool = False) -> None:
     """Start the FastAPI server with uvicorn."""
     import uvicorn
+    if sys.platform.startswith("win") and hasattr(asyncio, "WindowsProactorEventLoopPolicy"):
+        # Playwright launches a browser subprocess; on Windows this requires a
+        # Proactor-capable event loop. Keep uvicorn from forcing Selector loop.
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        logger.info("[App] Using Windows Proactor event loop policy")
     logger.info("[App] Starting FastAPI on http://127.0.0.1:%d (reload=%s)", port, reload_enabled)
     if reload_enabled:
         # Uvicorn reload mode requires an import string and should run on main thread.
@@ -479,6 +525,7 @@ def start_server(port: int = 6177, reload_enabled: bool = False) -> None:
             port=port,
             log_level="warning",
             reload=True,
+            loop="none",
         )
     else:
         uvicorn.run(
@@ -486,6 +533,7 @@ def start_server(port: int = 6177, reload_enabled: bool = False) -> None:
             host="127.0.0.1",
             port=port,
             log_level="warning",
+            loop="none",
         )
 
 

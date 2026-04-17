@@ -12,6 +12,7 @@ Provides:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import time
@@ -20,7 +21,17 @@ from typing import Any, Optional
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from server.utils.overlay_animation import compute_profile_window_ms
+
 logger = logging.getLogger(__name__)
+
+
+def _format_exc(exc: Exception) -> str:
+    """Return a non-empty, user-facing error message for exceptions."""
+    msg = str(exc).strip()
+    if msg:
+        return msg
+    return exc.__class__.__name__
 
 # ── Resolution presets ───────────────────────────────────────────────────────
 
@@ -69,6 +80,7 @@ class OverlayEngine:
         self._jinja_env: Optional[Environment] = None
         self._current_resolution = RESOLUTIONS[DEFAULT_RESOLUTION].copy()
         self._custom_template_dirs: list[Path] = []
+        self._animation_profile_cache: dict[str, dict[str, Any]] = {}
 
     @property
     def initialized(self) -> bool:
@@ -130,11 +142,18 @@ class OverlayEngine:
             logger.warning("[Overlay] Playwright not installed — overlay rendering unavailable")
             return {
                 "success": False,
-                "error": "Playwright not installed. Run: pip install playwright && playwright install chromium",
+                "error": "Playwright not installed. Run start.bat once, or use: python -m pip install playwright && python -m playwright install chromium",
             }
         except Exception as exc:
-            logger.error("[Overlay] Initialization failed: %s", exc)
-            return {"success": False, "error": str(exc)}
+            err = _format_exc(exc)
+            logger.error("[Overlay] Initialization failed: %s", err)
+            if isinstance(exc, NotImplementedError):
+                err = (
+                    "Async subprocesses are unavailable in the active event loop "
+                    "(Windows Selector loop). Restart backend with Proactor loop "
+                    "support enabled."
+                )
+            return {"success": False, "error": err}
 
     async def shutdown(self) -> None:
         """Close the browser and release resources."""
@@ -190,6 +209,193 @@ class OverlayEngine:
             logger.error("[Overlay] Template render failed (%s): %s", template_id, exc)
             raise
 
+    async def _collect_animation_profile(self, cache_key: str | None = None) -> dict[str, Any]:
+        if cache_key and cache_key in self._animation_profile_cache:
+            return dict(self._animation_profile_cache[cache_key])
+
+        profile = await self._page.evaluate(
+            """() => {
+                const animatedElements = [];
+                const transitionElements = [];
+                const keyframeNames = new Set();
+                const parseMaxMs = (value) => {
+                    if (!value) return 0;
+                    return String(value)
+                        .split(',')
+                        .map((chunk) => chunk.trim())
+                        .filter(Boolean)
+                        .reduce((maxValue, token) => {
+                            const lower = token.toLowerCase();
+                            if (lower.endsWith('ms')) {
+                                return Math.max(maxValue, parseFloat(lower.slice(0, -2)) || 0);
+                            }
+                            if (lower.endsWith('s')) {
+                                return Math.max(maxValue, (parseFloat(lower.slice(0, -1)) || 0) * 1000);
+                            }
+                            return Math.max(maxValue, parseFloat(lower) || 0);
+                        }, 0);
+                };
+                const parseIterations = (value) => {
+                    if (!value) return 1;
+                    return String(value)
+                        .split(',')
+                        .map((chunk) => chunk.trim().toLowerCase())
+                        .filter(Boolean)
+                        .reduce((maxValue, token) => {
+                            if (token === 'infinite') return Math.max(maxValue, 1);
+                            return Math.max(maxValue, parseFloat(token) || 1);
+                        }, 1);
+                };
+                const describe = (element) => {
+                    if (!element) return 'unknown';
+                    if (element.id) return `#${element.id}`;
+                    if (element.classList && element.classList.length) {
+                        return `${element.tagName.toLowerCase()}.${Array.from(element.classList).slice(0, 3).join('.')}`;
+                    }
+                    return element.tagName.toLowerCase();
+                };
+
+                const animations = document.getAnimations({ subtree: true }) || [];
+                animations.forEach((animation) => {
+                    const effect = animation.effect;
+                    const timing = effect && typeof effect.getTiming === 'function' ? effect.getTiming() : null;
+                    const target = effect && effect.target ? effect.target : null;
+                    const name = target ? getComputedStyle(target).animationName : 'unknown';
+                    if (name && name !== 'none') keyframeNames.add(name);
+                    animatedElements.push({
+                        selector: describe(target),
+                        name,
+                        duration: `${timing && Number.isFinite(timing.duration) ? timing.duration : 0}ms`,
+                        delay: `${timing && Number.isFinite(timing.delay) ? timing.delay : 0}ms`,
+                        iterations: timing && Number.isFinite(timing.iterations) ? String(timing.iterations) : '1',
+                    });
+                });
+
+                document.querySelectorAll('*').forEach((element) => {
+                    const style = getComputedStyle(element);
+                    const animationName = style.animationName || 'none';
+                    const animationDuration = style.animationDuration || '0s';
+                    const animationDelay = style.animationDelay || '0s';
+                    const animationIterationCount = style.animationIterationCount || '1';
+                    const transitionDuration = style.transitionDuration || '0s';
+                    const transitionDelay = style.transitionDelay || '0s';
+
+                    if (animationName !== 'none' && parseMaxMs(animationDuration) > 0) {
+                        keyframeNames.add(animationName);
+                        animatedElements.push({
+                            selector: describe(element),
+                            name: animationName,
+                            duration: animationDuration,
+                            delay: animationDelay,
+                            iterations: animationIterationCount,
+                        });
+                    }
+
+                    if (parseMaxMs(transitionDuration) > 0) {
+                        transitionElements.push({
+                            selector: describe(element),
+                            property: style.transitionProperty || 'all',
+                            duration: transitionDuration,
+                            delay: transitionDelay,
+                        });
+                    }
+                });
+
+                const uniqueAnimated = [];
+                const seenAnimated = new Set();
+                animatedElements.forEach((entry) => {
+                    const key = `${entry.selector}|${entry.name}|${entry.duration}|${entry.delay}|${entry.iterations}`;
+                    if (!seenAnimated.has(key)) {
+                        uniqueAnimated.push(entry);
+                        seenAnimated.add(key);
+                    }
+                });
+
+                const uniqueTransitions = [];
+                const seenTransitions = new Set();
+                transitionElements.forEach((entry) => {
+                    const key = `${entry.selector}|${entry.property}|${entry.duration}|${entry.delay}`;
+                    if (!seenTransitions.has(key)) {
+                        uniqueTransitions.push(entry);
+                        seenTransitions.add(key);
+                    }
+                });
+
+                let maxWindowMs = 0;
+                uniqueAnimated.forEach((entry) => {
+                    maxWindowMs = Math.max(
+                        maxWindowMs,
+                        parseMaxMs(entry.delay) + (parseMaxMs(entry.duration) * parseIterations(entry.iterations)),
+                    );
+                });
+                uniqueTransitions.forEach((entry) => {
+                    maxWindowMs = Math.max(maxWindowMs, parseMaxMs(entry.delay) + parseMaxMs(entry.duration));
+                });
+
+                return {
+                    animated_elements: uniqueAnimated.slice(0, 50),
+                    transition_elements: uniqueTransitions.slice(0, 50),
+                    keyframe_names: Array.from(keyframeNames),
+                    live_animation_count: animations.length,
+                    has_animations: uniqueAnimated.length > 0 || uniqueTransitions.length > 0,
+                    has_keyframes: uniqueAnimated.length > 0,
+                    has_transitions: uniqueTransitions.length > 0,
+                    supports_timeline_seek: animations.length > 0,
+                    max_window_ms: maxWindowMs,
+                };
+            }"""
+        )
+        profile["max_window_ms"] = round(compute_profile_window_ms(profile), 2)
+        if cache_key:
+            self._animation_profile_cache[cache_key] = dict(profile)
+        return profile
+
+    async def _seek_document_animations(self, animation_time_ms: float) -> dict[str, Any]:
+        return await self._page.evaluate(
+            """(targetMs) => {
+                const animations = document.getAnimations({ subtree: true }) || [];
+                let updated = 0;
+                animations.forEach((animation) => {
+                    try {
+                        animation.pause();
+                        animation.currentTime = Math.max(0, targetMs);
+                        updated += 1;
+                    } catch (error) {
+                        // Ignore animations Playwright cannot seek.
+                    }
+                });
+                return { updated };
+            }""",
+            float(animation_time_ms),
+        )
+
+    async def _prepare_rendered_html(
+        self,
+        rendered_html: str,
+        analyze_animations: bool = False,
+        animation_time_ms: float | None = None,
+    ) -> dict[str, Any] | None:
+        cache_key = hashlib.sha1(rendered_html.encode("utf-8")).hexdigest()
+        await self._page.set_content(rendered_html, wait_until="domcontentloaded")
+        await self._page.wait_for_load_state("networkidle")
+        await self._page.evaluate(
+            """() => new Promise((resolve) => {
+                requestAnimationFrame(() => requestAnimationFrame(resolve));
+            })"""
+        )
+
+        animation_profile: dict[str, Any] | None = None
+        if analyze_animations or animation_time_ms is not None:
+            animation_profile = await self._collect_animation_profile(cache_key=cache_key)
+        if animation_time_ms is not None:
+            await self._seek_document_animations(animation_time_ms)
+            await self._page.evaluate(
+                """() => new Promise((resolve) => {
+                    requestAnimationFrame(() => requestAnimationFrame(resolve));
+                })"""
+            )
+        return animation_profile
+
     # ── Frame rendering ──────────────────────────────────────────────────────
 
     async def render_frame(
@@ -197,6 +403,8 @@ class OverlayEngine:
         template_id: str,
         frame_data: dict[str, Any],
         output_path: Optional[str] = None,
+        analyze_animations: bool = False,
+        animation_time_ms: float | None = None,
     ) -> dict[str, Any]:
         """Render a single overlay frame as a transparent PNG.
 
@@ -222,8 +430,11 @@ class OverlayEngine:
                 "resolution": self._current_resolution,
             })
 
-            # Set the page content
-            await self._page.set_content(html, wait_until="domcontentloaded")
+            animation_profile = await self._prepare_rendered_html(
+                html,
+                analyze_animations=analyze_animations,
+                animation_time_ms=animation_time_ms,
+            )
 
             # Screenshot with transparent background
             screenshot_opts: dict[str, Any] = {
@@ -249,13 +460,17 @@ class OverlayEngine:
                 result["output_path"] = output_path
             else:
                 result["png_bytes"] = png_bytes
+            if animation_profile is not None:
+                result["animation_profile"] = animation_profile
+            if animation_time_ms is not None:
+                result["animation_time_ms"] = round(float(animation_time_ms), 2)
 
             return result
 
         except Exception as exc:
             elapsed_ms = (time.perf_counter() - start) * 1000
             logger.error("[Overlay] render_frame failed: %s (%.1fms)", exc, elapsed_ms)
-            return {"success": False, "error": str(exc), "elapsed_ms": round(elapsed_ms, 2)}
+            return {"success": False, "error": _format_exc(exc), "elapsed_ms": round(elapsed_ms, 2)}
 
     # ── Raw HTML rendering (for editor) ────────────────────────────────────
 
@@ -264,6 +479,10 @@ class OverlayEngine:
         html_content: str,
         frame_data: dict[str, Any],
         output_path: Optional[str] = None,
+        analyze_animations: bool = False,
+        animation_time_ms: float | None = None,
+        include_rendered_html: bool = False,
+        render_screenshot: bool = True,
     ) -> dict[str, Any]:
         """Render raw HTML content directly (bypassing template files).
 
@@ -302,19 +521,24 @@ class OverlayEngine:
                     "elapsed_ms": round((time.perf_counter() - start) * 1000, 2),
                 }
 
-            # Set the page content
-            await self._page.set_content(rendered_html, wait_until="domcontentloaded")
+            animation_profile = await self._prepare_rendered_html(
+                rendered_html,
+                analyze_animations=analyze_animations,
+                animation_time_ms=animation_time_ms,
+            )
 
-            # Screenshot with transparent background
-            screenshot_opts: dict[str, Any] = {
-                "type": "png",
-                "omit_background": True,
-                "full_page": False,
-            }
-            if output_path:
-                screenshot_opts["path"] = output_path
+            png_bytes: bytes = b""
+            if render_screenshot:
+                # Screenshot with transparent background
+                screenshot_opts: dict[str, Any] = {
+                    "type": "png",
+                    "omit_background": True,
+                    "full_page": False,
+                }
+                if output_path:
+                    screenshot_opts["path"] = output_path
 
-            png_bytes = await self._page.screenshot(**screenshot_opts)
+                png_bytes = await self._page.screenshot(**screenshot_opts)
 
             elapsed_ms = (time.perf_counter() - start) * 1000
 
@@ -324,17 +548,24 @@ class OverlayEngine:
                 "width": self._current_resolution["width"],
                 "height": self._current_resolution["height"],
                 "size_bytes": len(png_bytes),
-                "png_base64": base64.b64encode(png_bytes).decode("ascii"),
             }
-            if output_path:
+            if render_screenshot:
+                result["png_base64"] = base64.b64encode(png_bytes).decode("ascii")
+            if render_screenshot and output_path:
                 result["output_path"] = output_path
+            if include_rendered_html:
+                result["rendered_html"] = rendered_html
+            if animation_profile is not None:
+                result["animation_profile"] = animation_profile
+            if animation_time_ms is not None:
+                result["animation_time_ms"] = round(float(animation_time_ms), 2)
 
             return result
 
         except Exception as exc:
             elapsed_ms = (time.perf_counter() - start) * 1000
             logger.error("[Overlay] render_raw_html failed: %s (%.1fms)", exc, elapsed_ms)
-            return {"success": False, "error": str(exc), "elapsed_ms": round(elapsed_ms, 2)}
+            return {"success": False, "error": _format_exc(exc), "elapsed_ms": round(elapsed_ms, 2)}
 
     # ── Batch rendering ──────────────────────────────────────────────────────
 

@@ -91,7 +91,7 @@ function CollectPage() {
               - When collecting: transparent canvas floats above the explorer (pointer-events-none)
               - When no file selected: canvas fills the dark panel as an attract screen
               - When file selected & not collecting: hidden */}
-        <div className={`absolute inset-0 transition-opacity duration-500 pointer-events-none ${
+        <div className={`absolute inset-0 transition-opacity duration-500 ${
           liveInfo.active || !selectedFile ? 'opacity-100' : 'opacity-0'
         }`}>
           <DataStreamViz

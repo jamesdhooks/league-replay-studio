@@ -11,6 +11,7 @@ export const WORKFLOW_STEPS = [
   { id: 'editing', label: 'Editing', icon: 'scissors' },
   { id: 'overlay', label: 'Overlay', icon: 'layers' },
   { id: 'capture', label: 'Capture', icon: 'video' },
+  { id: 'compose', label: 'Compose', icon: 'clapperboard' },
   { id: 'export', label: 'Export', icon: 'download' },
   { id: 'upload', label: 'Upload', icon: 'upload' },
 ]

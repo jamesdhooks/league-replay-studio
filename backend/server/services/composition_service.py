@@ -658,6 +658,7 @@ class CompositionService:
                     focused_car_idx=focused_car_idx,
                     series_name=series_name,
                     track_name=track_name,
+                    clip_duration_seconds=max(0.0, float(clip.get("duration_seconds") or 0.0)),
                 )
             except Exception as exc:
                 logger.warning("[Composition] Overlay failed for %s: %s", seg_id, exc)
@@ -698,6 +699,7 @@ class CompositionService:
         focused_car_idx: int | None = None,
         series_name: str = "",
         track_name: str = "",
+        clip_duration_seconds: float = 0.0,
     ) -> str | None:
         """Run the async overlay compositor from a synchronous thread.
 
@@ -720,6 +722,7 @@ class CompositionService:
                     focused_car_idx=focused_car_idx,
                     series_name=series_name,
                     track_name=track_name,
+                    clip_duration_seconds=clip_duration_seconds,
                 )
             )
         finally:

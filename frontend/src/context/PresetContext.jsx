@@ -70,6 +70,10 @@ export function PresetProvider({ children }) {
     }
   }, [fetchPresets])
 
+  const linkTemplateToPreset = useCallback(async (presetId, templateId) => {
+    return updatePreset(presetId, { template_id: templateId })
+  }, [updatePreset])
+
   const deletePreset = useCallback(async (presetId) => {
     try {
       await apiDelete(`/presets/${presetId}`)
@@ -209,6 +213,9 @@ export function PresetProvider({ children }) {
         element_id: opts.elementId || null,
         frame_data: opts.frameData || null,
         variables: opts.variables || null,
+        analyze_animations: opts.analyzeAnimations ?? true,
+        include_rendered_html: opts.includeRenderedHtml ?? false,
+        render_screenshot: opts.renderScreenshot ?? true,
       })
       setPreviewData(result)
       return result
@@ -245,6 +252,7 @@ export function PresetProvider({ children }) {
     getPreset,
     createPreset,
     updatePreset,
+    linkTemplateToPreset,
     deletePreset,
     duplicatePreset,
     exportPreset,
@@ -262,6 +270,7 @@ export function PresetProvider({ children }) {
     presets, selectedPresetId, selectedPreset, activeSection, sectionElements,
     previewData, loading, error,
     fetchPresets, getPreset, createPreset, updatePreset, deletePreset,
+    linkTemplateToPreset,
     duplicatePreset, exportPreset, importPreset,
     addElement, updateElement, removeElement,
     listAssets, uploadAsset, deleteAsset,

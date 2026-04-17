@@ -205,6 +205,64 @@
   }
 }
 
+  .lrs-math-spectral {
+    position: absolute;
+    left: 0;
+    top: 0;
+    opacity: 0;
+    will-change: left, top, opacity, transform;
+    mix-blend-mode: screen;
+    pointer-events: none;
+    filter: blur(var(--lrs-math-blur, 1px));
+    -webkit-mask-image: radial-gradient(
+      ellipse at center,
+      rgba(0, 0, 0, 0.98) 34%,
+      rgba(0, 0, 0, 0.7) 56%,
+      rgba(0, 0, 0, 0.24) 72%,
+      transparent 88%
+    );
+    mask-image: radial-gradient(
+      ellipse at center,
+      rgba(0, 0, 0, 0.98) 34%,
+      rgba(0, 0, 0, 0.7) 56%,
+      rgba(0, 0, 0, 0.24) 72%,
+      transparent 88%
+    );
+    animation-name: lrs-math-spectral-float;
+    animation-timing-function: linear;
+    animation-fill-mode: forwards;
+  }
+
+  .lrs-math-spectral-img {
+    width: 100%;
+    height: auto;
+    object-fit: contain;
+    display: block;
+    user-select: none;
+    filter: saturate(0.78) contrast(1.03) brightness(1.03);
+  }
+
+  @keyframes lrs-math-spectral-float {
+    0% {
+      left: var(--lrs-math-start-x);
+      top: var(--lrs-math-start-y);
+      opacity: 0;
+      transform: translate(-50%, -50%) rotate(var(--lrs-math-rotate-start)) scale(var(--lrs-math-scale));
+    }
+    18% {
+      opacity: var(--lrs-math-max-alpha);
+    }
+    74% {
+      opacity: calc(var(--lrs-math-max-alpha) * 0.9);
+    }
+    100% {
+      left: var(--lrs-math-end-x);
+      top: var(--lrs-math-end-y);
+      opacity: 0;
+      transform: translate(-50%, -50%) rotate(var(--lrs-math-rotate-end)) scale(calc(var(--lrs-math-scale) * 1.07));
+    }
+  }
+
 /*
  * ── Typography Scale ───────────────────────────────────────────────────────
  *

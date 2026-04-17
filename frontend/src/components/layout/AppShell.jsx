@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, lazy, Suspense, useTransition } from 'react'
-import { Loader2, BarChart3, FolderOpen, Radio } from 'lucide-react'
+import { Loader2, FolderOpen, Radio } from 'lucide-react'
 import Toolbar from './Toolbar'
 import { useProject } from '../../context/ProjectContext'
 import { useAnalysis } from '../../context/AnalysisContext'
@@ -131,10 +131,11 @@ function AppShell() {
                     ${appReady ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
       >
         <div className="flex flex-col items-center gap-4">
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-gradient-from via-gradient-via to-gradient-to
-                          flex items-center justify-center shadow-glow">
-            <BarChart3 size={30} className="text-white" />
-          </div>
+          <img
+            src="/assets/logo_2048.png"
+            alt="League Replay Studio"
+            className="w-16 h-16 object-contain drop-shadow-[0_0_10px_rgba(255,255,255,0.22)]"
+          />
           <div className="text-center">
             <p className="text-base font-bold text-text-primary tracking-tight">League Replay Studio</p>
             <p className="text-xs text-text-tertiary mt-1">Starting up…</p>

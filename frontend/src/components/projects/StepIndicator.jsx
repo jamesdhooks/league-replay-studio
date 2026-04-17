@@ -5,6 +5,7 @@ import {
   Download,
   Upload,
   Layers,
+  Clapperboard,
   Check,
   Circle,
   Lock,
@@ -19,6 +20,7 @@ const STEP_ICONS = {
   analysis: BarChart3,
   editing: Scissors,
   overlay: Layers,
+  compose: Clapperboard,
   export: Download,
   upload: Upload,
 }

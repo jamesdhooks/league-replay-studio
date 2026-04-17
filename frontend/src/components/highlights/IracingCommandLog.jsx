@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { ChevronDown, ChevronUp, Terminal, Trash2 } from 'lucide-react'
+import { Terminal, Trash2 } from 'lucide-react'
+import SectionCollapseHeader from '../ui/SectionCollapseHeader'
 import { wsClient } from '../../services/websocket'
+import { apiDelete, apiGet } from '../../services/api'
 
 const MAX_ENTRIES = 500
 
@@ -55,16 +57,51 @@ export default function IracingCommandLog() {
   const [collapsed, setCollapsed] = useState(false)
   const bottomRef = useRef(null)
   const containerRef = useRef(null)
+  const seenSeqRef = useRef(new Set())
+
+  const mergeEntries = (incoming) => {
+    if (!Array.isArray(incoming) || incoming.length === 0) return
+    setEntries(prev => {
+      const next = [...prev]
+      for (const item of incoming) {
+        if (!item || item.seq == null) continue
+        if (seenSeqRef.current.has(item.seq)) continue
+        seenSeqRef.current.add(item.seq)
+        next.push(item)
+      }
+      return next.length > MAX_ENTRIES ? next.slice(next.length - MAX_ENTRIES) : next
+    })
+  }
 
   // Subscribe to live command events over WebSocket.
   useEffect(() => {
     const unsub = wsClient.subscribe('iracing:command', (data) => {
-      setEntries(prev => {
-        const next = [...prev, data]
-        return next.length > MAX_ENTRIES ? next.slice(next.length - MAX_ENTRIES) : next
-      })
+      mergeEntries([data])
     })
     return unsub
+  }, [])
+
+  // Fallback/bootstrapping path: fetch command history periodically so the
+  // feed still populates even if websocket delivery drops.
+  useEffect(() => {
+    let cancelled = false
+
+    const pull = async () => {
+      try {
+        const result = await apiGet('/iracing/replay/commands?limit=500')
+        if (cancelled) return
+        mergeEntries(result?.entries || [])
+      } catch {
+        // Non-fatal: websocket stream may still be active.
+      }
+    }
+
+    pull()
+    const interval = setInterval(pull, 1000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
   }, [])
 
   // Auto-scroll to bottom when new entries arrive (only if already near bottom).
@@ -89,42 +126,44 @@ export default function IracingCommandLog() {
       >
         {/* Header */}
         <div
-          className="flex items-center gap-2 px-3 py-2 border-b border-border bg-bg-secondary shrink-0 cursor-pointer select-none"
-          onClick={() => setCollapsed(c => !c)}
+          className="flex items-center gap-1.5 border-b border-border bg-bg-secondary shrink-0"
         >
-          <Terminal size={12} className="text-text-tertiary shrink-0" />
-          <span className="text-xxs font-semibold text-text-secondary uppercase tracking-wider flex-1">
-            iRacing Commands
-          </span>
-
-          {/* Summary when collapsed, or count when expanded */}
-          {collapsed && lastEntry && meta ? (
-            <span className={`text-xxs font-mono ${meta.color} truncate max-w-[120px]`}>
-              {meta.label}{formatParams(lastEntry.command, lastEntry.params) ? ` ${formatParams(lastEntry.command, lastEntry.params)}` : ''}
-            </span>
-          ) : (
-            <span className="text-xxs font-mono text-text-disabled tabular-nums">
-              {entries.length}
-            </span>
-          )}
+          <SectionCollapseHeader
+            open={!collapsed}
+            onToggle={() => setCollapsed(c => !c)}
+            icon={Terminal}
+            title="iRacing Commands"
+            right={collapsed && lastEntry && meta ? (
+              <span className={`text-xxs font-mono ${meta.color} truncate max-w-[120px]`}>
+                {meta.label}{formatParams(lastEntry.command, lastEntry.params) ? ` ${formatParams(lastEntry.command, lastEntry.params)}` : ''}
+              </span>
+            ) : (
+              <span className="text-xxs font-mono text-text-disabled tabular-nums">
+                {entries.length}
+              </span>
+            )}
+            className="flex-1"
+            buttonClassName="px-3 py-2"
+          />
 
           {/* Clear button (only when expanded) */}
           {!collapsed && entries.length > 0 && (
             <button
-              onClick={e => { e.stopPropagation(); setEntries([]) }}
+              onClick={async () => {
+                setEntries([])
+                seenSeqRef.current.clear()
+                try {
+                  await apiDelete('/iracing/replay/commands')
+                } catch {
+                  // Keep local clear behavior even if backend clear fails.
+                }
+              }}
               className="p-0.5 rounded hover:bg-bg-hover text-text-disabled hover:text-text-secondary transition-colors"
               title="Clear log"
             >
               <Trash2 size={11} />
             </button>
           )}
-
-          <button
-            className="p-0.5 rounded hover:bg-bg-hover transition-colors text-text-disabled hover:text-text-secondary"
-            title={collapsed ? 'Expand' : 'Collapse'}
-          >
-            {collapsed ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-          </button>
         </div>
 
         {/* Log body */}

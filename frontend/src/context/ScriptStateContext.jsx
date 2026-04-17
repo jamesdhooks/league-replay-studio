@@ -43,6 +43,9 @@ export function ScriptStateProvider({ children }) {
     border_width: 2,
     show_live_badge: true,
   })
+  const [overlayUiConfig, setOverlayUiConfig] = useState({
+    ui_zoom: 1.0,
+  })
   const [loading, setLoading]           = useState(false)
   const [error, setError]               = useState(null)
 
@@ -65,6 +68,7 @@ export function ScriptStateProvider({ children }) {
     setCaptureRange(state.capture_range ?? null)
     setTrash(state.trash ?? [])
     if (state.pip_config) setPipConfig(state.pip_config)
+    if (state.overlay_ui_config) setOverlayUiConfig(state.overlay_ui_config)
   }, [])
 
   // ── API Actions ────────────────────────────────────────────────────────
@@ -216,6 +220,30 @@ export function ScriptStateProvider({ children }) {
     }
   }, [])
 
+  // ── Overlay UI Config ───────────────────────────────────────────────
+
+  const fetchOverlayUiConfig = useCallback(async (projectId) => {
+    try {
+      const config = await apiGet(`/script-state/${projectId}/overlay-ui-config`)
+      setOverlayUiConfig(config)
+      return config
+    } catch (err) {
+      setError(err.message)
+      return null
+    }
+  }, [])
+
+  const updateOverlayUiConfig = useCallback(async (projectId, updates) => {
+    try {
+      const config = await apiPut(`/script-state/${projectId}/overlay-ui-config`, updates)
+      setOverlayUiConfig(config)
+      return config
+    } catch (err) {
+      setError(err.message)
+      throw err
+    }
+  }, [])
+
   // ── Filter ─────────────────────────────────────────────────────────────
 
   const filterSegments = useCallback(async (projectId, script, mode = 'all', opts = {}) => {
@@ -236,21 +264,23 @@ export function ScriptStateProvider({ children }) {
   // ── Context value ──────────────────────────────────────────────────────
   const value = useMemo(() => ({
     // State
-    scriptLocked, lockedAt, segments, captureRange, trash, pipConfig,
+    scriptLocked, lockedAt, segments, captureRange, trash, pipConfig, overlayUiConfig,
     summary, loading, error,
     // Actions
     fetchState, lockScript, unlockScript, compareScript,
     setCaptureRange: setCaptureRangeApi, invalidateSegment, markCaptured,
     fetchTrash, emptyTrash, restoreFromTrash,
     fetchPipConfig, updatePipConfig,
+    fetchOverlayUiConfig, updateOverlayUiConfig,
     filterSegments,
   }), [
-    scriptLocked, lockedAt, segments, captureRange, trash, pipConfig,
+    scriptLocked, lockedAt, segments, captureRange, trash, pipConfig, overlayUiConfig,
     summary, loading, error,
     fetchState, lockScript, unlockScript, compareScript,
     setCaptureRangeApi, invalidateSegment, markCaptured,
     fetchTrash, emptyTrash, restoreFromTrash,
     fetchPipConfig, updatePipConfig,
+    fetchOverlayUiConfig, updateOverlayUiConfig,
     filterSegments,
   ])
 

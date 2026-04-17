@@ -652,6 +652,7 @@ export default memo(function AnalysisPanel() {
                   handleSwitchDriver={handleSwitchDriver}
                   overrides={overrides}
                   toggleOverride={toggleOverride}
+                  className="flex-1"
                 />
               </div>
 

@@ -11,7 +11,7 @@ pywebview==5.3.0
 websockets==14.1
 
 # Utilities
-python-multipart==0.0.22
+python-multipart==0.0.20
 
 # iRacing SDK — shared memory telemetry + Broadcasting API
 # pyirsdk: Python 3 implementation of iRacing SDK
@@ -33,6 +33,7 @@ httpx==0.27.2
 
 # Overlay template rendering
 jinja2==3.1.4
+playwright==1.51.0
 
 # Testing
 pytest==8.3.0

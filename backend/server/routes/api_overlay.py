@@ -54,6 +54,7 @@ class RenderRequest(BaseModel):
     template_id: str
     frame_data: dict[str, Any] = {}
     project_id: Optional[int] = None
+    analyze_animations: bool = False
 
 
 class BatchRenderRequest(BaseModel):
@@ -91,6 +92,7 @@ class EditorPreviewRequest(BaseModel):
     template_id: str
     html_content: str
     frame_data: dict[str, Any] = {}
+    analyze_animations: bool = False
 
 
 class FrameDataRequest(BaseModel):
@@ -118,6 +120,11 @@ class CompositeRequest(BaseModel):
     series_name: str = ""
     track_name: str = ""
     frame_data: Optional[dict[str, Any]] = None  # supply directly to skip telemetry lookup
+    clip_duration_seconds: float = 0.0
+    animation_orchestration: bool = True
+    trigger_sensitivity: float = 1.0
+    cooldown_frames: int = 12
+    max_animated_seconds: float = 6.0
 
 
 class BatchCompositeRequest(BaseModel):
@@ -131,6 +138,10 @@ class BatchCompositeRequest(BaseModel):
     series_name: str = ""
     track_name: str = ""
     focused_car_idx: Optional[int] = None
+    animation_orchestration: bool = True
+    trigger_sensitivity: float = 1.0
+    cooldown_frames: int = 12
+    max_animated_seconds: float = 6.0
 
 
 # ── Status ──────────────────────────────────────────────────────────────────
@@ -246,6 +257,7 @@ async def render_frame(body: RenderRequest):
             body.template_id,
             body.frame_data,
             project_id=body.project_id,
+            analyze_animations=body.analyze_animations,
         )
         return result
     except Exception as exc:
@@ -334,6 +346,7 @@ async def editor_preview(body: EditorPreviewRequest):
             body.template_id,
             body.html_content,
             body.frame_data,
+            analyze_animations=body.analyze_animations,
         )
         return result
     except Exception as exc:
@@ -486,10 +499,19 @@ async def composite_overlay(project_id: int, body: CompositeRequest):
             focused_car_idx=body.focused_car_idx,
             series_name=body.series_name,
             track_name=track_name,
+            clip_duration_seconds=body.clip_duration_seconds,
+            animation_orchestration=body.animation_orchestration,
+            trigger_sensitivity=body.trigger_sensitivity,
+            cooldown_frames=body.cooldown_frames,
+            max_animated_seconds=body.max_animated_seconds,
         )
         if result is None:
             raise HTTPException(status_code=500, detail="Compositing failed")
-        return {"success": True, "output_path": result}
+        return {
+            "success": True,
+            "output_path": result,
+            "overlay_diagnostics": overlay_compositor.last_diagnostics,
+        }
     except HTTPException:
         raise
     except Exception as exc:
@@ -564,6 +586,10 @@ async def composite_batch(project_id: int, body: BatchCompositeRequest):
             series_name=body.series_name,
             track_name=track_name,
             focused_car_idx=body.focused_car_idx,
+            animation_orchestration=body.animation_orchestration,
+            trigger_sensitivity=body.trigger_sensitivity,
+            cooldown_frames=body.cooldown_frames,
+            max_animated_seconds=body.max_animated_seconds,
         )
         successful = sum(1 for c in composited_clips if c.get("composited_path"))
         return {
@@ -633,7 +659,11 @@ async def render_preset_preview(body: dict[str, Any]):
         if not init_result.get("success"):
             return init_result
 
-    result = await overlay_engine.render_raw_html(html_content, frame_data)
+    result = await overlay_engine.render_raw_html(
+        html_content,
+        frame_data,
+        analyze_animations=True,
+    )
     return result
 
 

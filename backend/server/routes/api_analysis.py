@@ -33,7 +33,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, Optional
+
+from fastapi import APIRouter, HTTPException
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -1976,6 +1979,14 @@ async def generate_video_script_endpoint(project_id: int, body: VideoScriptReque
                 len(result.get("script", [])),
                 len(result.get("sections", [])),
             )
+
+            # Persist the generated script so downstream steps (overlay/capture/export)
+            # can load it from project metadata even after refresh/restart.
+            project_service.save_project_metadata(project_id, {
+                "script": result.get("script", []),
+                "script_sections": result.get("sections", []),
+                "script_generated_at": datetime.now(timezone.utc).isoformat(),
+            })
 
             return {
                 "project_id": project_id,

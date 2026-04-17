@@ -144,6 +144,9 @@ SAMPLE_FRAME_DATA: dict[str, Any] = {
     "current_lap": 7,
     "total_laps": 20,
     "session_time": "01:23:45",
+    "session_time_seconds": 5025.0,
+    "replay_frame": 120750,
+    "frame_timestamp_ms": 5025000,
     "flag": "green",
 
     # ── Focused driver variables ─────────────────────────────────────────────
@@ -239,6 +242,20 @@ SAMPLE_FRAME_DATA: dict[str, Any] = {
     "venue_display_name": "Daytona International Speedway — Road Course",
     "driver_nickname": "MaxV",
     "driver_avatar": "a_abc123def456",
+
+    # ── Overlay orchestration helpers ────────────────────────────────────────
+    "overlay_clip_elapsed_seconds": 4.2,
+    "overlay_clip_duration_seconds": 12.0,
+    "overlay_section_elapsed_seconds": 4.2,
+    "overlay_section_duration_seconds": 12.0,
+    "overlay_page_index": 1,
+    "changed_keys": ["position", "standings"],
+    "animation_triggers": ["position", "standings"],
+    "animation_state": {
+        "active": True,
+        "progress_ms": 240.0,
+        "reason": ["position", "standings"],
+    },
 }
 
 # ── Variable documentation ──────────────────────────────────────────────────
@@ -600,6 +617,8 @@ class OverlayService:
         template_id: str,
         frame_data: dict[str, Any],
         project_id: Optional[int] = None,
+        analyze_animations: bool = False,
+        animation_time_ms: float | None = None,
     ) -> dict[str, Any]:
         """Render a single overlay frame.
 
@@ -637,13 +656,20 @@ class OverlayService:
         if template and not template.get("is_builtin"):
             overlay_engine.set_custom_template_dirs([CUSTOM_TEMPLATES_DIR])
 
-        return await overlay_engine.render_frame(template_id, frame_data)
+        return await overlay_engine.render_frame(
+            template_id,
+            frame_data,
+            analyze_animations=analyze_animations,
+            animation_time_ms=animation_time_ms,
+        )
 
     async def render_preview(
         self,
         template_id: str,
         html_content: str,
         frame_data: dict[str, Any],
+        analyze_animations: bool = False,
+        animation_time_ms: float | None = None,
     ) -> dict[str, Any]:
         """Render a preview frame from raw HTML content (for the editor).
 
@@ -663,7 +689,12 @@ class OverlayService:
             if not init.get("success"):
                 return init
 
-        return await overlay_engine.render_raw_html(html_content, frame_data)
+        return await overlay_engine.render_raw_html(
+            html_content,
+            frame_data,
+            analyze_animations=analyze_animations,
+            animation_time_ms=animation_time_ms,
+        )
 
     def get_template_context(self, template_id: str) -> Optional[dict[str, Any]]:
         """Get available Jinja2 template variables with sample values.

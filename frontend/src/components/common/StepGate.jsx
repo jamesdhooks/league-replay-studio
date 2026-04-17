@@ -1,7 +1,7 @@
 import { ChevronLeft } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext'
 
-const STEP_ORDER = ['analysis', 'editing', 'overlay', 'capture', 'export', 'upload']
+const STEP_ORDER = ['analysis', 'editing', 'overlay', 'capture', 'compose', 'export', 'upload']
 
 const STEP_INFO = {
   analysis: {
@@ -17,22 +17,28 @@ const STEP_INFO = {
     target: 'editing',
   },
   overlay: {
-    title: 'Analysis Required',
-    description: 'Run replay analysis before designing overlay templates.',
-    cta: 'Go to Analysis',
-    target: 'analysis',
+    title: 'Script Required',
+    description: 'Generate a race script in Editing before designing overlay templates.',
+    cta: 'Go to Editing',
+    target: 'editing',
   },
   capture: {
     title: 'Capture Required',
-    description: 'Record the replay before you can export it.',
+    description: 'Record the replay before you can compose it.',
+    cta: 'Go to Capture',
+    target: 'capture',
+  },
+  compose: {
+    title: 'Capture Required',
+    description: 'Capture replay clips before composing the final video.',
     cta: 'Go to Capture',
     target: 'capture',
   },
   export: {
-    title: 'Export Required',
-    description: 'Export the video before uploading.',
-    cta: 'Go to Export',
-    target: 'export',
+    title: 'Compose Required',
+    description: 'Compose the video first before encoding for delivery.',
+    cta: 'Go to Compose',
+    target: 'compose',
   },
 }
 

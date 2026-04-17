@@ -17,6 +17,8 @@ capture range, and PiP configuration.
   POST /api/script-state/{project_id}/trash/restore — Restore a clip from trash
   GET  /api/script-state/{project_id}/pip-config    — Get PiP config
   PUT  /api/script-state/{project_id}/pip-config    — Update PiP config
+    GET  /api/script-state/{project_id}/overlay-ui-config — Get overlay UI config
+    PUT  /api/script-state/{project_id}/overlay-ui-config — Update overlay UI config
   POST /api/script-state/{project_id}/filter        — Filter script segments by mode
 """
 
@@ -91,6 +93,10 @@ class PipConfigUpdate(BaseModel):
     border_color: str | None = None
     border_width: int | None = None
     show_live_badge: bool | None = None
+
+
+class OverlayUiConfigUpdate(BaseModel):
+    ui_zoom: float | None = None
 
 
 # ── Script Lock ─────────────────────────────────────────────────────────────
@@ -237,3 +243,18 @@ async def update_pip_config(project_id: int, body: PipConfigUpdate):
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     config = script_state_service.update_pip_config(project_dir, updates)
     return config
+
+
+@router.get("/{project_id}/overlay-ui-config")
+async def get_overlay_ui_config(project_id: int):
+    """Get overlay preview UI configuration."""
+    project_dir = _get_project_dir(project_id)
+    return script_state_service.get_overlay_ui_config(project_dir)
+
+
+@router.put("/{project_id}/overlay-ui-config")
+async def update_overlay_ui_config(project_id: int, body: OverlayUiConfigUpdate):
+    """Update overlay preview UI configuration."""
+    project_dir = _get_project_dir(project_id)
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    return script_state_service.update_overlay_ui_config(project_dir, updates)

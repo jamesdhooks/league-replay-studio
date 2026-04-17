@@ -4,15 +4,14 @@ import { useProject } from '../../context/ProjectContext'
 import { useAnalysis } from '../../context/AnalysisContext'
 import AnalysisPanel from '../analysis/AnalysisPanel'
 import HighlightPanel from '../highlights/HighlightPanel'
-import OverlayPanel from '../overlay/OverlayPanel'
-import OverlayPreviewStep from '../overlay/OverlayPreviewStep'
-import PipConfigurator from '../overlay/PipConfigurator'
+import OverlayStudio from '../overlay/OverlayStudio'
 import CapturePanel from '../capture/CapturePanel'
 import EncodingPanel from '../encoding/EncodingPanel'
 import CompositionPanel from '../encoding/CompositionPanel'
 import YouTubePanel from '../youtube/YouTubePanel'
 import PipelinePanel from '../pipeline/PipelinePanel'
 import StepGate from '../common/StepGate'
+import { useHighlight } from '../../context/HighlightContext'
 
 /**
  * Project view — shown when a project is open.
@@ -20,8 +19,9 @@ import StepGate from '../common/StepGate'
  * then renders step content.
  */
 function ProjectView({ project, isLoading }) {
-  const { advanceStep } = useProject()
+  const { advanceStep, updateProject } = useProject()
   const { events, eventSummary } = useAnalysis()
+  const { videoScript, scriptProjectId } = useHighlight()
 
   const handleAdvance = useCallback(async () => {
     try {
@@ -30,6 +30,23 @@ function ProjectView({ project, isLoading }) {
       // Advance failed
     }
   }, [project.id, advanceStep])
+
+  const resolvedScript = useMemo(() => {
+    if (Array.isArray(project.script) && project.script.length > 0) {
+      return project.script
+    }
+    if (scriptProjectId === project.id && Array.isArray(videoScript) && videoScript.length > 0) {
+      return videoScript
+    }
+    return []
+  }, [project.id, project.script, scriptProjectId, videoScript])
+
+  const handleScriptChange = useCallback(async (nextScript) => {
+    if (!project?.id || !Array.isArray(nextScript)) return
+    await updateProject(project.id, {
+      script: nextScript,
+    })
+  }, [project?.id, updateProject])
 
   // While the project record itself is still fetching, show a neutral spinner
   // in the content area (not the analysis-specific one).
@@ -56,22 +73,12 @@ function ProjectView({ project, isLoading }) {
       case 'overlay':
         if (!hasAnalysis) return <StepGate currentStep="overlay" requiredStep="analysis" />
         return (
-          <div className="flex flex-1 overflow-hidden">
-            {/* Left: Overlay template config + PiP */}
-            <div className="w-1/2 border-r border-border overflow-y-auto">
-              <OverlayPanel />
-              <div className="border-t border-border p-4">
-                <PipConfigurator projectId={project.id} />
-              </div>
-            </div>
-            {/* Right: Overlay preview with read-only timeline */}
-            <div className="w-1/2 overflow-hidden">
-              <OverlayPreviewStep
-                script={project.script || []}
-                projectId={project.id}
-              />
-            </div>
-          </div>
+          <OverlayStudio
+            projectId={project.id}
+            script={resolvedScript}
+            scriptGeneratedAt={project.script_generated_at || null}
+            onScriptChange={handleScriptChange}
+          />
         )
 
       case 'capture':
@@ -79,29 +86,23 @@ function ProjectView({ project, isLoading }) {
         return (
           <CapturePanel
             projectId={project.id}
-            script={project.script || []}
+            script={resolvedScript}
             totalDuration={project.race_duration || 0}
           />
         )
 
-      case 'export':
+      case 'compose':
         return (
-          <div className="flex flex-1 overflow-hidden">
-            {/* Left: Standard encoding panel */}
-            <div className="w-1/2 border-r border-border overflow-hidden">
-              <EncodingPanel projectId={project.id} />
-            </div>
-            {/* Right: Composition pipeline (trim, overlay, transition, stitch) */}
-            <div className="w-1/2 overflow-hidden">
-              <CompositionPanel
-                projectId={project.id}
-                script={project.script || []}
-                clipsManifest={project.clips_manifest || project.clips || []}
-                outputDir={project.output_dir || project.project_dir || ''}
-              />
-            </div>
-          </div>
+          <CompositionPanel
+            projectId={project.id}
+            script={resolvedScript}
+            clipsManifest={project.clips_manifest || project.clips || []}
+            outputDir={project.output_dir || project.project_dir || ''}
+          />
         )
+
+      case 'export':
+        return <EncodingPanel projectId={project.id} />
 
       case 'upload':
         return <YouTubePanel />

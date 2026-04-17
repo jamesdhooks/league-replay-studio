@@ -1,0 +1,46 @@
+{
+  "id": "preset_3233e642",
+  "name": "Test",
+  "description": "Overlay design",
+  "is_builtin": false,
+  "version": "1.0.0",
+  "sections": {
+    "intro": [],
+    "qualifying_results": [],
+    "race": [],
+    "race_results": []
+  },
+  "variables": {
+    "--color-primary": {
+      "value": "#ffffff",
+      "type": "color",
+      "label": "Primary Color"
+    },
+    "--color-secondary": {
+      "value": "#cccccc",
+      "type": "color",
+      "label": "Secondary Color"
+    },
+    "--color-accent": {
+      "value": "#3B82F6",
+      "type": "color",
+      "label": "Accent Color"
+    },
+    "--color-background": {
+      "value": "rgba(0,0,0,0.75)",
+      "type": "color",
+      "label": "Background Color"
+    },
+    "--font-primary": {
+      "value": "'Inter', sans-serif",
+      "type": "font",
+      "label": "Primary Font"
+    },
+    "--font-mono": {
+      "value": "'JetBrains Mono', monospace",
+      "type": "font",
+      "label": "Monospace Font"
+    }
+  },
+  "intro_video_path": null
+}

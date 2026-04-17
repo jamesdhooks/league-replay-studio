@@ -72,6 +72,7 @@ class StepName(str, Enum):
     ANALYSIS = "analysis"
     EDITING = "editing"
     CAPTURE = "capture"
+    COMPOSE = "compose"
     EXPORT = "export"
     UPLOAD = "upload"
 
@@ -144,6 +145,7 @@ class PipelineRun:
                 StepName.ANALYSIS: PipelineStep(name=StepName.ANALYSIS),
                 StepName.EDITING: PipelineStep(name=StepName.EDITING),
                 StepName.CAPTURE: PipelineStep(name=StepName.CAPTURE),
+                StepName.COMPOSE: PipelineStep(name=StepName.COMPOSE),
                 StepName.EXPORT: PipelineStep(name=StepName.EXPORT),
                 StepName.UPLOAD: PipelineStep(name=StepName.UPLOAD),
             }
@@ -860,6 +862,7 @@ class PipelineService:
             StepName.ANALYSIS,
             StepName.EDITING,
             StepName.CAPTURE,
+            StepName.COMPOSE,
             StepName.EXPORT,
             StepName.UPLOAD,
         ]
@@ -868,6 +871,7 @@ class PipelineService:
             StepName.CAPTURE: self._execute_capture,
             StepName.ANALYSIS: self._execute_analysis,
             StepName.EDITING: self._execute_editing,
+            StepName.COMPOSE: self._execute_compose,
             StepName.EXPORT: self._execute_export,
             StepName.UPLOAD: self._execute_upload,
         }
@@ -1367,6 +1371,84 @@ class PipelineService:
             })
 
         logger.info("[Pipeline] Editing step completed")
+
+    def _execute_compose(self) -> None:
+        """Execute the compose step — trim, overlay and stitch captured clips."""
+        logger.info("[Pipeline] Starting compose step")
+
+        with self._lock:
+            config = self._current_run.config if self._current_run else {}
+            project_id = self._current_run.project_id if self._current_run else 0
+
+        if config.get("skip_compose"):
+            logger.info("[Pipeline] Skipping compose (configured)")
+            return
+
+        from server.services.composition_service import composition_service
+        from server.services.project_service import project_service
+
+        project = project_service.get_project(project_id)
+        if not project:
+            raise ValueError(f"Project {project_id} not found")
+
+        script = project.get("script") or []
+        clips_manifest = project.get("clips_manifest") or []
+
+        if not clips_manifest:
+            raise ValueError("No captured clips found — run the Capture step first")
+        if not script:
+            raise ValueError("No composition script — run the Editing step first")
+
+        output_dir = project.get("project_dir", "")
+        if not output_dir:
+            raise ValueError("Project directory not set")
+
+        result = composition_service.submit_job(
+            project_id=project_id,
+            script=script,
+            clips_manifest=clips_manifest,
+            output_dir=output_dir,
+            preset_id=config.get("compose_preset", "youtube_1080p60"),
+        )
+
+        if not result.get("success"):
+            raise RuntimeError(result.get("error", "Composition job failed to start"))
+
+        job_id = result["job"]["job_id"]
+
+        # Monitor progress
+        while True:
+            if self._stop_event.is_set():
+                composition_service.cancel_job(job_id)
+                raise InterruptedError("Compose cancelled")
+            if self._pause_event.is_set():
+                time.sleep(0.5)
+                continue
+
+            job_status = composition_service.get_job(job_id)
+            if not job_status:
+                raise RuntimeError("Compose job lost")
+
+            progress = job_status.get("progress", 0)
+            self._update_step_progress(StepName.COMPOSE, progress, {
+                "job_id": job_id,
+                "output_file": job_status.get("output_file"),
+            })
+
+            state = job_status.get("state")
+            if state == "completed":
+                with self._lock:
+                    if self._current_run:
+                        self._current_run.steps[StepName.COMPOSE].output["output_file"] = job_status.get("output_file")
+                break
+            if state == "error":
+                raise RuntimeError(job_status.get("error", "Composition failed"))
+            if state == "cancelled":
+                raise InterruptedError("Compose cancelled")
+
+            time.sleep(0.5)
+
+        logger.info("[Pipeline] Compose step completed")
 
     def _execute_export(self) -> None:
         """Execute the export step."""

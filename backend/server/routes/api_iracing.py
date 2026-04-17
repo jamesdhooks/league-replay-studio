@@ -423,6 +423,23 @@ async def replay_pause() -> dict:
     return {"status": "ok", "speed": 0}
 
 
+@router.get("/replay/commands")
+async def replay_commands(limit: int = 200) -> dict:
+    """Return recently recorded replay commands (oldest to newest)."""
+    safe_limit = max(1, min(limit, 1000))
+    entries = command_log.get_all()
+    if len(entries) > safe_limit:
+        entries = entries[-safe_limit:]
+    return {"entries": entries, "total": len(entries)}
+
+
+@router.delete("/replay/commands")
+async def clear_replay_commands() -> dict:
+    """Clear in-memory replay command log entries."""
+    command_log.clear()
+    return {"success": True}
+
+
 @router.post("/replay/seek")
 async def replay_seek(body: SeekRequest) -> dict:
     """Seek the replay to a specific frame number."""

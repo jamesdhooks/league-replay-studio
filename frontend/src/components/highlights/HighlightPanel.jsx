@@ -18,6 +18,7 @@ import EditHistoryPanel from '../history/EditHistoryPanel'
 import ProjectFileBrowser from '../projects/ProjectFileBrowser'
 import ResizableSidebar from '../layout/ResizableSidebar'
 import CollapsibleSection from '../ui/CollapsibleSection'
+import ResizableRowPane from '../ui/ResizableRowPane'
 import { Sparkles, List, Search, History, Folder, Film, Scissors, Clapperboard, ChevronDown, ChevronRight, AlertCircle, Save, Zap } from 'lucide-react'
 
 /**
@@ -60,27 +61,6 @@ export default function HighlightPanel({ projectId }) {
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
   }, [setTuningWidth])
-
-  // Resizable timeline pane height (bottom of right column)
-  const [timelineHeight, setTimelineHeight] = useLocalStorage('lrs:editing:timelineHeight', 160)
-  const timelineHeightRef = useRef(timelineHeight)
-  useEffect(() => { timelineHeightRef.current = timelineHeight }, [timelineHeight])
-
-  const startTimelineResize = useCallback((e) => {
-    e.preventDefault()
-    const startY = e.clientY
-    const startH = timelineHeightRef.current
-    const onMove = (mv) => {
-      const h = Math.max(80, Math.min(400, startH - (mv.clientY - startY)))
-      setTimelineHeight(h)
-    }
-    const onUp = () => {
-      document.removeEventListener('mousemove', onMove)
-      document.removeEventListener('mouseup', onUp)
-    }
-    document.addEventListener('mousemove', onMove)
-    document.addEventListener('mouseup', onUp)
-  }, [setTimelineHeight])
 
   // Histogram + Preview: collapsed state (mutually exclusive — only one expands at a time)
   const [histogramCollapsed, setHistogramCollapsed] = useLocalStorage('lrs:editing:histogramCollapsed', false)
@@ -280,44 +260,35 @@ export default function HighlightPanel({ projectId }) {
 
           {/* Right column: shared top zone (histogram OR preview) + timeline */}
           <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
-
-            {/* Top zone — always flex-1; histogram and preview share this space.
-                The active panel fills the zone; the collapsed one shows header only. */}
-            <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-              <div className={!histogramCollapsed ? 'flex-1 flex flex-col min-h-0 overflow-hidden' : 'shrink-0'}>
-                <HighlightHistogram
-                  onInspect={() => sidebarRef.current?.switchTab('inspector')}
-                  projectId={projectId}
-                  collapsed={histogramCollapsed}
-                  onToggle={toggleHistogram}
-                  eventsLoaded={eventsLoaded}
-                />
-              </div>
-              <div className={!previewCollapsed ? 'flex-1 flex flex-col min-h-0 overflow-hidden' : 'shrink-0'}>
-                <HighlightPreview
-                  collapsed={previewCollapsed}
-                  onToggle={togglePreview}
-                />
-              </div>
-            </div>
-
-            {/* Resize handle — splits top zone from timeline */}
-            <div
-              className="shrink-0 cursor-row-resize group/divider relative"
-              style={{ height: 1, marginTop: -1 }}
-              onMouseDown={startTimelineResize}
-            >
-              <div className="absolute inset-x-0 -top-2 -bottom-2 z-20" />
-              <div className="absolute inset-x-0 top-0 h-px bg-border transition-colors group-hover/divider:bg-accent group-active/divider:bg-accent" />
-            </div>
-
-            {/* Timeline strip (bottom, fixed height) */}
-            <div
-              className="shrink-0 overflow-hidden"
-              style={{ height: timelineHeight }}
-            >
-              <HighlightTimeline onInspect={() => sidebarRef.current?.switchTab('inspector')} />
-            </div>
+            <ResizableRowPane
+              storageKey="lrs:editing:timelineHeight"
+              defaultBottomHeight={160}
+              minBottom={80}
+              maxBottom={400}
+              containerClassName="flex flex-col flex-1 min-h-0 overflow-hidden"
+              top={
+                <div className="h-full flex flex-col min-h-0 overflow-hidden">
+                  <div className={!histogramCollapsed ? 'flex-1 flex flex-col min-h-0 overflow-hidden' : 'shrink-0'}>
+                    <HighlightHistogram
+                      onInspect={() => sidebarRef.current?.switchTab('inspector')}
+                      projectId={projectId}
+                      collapsed={histogramCollapsed}
+                      onToggle={toggleHistogram}
+                      eventsLoaded={eventsLoaded}
+                    />
+                  </div>
+                  <div className={!previewCollapsed ? 'flex-1 flex flex-col min-h-0 overflow-hidden' : 'shrink-0'}>
+                    <HighlightPreview
+                      collapsed={previewCollapsed}
+                      onToggle={togglePreview}
+                    />
+                  </div>
+                </div>
+              }
+              bottom={
+                <HighlightTimeline onInspect={() => sidebarRef.current?.switchTab('inspector')} />
+              }
+            />
           </div>
         </div>
       </div>

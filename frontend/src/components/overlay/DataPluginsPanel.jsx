@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   Plug, Plus, Trash2, TestTube, ChevronDown, ChevronRight,
   CheckCircle2, XCircle, Loader2, Shield, Key, Globe,
-  Users, Trophy, Flag, Info,
+  Users, Trophy, Flag, Info, AlertTriangle,
 } from 'lucide-react'
 import { apiGet, apiPost, apiPut, apiDelete } from '../../services/api'
 
@@ -47,6 +47,24 @@ export default function DataPluginsPanel() {
   const [testing, setTesting] = useState(null)
   const [testResult, setTestResult] = useState(null)
   const [showFormats, setShowFormats] = useState(false)
+
+  const normalizedFormats = useMemo(() => {
+    if (!formats || typeof formats !== 'object') return []
+    return Object.entries(formats)
+      .map(([type, fmt]) => ({
+        type,
+        fmt: (fmt && typeof fmt === 'object') ? fmt : {},
+      }))
+      .filter((entry) => Boolean(entry.type))
+  }, [formats])
+
+  const formatByType = useMemo(() => {
+    const lookup = {}
+    for (const entry of normalizedFormats) {
+      lookup[entry.type] = entry.fmt || {}
+    }
+    return lookup
+  }, [normalizedFormats])
 
   // ── Fetch plugins + formats on mount ─────────────────────────────────────
   const fetchPlugins = useCallback(async () => {
@@ -169,6 +187,7 @@ export default function DataPluginsPanel() {
           <PluginCard
             key={plugin.id}
             plugin={plugin}
+            formatDoc={formatByType[plugin.plugin_type] || null}
             isExpanded={expandedPlugin === plugin.id}
             onToggle={() => setExpandedPlugin(expandedPlugin === plugin.id ? null : plugin.id)}
             onUpdate={handleUpdate}
@@ -229,31 +248,38 @@ export default function DataPluginsPanel() {
           </button>
           {showFormats && (
             <div className="mt-2 space-y-3">
-              {Object.entries(formats).map(([type, fmt]) => {
+              {normalizedFormats.length === 0 && (
+                <div className="rounded border border-border bg-bg-secondary/20 p-3 text-[10px] text-text-tertiary">
+                  No API format docs are available yet. Try refreshing after plugin formats load from the backend.
+                </div>
+              )}
+              {normalizedFormats.map(({ type, fmt }) => {
                 const meta = PLUGIN_TYPES.find(t => t.value === type)
+                const requestExample = fmt.request_example ?? fmt.request ?? {}
+                const responseExample = fmt.response_example ?? fmt.response ?? {}
                 return (
                   <div key={type} className="rounded border border-border bg-bg-secondary/30 p-3">
                     <h4 className="text-[11px] font-medium text-text-primary mb-1">
                       {meta?.label || type}
                     </h4>
                     <p className="text-[10px] text-text-tertiary mb-2 leading-relaxed">
-                      {fmt.description}
+                      {fmt.description || 'Expected request/response format for this plugin type.'}
                     </p>
-                    <div className="space-y-1.5">
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
                       <div>
                         <span className="text-[9px] font-medium text-text-disabled uppercase tracking-wider">
                           Request Body
                         </span>
                         <pre className="text-[10px] text-text-tertiary font-mono bg-bg-primary rounded p-1.5 mt-0.5 overflow-x-auto">
-                          {JSON.stringify(fmt.request_example, null, 2)}
+                          {JSON.stringify(requestExample, null, 2)}
                         </pre>
                       </div>
                       <div>
                         <span className="text-[9px] font-medium text-text-disabled uppercase tracking-wider">
-                          Response Format
+                          API Response Format
                         </span>
                         <pre className="text-[10px] text-text-tertiary font-mono bg-bg-primary rounded p-1.5 mt-0.5 overflow-x-auto">
-                          {JSON.stringify(fmt.response_example, null, 2)}
+                          {JSON.stringify(responseExample, null, 2)}
                         </pre>
                       </div>
                     </div>
@@ -271,7 +297,7 @@ export default function DataPluginsPanel() {
 
 // ── Plugin Card (expandable) ────────────────────────────────────────────────
 
-function PluginCard({ plugin, isExpanded, onToggle, onUpdate, onDelete, onTest, testing, testResult }) {
+function PluginCard({ plugin, formatDoc, isExpanded, onToggle, onUpdate, onDelete, onTest, testing, testResult }) {
   const [localUrl, setLocalUrl] = useState(plugin.endpoint_url || '')
   const [localName, setLocalName] = useState(plugin.name || '')
   const [localAuth, setLocalAuth] = useState(plugin.auth_method || 'none')
@@ -279,6 +305,42 @@ function PluginCard({ plugin, isExpanded, onToggle, onUpdate, onDelete, onTest, 
 
   const meta = PLUGIN_TYPES.find(t => t.value === plugin.plugin_type)
   const Icon = meta?.icon || Plug
+
+  const mappingStatus = useMemo(() => {
+    const hasEndpoint = Boolean((plugin.endpoint_url || '').trim())
+    const hasFormat = Boolean(formatDoc && typeof formatDoc === 'object' && Object.keys(formatDoc).length > 0)
+    const hasRequest = hasFormat && Boolean(formatDoc.request_example ?? formatDoc.request)
+    const hasResponse = hasFormat && Boolean(formatDoc.response_example ?? formatDoc.response)
+
+    if (hasEndpoint && hasRequest && hasResponse) {
+      return {
+        label: 'Mapping Ready',
+        className: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+        icon: CheckCircle2,
+        title: 'Endpoint + request/response format mapping look complete',
+      }
+    }
+
+    if (!hasFormat) {
+      return {
+        label: 'No Format Doc',
+        className: 'bg-red-500/15 text-red-400 border-red-500/30',
+        icon: XCircle,
+        title: 'No API format reference found for this plugin type',
+      }
+    }
+
+    return {
+      label: hasEndpoint ? 'Mapping Partial' : 'Needs Endpoint',
+      className: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
+      icon: AlertTriangle,
+      title: hasEndpoint
+        ? 'Format docs exist, but request/response examples are incomplete'
+        : 'Add endpoint URL and verify format mapping',
+    }
+  }, [formatDoc, plugin.endpoint_url])
+
+  const MappingIcon = mappingStatus.icon
 
   const handleSave = useCallback(() => {
     onUpdate(plugin.id, {
@@ -315,6 +377,13 @@ function PluginCard({ plugin, isExpanded, onToggle, onUpdate, onDelete, onTest, 
             : 'bg-bg-secondary text-text-disabled'
         }`}>
           {plugin.enabled ? 'Active' : 'Disabled'}
+        </span>
+        <span
+          className={`inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-full border ${mappingStatus.className}`}
+          title={mappingStatus.title}
+        >
+          <MappingIcon className="w-2.5 h-2.5" />
+          {mappingStatus.label}
         </span>
         {plugin.last_test_ok && (
           <CheckCircle2 className="w-3 h-3 text-emerald-500 flex-shrink-0" />

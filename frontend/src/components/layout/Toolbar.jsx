@@ -4,7 +4,6 @@ import {
   Undo2,
   Redo2,
   Save,
-  PlayCircle,
   ArrowLeft,
   Wifi,
   WifiOff,
@@ -72,10 +71,11 @@ function Toolbar({
           </>
         ) : (
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-gradient-from via-gradient-via to-gradient-to
-                            flex items-center justify-center shadow-glow-sm">
-              <PlayCircle className="w-5 h-5 text-white" />
-            </div>
+            <img
+              src="/assets/logo_2048.png"
+              alt="League Replay Studio"
+              className="w-9 h-9 object-contain drop-shadow-[0_0_8px_rgba(255,255,255,0.22)]"
+            />
             <div className="flex items-baseline gap-2">
               <span className="text-lg font-extrabold text-gradient tracking-tight">
                 League Replay Studio
