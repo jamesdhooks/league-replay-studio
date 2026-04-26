@@ -58,17 +58,44 @@ PLUGIN_CHAMPIONSHIP_STANDINGS = "championship_standings"
 VALID_PLUGIN_TYPES = {PLUGIN_DRIVER_DETAILS, PLUGIN_RACE_DETAILS, PLUGIN_CHAMPIONSHIP_STANDINGS}
 VALID_AUTH_METHODS = {AUTH_NONE, AUTH_API_KEY, AUTH_BEARER, AUTH_CUSTOM_HEADER}
 
+# ── Request style constants ─────────────────────────────────────────────────
+
+REQUEST_STYLE_POST_BODY = "post_body"    # POST with JSON body  (default)
+REQUEST_STYLE_PATH_PARAM = "path_param"  # GET with single param appended as path segment
+
+VALID_REQUEST_STYLES = {REQUEST_STYLE_POST_BODY, REQUEST_STYLE_PATH_PARAM}
+
 # ── Expected response formats ──────────────────────────────────────────────
 
 EXPECTED_FORMATS: dict[str, dict[str, Any]] = {
     PLUGIN_DRIVER_DETAILS: {
         "description": (
-            "Accepts a JSON body with { \"cust_ids\": [int, ...] }. "
+            "Accepts a JSON body with { \"customer_ids\": [int, ...] }. "
             "Returns a map of iRacing customer IDs to driver info objects. "
             "Each object should have \"nickname\" (string) and \"avatar\" "
             "(URL string or Discord avatar hash, e.g. 'a_abc123def456')."
         ),
-        "request_example": {"cust_ids": [12345, 67890]},
+        "request_schema": [
+            {
+                "field": "customer_ids",
+                "type": "int[]",
+                "required": True,
+                "description": "One or more iRacing customer IDs to enrich.",
+            },
+        ],
+        "response_schema": [
+            {
+                "field": "<customer_id>",
+                "type": "object",
+                "required": True,
+                "description": "Object key is the customer ID string.",
+                "children": [
+                    {"field": "nickname", "type": "string", "required": False},
+                    {"field": "avatar", "type": "string", "required": False},
+                ],
+            },
+        ],
+        "request_example": {"customer_ids": [12345, 67890]},
         "response_example": {
             "12345": {"nickname": "MaxV", "avatar": "a_abc123def456"},
             "67890": {"nickname": "LewisH", "avatar": "https://cdn.example.com/avatar.png"},
@@ -78,15 +105,30 @@ EXPECTED_FORMATS: dict[str, dict[str, Any]] = {
         "description": (
             "Accepts a JSON body with { \"subsession_id\": int }. "
             "Returns race metadata: season, series, week_number, "
-            "race_date (ISO 8601), and venue_display_name."
+            "race_date (ISO 8601), and track_name."
         ),
+        "request_schema": [
+            {
+                "field": "subsession_id",
+                "type": "int",
+                "required": True,
+                "description": "The iRacing subsession ID for the race.",
+            },
+        ],
+        "response_schema": [
+            {"field": "season", "type": "string", "required": False},
+            {"field": "series", "type": "string", "required": False},
+            {"field": "week_number", "type": "int", "required": False},
+            {"field": "race_date", "type": "string", "required": False, "description": "ISO date string."},
+            {"field": "track_name", "type": "string", "required": False},
+        ],
         "request_example": {"subsession_id": 12345678},
         "response_example": {
             "season": "2025 Season 2",
             "series": "IMSA SportsCar Championship",
             "week_number": 5,
             "race_date": "2025-03-15",
-            "venue_display_name": "Daytona International Speedway — Road Course",
+            "track_name": "Daytona International Speedway — Road Course",
         },
     },
     PLUGIN_CHAMPIONSHIP_STANDINGS: {
@@ -97,6 +139,30 @@ EXPECTED_FORMATS: dict[str, dict[str, Any]] = {
             "points_delta, position_delta, championship_position, and "
             "participated (boolean indicating presence in the subsession)."
         ),
+        "request_schema": [
+            {
+                "field": "subsession_id",
+                "type": "int",
+                "required": True,
+                "description": "The iRacing subsession ID for standings lookup.",
+            },
+        ],
+        "response_schema": [
+            {
+                "field": "standings",
+                "type": "array<object>",
+                "required": True,
+                "children": [
+                    {"field": "championship_position", "type": "int", "required": False},
+                    {"field": "driver_name", "type": "string", "required": False},
+                    {"field": "iracing_cust_id", "type": "int", "required": False},
+                    {"field": "total_points", "type": "int", "required": False},
+                    {"field": "points_delta", "type": "int", "required": False},
+                    {"field": "position_delta", "type": "int", "required": False},
+                    {"field": "participated", "type": "bool", "required": False},
+                ],
+            },
+        ],
         "request_example": {"subsession_id": 12345678},
         "response_example": {
             "standings": [
@@ -120,7 +186,7 @@ EXPECTED_FORMATS: dict[str, dict[str, Any]] = {
 
 WHITELIST: dict[str, set[str]] = {
     PLUGIN_DRIVER_DETAILS: {"nickname", "avatar"},
-    PLUGIN_RACE_DETAILS: {"season", "series", "week_number", "race_date", "venue_display_name"},
+    PLUGIN_RACE_DETAILS: {"season", "series", "week_number", "race_date", "track_name"},
     PLUGIN_CHAMPIONSHIP_STANDINGS: {
         "championship_position", "driver_name", "iracing_cust_id",
         "total_points", "points_delta", "position_delta", "participated",
@@ -146,7 +212,7 @@ class DataPluginService:
         if PLUGINS_FILE.exists():
             try:
                 data = json.loads(PLUGINS_FILE.read_text(encoding="utf-8"))
-                self._plugins = data if isinstance(data, list) else []
+                self._plugins = self._dedupe_plugins(data if isinstance(data, list) else [])
             except (json.JSONDecodeError, OSError) as exc:
                 logger.warning("[DataPlugin] Failed to load plugins: %s", exc)
                 self._plugins = []
@@ -178,12 +244,18 @@ class DataPluginService:
     def create_plugin(self, data: dict[str, Any]) -> dict[str, Any]:
         """Create a new data plugin configuration."""
         import uuid
+
+        existing = next((p for p in self._plugins if p.get("plugin_type") == data.get("plugin_type")), None)
+        if existing:
+            return self._mask_secrets(existing)
+
         plugin = {
             "id": str(uuid.uuid4())[:8],
             "name": data.get("name", "Unnamed Plugin"),
             "plugin_type": data.get("plugin_type", PLUGIN_DRIVER_DETAILS),
             "enabled": data.get("enabled", True),
             "endpoint_url": data.get("endpoint_url", ""),
+            "request_style": data.get("request_style", REQUEST_STYLE_POST_BODY),
             "auth_method": data.get("auth_method", AUTH_NONE),
             "auth_config": data.get("auth_config", {}),
             "last_test": None,
@@ -193,8 +265,11 @@ class DataPluginService:
             raise ValueError(f"Invalid plugin type: {plugin['plugin_type']}")
         if plugin["auth_method"] not in VALID_AUTH_METHODS:
             raise ValueError(f"Invalid auth method: {plugin['auth_method']}")
+        if plugin["request_style"] not in VALID_REQUEST_STYLES:
+            raise ValueError(f"Invalid request style: {plugin['request_style']}")
 
         self._plugins.append(plugin)
+        self._plugins = self._dedupe_plugins(self._plugins)
         self._save_plugins()
         return self._mask_secrets(plugin)
 
@@ -204,15 +279,26 @@ class DataPluginService:
         if not plugin:
             return None
 
-        for key in ("name", "plugin_type", "enabled", "endpoint_url", "auth_method", "auth_config"):
+        for key in ("name", "plugin_type", "enabled", "endpoint_url", "auth_method", "request_style"):
             if key in updates:
                 plugin[key] = updates[key]
+
+        if "auth_config" in updates:
+            plugin["auth_config"] = self._merge_auth_config(
+                plugin.get("auth_config", {}),
+                updates.get("auth_config") or {},
+                incoming_method=updates.get("auth_method", plugin.get("auth_method", AUTH_NONE)),
+                current_method=plugin.get("auth_method", AUTH_NONE),
+            )
 
         if plugin.get("plugin_type") and plugin["plugin_type"] not in VALID_PLUGIN_TYPES:
             raise ValueError(f"Invalid plugin type: {plugin['plugin_type']}")
         if plugin.get("auth_method") and plugin["auth_method"] not in VALID_AUTH_METHODS:
             raise ValueError(f"Invalid auth method: {plugin['auth_method']}")
+        if plugin.get("request_style") and plugin["request_style"] not in VALID_REQUEST_STYLES:
+            raise ValueError(f"Invalid request style: {plugin['request_style']}")
 
+        self._plugins = self._dedupe_plugins(self._plugins)
         self._save_plugins()
         return self._mask_secrets(plugin)
 
@@ -242,10 +328,12 @@ class DataPluginService:
 
         try:
             headers = self._build_auth_headers(plugin)
+            method, url, json_body = self._build_request_args(plugin, sample_body)
             async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(
-                    plugin["endpoint_url"],
-                    json=sample_body,
+                resp = await client.request(
+                    method,
+                    url,
+                    json=json_body,
                     headers=headers,
                 )
                 resp.raise_for_status()
@@ -290,6 +378,69 @@ class DataPluginService:
             # Return only the exception class name to avoid leaking stack traces
             return {"success": False, "error": f"Connection failed: {type(exc).__name__}"}
 
+    async def preview_plugin(self, plugin_id: str, request_body: dict[str, Any]) -> dict[str, Any]:
+        """Execute a configured plugin with a caller-provided request body.
+
+        Returns both the raw API response and a normalized/whitelisted version
+        so the UI can inspect what the overlay pipeline would actually consume.
+        """
+        plugin = self._find_plugin(plugin_id)
+        if not plugin:
+            return {"success": False, "error": "Plugin not found"}
+
+        try:
+            headers = self._build_auth_headers(plugin)
+            method, url, json_body = self._build_request_args(plugin, request_body or {})
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.request(
+                    method,
+                    url,
+                    json=json_body,
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                raw = resp.json()
+
+            validation = self._validate_response(plugin["plugin_type"], raw)
+            normalized = self._normalize_preview_data(plugin["plugin_type"], raw)
+
+            return {
+                "success": True,
+                "plugin": self._mask_secrets(plugin),
+                "request_method": method,
+                "request_url": url,
+                "request_body": json_body,
+                "status_code": resp.status_code,
+                "validation": validation,
+                "normalized_data": normalized,
+                "raw_response": raw,
+            }
+        except httpx.HTTPStatusError as exc:
+            return {
+                "success": False,
+                "request_body": request_body or {},
+                "error": f"HTTP {exc.response.status_code}: {exc.response.text[:400]}",
+            }
+        except httpx.ConnectError:
+            return {
+                "success": False,
+                "request_body": request_body or {},
+                "error": "Connection failed — check the endpoint URL",
+            }
+        except httpx.TimeoutException:
+            return {
+                "success": False,
+                "request_body": request_body or {},
+                "error": "Connection timed out (15s limit)",
+            }
+        except Exception as exc:
+            logger.warning("[DataPlugin] Preview failed for %s: %s", plugin_id, exc)
+            return {
+                "success": False,
+                "request_body": request_body or {},
+                "error": f"Connection failed: {type(exc).__name__}",
+            }
+
     # ── Data fetching ────────────────────────────────────────────────────────
 
     async def fetch_driver_details(
@@ -303,17 +454,19 @@ class DataPluginService:
         if not plugin or not cust_ids:
             return {}
 
-        cache_key = self._cache_key(plugin["id"], {"cust_ids": sorted(cust_ids)})
+        cache_key = self._cache_key(plugin["id"], {"customer_ids": sorted(cust_ids)})
         cached = self._get_cached(cache_key)
         if cached is not None:
             return cached
 
         try:
             headers = self._build_auth_headers(plugin)
+            method, url, json_body = self._build_request_args(plugin, {"customer_ids": cust_ids})
             async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(
-                    plugin["endpoint_url"],
-                    json={"cust_ids": cust_ids},
+                resp = await client.request(
+                    method,
+                    url,
+                    json=json_body,
                     headers=headers,
                 )
                 resp.raise_for_status()
@@ -343,7 +496,7 @@ class DataPluginService:
         """Fetch race details from the configured race_details plugin.
 
         Returns a dict with season, series, week_number, race_date,
-        venue_display_name.
+        track_name.
         """
         plugin = self._get_enabled_plugin(PLUGIN_RACE_DETAILS)
         if not plugin or not subsession_id:
@@ -356,10 +509,12 @@ class DataPluginService:
 
         try:
             headers = self._build_auth_headers(plugin)
+            method, url, json_body = self._build_request_args(plugin, {"subsession_id": subsession_id})
             async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(
-                    plugin["endpoint_url"],
-                    json={"subsession_id": subsession_id},
+                resp = await client.request(
+                    method,
+                    url,
+                    json=json_body,
                     headers=headers,
                 )
                 resp.raise_for_status()
@@ -394,10 +549,12 @@ class DataPluginService:
 
         try:
             headers = self._build_auth_headers(plugin)
+            method, url, json_body = self._build_request_args(plugin, {"subsession_id": subsession_id})
             async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(
-                    plugin["endpoint_url"],
-                    json={"subsession_id": subsession_id},
+                resp = await client.request(
+                    method,
+                    url,
+                    json=json_body,
                     headers=headers,
                 )
                 resp.raise_for_status()
@@ -432,12 +589,17 @@ class DataPluginService:
 
         Modifies ``frame_data`` in-place and returns it.
         """
-        # Gather all cust_ids from standings
+        # Gather all cust_ids from standings (main + section-specific arrays)
         cust_ids = [
             e["iracing_cust_id"]
             for e in frame_data.get("standings", [])
             if e.get("iracing_cust_id")
         ]
+        for extra_key in ("qualifying_standings", "final_standings"):
+            for e in frame_data.get(extra_key, []):
+                cid = e.get("iracing_cust_id", 0)
+                if cid and cid not in cust_ids:
+                    cust_ids.append(cid)
         focused_cust_id = frame_data.get("iracing_cust_id", 0)
         if focused_cust_id and focused_cust_id not in cust_ids:
             cust_ids.append(focused_cust_id)
@@ -455,6 +617,15 @@ class DataPluginService:
                 entry["nickname"] = dd.get("nickname")
                 entry["avatar"] = dd.get("avatar")
 
+        # Enrich section-specific standings arrays for template compatibility
+        for extra_key in ("qualifying_standings", "final_standings"):
+            for entry in frame_data.get(extra_key, []):
+                cid = entry.get("iracing_cust_id", 0)
+                if cid and cid in driver_details:
+                    dd = driver_details[cid]
+                    entry["nickname"] = dd.get("nickname")
+                    entry["avatar"] = dd.get("avatar")
+
         # Enrich focused driver
         if focused_cust_id and focused_cust_id in driver_details:
             dd = driver_details[focused_cust_id]
@@ -464,9 +635,10 @@ class DataPluginService:
         # Race details
         if race_details:
             frame_data["race_season"] = race_details.get("season")
+            frame_data["series_name"] = race_details.get("series")
             frame_data["race_week"] = race_details.get("week_number")
             frame_data["race_date"] = race_details.get("race_date")
-            frame_data["venue_display_name"] = race_details.get("venue_display_name")
+            frame_data["track_name"] = race_details.get("track_name")
 
         # Championship standings — also enrich with driver details
         if championship:
@@ -505,6 +677,89 @@ class DataPluginService:
     def _find_plugin(self, plugin_id: str) -> Optional[dict[str, Any]]:
         return next((p for p in self._plugins if p["id"] == plugin_id), None)
 
+    @staticmethod
+    def _is_masked_secret(value: Any) -> bool:
+        return isinstance(value, str) and "****" in value
+
+    def _merge_auth_config(
+        self,
+        current_config: dict[str, Any],
+        incoming_config: dict[str, Any],
+        incoming_method: str,
+        current_method: str,
+    ) -> dict[str, Any]:
+        """Merge auth config while preserving stored secrets behind masked UI values."""
+        if incoming_method != current_method:
+            return dict(incoming_config or {})
+
+        merged = dict(current_config or {})
+        for key, value in (incoming_config or {}).items():
+            if key in {"api_key", "token", "header_value"} and self._is_masked_secret(value):
+                continue
+            merged[key] = value
+        return merged
+
+    def _dedupe_plugins(self, plugins: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Keep at most one plugin per type, preferring the most complete record."""
+        by_type: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+
+        for raw_plugin in plugins:
+            if not isinstance(raw_plugin, dict):
+                continue
+            plugin = dict(raw_plugin)
+            plugin_type = plugin.get("plugin_type")
+            if plugin_type not in VALID_PLUGIN_TYPES:
+                continue
+
+            if plugin_type not in by_type:
+                by_type[plugin_type] = plugin
+                order.append(plugin_type)
+                continue
+
+            existing = by_type[plugin_type]
+            winner, loser = self._pick_preferred_plugin(existing, plugin)
+            by_type[plugin_type] = self._merge_plugin_records(winner, loser)
+
+        return [by_type[plugin_type] for plugin_type in order if plugin_type in by_type]
+
+    @staticmethod
+    def _plugin_score(plugin: dict[str, Any]) -> tuple[int, int, int]:
+        auth_config = plugin.get("auth_config") or {}
+        has_secret = any(bool(auth_config.get(key)) for key in ("api_key", "token", "header_value"))
+        has_endpoint = bool((plugin.get("endpoint_url") or "").strip())
+        last_test_ok = bool(plugin.get("last_test_ok"))
+        last_test = int(plugin.get("last_test") or 0)
+        return (
+            int(has_endpoint) * 4 + int(has_secret) * 3 + int(last_test_ok) * 2 + int(bool(plugin.get("enabled"))),
+            last_test,
+            len(json.dumps(plugin, sort_keys=True)),
+        )
+
+    def _pick_preferred_plugin(self, a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        return (a, b) if self._plugin_score(a) >= self._plugin_score(b) else (b, a)
+
+    def _merge_plugin_records(self, preferred: dict[str, Any], duplicate: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(preferred)
+        if not merged.get("endpoint_url") and duplicate.get("endpoint_url"):
+            merged["endpoint_url"] = duplicate.get("endpoint_url")
+        if not merged.get("name") and duplicate.get("name"):
+            merged["name"] = duplicate.get("name")
+        if not merged.get("auth_method") and duplicate.get("auth_method"):
+            merged["auth_method"] = duplicate.get("auth_method")
+        merged["auth_config"] = self._merge_auth_config(
+            merged.get("auth_config", {}),
+            duplicate.get("auth_config", {}),
+            incoming_method=merged.get("auth_method", AUTH_NONE),
+            current_method=merged.get("auth_method", AUTH_NONE),
+        )
+        if not merged.get("last_test") and duplicate.get("last_test"):
+            merged["last_test"] = duplicate.get("last_test")
+        if not merged.get("last_test_ok") and duplicate.get("last_test_ok"):
+            merged["last_test_ok"] = duplicate.get("last_test_ok")
+        merged["enabled"] = bool(merged.get("enabled") or duplicate.get("enabled"))
+        return merged
+
     def _get_enabled_plugin(self, plugin_type: str) -> Optional[dict[str, Any]]:
         """Find the first enabled plugin of the given type."""
         return next(
@@ -522,6 +777,29 @@ class DataPluginService:
                 ac[key] = ac[key][:4] + "****" if len(ac[key]) > 4 else "****"
         p["auth_config"] = ac
         return p
+
+    @staticmethod
+    def _build_request_args(plugin: dict[str, Any], body: dict[str, Any]) -> tuple[str, str, dict | None]:
+        """Return (method, url, json_body) for a plugin call.
+
+        post_body  → POST <endpoint_url>  with body as JSON
+        path_param → GET  <endpoint_url>/<single_value>  with no body
+                     Falls back to POST+body for driver_details (multiple customer_ids)
+                     or when body has more than one key.
+        """
+        style = plugin.get("request_style", REQUEST_STYLE_POST_BODY)
+        url = plugin["endpoint_url"].rstrip("/")
+
+        if style == REQUEST_STYLE_PATH_PARAM and len(body) == 1:
+            value = next(iter(body.values()))
+            if isinstance(value, list):
+                # Multiple values (e.g. cust_ids) — fall back to POST body
+                pass
+            else:
+                return "GET", f"{url}/{value}", None
+
+        # Default: POST with JSON body
+        return "POST", url, body
 
     @staticmethod
     def _build_auth_headers(plugin: dict[str, Any]) -> dict[str, str]:
@@ -562,7 +840,7 @@ class DataPluginService:
         elif plugin_type == PLUGIN_RACE_DETAILS:
             if not isinstance(data, dict):
                 return {"valid": False, "error": "Expected a JSON object with race details"}
-            expected = {"season", "race_date", "venue_display_name"}
+            expected = {"season", "race_date", "track_name"}
             found = set(data.keys()) & expected
             return {"valid": len(found) > 0, "fields_found": list(data.keys())}
 
@@ -581,6 +859,39 @@ class DataPluginService:
     def _cache_key(self, plugin_id: str, params: dict) -> str:
         raw = json.dumps({"id": plugin_id, **params}, sort_keys=True)
         return hashlib.md5(raw.encode()).hexdigest()  # noqa: S324
+
+    @staticmethod
+    def _normalize_preview_data(plugin_type: str, data: Any) -> Any:
+        """Reduce raw plugin response to the subset consumed by overlays."""
+        if plugin_type == PLUGIN_DRIVER_DETAILS:
+            result: dict[str, dict[str, Any]] = {}
+            if isinstance(data, dict):
+                for cid_str, info in data.items():
+                    if isinstance(info, dict):
+                        result[str(cid_str)] = {
+                            k: v for k, v in info.items()
+                            if k in WHITELIST[PLUGIN_DRIVER_DETAILS]
+                        }
+            return result
+
+        if plugin_type == PLUGIN_RACE_DETAILS:
+            return {
+                k: v for k, v in data.items()
+                if isinstance(data, dict) and k in WHITELIST[PLUGIN_RACE_DETAILS]
+            } if isinstance(data, dict) else {}
+
+        if plugin_type == PLUGIN_CHAMPIONSHIP_STANDINGS:
+            standings_raw = data.get("standings", []) if isinstance(data, dict) else []
+            result = []
+            for entry in standings_raw:
+                if isinstance(entry, dict):
+                    result.append({
+                        k: v for k, v in entry.items()
+                        if k in WHITELIST[PLUGIN_CHAMPIONSHIP_STANDINGS]
+                    })
+            return result
+
+        return data
 
     def _get_cached(self, key: str) -> Optional[Any]:
         entry = self._cache.get(key)

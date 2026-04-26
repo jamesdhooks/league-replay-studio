@@ -12,6 +12,8 @@ import { TimelineProvider } from '../context/TimelineContext'
 import { HighlightProvider } from '../context/HighlightContext'
 import { EncodingProvider } from '../context/EncodingContext'
 import { PreviewProvider } from '../context/PreviewContext'
+import { LivePreviewProvider } from '../context/LivePreviewContext'
+import { SharedPreviewSurfaceProvider } from '../context/SharedPreviewSurfaceContext'
 import { OverlayProvider } from '../context/OverlayContext'
 import { PresetProvider } from '../context/PresetContext'
 import { LLMProvider } from '../context/LLMContext'
@@ -94,6 +96,8 @@ const PROVIDER_STACK = [
   [ScriptStateProvider],
   [EncodingProvider],
   [PreviewProvider],
+  [LivePreviewProvider],
+  [SharedPreviewSurfaceProvider],
   [OverlayProvider],
   [PresetProvider],
   [LLMProvider],

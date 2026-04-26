@@ -135,6 +135,7 @@ function VideoViewer({ file, projectId }) {
           <video
             src={src}
             controls
+            preload="metadata"
             className="max-w-full max-h-[55vh] rounded-lg"
             onError={() => setVideoError(true)}
           />

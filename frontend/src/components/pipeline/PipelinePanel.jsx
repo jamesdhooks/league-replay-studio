@@ -147,10 +147,15 @@ function PipelinePanel() {
   // ── Overall progress ─────────────────────────────────────────────────────
   const overallProgress = useMemo(() => {
     if (!steps || Object.keys(steps).length === 0) return 0
-    const completed = Object.values(steps).filter(
-      s => s.state === 'completed' || s.state === 'skipped'
-    ).length
-    return Math.round((completed / 6) * 100)
+    const stepValues = Object.values(steps)
+    const total = stepValues.length || 1
+    const sum = stepValues.reduce((acc, step) => {
+      if (!step) return acc
+      if (step.state === 'completed' || step.state === 'skipped') return acc + 100
+      const pct = Number(step.progress || 0)
+      return acc + Math.max(0, Math.min(100, pct))
+    }, 0)
+    return Math.round(sum / total)
   }, [steps])
 
   return (

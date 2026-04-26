@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import os
+import subprocess
 import shutil
 import sqlite3
 from datetime import datetime, timezone
@@ -27,7 +28,7 @@ from server.services.db import get_connection, init_db, row_to_dict
 logger = logging.getLogger(__name__)
 
 # Valid workflow steps in order
-WORKFLOW_STEPS = ["analysis", "editing", "overlay", "capture", "export", "upload"]
+WORKFLOW_STEPS = ["pipeline", "analysis", "editing", "overlay", "capture", "compose", "export", "upload"]
 
 
 def _normalize(text: str) -> str:
@@ -71,7 +72,7 @@ def fuzzy_match_replay(
 # Standard project sub-directories created for every new project
 PROJECT_SUBDIRS = [
     "replay", "captures", "preview", "preview/sprites",
-    "exports", "logs", "overlays", "overlays/templates",
+    "compositions", "exports", "logs", "overlays", "overlays/templates",
     "overlays/rendered", "overlays/assets",
 ]
 
@@ -146,6 +147,11 @@ class ProjectService:
                 "script_generated_at",
                 "clips_manifest",
                 "capture_manifest",
+                "preferred_capture_mode",
+                "last_composition_output",
+                "last_composition_completed_at",
+                "last_composition_job_id",
+                "subsession_id",
             ):
                 if key in meta:
                     project[key] = meta[key]
@@ -220,6 +226,7 @@ class ProjectService:
             "track_name": track_name,
             "session_type": session_type,
             "replay_file": actual_replay,
+            "preferred_capture_mode": "all",
         }
         (proj_path / "project.json").write_text(
             json.dumps(meta, indent=2), encoding="utf-8"
@@ -257,7 +264,7 @@ class ProjectService:
         }
         allowed_meta = {
             "script", "script_sections", "script_generated_at",
-            "clips_manifest", "capture_manifest",
+            "clips_manifest", "capture_manifest", "subsession_id",
         }
 
         db_updates = {k: v for k, v in updates.items() if k in allowed_db}
@@ -446,44 +453,47 @@ class ProjectService:
 
         # Define category mapping
         category_defs = [
-            ("replay", "Replay Files", "Replay Files"),
-            ("captures", "Captures", "Captured Video"),
-            ("preview", "Preview Assets", "Preview Assets"),
-            ("exports", "Exports", "Exported Video"),
-            ("overlays", "Overlays", "Overlay Templates"),
-            ("logs", "Logs", "Log Files"),
+            {"name": "replay", "label": "Replay Files", "description": "Replay Files", "dirs": ["replay"]},
+            # Support legacy/new naming so script-capture clips always appear.
+            {"name": "captures", "label": "Captures", "description": "Captured Video", "dirs": ["captures", "clips"]},
+            {"name": "preview", "label": "Preview Assets", "description": "Preview Assets", "dirs": ["preview"]},
+            {"name": "compose", "label": "Compositions", "description": "Composed Output", "dirs": ["compositions"]},
+            {"name": "exports", "label": "Encoded", "description": "Encoded Video", "dirs": ["Encoded", "exports"]},
+            {"name": "overlays", "label": "Overlays", "description": "Overlay Templates", "dirs": ["overlays"]},
+            {"name": "logs", "label": "Logs", "description": "Log Files", "dirs": ["logs"]},
         ]
 
-        for dir_name, icon_label, description in category_defs:
-            cat_path = proj_dir / dir_name
-            if not cat_path.exists():
+        for category in category_defs:
+            existing_dirs = [proj_dir / d for d in category["dirs"] if (proj_dir / d).exists()]
+            if not existing_dirs:
                 continue
 
             cat_files = []
             cat_size = 0
-            for f in sorted(cat_path.rglob("*")):
-                if f.is_file():
-                    try:
-                        stat = f.stat()
-                        size = stat.st_size
-                        cat_size += size
-                        total_size += size
-                        cat_files.append({
-                            "name": f.name,
-                            "path": str(f.relative_to(proj_dir)),
-                            "size_bytes": size,
-                            "extension": f.suffix.lower(),
-                            "modified_at": datetime.fromtimestamp(
-                                stat.st_mtime, tz=timezone.utc
-                            ).isoformat(),
-                        })
-                    except OSError:
-                        continue
+            for cat_path in existing_dirs:
+                for f in sorted(cat_path.rglob("*")):
+                    if f.is_file():
+                        try:
+                            stat = f.stat()
+                            size = stat.st_size
+                            cat_size += size
+                            total_size += size
+                            cat_files.append({
+                                "name": f.name,
+                                "path": str(f.relative_to(proj_dir)),
+                                "size_bytes": size,
+                                "extension": f.suffix.lower(),
+                                "modified_at": datetime.fromtimestamp(
+                                    stat.st_mtime, tz=timezone.utc
+                                ).isoformat(),
+                            })
+                        except OSError:
+                            continue
 
             categories.append({
-                "name": dir_name,
-                "label": icon_label,
-                "description": description,
+                "name": category["name"],
+                "label": category["label"],
+                "description": category["description"],
                 "files": cat_files,
                 "file_count": len(cat_files),
                 "total_size": cat_size,
@@ -572,6 +582,85 @@ class ProjectService:
             return {"error": "File not found"}
 
         return {"absolute_path": str(file_path), "filename": file_path.name}
+
+    def open_project_directory(self, project_id: int, rel_path: str = "") -> Optional[dict]:
+        """Open a project's root directory or a project-relative path in the OS file explorer."""
+        project = self.get_project(project_id)
+        if not project:
+            return None
+
+        proj_dir = Path(project["project_dir"]).resolve()
+        if not proj_dir.exists() or not proj_dir.is_dir():
+            return {"error": "Project directory not found"}
+
+        target = proj_dir
+        if rel_path:
+            candidate = (proj_dir / rel_path).resolve()
+            if not str(candidate).startswith(str(proj_dir)):
+                return {"error": "Path escapes project directory"}
+            target = candidate.parent if candidate.is_file() else candidate
+            if not target.exists():
+                return {"error": "Target path not found"}
+
+        try:
+            if os.name == "nt":
+                os.startfile(str(target))  # type: ignore[attr-defined]
+            elif os.name == "posix":
+                try:
+                    subprocess.Popen(["xdg-open", str(target)])  # noqa: S603
+                except OSError:
+                    subprocess.Popen(["open", str(target)])  # noqa: S603
+            else:
+                return {"error": "Opening directories is not supported on this platform"}
+        except Exception as exc:
+            return {"error": f"Failed to open project directory: {exc}"}
+
+        return {"opened": True, "project_dir": str(proj_dir), "target": str(target)}
+
+    def delete_project_files(self, project_id: int, rel_paths: list[str]) -> Optional[dict]:
+        """Delete one or more files inside a project directory.
+
+        Returns a summary with deleted and failed paths.
+        """
+        project = self.get_project(project_id)
+        if not project:
+            return None
+
+        proj_dir = Path(project["project_dir"]).resolve()
+        protected = {"project.json", "project.db"}
+        deleted: list[str] = []
+        failed: list[dict[str, str]] = []
+
+        for rel_path in rel_paths or []:
+            rel = str(rel_path or "").strip()
+            if not rel:
+                continue
+
+            if rel in protected:
+                failed.append({"path": rel, "error": "Protected project file"})
+                continue
+
+            target = (proj_dir / rel).resolve()
+            if not str(target).startswith(str(proj_dir)):
+                failed.append({"path": rel, "error": "Path escapes project directory"})
+                continue
+
+            if not target.exists() or not target.is_file():
+                failed.append({"path": rel, "error": "File not found"})
+                continue
+
+            try:
+                target.unlink()
+                deleted.append(rel)
+            except OSError as exc:
+                failed.append({"path": rel, "error": f"Cannot delete file: {exc}"})
+
+        return {
+            "deleted": deleted,
+            "failed": failed,
+            "deleted_count": len(deleted),
+            "failed_count": len(failed),
+        }
 
     # ── Private helpers ───────────────────────────────────────────────────────
 

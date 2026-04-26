@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react'
 import { useAnalysis } from '../../context/AnalysisContext'
 import { useProject } from '../../context/ProjectContext'
+import { usePipeline } from '../../context/PipelineContext'
 import { useIRacing } from '../../context/IRacingContext'
 import { useToast } from '../../context/ToastContext'
 import { useHighlight } from '../../context/HighlightContext'
@@ -23,6 +24,7 @@ import TuningPanel from './TuningPanel'
 import LogTabContent from './LogTabContent'
 import EventsTabContent from './EventsTabContent'
 import DataStreamViz from '../collect/DataStreamViz'
+import ResizableRowPane from '../ui/ResizableRowPane'
 
 export default memo(function AnalysisPanel() {
   // ── Context ────────────────────────────────────────────────────────────
@@ -34,9 +36,36 @@ export default memo(function AnalysisPanel() {
     loadAnalysisLog, clearDiscoveredEvents, clearLog,
   } = useAnalysis()
   const { activeProject, advanceStep } = useProject()
+  const {
+    currentRun: pipelineRun,
+    currentStep: pipelineCurrentStep,
+    steps: pipelineSteps,
+    cancelPipeline,
+  } = usePipeline()
   const { isConnected } = useIRacing()
   const { overrides, toggleOverride, params } = useHighlight()
   const { showError, showWarning } = useToast()
+
+  const isPipelineRunActive = ['running', 'paused', 'waiting_intervention'].includes(pipelineRun?.state)
+  const isPipelineProjectMatch = Boolean(activeProject?.id && pipelineRun?.project_id === activeProject.id)
+  const pipelineAnalysisStepState = pipelineSteps?.analysis?.state
+  const isPipelineAnalysisActive = isPipelineProjectMatch
+    && isPipelineRunActive
+    && (
+      pipelineCurrentStep === 'analysis'
+      || pipelineAnalysisStepState === 'running'
+      || (pipelineCurrentStep == null && pipelineAnalysisStepState === 'pending')
+    )
+
+  const effectiveIsAnalyzing = isAnalyzing || isPipelineAnalysisActive
+  const effectiveIsScanning = isScanning || (isPipelineAnalysisActive && !hasTelemetry)
+  const effectiveProgress = progress || (isPipelineAnalysisActive
+    ? {
+        percent: Math.max(0, Math.round(Number(pipelineSteps?.analysis?.progress || 0))),
+        message: 'Automated pipeline is running replay analysis…',
+        detail: '',
+      }
+    : null)
 
   // ── Local state ────────────────────────────────────────────────────────
   const [activeFilter, setActiveFilter] = useState('')
@@ -79,7 +108,7 @@ export default memo(function AnalysisPanel() {
   // Event table sort
   const [eventSort, setEventSort] = useState({ col: 'time', dir: 'asc' })
 
-  // Window picker state now lives inside PreviewPlayer via useStream().
+  // Window picker state now lives inside PreviewPlayer via LivePreviewContext.
 
   // Replay controls
   const [replaySpeed, setReplaySpeed] = useState(1)
@@ -90,14 +119,20 @@ export default memo(function AnalysisPanel() {
   const [sessionMatch, setSessionMatch] = useState(null)
   const [isSeeking, setIsSeeking] = useState(false)
 
-  // Stream settings now live inside PreviewPlayer via useStream().
+  // Stream settings now live inside PreviewPlayer via LivePreviewContext.
 
   // Tuning parameters
   const [tuningParams, setTuningParams] = useLocalStorage('lrs:analysis:tuningParams', {
     incident_lead_in: 2.0,
     incident_follow_out: 8.0,
     battle_gap_threshold: 0.5,
-    close_call_proximity_pct: 0.02,
+    battle_max_segment: 45.0,
+    battle_min_duration: 10.0,
+    battle_max_cluster_drivers: 4,
+    battle_merge_min_overlap_seconds: 2.0,
+    battle_merge_max_idle_gap_seconds: 5.0,
+    battle_merge_max_position_delta: 2,
+    close_call_proximity_seconds: 2.0,
     close_call_max_time_loss: 2.0,
   })
   const [showTuningPanel, setShowTuningPanel] = useState(false)
@@ -114,7 +149,7 @@ export default memo(function AnalysisPanel() {
   // Timeline
   const [raceDuration, setRaceDuration] = useState(0)
   const [raceStart, setRaceStart] = useState(0)
-  const [raceSessionNum, setRaceSessionNum] = useState(0)
+  const [raceSessionNum, setRaceSessionNum] = useState(null)
 
   // Portrait mode
   const [isPortrait, setIsPortrait] = useState(() => window.innerWidth < window.innerHeight)
@@ -203,7 +238,18 @@ export default memo(function AnalysisPanel() {
       logFetch,
       apiGet(`/projects/${activeProject.id}/analysis/tuning`)
         .then(data => {
-          if (data?.tuning_params) setTuningParams(prev => ({ ...prev, ...data.tuning_params }))
+          if (data?.tuning_params) {
+            const next = { ...data.tuning_params }
+            if (next.close_call_proximity_seconds == null) {
+              if (next.close_call_proximity_pct != null) {
+                next.close_call_proximity_seconds = Number(next.close_call_proximity_pct) * 90
+              } else if (next.close_call_proximity != null) {
+                const legacy = Number(next.close_call_proximity)
+                next.close_call_proximity_seconds = legacy <= 1 ? legacy * 90 : legacy
+              }
+            }
+            setTuningParams(prev => ({ ...prev, ...next }))
+          }
         })
         .catch(() => {}),
     ]).finally(() => setIsDataLoading(false))
@@ -215,7 +261,7 @@ export default memo(function AnalysisPanel() {
       .then(data => {
         setRaceDuration(data?.duration_seconds || 0)
         setRaceStart(data?.race_start_seconds || 0)
-        setRaceSessionNum(data?.race_session_num ?? 0)
+        setRaceSessionNum(data?.race_session_num ?? null)
       })
       .catch(() => {})
   }, [activeProject?.id, events])
@@ -223,20 +269,20 @@ export default memo(function AnalysisPanel() {
   useEffect(() => {
     // Only auto-scroll to the bottom while analysis is actively running —
     // not after it completes, so the slide-in animation starts at the top.
-    if (isAnalyzing && sidebarTab === 'events' && eventsEndRef.current) {
+    if (effectiveIsAnalyzing && sidebarTab === 'events' && eventsEndRef.current) {
       eventsEndRef.current.scrollIntoView({ behavior: 'smooth' })
     }
-  }, [discoveredEvents, sidebarTab, isAnalyzing])
+  }, [discoveredEvents, sidebarTab, effectiveIsAnalyzing])
 
   useEffect(() => {
-    if (wasAnalyzingRef.current && !isAnalyzing) {
+    if (wasAnalyzingRef.current && !effectiveIsAnalyzing) {
       setSidebarTab('events')
     }
-    wasAnalyzingRef.current = isAnalyzing
-  }, [isAnalyzing, setSidebarTab])
+    wasAnalyzingRef.current = effectiveIsAnalyzing
+  }, [effectiveIsAnalyzing, setSidebarTab])
 
   useEffect(() => {
-    if (!cameraFollow || !isAnalyzing || discoveredEvents.length === 0) return
+    if (!cameraFollow || !effectiveIsAnalyzing || discoveredEvents.length === 0) return
     const latest = discoveredEvents[discoveredEvents.length - 1]
     if (lastCameraEventRef.current === latest.id) return
     lastCameraEventRef.current = latest.id
@@ -244,7 +290,7 @@ export default memo(function AnalysisPanel() {
     if (carIdx != null) {
       apiPost('/iracing/replay/camera', { car_idx: carIdx, group_num: 0 }).catch(() => {})
     }
-  }, [cameraFollow, isAnalyzing, discoveredEvents])
+  }, [cameraFollow, effectiveIsAnalyzing, discoveredEvents])
 
   // ── Derived values ─────────────────────────────────────────────────────
   const hasEventsLocal = events.length > 0 || hasEvents
@@ -306,7 +352,18 @@ export default memo(function AnalysisPanel() {
   }
 
   const handleCancel = async () => {
-    try { await cancelAnalysis(activeProject.id) } catch {}
+    try {
+      const isPipelineRunForProject = Boolean(activeProject?.id && pipelineRun?.project_id === activeProject.id)
+      const isPipelineActive = ['running', 'paused', 'waiting_intervention'].includes(pipelineRun?.state)
+      const isPipelineInAnalysis = pipelineCurrentStep === 'analysis' || pipelineSteps?.analysis?.state === 'running'
+
+      if (isPipelineRunForProject && isPipelineActive && isPipelineInAnalysis) {
+        await cancelPipeline()
+        return
+      }
+
+      await cancelAnalysis(activeProject.id)
+    } catch {}
   }
 
   const handleClear = async () => {
@@ -462,7 +519,7 @@ export default memo(function AnalysisPanel() {
   // ── Idle state: no analysis running, no telemetry, no events ─────────
   // Once telemetry exists, fall through to the full editor so the user can
   // run event detection via the phase cards in the tuning column.
-  if (!isAnalyzing && !hasTelemetry && !hasEventsLocal && discoveredEvents.length === 0) {
+  if (!effectiveIsAnalyzing && !hasTelemetry && !hasEventsLocal && discoveredEvents.length === 0) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center p-8">
         <div className="flex flex-col items-center gap-3 text-center max-w-sm">
@@ -522,8 +579,8 @@ export default memo(function AnalysisPanel() {
               count: analysisLog.length,
               content: (
                 <LogTabContent
-                  isAnalyzing={isAnalyzing}
-                  progress={progress}
+                  isAnalyzing={effectiveIsAnalyzing}
+                  progress={effectiveProgress}
                   analysisLog={analysisLog}
                   onClearLog={clearLog}
                 />
@@ -533,13 +590,13 @@ export default memo(function AnalysisPanel() {
               id: 'events',
               label: 'Events',
               icon: List,
-              count: isAnalyzing ? null : (eventSummary?.total_events || events.length || 0),
+              count: effectiveIsAnalyzing ? null : (eventSummary?.total_events || events.length || 0),
               content: (
                 <EventsTabContent
-                  isAnalyzing={isAnalyzing}
-                  isScanning={isScanning}
+                  isAnalyzing={effectiveIsAnalyzing}
+                  isScanning={effectiveIsScanning}
                   isRedetecting={isRedetecting}
-                  progress={progress}
+                  progress={effectiveProgress}
                   events={filteredEvents}
                   eventSummary={eventSummary}
                   eventSort={eventSort}
@@ -572,9 +629,9 @@ export default memo(function AnalysisPanel() {
         <AnalysisTuningColumn
           tuningParams={tuningParams}
           updateTuning={updateTuning}
-          isAnalyzing={isAnalyzing}
-          isScanning={isScanning}
-          progress={progress}
+          isAnalyzing={effectiveIsAnalyzing}
+          isScanning={effectiveIsScanning}
+          progress={effectiveProgress}
           error={error}
           hasTelemetry={hasTelemetry}
           hasEventsLocal={hasEventsLocal}
@@ -607,59 +664,67 @@ export default memo(function AnalysisPanel() {
             <>
               {/* Center column: preview + timeline */}
               <div className="flex-1 flex flex-col min-w-0 min-h-0">
-                {/* Preview — DataStreamViz overlaid during telemetry scan */}
-                <div className="relative flex-1 min-h-0 min-w-0 flex flex-col">
-                  <PreviewPlayer
-                    isAnalyzing={isAnalyzing}
-                    isPlaying={isPlaying}
-                    sessionMatch={sessionMatch}
-                    onPlayPause={handlePlayPause}
-                    isPortrait={isPortrait}
-                  />
-                  {/* Particle overlay during telemetry scan */}
-                  {isAnalyzing && isScanning && (
-                    <div className="absolute inset-0 z-10 pointer-events-none">
-                      <DataStreamViz
-                        isCollecting={true}
-                        tickCount={progress?.totalTicks ?? 0}
-                        hz={4}
-                        label={activeProject?.name ?? ''}
+                <ResizableRowPane
+                  storageKey="lrs:analysis:timelineHeight"
+                  defaultBottomHeight={220}
+                  minBottom={130}
+                  maxBottom={460}
+                  topClassName="bg-bg-primary"
+                  bottomClassName="overflow-hidden bg-bg-secondary/30"
+                  top={(
+                    <div className="relative h-full min-h-0 min-w-0 flex flex-col">
+                      <PreviewPlayer
+                        isAnalyzing={effectiveIsAnalyzing}
+                        isPlaying={isPlaying}
+                        sessionMatch={sessionMatch}
+                        onPlayPause={handlePlayPause}
+                        isPortrait={isPortrait}
+                        overlayContent={effectiveIsAnalyzing && effectiveIsScanning ? (
+                          <div className="absolute inset-0 bg-bg-secondary/20 pointer-events-none">
+                            <DataStreamViz
+                              isCollecting={true}
+                              tickCount={effectiveProgress?.totalTicks ?? analysisStatus?.total_ticks ?? 0}
+                              hz={4}
+                              label={activeProject?.name ?? ''}
+                            />
+                          </div>
+                        ) : null}
                       />
                     </div>
                   )}
-                </div>
-
-                <PlaybackTimeline
-                  isConnected={isConnected}
-                  isAnalyzing={isAnalyzing}
-                  raceDuration={raceDuration}
-                  raceStart={raceStart}
-                  raceSessionNum={raceSessionNum}
-                  replayState={replayState}
-                  replaySpeed={replaySpeed}
-                  isPlaying={isPlaying}
-                  isSeeking={isSeeking}
-                  focusedEvent={focusedEvent}
-                  setFocusedEvent={setFocusedEvent}
-                  autoLoop={autoLoop}
-                  setAutoLoop={setAutoLoop}
-                  filteredEvents={filteredEvents}
-                  seekToEvent={seekToEvent}
-                  navigateEvent={navigateEvent}
-                  handlePlayPause={handlePlayPause}
-                  handleSetSpeed={handleSetSpeed}
-                  handleReplaySearch={handleReplaySearch}
-                  handleSwitchDriver={handleSwitchDriver}
-                  overrides={overrides}
-                  toggleOverride={toggleOverride}
-                  className="flex-1"
+                  bottom={(
+                    <PlaybackTimeline
+                      isConnected={isConnected}
+                      isAnalyzing={isAnalyzing}
+                      raceDuration={raceDuration}
+                      raceStart={raceStart}
+                      raceSessionNum={raceSessionNum}
+                      replayState={replayState}
+                      replaySpeed={replaySpeed}
+                      isPlaying={isPlaying}
+                      isSeeking={isSeeking}
+                      focusedEvent={focusedEvent}
+                      setFocusedEvent={setFocusedEvent}
+                      autoLoop={autoLoop}
+                      setAutoLoop={setAutoLoop}
+                      filteredEvents={filteredEvents}
+                      seekToEvent={seekToEvent}
+                      navigateEvent={navigateEvent}
+                      handlePlayPause={handlePlayPause}
+                      handleSetSpeed={handleSetSpeed}
+                      handleReplaySearch={handleReplaySearch}
+                      handleSwitchDriver={handleSwitchDriver}
+                      overrides={overrides}
+                      toggleOverride={toggleOverride}
+                    />
+                  )}
                 />
               </div>
 
               {/* Right panel: Cameras / Drivers */}
               <AnalysisRightPanel
                 isConnected={isConnected}
-                isAnalyzing={isAnalyzing}
+                isAnalyzing={effectiveIsAnalyzing}
                 replayState={replayState}
                 cameraGroups={cameraGroups}
                 drivers={drivers}

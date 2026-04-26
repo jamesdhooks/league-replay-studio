@@ -1,1 +1,225 @@
-{}
+{
+  "Balanced Mix": {
+    "weights": {
+      "incident": 75,
+      "car_contact": 80,
+      "contact": 60,
+      "lost_control": 50,
+      "off_track": 25,
+      "turn_cutting": 15,
+      "battle": 70,
+      "overtake": 75,
+      "pit_stop": 30,
+      "fastest_lap": 50,
+      "leader_change": 90,
+      "first_lap": 70,
+      "last_lap": 70,
+      "close_call": 50,
+      "race_start": 100,
+      "race_finish": 100
+    },
+    "target_duration": 720,
+    "min_severity": 0,
+    "params": {
+      "normalizationMode": "cross_type",
+      "diversityStrength": 70,
+      "typeDecayBase": 0.85,
+      "bucketRepeatPenalty": 0.25,
+      "mixTargets": {
+        "battle": 0.20,
+        "overtake": 0.20,
+        "car_contact": 0.15,
+        "incident": 0.10,
+        "leader_change": 0.10,
+        "first_lap": 0.05,
+        "last_lap": 0.05
+      },
+      "mixMin": {
+        "battle": 0.15,
+        "overtake": 0.15,
+        "car_contact": 0.10,
+        "leader_change": 0.05
+      },
+      "mixMax": {
+        "battle": 0.35,
+        "overtake": 0.35,
+        "car_contact": 0.30,
+        "contact": 0.15,
+        "lost_control": 0.10,
+        "incident": 0.20
+      }
+    },
+    "section_config": {},
+    "replay_mode": "highlights"
+  },
+  "Action Heavy": {
+    "weights": {
+      "incident": 90,
+      "car_contact": 95,
+      "contact": 80,
+      "lost_control": 70,
+      "off_track": 30,
+      "turn_cutting": 15,
+      "battle": 60,
+      "overtake": 60,
+      "pit_stop": 15,
+      "fastest_lap": 30,
+      "leader_change": 70,
+      "first_lap": 80,
+      "last_lap": 70,
+      "close_call": 60,
+      "race_start": 100,
+      "race_finish": 100
+    },
+    "target_duration": 720,
+    "min_severity": 0,
+    "params": {
+      "normalizationMode": "cross_type",
+      "diversityStrength": 50,
+      "typeDecayBase": 0.85,
+      "bucketRepeatPenalty": 0.20,
+      "mixTargets": {
+        "car_contact": 0.30,
+        "incident": 0.15,
+        "contact": 0.15,
+        "lost_control": 0.10,
+        "battle": 0.15,
+        "overtake": 0.10
+      },
+      "mixMin": {
+        "car_contact": 0.20,
+        "incident": 0.10
+      },
+      "mixMax": {
+        "battle": 0.25,
+        "overtake": 0.20,
+        "fastest_lap": 0.05,
+        "pit_stop": 0.05
+      }
+    },
+    "section_config": {},
+    "replay_mode": "highlights"
+  },
+  "Story-Driven": {
+    "weights": {
+      "incident": 50,
+      "car_contact": 60,
+      "contact": 40,
+      "lost_control": 35,
+      "off_track": 15,
+      "turn_cutting": 10,
+      "battle": 95,
+      "overtake": 85,
+      "pit_stop": 35,
+      "fastest_lap": 60,
+      "leader_change": 100,
+      "first_lap": 80,
+      "last_lap": 90,
+      "close_call": 60,
+      "race_start": 100,
+      "race_finish": 100
+    },
+    "target_duration": 720,
+    "min_severity": 0,
+    "params": {
+      "normalizationMode": "cross_type",
+      "diversityStrength": 60,
+      "typeDecayBase": 0.82,
+      "bucketRepeatPenalty": 0.30,
+      "mixTargets": {
+        "battle": 0.30,
+        "overtake": 0.25,
+        "leader_change": 0.15,
+        "car_contact": 0.10,
+        "incident": 0.10,
+        "first_lap": 0.05,
+        "last_lap": 0.05
+      },
+      "mixMin": {
+        "battle": 0.25,
+        "overtake": 0.20,
+        "leader_change": 0.10
+      },
+      "mixMax": {
+        "car_contact": 0.20,
+        "incident": 0.15,
+        "contact": 0.10,
+        "lost_control": 0.08
+      }
+    },
+    "section_config": {},
+    "replay_mode": "highlights"
+  },
+  "Battles Only": {
+    "weights": {
+      "battle": 100,
+      "overtake": 80,
+      "leader_change": 80,
+      "incident": 30,
+      "car_contact": 30,
+      "contact": 20,
+      "lost_control": 20,
+      "first_lap": 50,
+      "last_lap": 50,
+      "race_start": 100,
+      "race_finish": 100
+    },
+    "target_duration": 720,
+    "min_severity": 0,
+    "params": {
+      "normalizationMode": "cross_type",
+      "diversityStrength": 40,
+      "typeDecayBase": 0.92,
+      "bucketRepeatPenalty": 0.15,
+      "mixTargets": {
+        "battle": 0.55,
+        "overtake": 0.20,
+        "leader_change": 0.10
+      },
+      "mixMin": {
+        "battle": 0.50
+      },
+      "mixMax": {
+        "incident": 0.10,
+        "car_contact": 0.10,
+        "contact": 0.05,
+        "lost_control": 0.05,
+        "fastest_lap": 0.05,
+        "pit_stop": 0.03
+      }
+    },
+    "section_config": {},
+    "replay_mode": "highlights"
+  },
+  "Pure Score (Legacy)": {
+    "weights": {
+      "incident": 80,
+      "car_contact": 85,
+      "contact": 60,
+      "lost_control": 50,
+      "off_track": 25,
+      "turn_cutting": 15,
+      "battle": 60,
+      "overtake": 70,
+      "pit_stop": 20,
+      "fastest_lap": 50,
+      "leader_change": 90,
+      "first_lap": 70,
+      "last_lap": 70,
+      "close_call": 40,
+      "race_start": 100,
+      "race_finish": 100
+    },
+    "target_duration": 720,
+    "min_severity": 0,
+    "params": {
+      "normalizationMode": "per_type",
+      "diversityStrength": 0,
+      "mixTargets": {},
+      "mixMin": {},
+      "mixMax": {}
+    },
+    "section_config": {},
+    "replay_mode": "highlights"
+  }
+}

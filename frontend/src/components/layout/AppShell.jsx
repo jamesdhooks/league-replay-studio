@@ -1,11 +1,15 @@
-import { useState, useCallback, useEffect, lazy, Suspense, useTransition } from 'react'
+import { useState, useCallback, useEffect, useRef, useMemo, lazy, Suspense, useTransition } from 'react'
 import { Loader2, FolderOpen, Radio } from 'lucide-react'
 import Toolbar from './Toolbar'
 import { useProject } from '../../context/ProjectContext'
 import { useAnalysis } from '../../context/AnalysisContext'
+import { useHighlight } from '../../context/HighlightContext'
 import { useUndoRedo } from '../../context/UndoRedoContext'
 import { useSettings } from '../../context/SettingsContext'
+import { usePipeline } from '../../context/PipelineContext'
 import { useHotkeys } from '../../hooks/useHotkeys'
+import { useSharedPreviewSurface } from '../../context/SharedPreviewSurfaceContext'
+import SharedPreviewHost from '../ui/SharedPreviewHost'
 
 // ── Lazy-loaded panels (code splitting) ──────────────────────────────────────
 const ProjectLibrary = lazy(() => import('../projects/ProjectLibrary'))
@@ -38,15 +42,35 @@ function AppShell() {
   const [activeTab, setActiveTab] = useState('projects')
   const { activeProject, openProject, closeProject, setStep } = useProject()
   const { events, eventSummary, isAnalyzing, progress: analysisProgress } = useAnalysis()
+  const { videoScript, scriptProjectId } = useHighlight()
+  const { currentRun, currentStep: pipelineCurrentStep } = usePipeline()
   const { loading: settingsLoading } = useSettings()
   const [showSettings, setShowSettings] = useState(false)
-  const { undo, redo, canUndo, canRedo, history, currentIndex } = useUndoRedo()
+  const { undo, redo, canUndo, canRedo } = useUndoRedo()
 
   // React 19 concurrent: mark project loading as a non-urgent transition
   const [isPending, startTransition] = useTransition()
 
   // True while a project is being fetched after the user clicks open
   const [projectLoading, setProjectLoading] = useState(false)
+  const [pipelineAdvancedMode, setPipelineAdvancedMode] = useState(() => {
+    try {
+      const saved = localStorage.getItem('lrs_pipeline_advanced_mode')
+      if (saved == null) return true
+      return saved === '1'
+    } catch {
+      return true
+    }
+  })
+  const fallbackPreviewRef = useRef(null)
+  const { registerFallbackTarget, unregisterFallbackTarget } = useSharedPreviewSurface()
+
+  useEffect(() => {
+    if (!fallbackPreviewRef.current) return undefined
+    const element = fallbackPreviewRef.current
+    registerFallbackTarget(element)
+    return () => unregisterFallbackTarget(element)
+  }, [registerFallbackTarget, unregisterFallbackTarget])
 
   // App-ready fade: once settings load, flip appReady so we can fade out the splash
   const [appReady, setAppReady] = useState(false)
@@ -78,6 +102,18 @@ function AppShell() {
     }
   }, [activeProject, setStep])
 
+  const togglePipelineAdvancedMode = useCallback(() => {
+    setPipelineAdvancedMode((prev) => {
+      const next = !prev
+      try {
+        localStorage.setItem('lrs_pipeline_advanced_mode', next ? '1' : '0')
+      } catch {
+        // ignore storage failures
+      }
+      return next
+    })
+  }, [])
+
   const [showHelp, setShowHelp] = useState(false)
   const openSettings = useCallback(() => setShowSettings(true), [])
   const closeSettings = useCallback(() => setShowSettings(false), [])
@@ -106,17 +142,43 @@ function AppShell() {
     enabled: showSettings || showHelp,
   })
 
-  // Compute undo/redo descriptions for toolbar tooltips
-  const undoDescription = canUndo ? history[currentIndex]?.description : undefined
-  const redoDescription = canRedo ? history[currentIndex + 1]?.description : undefined
-
   // Compute step readiness based on available data
-  const hasAnalysis = (events?.length > 0) || (eventSummary?.total_events > 0)
+  const STEP_ORDER = ['pipeline', 'analysis', 'editing', 'overlay', 'capture', 'compose', 'export', 'upload']
+  const analysisStepIndex = STEP_ORDER.indexOf('analysis')
+  const editingStepIndex = STEP_ORDER.indexOf('editing')
+  const currentStepIndex = STEP_ORDER.indexOf(activeProject?.current_step)
+  const projectHasPassedAnalysis = currentStepIndex > analysisStepIndex
+  const projectHasPassedEditing = currentStepIndex > editingStepIndex
+
+  const hasAnalysis = projectHasPassedAnalysis || (events?.length > 0) || (eventSummary?.total_events > 0)
+
+  const hasProjectScript = Array.isArray(activeProject?.script) && activeProject.script.length > 0
+  const hasCachedScript = scriptProjectId === activeProject?.id && Array.isArray(videoScript) && videoScript.length > 0
+  const hasPersistedScriptMarker = Boolean(activeProject?.script_generated_at)
+  const hasScript = hasProjectScript || hasCachedScript || hasPersistedScriptMarker
+
+  const hasEditing = hasScript || projectHasPassedEditing
+  const pipelineRunForActiveProject = currentRun && activeProject && currentRun.project_id === activeProject.id
+    ? currentRun
+    : null
+
+  const pipelineAnalysisProgress = useMemo(() => {
+    const percent = pipelineRunForActiveProject?.steps?.analysis?.progress
+    if (percent == null) return null
+    return {
+      percent: Number(percent),
+      message: 'Automated analysis running…',
+    }
+  }, [pipelineRunForActiveProject])
+
+  const effectiveAnalysisProgress = isAnalyzing ? analysisProgress : pipelineAnalysisProgress
+
   const stepReadiness = {
+    pipeline: true,
     analysis: true,
-    editing: hasAnalysis,
-    overlay: hasAnalysis,
-    capture: hasAnalysis,
+    editing: hasEditing,
+    overlay: hasAnalysis && hasScript,
+    capture: hasAnalysis && hasScript,
     export: true,
     upload: true,
   }
@@ -152,15 +214,13 @@ function AppShell() {
         onBack={closeProject}
         onStepClick={handleStepClick}
         stepReadiness={stepReadiness}
-        analysisProgress={isAnalyzing ? analysisProgress : null}
+        pipelineExecutionSteps={pipelineRunForActiveProject?.steps || {}}
+        pipelineRunningStep={pipelineRunForActiveProject?.current_step || null}
+        pipelineAdvancedMode={pipelineAdvancedMode}
+        onTogglePipelineAdvancedMode={togglePipelineAdvancedMode}
+        analysisProgress={effectiveAnalysisProgress}
         onOpenSettings={openSettings}
         onOpenHelp={openHelp}
-        canUndo={canUndo}
-        canRedo={canRedo}
-        onUndo={undo}
-        onRedo={redo}
-        undoDescription={undoDescription}
-        redoDescription={redoDescription}
       />
 
       {/* Main content area */}
@@ -195,6 +255,7 @@ function AppShell() {
               <ProjectView
                 project={activeProject}
                 isLoading={projectLoading}
+                pipelineAdvancedMode={pipelineAdvancedMode}
               />
             ) : activeTab === 'collect' ? (
               <CollectPage />
@@ -203,7 +264,14 @@ function AppShell() {
             )}
           </Suspense>
         </main>
+
+        <SharedPreviewHost />
       </div>
+
+      <div
+        ref={fallbackPreviewRef}
+        className="fixed right-4 bottom-4 w-[360px] max-w-[calc(100vw-2rem)] aspect-video pointer-events-none"
+      />
     </div>
 
     <Suspense fallback={null}>

@@ -16,7 +16,13 @@ from .constants import (
     BROLL_GAP_THRESHOLD,
     MAX_BROLL_FILLER_DURATION,
     BUCKET_BOUNDARIES,
+    DEFAULT_BUCKET_REPEAT_PENALTY,
+    DEFAULT_DIVERSITY_STRENGTH,
+    DEFAULT_FLOOR_BOOST,
+    DEFAULT_MAX_FLOOR_REBALANCE_SWAPS,
+    DEFAULT_MIX_MAX,
     DEFAULT_PIP_THRESHOLD,
+    DEFAULT_TYPE_DECAY_BASE,
     MANDATORY_TYPES,
     TV_CAM_PREFERENCES,
 )
@@ -30,6 +36,53 @@ logger = logging.getLogger(__name__)
 def _tier_priority(tier: str) -> int:
     """Map tier to sort priority (higher = more important)."""
     return {"S": 4, "A": 3, "B": 2, "C": 1}.get(tier, 0)
+
+
+# ── Diversity / mix-balancing helpers (Balanced Selection v3) ───────────────
+
+
+def _diversity_scale(diversity_strength: float) -> float:
+    """Convert 0–100 slider into a multiplier. 0 disables diversity, 50 nominal, 100 aggressive."""
+    return max(0.0, float(diversity_strength)) / 50.0
+
+
+def _type_decay_factor(count: int, decay_base: float, scale: float) -> float:
+    """Diminishing returns: Nth event of a type is worth decay_base^(N*scale) of its score."""
+    if scale <= 0 or count <= 0:
+        return 1.0
+    base = max(0.01, min(1.0, float(decay_base)))
+    return base ** (count * scale)
+
+
+def _quota_pressure(
+    used_share: float,
+    mix_min: Optional[float],
+    mix_max: Optional[float],
+    floor_boost: float,
+    scale: float,
+) -> float:
+    """Quota pressure factor.
+
+    Returns 0 (hard exclude) if the type's used share has reached its hard cap.
+    Returns >1 (boost) if the type is below its soft floor.
+    Returns 1 otherwise.
+    """
+    if mix_max is not None and used_share >= float(mix_max):
+        return 0.0
+    if scale > 0 and mix_min is not None and used_share < float(mix_min):
+        # Boost scales with diversity_strength; at scale=0 no boost is applied.
+        return 1.0 + (float(floor_boost) - 1.0) * scale
+    return 1.0
+
+
+def _bucket_diversity_factor(bucket_type_count: int, repeat_penalty: float, scale: float) -> float:
+    """Soft penalty for stacking same-type events inside one temporal bucket.
+
+    Never zero — only nudges. At scale=0 returns 1.0.
+    """
+    if scale <= 0 or bucket_type_count <= 0:
+        return 1.0
+    return 1.0 / (1.0 + max(0.0, float(repeat_penalty)) * bucket_type_count * scale)
 
 
 def _evt_duration(event: dict) -> float:
@@ -319,6 +372,18 @@ def allocate_timeline(
     max_driver_exposure = constraints.get("max_driver_exposure", 0.25)
     min_severity = constraints.get("min_severity", 0)
 
+    # ── Diversity / mix-balancing constraints (Balanced Selection v3) ──────
+    # All optional. When diversity_strength == 0 every diversity term collapses
+    # to 1.0 and selection reproduces the legacy strict-by-score behavior.
+    diversity_strength = float(constraints.get("diversity_strength", DEFAULT_DIVERSITY_STRENGTH))
+    type_decay_base = float(constraints.get("type_decay_base", DEFAULT_TYPE_DECAY_BASE))
+    bucket_repeat_penalty = float(constraints.get("bucket_repeat_penalty", DEFAULT_BUCKET_REPEAT_PENALTY))
+    floor_boost = float(constraints.get("floor_boost", DEFAULT_FLOOR_BOOST))
+    max_floor_swaps = int(constraints.get("max_floor_rebalance_swaps", DEFAULT_MAX_FLOOR_REBALANCE_SWAPS))
+    mix_min: dict[str, float] = dict(constraints.get("mix_min") or {})
+    mix_max: dict[str, float] = dict(constraints.get("mix_max") or {})
+    div_scale = _diversity_scale(diversity_strength)
+
     # Filter by minimum severity. Force-included events always remain candidates.
     # force_full_video events are intentionally excluded from highlight allocation.
     candidates = [
@@ -348,40 +413,168 @@ def allocate_timeline(
     timeline = list(must_have)
     used_duration = sum(_evt_selection_duration(e, constraints) for e in timeline)
 
-    # Pass 2 — Bucket fill
+    # Pass 2 — Bucket fill (with optional diversity/quota balancing)
     bucket_budgets = {
         name: target_duration * (hi - lo)
         for name, (lo, hi) in BUCKET_BOUNDARIES.items()
     }
     bucket_used: dict[str, float] = defaultdict(float)
+    type_count: dict[str, int] = defaultdict(int)
+    type_used_duration: dict[str, float] = defaultdict(float)
+    bucket_type_count: dict[tuple[str, str], int] = defaultdict(int)
     for evt in timeline:
-        bucket_used[evt.get("bucket", "mid")] += _evt_selection_duration(evt, constraints)
+        b = evt.get("bucket", "mid")
+        t = evt.get("event_type", "unknown")
+        d = _evt_selection_duration(evt, constraints)
+        bucket_used[b] += d
+        type_count[t] += 1
+        type_used_duration[t] += d
+        bucket_type_count[(b, t)] += 1
 
     selected_ids = {id(e) for e in timeline}
-    for evt in remaining:
-        if used_duration >= target_duration:
-            break
-        bucket = evt.get("bucket", "mid")
-        budget = bucket_budgets.get(bucket, target_duration * 0.3)
-        if bucket_used[bucket] >= budget:
-            continue
-        evt_dur = _evt_selection_duration(evt, constraints)
-        timeline.append(evt)
-        selected_ids.add(id(evt))
-        used_duration += evt_dur
-        bucket_used[bucket] += evt_dur
+    remaining_pool = list(remaining)
+    target = max(target_duration, 1.0)
 
-    # Pass 2b — Overflow fill: if still under target, ignore bucket limits
+    def _effective_score(evt: dict) -> float:
+        """Score after applying diversity/quota/bucket factors. <=0 means skip."""
+        t = evt.get("event_type", "unknown")
+        b = evt.get("bucket", "mid")
+        share = type_used_duration[t] / target
+        q = _quota_pressure(share, mix_min.get(t), mix_max.get(t, DEFAULT_MIX_MAX), floor_boost, div_scale)
+        if q <= 0:
+            return 0.0
+        decay = _type_decay_factor(type_count[t], type_decay_base, div_scale)
+        bdiv = _bucket_diversity_factor(bucket_type_count[(b, t)], bucket_repeat_penalty, div_scale)
+        return max(0.0, evt.get("score", 0)) * q * decay * bdiv
+
+    # Marginal-utility greedy: re-rank remaining each iteration so diversity
+    # terms (which depend on already-selected counts) update correctly.
+    while used_duration < target_duration and remaining_pool:
+        best_idx = -1
+        best_eff = -1.0
+        best_evt = None
+        for i, evt in enumerate(remaining_pool):
+            if id(evt) in selected_ids:
+                continue
+            b = evt.get("bucket", "mid")
+            budget = bucket_budgets.get(b, target_duration * 0.3)
+            if bucket_used[b] >= budget:
+                continue
+            eff = _effective_score(evt)
+            # Tier still acts as a strong tie-breaker so S/A events outrank C even with decay.
+            tier_bonus = _tier_priority(evt.get("tier", "C")) * 0.001
+            eff_total = eff + tier_bonus
+            if eff > 0 and eff_total > best_eff:
+                best_eff = eff_total
+                best_idx = i
+                best_evt = evt
+        if best_evt is None:
+            break
+        evt_dur = _evt_selection_duration(best_evt, constraints)
+        b = best_evt.get("bucket", "mid")
+        t = best_evt.get("event_type", "unknown")
+        timeline.append(best_evt)
+        selected_ids.add(id(best_evt))
+        used_duration += evt_dur
+        bucket_used[b] += evt_dur
+        type_count[t] += 1
+        type_used_duration[t] += evt_dur
+        bucket_type_count[(b, t)] += 1
+        remaining_pool.pop(best_idx)
+
+    # Pass 2b — Overflow fill: if still under target, ignore bucket limits.
+    # Hard caps (mix_max) are still respected.
     if used_duration < target_duration:
-        for evt in remaining:
+        for evt in list(remaining_pool):
             if used_duration >= target_duration:
                 break
             if id(evt) in selected_ids:
                 continue
+            t = evt.get("event_type", "unknown")
+            cap = mix_max.get(t)
+            if cap is not None and (type_used_duration[t] / target) >= float(cap):
+                continue
             evt_dur = _evt_selection_duration(evt, constraints)
+            b = evt.get("bucket", "mid")
             timeline.append(evt)
             selected_ids.add(id(evt))
             used_duration += evt_dur
+            bucket_used[b] += evt_dur
+            type_count[t] += 1
+            type_used_duration[t] += evt_dur
+            bucket_type_count[(b, t)] += 1
+
+    # Pass 4 — Floor rebalance: if any mix_min is unmet, swap low-tier non-mandatory
+    # selected events for the strongest unmet-floor candidates. Capped at
+    # max_floor_swaps to prevent oscillation.
+    diagnostics_swaps: list[dict] = []
+    if div_scale > 0 and mix_min and max_floor_swaps > 0:
+        swaps_done = 0
+        unmet_types = [
+            t for t, mn in mix_min.items()
+            if (type_used_duration[t] / target) < float(mn)
+        ]
+        for unmet_t in unmet_types:
+            if swaps_done >= max_floor_swaps:
+                break
+            # Best candidate of unmet type not yet selected
+            cand = next(
+                (e for e in remaining_pool
+                 if e.get("event_type") == unmet_t
+                 and id(e) not in selected_ids
+                 and e.get("score", 0) > 0),
+                None,
+            )
+            if cand is None:
+                continue
+            cand_dur = _evt_selection_duration(cand, constraints)
+            # Find the weakest swappable selected event (non-mandatory, not force-included,
+            # tier B/C, of a type that is over-floor).
+            swap_target = None
+            for evt in sorted(timeline, key=lambda e: e.get("score", 0)):
+                if evt.get("event_type") in MANDATORY_TYPES or evt.get("force_included"):
+                    continue
+                if evt.get("tier") in ("S", "A"):
+                    continue
+                t = evt.get("event_type", "unknown")
+                if t == unmet_t:
+                    continue
+                # Don't drop a type below its own floor
+                share_after = (type_used_duration[t] - _evt_selection_duration(evt, constraints)) / target
+                if t in mix_min and share_after < float(mix_min[t]):
+                    continue
+                swap_target = evt
+                break
+            if swap_target is None:
+                continue
+            # Perform swap
+            sw_dur = _evt_selection_duration(swap_target, constraints)
+            sw_t = swap_target.get("event_type", "unknown")
+            sw_b = swap_target.get("bucket", "mid")
+            timeline.remove(swap_target)
+            selected_ids.discard(id(swap_target))
+            used_duration -= sw_dur
+            bucket_used[sw_b] -= sw_dur
+            type_count[sw_t] -= 1
+            type_used_duration[sw_t] -= sw_dur
+            bucket_type_count[(sw_b, sw_t)] = max(0, bucket_type_count[(sw_b, sw_t)] - 1)
+
+            cand_b = cand.get("bucket", "mid")
+            timeline.append(cand)
+            selected_ids.add(id(cand))
+            used_duration += cand_dur
+            bucket_used[cand_b] += cand_dur
+            type_count[unmet_t] += 1
+            type_used_duration[unmet_t] += cand_dur
+            bucket_type_count[(cand_b, unmet_t)] += 1
+
+            diagnostics_swaps.append({
+                "in_type": unmet_t,
+                "in_id": cand.get("id"),
+                "out_type": sw_t,
+                "out_id": swap_target.get("id"),
+            })
+            swaps_done += 1
 
     # Pass 3 — Smoothing
     timeline = _smooth_timeline(
@@ -397,9 +590,35 @@ def allocate_timeline(
 
     total_dur = sum(_evt_selection_duration(e, constraints) for e in timeline)
     logger.info(
-        "allocate_timeline: selected %d segments (%.1fs total) for %.1fs target",
-        len(timeline), total_dur, target_duration,
+        "allocate_timeline: selected %d segments (%.1fs total) for %.1fs target — "
+        "diversity_strength=%.0f, swaps=%d",
+        len(timeline), total_dur, target_duration, diversity_strength, len(diagnostics_swaps),
     )
+
+    # Attach selection diagnostics for the caller. We can't set arbitrary attributes
+    # on a built-in list, so we mutate the caller-provided constraints dict in place
+    # under the "_diagnostics" key. The pipeline reads it back from there.
+    diagnostics = {
+        "diversity_strength": diversity_strength,
+        "type_used_duration": dict(type_used_duration),
+        "type_share": {t: round(d / target, 4) for t, d in type_used_duration.items()},
+        "mix_min": mix_min,
+        "mix_max": mix_max,
+        "floors_unmet": [
+            t for t, mn in mix_min.items()
+            if (type_used_duration[t] / target) < float(mn)
+        ],
+        "caps_hit": [
+            t for t, mx in mix_max.items()
+            if mx is not None and (type_used_duration[t] / target) >= float(mx)
+        ],
+        "swaps": diagnostics_swaps,
+        "total_duration": total_dur,
+        "target_duration": target_duration,
+    }
+    if isinstance(constraints, dict):
+        constraints["_diagnostics"] = diagnostics
+
     return timeline
 
 

@@ -5,8 +5,6 @@ import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { useAnalysis } from '../../context/AnalysisContext'
 import { useProject } from '../../context/ProjectContext'
 import { useUndoRedo } from '../../context/UndoRedoContext'
-import { useModal } from '../../context/ModalContext'
-import { useToast } from '../../context/ToastContext'
 import HighlightWeightSliders from './HighlightWeightSliders'
 import HighlightEventTable from './HighlightEventTable'
 import HighlightMetrics from './HighlightMetrics'
@@ -19,7 +17,9 @@ import ProjectFileBrowser from '../projects/ProjectFileBrowser'
 import ResizableSidebar from '../layout/ResizableSidebar'
 import CollapsibleSection from '../ui/CollapsibleSection'
 import ResizableRowPane from '../ui/ResizableRowPane'
-import { Sparkles, List, Search, History, Folder, Film, Scissors, Clapperboard, ChevronDown, ChevronRight, AlertCircle, Save, Zap } from 'lucide-react'
+import CollapsibleControlsHeader from '../ui/CollapsibleControlsHeader'
+import { Sparkles, List, Search, History, Folder, Film, Scissors, Clapperboard, Clock, AlertCircle } from 'lucide-react'
+import LabeledSlider from '../ui/LabeledSlider'
 
 /**
  * HighlightPanel — Main container for the Highlight Editing Suite.
@@ -31,7 +31,7 @@ import { Sparkles, List, Search, History, Folder, Film, Scissors, Clapperboard, 
  * @param {number} props.projectId - Active project ID
  */
 export default function HighlightPanel({ projectId }) {
-  const { loadConfig, loadDrivers, loadPresets, replayMode, setReplayMode, presets, loadPreset, savePreset, deletePreset, videoSections, sectionConfig, updateSectionConfig, metrics, currentPresetId, hasUnsavedChanges, autoSavePreset, setAutoSavePreset } = useHighlight()
+  const { loadConfig, loadDrivers, loadPresets, replayMode, setReplayMode, videoSections, sectionConfig, updateSectionConfig, metrics, targetDuration, setTargetDuration } = useHighlight()
   const { loadRaceDuration } = useTimeline()
   const { fetchEvents, events } = useAnalysis()
   const { history } = useUndoRedo()
@@ -65,6 +65,7 @@ export default function HighlightPanel({ projectId }) {
   // Histogram + Preview: collapsed state (mutually exclusive — only one expands at a time)
   const [histogramCollapsed, setHistogramCollapsed] = useLocalStorage('lrs:editing:histogramCollapsed', false)
   const [previewCollapsed, setPreviewCollapsed] = useLocalStorage('lrs:editing:previewCollapsed', true)
+  const [timelineCollapsed] = useLocalStorage('lrs:editing:timeline:collapsed', false)
 
   const toggleHistogram = useCallback(() => {
     if (histogramCollapsed) {
@@ -160,14 +161,13 @@ export default function HighlightPanel({ projectId }) {
         <div className="flex-1 flex min-w-0 min-h-0 overflow-hidden">
           {/* Editing Controls collapsed icon bar */}
           {tuningCollapsed && (
-            <button
-              onClick={() => setTuningCollapsed(false)}
-              className="shrink-0 w-9 border-r border-border bg-bg-secondary flex flex-col items-center py-2 gap-3
-                         hover:bg-bg-primary/50 transition-colors cursor-pointer"
-              title="Expand Editing Controls"
-            >
-              <Sparkles className="w-4 h-4 text-accent" />
-            </button>
+            <CollapsibleControlsHeader
+              collapsed
+              icon={Sparkles}
+              title="Editing Controls"
+              onExpand={() => setTuningCollapsed(false)}
+              expandTitle="Expand Editing Controls"
+            />
           )}
 
           {/* Editing Controls pane (resizable) */}
@@ -177,17 +177,12 @@ export default function HighlightPanel({ projectId }) {
             className="shrink-0 border-r border-border bg-bg-secondary flex flex-col min-h-0"
             style={{ width: tuningWidth }}
           >
-            {/* Section header */}
-            <button
-              onClick={() => setTuningCollapsed(true)}
-              className="flex items-center gap-2 px-3 py-2 border-b border-border shrink-0 w-full text-left hover:bg-bg-primary/50 transition-colors"
-            >
-              <Sparkles className="w-4 h-4 text-accent" />
-              <h3 className="text-xs font-semibold text-text-primary uppercase tracking-wider flex-1">
-                Editing Controls
-              </h3>
-              <ChevronRight className="w-3 h-3 text-text-tertiary" />
-            </button>
+            <CollapsibleControlsHeader
+              collapsed={false}
+              icon={Sparkles}
+              title="Editing Controls"
+              onCollapse={() => setTuningCollapsed(true)}
+            />
             {/* Replay mode toggle */}
             <div className="px-3 py-2 border-b border-border-subtle shrink-0">
               <div className="flex items-center gap-1 p-0.5 bg-bg-primary rounded-lg border border-border">
@@ -219,17 +214,19 @@ export default function HighlightPanel({ projectId }) {
               )}
             </div>
 
-            {/* Presets — inline below mode toggle */}
-            <PresetSelector
-              presets={presets}
-              currentPresetId={currentPresetId}
-              hasUnsavedChanges={hasUnsavedChanges}
-              onLoad={loadPreset}
-              onSave={savePreset}
-              onDelete={deletePreset}
-              autoSave={autoSavePreset}
-              onToggleAutoSave={setAutoSavePreset}
-            />
+            {replayMode !== 'full' && (
+              <div className="px-3 py-2 border-b border-border-subtle shrink-0">
+                <LabeledSlider
+                  label="Target Duration"
+                  tooltip="Target duration of the final highlight video — shorter means stricter event selection (0 = no limit)"
+                  value={targetDuration ? Math.round(targetDuration / 60) : 0}
+                  min={0} max={30} step={1}
+                  format={v => v === 0 ? 'No limit' : `${v} min`}
+                  onChange={v => setTargetDuration(v === 0 ? null : v * 60)}
+                  labelWidth="7rem"
+                />
+              </div>
+            )}
 
             <div className="flex-1 overflow-y-auto">
               {/* Race segments breakdown */}
@@ -265,7 +262,9 @@ export default function HighlightPanel({ projectId }) {
               defaultBottomHeight={160}
               minBottom={80}
               maxBottom={400}
-              containerClassName="flex flex-col flex-1 min-h-0 overflow-hidden"
+              collapsed={timelineCollapsed}
+              collapsedBottomHeight={42}
+              containerClassName="flex flex-col flex-1 h-full min-h-0 overflow-hidden"
               top={
                 <div className="h-full flex flex-col min-h-0 overflow-hidden">
                   <div className={!histogramCollapsed ? 'flex-1 flex flex-col min-h-0 overflow-hidden' : 'shrink-0'}>
@@ -297,147 +296,6 @@ export default function HighlightPanel({ projectId }) {
 }
 
 
-/**
- * PresetSelector — Compact inline preset picker for the tuning pane.
- */
-function PresetSelector({ presets, onLoad, onSave, onDelete, currentPresetId, hasUnsavedChanges, autoSave, onToggleAutoSave }) {
-  const [open, setOpen] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [name, setName] = useState('')
-  const [isSaving, setIsSaving] = useState(false)
-  const { openModal } = useModal()
-  const { showSuccess } = useToast()
-
-  const handleSave = async () => {
-    if (!name.trim()) return
-    try {
-      await onSave(name.trim())
-      setName('')
-      setSaving(false)
-    } catch {}
-  }
-
-  const handleSaveExisting = async () => {
-    if (!currentPresetId) return
-    setIsSaving(true)
-    try { await onSave(currentPresetId) } catch {}
-    finally { setIsSaving(false) }
-  }
-
-  const handleDeleteWithConfirmation = useCallback((presetName) => {
-    openModal('delete-preset', 'confirm', {
-      title: 'Delete Preset',
-      message: `Are you sure you want to delete the preset "${presetName}"? This action cannot be undone.`,
-      confirmText: 'Delete',
-      danger: true,
-      onConfirm: async () => {
-        try {
-          await onDelete(presetName)
-          showSuccess('Preset deleted')
-        } catch (err) {
-          console.error('Failed to delete preset:', err)
-        }
-      },
-    })
-  }, [openModal, onDelete, showSuccess])
-
-  return (
-    <div className="px-3 py-2 border-b border-border-subtle shrink-0 space-y-2">
-      {/* Preset selector row */}
-      <div className="flex items-center gap-1.5">
-        <span className="text-xxs text-text-tertiary font-medium">Preset:</span>
-        <div className="relative flex-1">
-          <button
-            onClick={() => setOpen(v => !v)}
-            className="w-full flex items-center justify-between px-2 py-1 text-xxs bg-bg-primary border border-border
-                       rounded text-text-primary hover:border-accent transition-colors"
-          >
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="truncate">
-                {currentPresetId || 'Select preset...'}
-              </span>
-              {hasUnsavedChanges && currentPresetId && !autoSave && (
-                <span title="Unsaved changes" className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0"></span>
-              )}
-            </div>
-            <Folder className="w-3 h-3 text-text-disabled shrink-0" />
-          </button>
-          {open && (
-            <div className="absolute top-full left-0 right-0 mt-1 z-50 bg-bg-secondary border border-border rounded-lg shadow-lg py-1">
-              {presets.length === 0 && (
-                <div className="px-3 py-2 text-xxs text-text-disabled">No presets</div>
-              )}
-              {presets.map(p => (
-                <div key={p.name} className="flex items-center gap-1 px-3 py-1 hover:bg-bg-hover">
-                  <button onClick={() => { onLoad(p); setOpen(false) }} className="flex-1 text-left text-xxs text-text-primary truncate">
-                    {p.name}
-                  </button>
-                  <button onClick={() => handleDeleteWithConfirmation(p.name)} className="p-0.5 text-text-disabled hover:text-danger">
-                    ×
-                  </button>
-                </div>
-              ))}
-              <div className="border-t border-border-subtle mt-1 pt-1 px-3 py-1">
-                {saving ? (
-                  <div className="flex items-center gap-1">
-                    <input
-                      type="text" value={name} onChange={e => setName(e.target.value)}
-                      onKeyDown={e => e.key === 'Enter' && handleSave()}
-                      placeholder="Preset name..." autoFocus
-                      className="flex-1 px-1.5 py-0.5 text-xxs bg-bg-primary border border-border rounded text-text-primary
-                                 placeholder:text-text-disabled focus:outline-none focus:border-accent"
-                    />
-                    <button onClick={handleSave} className="text-xxs text-accent hover:text-accent-hover">Save</button>
-                  </div>
-                ) : (
-                  <button onClick={() => setSaving(true)} className="text-xxs text-accent hover:text-accent-hover">
-                    + Save current...
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Save + Auto-save controls — separate row, only when a preset is loaded */}
-      {currentPresetId && (
-        <div className="flex items-center gap-1.5">
-          {/* Save button — highlighted when there are pending changes */}
-          <button
-            onClick={handleSaveExisting}
-            disabled={isSaving || !hasUnsavedChanges}
-            title={hasUnsavedChanges ? `Save changes to "${currentPresetId}"` : 'No changes to save'}
-            className={`flex items-center gap-1 px-2 py-0.5 text-xxs rounded border transition-colors
-              ${ hasUnsavedChanges && !autoSave
-                ? 'bg-amber-500/20 border-amber-400/60 text-amber-300 hover:bg-amber-500/35 cursor-pointer'
-                : 'bg-bg-primary border-border text-text-disabled cursor-default opacity-50'
-              }`}
-          >
-            <Save className="w-3 h-3" />
-            {isSaving ? 'Saving…' : 'Save'}
-          </button>
-
-          {/* Auto-save toggle */}
-          <button
-            onClick={() => onToggleAutoSave(!autoSave)}
-            title={autoSave ? 'Auto-save ON — every change is saved immediately' : 'Auto-save OFF'}
-            className={`flex items-center gap-1 px-2 py-0.5 text-xxs rounded border transition-colors
-              ${ autoSave
-                ? 'bg-accent/20 border-accent/60 text-accent hover:bg-accent/30'
-                : 'bg-bg-primary border-border text-text-disabled hover:border-border-active hover:text-text-secondary'
-              }`}
-          >
-            <Zap className="w-3 h-3" />
-            Auto-save
-          </button>
-        </div>
-      )}
-    </div>
-  )
-}
-
-
 const SEGMENT_TYPES = [
   { id: 'intro',              label: 'Intro',             icon: '🎬', defaultDuration: 10 },
   { id: 'qualifying_results', label: 'Qualifying',        icon: '🏁', defaultDuration: 15 },
@@ -450,8 +308,6 @@ const SEGMENT_TYPES = [
  * Non-race sections expose a duration input; race duration is automatic.
  */
 function SegmentBreakdown({ sections, config, onUpdate, metrics }) {
-  const [expanded, setExpanded] = useLocalStorage('lrs:editing:segments:expanded', false)
-
   // Calculate total duration across enabled segments
   const totalSegmentDuration = SEGMENT_TYPES.reduce((sum, seg) => {
     const cfg = config[seg.id] || {}
@@ -464,8 +320,8 @@ function SegmentBreakdown({ sections, config, onUpdate, metrics }) {
     <CollapsibleSection
       icon={Clapperboard}
       label="Race Segments"
-      open={expanded}
-      onToggle={() => setExpanded(v => !v)}
+      storageKey="lrs:editing:segments:expanded"
+      defaultOpen={false}
       right={
         <span className="text-[9px] text-text-disabled font-mono">
           {totalSegmentDuration > 0 ? `${Math.round(totalSegmentDuration / 60)}m` : '—'}

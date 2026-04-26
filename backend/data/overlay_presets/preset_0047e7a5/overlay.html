@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width={{ resolution.width }}, height={{ resolution.height }}">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: {{ resolution.width }}px; height: {{ resolution.height }}px; background: transparent; overflow: hidden; }
+    .overlay { width: 100%; height: 100%; position: relative; }
+  </style>
+</head>
+<body>
+  <div class="overlay">
+    {# Blank template — starting point for custom overlays #}
+    {# Available context variables: #}
+    {#   frame.section     — 'intro' | 'qualifying_results' | 'race' | 'race_results' #}
+    {#   frame.driver_name, frame.position, frame.current_lap, frame.total_laps #}
+    {#   frame.session_time, frame.last_lap_time, frame.best_lap_time #}
+    {#   frame.car_name, frame.irating, frame.team_color #}
+    {#   frame.flag ('green' | 'yellow' | 'red' | 'checkered') #}
+    {#   frame.standings   — list: {position, driver_name, gap, is_player, car_number} #}
+    {#   frame.series_name, frame.track_name #}
+    {#   frame.incident_count #}
+    {#   resolution.width, resolution.height #}
+  </div>
+</body>
+</html>

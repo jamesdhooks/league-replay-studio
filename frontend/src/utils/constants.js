@@ -7,12 +7,13 @@ export const APP_VERSION = '0.1.0'
 
 /** Project workflow steps */
 export const WORKFLOW_STEPS = [
+  { id: 'pipeline', label: 'Auto', icon: 'rocket' },
   { id: 'analysis', label: 'Analysis', icon: 'bar-chart' },
   { id: 'editing', label: 'Editing', icon: 'scissors' },
   { id: 'overlay', label: 'Overlay', icon: 'layers' },
   { id: 'capture', label: 'Capture', icon: 'video' },
   { id: 'compose', label: 'Compose', icon: 'clapperboard' },
-  { id: 'export', label: 'Export', icon: 'download' },
+  { id: 'export', label: 'Encoder', icon: 'download' },
   { id: 'upload', label: 'Upload', icon: 'upload' },
 ]
 

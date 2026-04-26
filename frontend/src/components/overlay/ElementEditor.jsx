@@ -1,7 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import {
-  Move, Layers, Code, Eye, EyeOff,
-  Info,
+  Move, Layers, Eye, EyeOff,
 } from 'lucide-react'
 
 /**
@@ -20,31 +19,40 @@ export default function ElementEditor({ element, isBuiltin, onUpdate, onRefreshP
   const [name, setName] = useState(element.name)
   const [position, setPosition] = useState(element.position)
   const [zIndex, setZIndex] = useState(element.z_index)
-  const [template, setTemplate] = useState(element.template)
-  const [showGuide, setShowGuide] = useState(false)
   const saveTimeoutRef = useRef(null)
+  const initialPositionRef = useRef(element.position || { x: 0, y: 0, w: 100, h: 100 })
 
   // Sync when element changes
   useEffect(() => {
     setName(element.name)
     setPosition(element.position)
     setZIndex(element.z_index)
-    setTemplate(element.template)
-  }, [element.id, element.name, element.position, element.z_index, element.template])
+    initialPositionRef.current = element.position || { x: 0, y: 0, w: 100, h: 100 }
+  }, [element.id, element.name, element.position, element.z_index])
 
   const handleSave = useCallback((field, value) => {
-    if (isBuiltin) return
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current)
     saveTimeoutRef.current = setTimeout(async () => {
       await onUpdate({ [field]: value })
     }, 500)
-  }, [isBuiltin, onUpdate])
+  }, [onUpdate])
 
   const handlePositionChange = useCallback((axis, val) => {
     const newPos = { ...position, [axis]: parseFloat(val) || 0 }
     setPosition(newPos)
     handleSave('position', newPos)
   }, [position, handleSave])
+
+  const handleResetPosition = useCallback(() => {
+    const resetPos = {
+      x: Number(initialPositionRef.current?.x ?? 0),
+      y: Number(initialPositionRef.current?.y ?? 0),
+      w: Number(initialPositionRef.current?.w ?? 100),
+      h: Number(initialPositionRef.current?.h ?? 100),
+    }
+    setPosition(resetPos)
+    handleSave('position', resetPos)
+  }, [handleSave])
 
   return (
     <div className="flex flex-col h-full">
@@ -64,16 +72,25 @@ export default function ElementEditor({ element, isBuiltin, onUpdate, onRefreshP
             type="text"
             value={name}
             onChange={e => { setName(e.target.value); handleSave('name', e.target.value) }}
-            disabled={isBuiltin}
             className="w-full mt-1 bg-bg-secondary border border-border rounded px-2 py-1 text-xs text-text-primary focus:border-blue-500 focus:outline-none disabled:opacity-50"
           />
         </div>
 
         {/* Position */}
         <div>
-          <label className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider flex items-center gap-1">
-            <Move className="w-3 h-3" /> Position (%)
-          </label>
+          <div className="flex items-center justify-between">
+            <label className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider flex items-center gap-1">
+              <Move className="w-3 h-3" /> Position (%)
+            </label>
+            <button
+              type="button"
+              onClick={handleResetPosition}
+              className="rounded border border-border px-1.5 py-0.5 text-[10px] text-text-tertiary hover:bg-bg-secondary hover:text-text-primary"
+              title="Reset position values"
+            >
+              Reset
+            </button>
+          </div>
           <div className="grid grid-cols-2 gap-2 mt-1">
             {[
               { key: 'x', label: 'Left' },
@@ -90,7 +107,6 @@ export default function ElementEditor({ element, isBuiltin, onUpdate, onRefreshP
                   step={0.5}
                   value={position[key] || 0}
                   onChange={e => handlePositionChange(key, e.target.value)}
-                  disabled={isBuiltin}
                   className="w-full bg-bg-secondary border border-border rounded px-2 py-0.5 text-xs text-text-primary focus:border-blue-500 focus:outline-none disabled:opacity-50 tabular-nums"
                 />
               </div>
@@ -107,74 +123,12 @@ export default function ElementEditor({ element, isBuiltin, onUpdate, onRefreshP
             max={100}
             value={zIndex}
             onChange={e => { const v = parseInt(e.target.value) || 0; setZIndex(v); handleSave('z_index', v) }}
-            disabled={isBuiltin}
             className="w-full mt-1 bg-bg-secondary border border-border rounded px-2 py-1 text-xs text-text-primary focus:border-blue-500 focus:outline-none disabled:opacity-50"
           />
         </div>
 
-        {/* Template HTML */}
-        <div>
-          <div className="flex items-center justify-between">
-            <label className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider flex items-center gap-1">
-              <Code className="w-3 h-3" /> Template HTML
-            </label>
-            <button onClick={() => setShowGuide(!showGuide)}
-              className="text-[10px] text-blue-400 hover:text-blue-300 flex items-center gap-0.5">
-              <Info className="w-3 h-3" />
-              {showGuide ? 'Hide' : 'Guide'}
-            </button>
-          </div>
-
-          {/* Template guide */}
-          {showGuide && (
-            <div className="mt-1 p-2 rounded bg-bg-secondary border border-border text-[10px] text-text-tertiary space-y-1.5">
-              <p className="font-medium text-text-secondary">Available Variables:</p>
-              <div className="grid grid-cols-2 gap-x-2 gap-y-0.5">
-                <code className="text-blue-400">{'{{ frame.driver_name }}'}</code>
-                <span>Focused driver</span>
-                <code className="text-blue-400">{'{{ frame.position }}'}</code>
-                <span>Race position</span>
-                <code className="text-blue-400">{'{{ frame.current_lap }}'}</code>
-                <span>Current lap</span>
-                <code className="text-blue-400">{'{{ frame.total_laps }}'}</code>
-                <span>Total laps</span>
-                <code className="text-blue-400">{'{{ frame.flag }}'}</code>
-                <span>Flag status</span>
-                <code className="text-blue-400">{'{{ frame.team_color }}'}</code>
-                <span>Team color</span>
-                <code className="text-blue-400">{'{{ frame.standings }}'}</code>
-                <span>All drivers</span>
-              </div>
-              <p className="font-medium text-text-secondary mt-2">Position:</p>
-              <div className="grid grid-cols-2 gap-x-2 gap-y-0.5">
-                <code className="text-green-400">{'{{pos.x}}, {{pos.y}}'}</code>
-                <span>Left, Top (%)</span>
-                <code className="text-green-400">{'{{pos.w}}, {{pos.h}}'}</code>
-                <span>Width, Height (%)</span>
-              </div>
-              <p className="font-medium text-text-secondary mt-2">Loops:</p>
-              <code className="text-amber-400 block">{'{% for entry in frame.standings %}'}</code>
-              <code className="text-amber-400 block pl-2">{'{{ entry.driver_name }} P{{ entry.position }}'}</code>
-              <code className="text-amber-400 block">{'{% endfor %}'}</code>
-              <p className="font-medium text-text-secondary mt-2">Conditionals:</p>
-              <code className="text-amber-400 block">{'{% if entry.is_player %}'}</code>
-              <code className="text-amber-400 block pl-2">{'highlight this row'}</code>
-              <code className="text-amber-400 block">{'{% endif %}'}</code>
-              <p className="font-medium text-text-secondary mt-2">CSS Variables:</p>
-              <code className="text-purple-400 block">{'var(--color-primary, #fff)'}</code>
-              <code className="text-purple-400 block">{'var(--font-primary, sans-serif)'}</code>
-            </div>
-          )}
-
-          <textarea
-            value={template}
-            onChange={e => { setTemplate(e.target.value); handleSave('template', e.target.value) }}
-            disabled={isBuiltin}
-            rows={12}
-            spellCheck={false}
-            className="w-full mt-1 bg-bg-secondary border border-border rounded px-2 py-1.5 text-xs text-text-primary font-mono focus:border-blue-500 focus:outline-none disabled:opacity-50 resize-y"
-            placeholder="Enter Jinja2 HTML template..."
-          />
+        <div className="rounded border border-border bg-bg-secondary/40 p-2 text-[10px] text-text-tertiary">
+          Template HTML is edited in the Build tab. Element Properties here control placement, z-index, and visibility.
         </div>
       </div>
     </div>

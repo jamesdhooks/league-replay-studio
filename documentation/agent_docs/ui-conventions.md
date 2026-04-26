@@ -119,6 +119,39 @@ All shortcuts must be configurable via Settings.
 - Minimum panel sizes prevent content from being unusable
 - Double-click a drag handle to reset to default size
 
+## Shared Header/Layout Components (Mandatory)
+
+All workflow steps must use the shared components below. One-off header/layout implementations are not allowed.
+
+### 1) Left Step Sidebars
+
+- Component: `ResizableSidebar`
+- Use for: left tabbed sidebars in step workspaces
+- Must include persistent width/tab/collapsed state via the component storage key API
+
+### 2) Controls Column Headers (Analysis/Capture/Editing Controls)
+
+- Component: `CollapsibleControlsHeader`
+- Use for: collapsible controls columns that have a collapsed icon rail and expanded title row
+- Do not hand-roll chevron/title/icon header bars for controls columns
+
+### 3) Section Headers (Timeline/Preview/Log Panels)
+
+- Component: `CollapsiblePanelHeader`
+- Use for: panel-level collapsible regions such as timelines, preview panes, histogram/log panels
+- Supports controlled mode and optional built-in persistence via `storageKey`
+
+### 4) Subheaders (Inner Regions inside Controls Columns)
+
+- Component: `CollapsibleSection`
+- Use for: nested collapsible regions inside controls columns (for example, Phases, Detection Tuning, Race Segments)
+- Uses built-in localStorage persistence when `storageKey` is provided
+
+### 5) Low-Level Primitive Restriction
+
+- `SectionCollapseHeader` is a base primitive and should only be used by shared wrapper components (`CollapsibleSection` and `CollapsiblePanelHeader`)
+- Feature components should not import `SectionCollapseHeader` directly
+
 ## Loading States
 
 - Use skeleton loaders for content areas (not spinners)

@@ -57,6 +57,7 @@ const DEFAULT_PARAMS = {
   preferredDriverBoost: 1.3,    // Score multiplier for preferred driver events
   // iRD-inspired tuning knobs
   battleFrontBias: 1.0,         // Extra multiplier for front-of-field battles (1.0 = off)
+  battleGapBonus: 0.5,          // Score bonus for battle segments with tight avg gap (0 = off, 0.5 default)
   preferredDriversOnly: false,  // When true, exclude events with no preferred driver
   ignoreIncidentsDuringFirstLap: false, // Suppress incident events in the first-lap bucket
   firstLapStickyPeriod: 0,      // Seconds from race start for firstLapWeight boost (0 = off)
@@ -74,6 +75,14 @@ const DEFAULT_PARAMS = {
   driverChangeProbability: 0.3, // Probability of switching driver focus on each camera cut (0–1)
   driverRecencyPenalty: 0.5,    // 0 = no recency penalty, 1 = maximum penalty for recently-shown drivers
   driverRecencyDecay: 60.0,     // Seconds for driver recency penalty to decay back to zero
+  // ── Balanced Selection v3: cross-type normalization + mix targets ──
+  normalizationMode: 'cross_type', // 'cross_type' (default, honest weights) | 'per_type' (legacy)
+  diversityStrength: 50,        // 0–100. 0 = pure score-greedy (legacy). 100 = strict mix targets.
+  typeDecayBase: 0.85,          // Diminishing returns: Nth event of a type ≈ score × base^(N*scale)
+  bucketRepeatPenalty: 0.25,    // Soft penalty for stacking same-type events in one temporal bucket
+  mixTargets: {},               // Per-type target share of script duration (0–1). UI display only — drives mixMin/mixMax suggestions.
+  mixMin: {},                   // Per-type soft floor (0–1). Floor-rebalance pass swaps in under-floor types.
+  mixMax: {},                   // Per-type hard cap (0–1). Selection of a type stops at this share.
 }
 
 /** Event type labels for UI display */
@@ -189,8 +198,8 @@ export function HighlightProvider({ children }) {
 
   // ── Production timeline (overlap-aware, memoised) ─────────────────────
   const productionTimeline = useMemo(
-    () => buildProductionTimeline(selection, targetDuration, params, raceDuration),
-    [selection, targetDuration, params, raceDuration],
+    () => buildProductionTimeline(selection, targetDuration, params, raceDuration, replayMode),
+    [selection, targetDuration, params, raceDuration, replayMode],
   )
 
   // ── Sorted & filtered event list ───────────────────────────────────────
@@ -391,8 +400,15 @@ export function HighlightProvider({ children }) {
           min_severity: minSeverity,
           pip_threshold: params.pipThreshold ?? opts.pipThreshold ?? 7.0,
           max_driver_exposure: opts.maxDriverExposure || 0.25,
+          // Balanced Selection v3: mix targets + diversity
+          diversity_strength: params.diversityStrength ?? 50,
+          type_decay_base: params.typeDecayBase ?? 0.85,
+          bucket_repeat_penalty: params.bucketRepeatPenalty ?? 0.25,
+          mix_min: params.mixMin || {},
+          mix_max: params.mixMax || {},
         },
         tuning: {
+          normalizationMode: params.normalizationMode ?? 'cross_type',
           battleFrontBias: params.battleFrontBias,
           preferredDriversOnly: params.preferredDriversOnly,
           preferredDrivers: params.preferredDrivers,
@@ -451,8 +467,15 @@ export function HighlightProvider({ children }) {
           min_severity: minSeverity,
           pip_threshold: params.pipThreshold ?? opts.pipThreshold ?? 7.0,
           max_driver_exposure: opts.maxDriverExposure || 0.25,
+          // Balanced Selection v3: mix targets + diversity
+          diversity_strength: params.diversityStrength ?? 50,
+          type_decay_base: params.typeDecayBase ?? 0.85,
+          bucket_repeat_penalty: params.bucketRepeatPenalty ?? 0.25,
+          mix_min: params.mixMin || {},
+          mix_max: params.mixMax || {},
         },
         tuning: {
+          normalizationMode: params.normalizationMode ?? 'cross_type',
           battleFrontBias: params.battleFrontBias,
           preferredDriversOnly: params.preferredDriversOnly,
           preferredDrivers: params.preferredDrivers,
@@ -494,6 +517,18 @@ export function HighlightProvider({ children }) {
             sections: result.sections || [],
           }))
         } catch { /* storage full — non-fatal */ }
+        
+        // ── Auto-save script to project ──────────────────────────────
+        // Ensure the generated script is persisted to the project so it survives app reload
+        try {
+          await apiPut(`/projects/${pid}`, {
+            script: result.script,
+            script_generated_at: new Date().toISOString(),
+          })
+        } catch (err) {
+          console.error('[Highlights] Failed to persist script to project:', err)
+          // Non-fatal — script is still in memory and localStorage
+        }
       }
       if (result.scored_events) {
         setServerScoredEvents(result.scored_events)

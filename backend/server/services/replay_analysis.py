@@ -54,6 +54,14 @@ TICK_INTERVAL = 0.02
 BATCH_SIZE = 100         # Commit telemetry in batches
 PROGRESS_INTERVAL = 2.0  # Seconds between progress broadcasts
 
+# Weighted progress ranges for full analysis (0-100).
+SCAN_PROGRESS_START = 8
+SCAN_PROGRESS_END = 72
+PREPASS_PROGRESS_START = 72
+PREPASS_PROGRESS_END = 80
+DETECT_PROGRESS_START = 80
+DETECT_PROGRESS_END = 99
+
 # iRacing session states
 SESSION_STATE_RACING = 4
 SESSION_STATE_CHECKERED = 5
@@ -389,6 +397,7 @@ class ReplayAnalyzer:
                 "duration_seconds": round(scan_duration, 1),
                 "description": f"Telemetry collected — {total_ticks:,} samples in {_format_time(scan_duration)}",
                 "detail": "Ready for event detection. Adjust tuning parameters and click Re-analyze.",
+                "progress_percent": 100,
             })
 
             incident_rows = conn.execute("SELECT COUNT(*) FROM incident_log").fetchone()[0]
@@ -476,7 +485,7 @@ class ReplayAnalyzer:
                 "stage": "analysis_detect",
                 "description": "Running event detectors on telemetry data...",
                 "detail": f"Analysing {total_ticks:,} telemetry samples with {num_detectors} event detectors",
-                "progress_percent": 55,
+                "progress_percent": DETECT_PROGRESS_START,
             })
             loop = asyncio.get_running_loop()
             total_events = await loop.run_in_executor(None, self._run_detect_in_thread)
@@ -492,6 +501,7 @@ class ReplayAnalyzer:
                 "duration_seconds": round(scan_duration, 1),
                 "description": f"Analysis complete — {total_events} events found in {_format_time(scan_duration)}",
                 "detail": f"Processed {total_ticks:,} telemetry samples across the full race",
+                "progress_percent": 100,
             })
 
             logger.info(
@@ -1067,14 +1077,18 @@ class ReplayAnalyzer:
         last_session_time = 0.0
         first_session_time = race_start_session_time
         last_lap_num = 0
-        estimated_race_duration = 3600.0  # conservative fallback; refined once lap data is available
+        estimated_race_duration = self._estimate_race_duration_seconds(
+            session_data=session_data,
+            race_session_num=race_session_num,
+            race_start_session_time=race_start_session_time,
+        )
 
         self.on_progress("step_completed", {
             "project_id": self.project_id,
             "stage": "analysis_scan",
             "description": f"Recording telemetry at {SCAN_SPEED}× speed...",
             "detail": "Capturing car positions, surfaces, gaps, and camera switches every 20ms",
-            "progress_percent": 8,
+            "progress_percent": SCAN_PROGRESS_START,
         })
 
         # Hand camera control to the viewer during the telemetry scan so they can
@@ -1120,18 +1134,15 @@ class ReplayAnalyzer:
                 car_count = len(snapshot.get("car_states", []))
                 detail = f"Tracking {car_count} cars · {writer.total_ticks:,} telemetry samples captured"
 
-                # Compute scan progress: maps 8% → 49% based on elapsed race time
+                # Pass 1 progress is time-based against estimated race duration.
                 elapsed_race = max(0.0, session_time - first_session_time)
                 # Refine estimate once we have lap data
                 if current_lap >= 2 and elapsed_race > 0:
                     avg_lap = elapsed_race / (current_lap - 1)
-                    # Assume ~3 more laps remain beyond current
-                    estimated_race_duration = max(
-                        estimated_race_duration,
-                        elapsed_race + avg_lap * 3,
-                    )
-                scan_fraction = min(0.98, elapsed_race / max(1.0, estimated_race_duration))
-                scan_pct = 8 + int(41 * scan_fraction)  # 8 → 49
+                    estimated_race_duration = max(estimated_race_duration, elapsed_race + avg_lap)
+                scan_fraction = min(1.0, elapsed_race / max(1.0, estimated_race_duration))
+                scan_span = SCAN_PROGRESS_END - SCAN_PROGRESS_START
+                scan_pct = SCAN_PROGRESS_START + int(scan_span * scan_fraction)
 
                 self.on_progress("step_completed", {
                     "project_id": self.project_id,
@@ -1158,7 +1169,7 @@ class ReplayAnalyzer:
                     "stage": "analysis_scan",
                     "description": "Checkered flag! Waiting for all cars to finish...",
                     "detail": "Continuing to record telemetry while remaining cars cross the line",
-                    "progress_percent": 50,
+                    "progress_percent": SCAN_PROGRESS_END,
                     "total_ticks": writer.total_ticks,
                 })
                 finish_poll_start = time.monotonic()
@@ -1312,7 +1323,7 @@ class ReplayAnalyzer:
                 "Pausing replay and navigating each incident via iRacing's built-in "
                 "incident log (more accurate than surface-transition heuristics)"
             ),
-            "progress_percent": 51,
+            "progress_percent": PREPASS_PROGRESS_START,
         })
 
         # Read race_start_frame written by _scan_telemetry
@@ -1437,12 +1448,15 @@ class ReplayAnalyzer:
             )
 
             if incidents_found % 5 == 0 or incidents_found == 1:
+                prepass_span = PREPASS_PROGRESS_END - PREPASS_PROGRESS_START
+                prepass_fraction = min(1.0, (attempt + 1) / max(1, MAX_INCIDENTS))
+                prepass_pct = PREPASS_PROGRESS_START + int(prepass_span * prepass_fraction)
                 self.on_progress("step_completed", {
                     "project_id": self.project_id,
                     "stage": "analysis_scan",
                     "description": f"Incident API scan: {incidents_found} found...",
                     "detail": f"Latest: {user_name} — lap {race_laps}, {_format_time(session_time)}",
-                    "progress_percent": 51,
+                    "progress_percent": prepass_pct,
                 })
 
         self.on_progress("step_completed", {
@@ -1454,7 +1468,7 @@ class ReplayAnalyzer:
                 if incidents_found > 0 else
                 "No incidents via iRacing API — surface-transition fallback will be used."
             ),
-            "progress_percent": 53,
+            "progress_percent": PREPASS_PROGRESS_END,
         })
 
         logger.info("[Analysis][Prepass] Complete: %d incidents recorded", incidents_found)
@@ -1521,7 +1535,8 @@ class ReplayAnalyzer:
         for i, detector in enumerate(ALL_DETECTORS):
             detector_name = detector.__class__.__name__
             label, detail = DETECTOR_LABELS.get(detector_name, (detector_name, ""))
-            progress_pct = 55 + int((i / num_detectors) * 40)  # 55% → 95%
+            detect_span = DETECT_PROGRESS_END - DETECT_PROGRESS_START
+            progress_pct = DETECT_PROGRESS_START + int((i / max(1, num_detectors)) * detect_span)
 
             self.on_progress("step_completed", {
                 "project_id": self.project_id,
@@ -1715,8 +1730,76 @@ class ReplayAnalyzer:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
+
+        # Persist total_laps (max laps from any race session) to analysis_meta
+        # so the frame builder can surface it without a join.
+        race_type_tokens = ("race",)
+        max_lap_row = conn.execute(
+            """
+            SELECT MAX(lap) AS max_lap FROM session_results
+            WHERE """ + " OR ".join(["LOWER(session_type) LIKE ?" for _ in race_type_tokens]) + """
+            """,
+            tuple(f"%{t}%" for t in race_type_tokens),
+        ).fetchone()
+        if max_lap_row and max_lap_row["max_lap"]:
+            conn.execute(
+                "INSERT OR REPLACE INTO analysis_meta (key, value) VALUES (?, ?)",
+                ("total_laps", str(int(max_lap_row["max_lap"]))),
+            )
+
         conn.commit()
         logger.info("[Analysis] Saved %d session_results rows", len(rows))
+
+    def _estimate_race_duration_seconds(
+        self,
+        session_data: dict,
+        race_session_num: int | None,
+        race_start_session_time: float,
+    ) -> float:
+        """Estimate race duration from session results with robust fallbacks."""
+        sessions = session_data.get("session_results") or []
+        avg_lap = float(session_data.get("avg_lap_time") or self.session_info.get("avg_lap_time") or 90.0)
+        best_total = 0.0
+        best_laps = 0
+
+        race_sessions = []
+        for sess in sessions:
+            if not isinstance(sess, dict):
+                continue
+            session_num = sess.get("session_num", sess.get("index"))
+            session_type = str(sess.get("session_type", sess.get("type", "")) or "").lower()
+            is_race = session_type.startswith("race")
+            if race_session_num is not None:
+                if int(session_num or -1) == int(race_session_num):
+                    race_sessions.append(sess)
+            elif is_race:
+                race_sessions.append(sess)
+
+        for sess in race_sessions:
+            positions = sess.get("results_positions") or sess.get("ResultsPositions") or []
+            if not isinstance(positions, list):
+                continue
+            for row in positions:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    total_time = float(row.get("total_time", row.get("Time", 0)) or 0)
+                except (TypeError, ValueError):
+                    total_time = 0.0
+                try:
+                    lap_count = int(row.get("lap", row.get("Lap", 0)) or 0)
+                except (TypeError, ValueError):
+                    lap_count = 0
+                if total_time > best_total:
+                    best_total = total_time
+                if lap_count > best_laps:
+                    best_laps = lap_count
+
+        if best_total > 0:
+            return max(300.0, best_total - race_start_session_time)
+        if best_laps > 0 and avg_lap > 0:
+            return max(300.0, best_laps * avg_lap)
+        return 3600.0
 
     @staticmethod
     def _estimate_avg_lap_time(conn: sqlite3.Connection) -> float:

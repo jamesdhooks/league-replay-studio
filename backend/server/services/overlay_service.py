@@ -151,6 +151,7 @@ SAMPLE_FRAME_DATA: dict[str, Any] = {
 
     # ── Focused driver variables ─────────────────────────────────────────────
     "driver_name": "Max Verstappen",
+    "driver_short_name": "VER",
     "car_name": "Dallara P217 LMP2",
     "car_number": "1",
     "position": 3,
@@ -178,44 +179,105 @@ SAMPLE_FRAME_DATA: dict[str, Any] = {
     # ── Standings (race position order) ──────────────────────────────────────
     "standings": [
         {
-            "position": 1, "driver_name": "Lewis Hamilton", "gap": "Leader",
-            "relative": None, "is_player": False, "car_number": "44",
+            "position": 1, "driver_name": "Lewis Hamilton", "driver_short_name": "HAM", "gap": "Leader",
+            "gap_to_leader": "Leader", "relative": None, "is_player": False, "car_number": "44",
+            "qualifying_time": "1:33.215", "fastest_lap_time": "1:33.215", "average_lap_time": "1:35.412",
+            "incidents": 1, "laps_completed": 20, "reason_out": "",
             "iracing_cust_id": 11111, "nickname": None, "avatar": None,
         },
         {
-            "position": 2, "driver_name": "Charles Leclerc", "gap": "+1.234",
-            "relative": "+0.812", "is_player": False, "car_number": "16",
+            "position": 2, "driver_name": "Charles Leclerc", "driver_short_name": "LEC", "gap": "+1.234",
+            "gap_to_leader": "+1.234", "relative": "+0.812", "is_player": False, "car_number": "16",
+            "qualifying_time": "1:33.441", "fastest_lap_time": "1:33.441", "average_lap_time": "1:35.501",
+            "incidents": 2, "laps_completed": 20, "reason_out": "",
             "iracing_cust_id": 22222, "nickname": None, "avatar": None,
         },
         {
-            "position": 3, "driver_name": "Max Verstappen", "gap": "+2.567",
-            "relative": "+1.333", "is_player": True, "car_number": "1",
+            "position": 3, "driver_name": "Max Verstappen", "driver_short_name": "VER", "gap": "+2.567",
+            "gap_to_leader": "+2.567", "relative": "+1.333", "is_player": True, "car_number": "1",
+            "qualifying_time": "1:33.891", "fastest_lap_time": "1:33.891", "average_lap_time": "1:35.644",
+            "incidents": 2, "laps_completed": 20, "reason_out": "",
             "iracing_cust_id": 12345, "nickname": "MaxV", "avatar": "a_abc123def456",
         },
         {
-            "position": 4, "driver_name": "Lando Norris", "gap": "+4.891",
-            "relative": "+2.324", "is_player": False, "car_number": "4",
+            "position": 4, "driver_name": "Lando Norris", "driver_short_name": "NOR", "gap": "+4.891",
+            "gap_to_leader": "+4.891", "relative": "+2.324", "is_player": False, "car_number": "4",
+            "qualifying_time": "1:34.102", "fastest_lap_time": "1:34.102", "average_lap_time": "1:35.780",
+            "incidents": 0, "laps_completed": 20, "reason_out": "",
             "iracing_cust_id": 33333, "nickname": None, "avatar": None,
         },
         {
-            "position": 5, "driver_name": "Carlos Sainz", "gap": "+6.123",
-            "relative": "+1.232", "is_player": False, "car_number": "55",
+            "position": 5, "driver_name": "Carlos Sainz", "driver_short_name": "SAI", "gap": "+6.123",
+            "gap_to_leader": "+6.123", "relative": "+1.232", "is_player": False, "car_number": "55",
+            "qualifying_time": "1:34.228", "fastest_lap_time": "1:34.228", "average_lap_time": "1:35.913",
+            "incidents": 3, "laps_completed": 20, "reason_out": "",
             "iracing_cust_id": 44444, "nickname": None, "avatar": None,
         },
         {
-            "position": 6, "driver_name": "Oscar Piastri", "gap": "+8.456",
-            "relative": "+2.333", "is_player": False, "car_number": "81",
+            "position": 6, "driver_name": "Oscar Piastri", "driver_short_name": "PIA", "gap": "+8.456",
+            "gap_to_leader": "+8.456", "relative": "+2.333", "is_player": False, "car_number": "81",
+            "qualifying_time": "1:34.417", "fastest_lap_time": "1:34.417", "average_lap_time": "1:36.012",
+            "incidents": 1, "laps_completed": 20, "reason_out": "",
             "iracing_cust_id": 55555, "nickname": None, "avatar": None,
         },
         {
-            "position": 7, "driver_name": "George Russell", "gap": "+10.789",
-            "relative": "+2.333", "is_player": False, "car_number": "63",
+            "position": 7, "driver_name": "George Russell", "driver_short_name": "RUS", "gap": "+10.789",
+            "gap_to_leader": "+10.789", "relative": "+2.333", "is_player": False, "car_number": "63",
+            "qualifying_time": "1:34.691", "fastest_lap_time": "1:34.691", "average_lap_time": "1:36.177",
+            "incidents": 4, "laps_completed": 20, "reason_out": "",
             "iracing_cust_id": 66666, "nickname": None, "avatar": None,
         },
         {
-            "position": 8, "driver_name": "Fernando Alonso", "gap": "+12.012",
-            "relative": "+1.223", "is_player": False, "car_number": "14",
+            "position": 8, "driver_name": "Fernando Alonso", "driver_short_name": "ALO", "gap": "+12.012",
+            "gap_to_leader": "+12.012", "relative": "+1.223", "is_player": False, "car_number": "14",
+            "qualifying_time": "1:34.905", "fastest_lap_time": "1:34.905", "average_lap_time": "1:36.241",
+            "incidents": 5, "laps_completed": 20, "reason_out": "",
             "iracing_cust_id": 77777, "nickname": None, "avatar": None,
+        },
+    ],
+
+    # ── Section-specific standings snapshots ─────────────────────────────────
+    "qualifying_standings": [
+        {
+            "position": 1, "driver_name": "Lewis Hamilton", "driver_short_name": "HAM", "car_number": "44",
+            "qualifying_time": "1:33.215", "gap": "Pole", "gap_to_leader": "Pole", "relative": None,
+            "fastest_lap_time": "1:33.215", "average_lap_time": None, "incidents": 0, "laps_completed": 0,
+            "is_player": False, "iracing_cust_id": 11111, "nickname": None, "avatar": None, "reason_out": "",
+        },
+        {
+            "position": 2, "driver_name": "Charles Leclerc", "driver_short_name": "LEC", "car_number": "16",
+            "qualifying_time": "1:33.441", "gap": "+0.226", "gap_to_leader": "+0.226", "relative": "+0.226",
+            "fastest_lap_time": "1:33.441", "average_lap_time": None, "incidents": 0, "laps_completed": 0,
+            "is_player": False, "iracing_cust_id": 22222, "nickname": None, "avatar": None, "reason_out": "",
+        },
+        {
+            "position": 3, "driver_name": "Max Verstappen", "driver_short_name": "VER", "car_number": "1",
+            "qualifying_time": "1:33.891", "gap": "+0.676", "gap_to_leader": "+0.676", "relative": "+0.450",
+            "fastest_lap_time": "1:33.891", "average_lap_time": None, "incidents": 0, "laps_completed": 0,
+            "is_player": True, "iracing_cust_id": 12345, "nickname": "MaxV", "avatar": "a_abc123def456", "reason_out": "",
+        },
+    ],
+    "final_standings": [
+        {
+            "position": 1, "driver_name": "Lewis Hamilton", "driver_short_name": "HAM", "car_number": "44",
+            "gap": "Winner", "gap_to_leader": "Winner", "relative": None,
+            "fastest_lap_time": "1:33.215", "average_lap_time": "1:35.412", "qualifying_time": "1:33.215",
+            "incidents": 1, "laps_completed": 20, "is_player": False, "iracing_cust_id": 11111,
+            "nickname": None, "avatar": None, "reason_out": "",
+        },
+        {
+            "position": 2, "driver_name": "Charles Leclerc", "driver_short_name": "LEC", "car_number": "16",
+            "gap": "+1.234", "gap_to_leader": "+1.234", "relative": "+1.234",
+            "fastest_lap_time": "1:33.441", "average_lap_time": "1:35.501", "qualifying_time": "1:33.441",
+            "incidents": 2, "laps_completed": 20, "is_player": False, "iracing_cust_id": 22222,
+            "nickname": None, "avatar": None, "reason_out": "",
+        },
+        {
+            "position": 3, "driver_name": "Max Verstappen", "driver_short_name": "VER", "car_number": "1",
+            "gap": "+2.567", "gap_to_leader": "+2.567", "relative": "+1.333",
+            "fastest_lap_time": "1:33.891", "average_lap_time": "1:35.644", "qualifying_time": "1:33.891",
+            "incidents": 2, "laps_completed": 20, "is_player": True, "iracing_cust_id": 12345,
+            "nickname": "MaxV", "avatar": "a_abc123def456", "reason_out": "",
         },
     ],
 
@@ -239,7 +301,7 @@ SAMPLE_FRAME_DATA: dict[str, Any] = {
     "race_season": "2025 Season 2",
     "race_week": 5,
     "race_date": "2025-03-15",
-    "venue_display_name": "Daytona International Speedway — Road Course",
+    "track_name": "Daytona International Speedway — Road Course",
     "driver_nickname": "MaxV",
     "driver_avatar": "a_abc123def456",
 
@@ -266,8 +328,8 @@ SAMPLE_FRAME_DATA: dict[str, Any] = {
 VARIABLE_DOCS: dict[str, str] = {
     # Core session
     "frame.section": "Active video section: 'intro', 'qualifying_results', 'race', or 'race_results'",
-    "frame.series_name": "Name of the racing series (e.g., 'IMSA SportsCar Championship')",
-    "frame.track_name": "Name of the track (e.g., 'Daytona International Speedway')",
+    "frame.series_name": "Name of the racing series. Overwritten by the race_details data plugin when configured.",
+    "frame.track_name": "Name of the track. Overwritten by the race_details data plugin when configured.",
     "frame.current_lap": "Current lap number (integer)",
     "frame.total_laps": "Total laps in the race (integer)",
     "frame.session_time": "Elapsed session time (string, HH:MM:SS format)",
@@ -275,6 +337,7 @@ VARIABLE_DOCS: dict[str, str] = {
 
     # Focused driver
     "frame.driver_name": "Name of the focused driver",
+    "frame.driver_short_name": "Short motorsport-style driver code for the focused driver (e.g., 'VER')",
     "frame.car_name": "Name/model of the car",
     "frame.car_number": "Car number (string)",
     "frame.position": "Current overall race position (integer)",
@@ -309,9 +372,13 @@ VARIABLE_DOCS: dict[str, str] = {
     # Standings array
     "frame.standings": (
         "Array of race-position entries. Each entry has: position, driver_name, "
-        "gap (string), relative (gap to car ahead), is_player (bool), car_number, "
-        "iracing_cust_id, nickname (from 3rd party), avatar (URL or Discord hash)"
+        "driver_short_name, gap (string), gap_to_leader, relative (gap to car ahead), "
+        "is_player (bool), car_number, iracing_cust_id, qualifying_time, fastest_lap_time, "
+        "average_lap_time, incidents, laps_completed, reason_out, nickname (from 3rd party), "
+        "avatar (URL or Discord hash)"
     ),
+    "frame.qualifying_standings": "Section-specific qualifying classification rows, ordered by qualifying position",
+    "frame.final_standings": "Section-specific final classified result rows, ordered by finishing position",
 
     # Championship standings (from 3rd party data plugin)
     "frame.championship_standings": (
@@ -325,7 +392,7 @@ VARIABLE_DOCS: dict[str, str] = {
     "frame.race_season": "Season name from the data plugin (e.g., '2025 Season 2')",
     "frame.race_week": "Week number within the season (integer)",
     "frame.race_date": "Date of the race (ISO 8601 string, e.g., '2025-03-15')",
-    "frame.venue_display_name": "Formatted venue name from the data plugin",
+    "frame.track_name": "Formatted venue name from the data plugin",
     "frame.driver_nickname": "Display nickname for the focused driver from the data plugin",
     "frame.driver_avatar": "Avatar for the focused driver — a URL or Discord avatar hash (e.g., 'a_abc123def456')",
 
@@ -339,12 +406,12 @@ VARIABLE_DOCS: dict[str, str] = {
 # DataContextInspector to display source badges and group variables.
 
 VARIABLE_SOURCES: dict[str, str] = {
-    # Core session — from telemetry
-    "section": "telemetry", "series_name": "telemetry", "track_name": "telemetry",
+    # Core session — from telemetry (series_name and track_name overwritten by plugin when configured)
+    "section": "telemetry", "series_name": "plugin", "track_name": "plugin",
     "current_lap": "telemetry", "total_laps": "telemetry", "session_time": "telemetry",
     "flag": "telemetry",
     # Focused driver — from telemetry
-    "driver_name": "telemetry", "car_name": "telemetry", "car_number": "telemetry",
+    "driver_name": "telemetry", "driver_short_name": "computed", "car_name": "telemetry", "car_number": "telemetry",
     "position": "telemetry", "class_position": "telemetry", "irating": "telemetry",
     "iracing_cust_id": "telemetry", "team_color": "telemetry",
     "last_lap_time": "telemetry", "best_lap_time": "telemetry", "incident_count": "telemetry",
@@ -354,10 +421,10 @@ VARIABLE_SOURCES: dict[str, str] = {
     "fuel_laps_remaining": "computed", "fuel_laps_remaining_conservative": "computed",
     "fuel_delta": "computed", "pit_window_start": "computed", "pit_window_end": "computed",
     # Standings
-    "standings": "telemetry",
+    "standings": "telemetry", "qualifying_standings": "computed", "final_standings": "computed",
     # Championship + 3rd party
     "championship_standings": "plugin", "race_season": "plugin", "race_week": "plugin",
-    "race_date": "plugin", "venue_display_name": "plugin",
+    "race_date": "plugin", "track_name": "plugin",
     "driver_nickname": "plugin", "driver_avatar": "plugin",
 }
 

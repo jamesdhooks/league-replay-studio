@@ -416,6 +416,16 @@ class TestCaptureScript:
         assert len(clips) == 1
         assert set(clips[0]["segments"]) == {"a", "b"}
 
+        manifest = engine.composition_manifest
+        assert len(manifest) == 2
+        assert [entry["id"] for entry in manifest] == ["a", "b"]
+        assert manifest[0]["path"] == clips[0]["path"]
+        assert manifest[1]["path"] == clips[0]["path"]
+        assert manifest[0]["source_offset_start_seconds"] == pytest.approx(0.5, abs=1e-6)
+        assert manifest[0]["source_offset_end_seconds"] == pytest.approx(10.5, abs=1e-6)
+        assert manifest[1]["source_offset_start_seconds"] == pytest.approx(11.0, abs=1e-6)
+        assert manifest[1]["source_offset_end_seconds"] == pytest.approx(20.5, abs=1e-6)
+
     def test_skips_transitions_and_zero_duration(self):
         engine = make_engine()
         bridge = make_iracing_bridge(session_time=98.0)

@@ -14,6 +14,9 @@ const SOURCE_GROUPS = {
   plugin:    { label: '3rd Party', icon: Plug,     color: 'text-emerald-400', badge: 'bg-emerald-500/15 text-emerald-400' },
 }
 
+// Render high-priority sources first in the variable browser.
+const SECTION_ORDER = ['plugin', 'telemetry', 'computed', 'resolution']
+
 /**
  * DataContextInspector — Shows available Jinja2 template variables with sample
  * values, grouped by data source (Telemetry / Computed / 3rd Party Plugin).
@@ -105,7 +108,7 @@ export default function DataContextInspector({ variables, variableDocs, variable
   }
 
   // ── Count matching entries per group ──────────────────────────────────────
-  const sectionOrder = ['telemetry', 'computed', 'plugin', 'resolution']
+  const sectionOrder = SECTION_ORDER
 
   return (
     <div className="flex flex-col h-full bg-bg-primary border-t border-border">

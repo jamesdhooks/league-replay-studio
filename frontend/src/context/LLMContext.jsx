@@ -1,10 +1,13 @@
-import { createContext, useContext, useState, useCallback, useEffect, useMemo } from 'react'
+import { createContext, useContext, useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { apiGet, apiPost } from '../services/api'
 import { useToast } from './ToastContext'
 
 // ── Context ─────────────────────────────────────────────────────────────────
 
 const LLMContext = createContext(null)
+
+// Retry delays (ms) after each consecutive fetch failure
+const RETRY_DELAYS = [2000, 5000, 15000]
 
 // ── Provider ────────────────────────────────────────────────────────────────
 
@@ -16,23 +19,49 @@ export function LLMProvider({ children }) {
   const [lastResult, setLastResult] = useState(null)
   const [error, setError] = useState(null)
 
-  // ── Fetch LLM availability status ───────────────────────────────────────
-  const fetchStatus = useCallback(async () => {
+  const retryTimerRef = useRef(null)
+
+  // ── Fetch LLM status with automatic retry on failure ───────────────────
+  const fetchWithRetry = useCallback(async (attempt = 0) => {
     try {
       const data = await apiGet('/llm/status')
       setStatus(data)
     } catch {
-      setStatus({ available: false, provider: 'none', model: '', skills: [] })
+      if (attempt < RETRY_DELAYS.length) {
+        retryTimerRef.current = setTimeout(
+          () => fetchWithRetry(attempt + 1),
+          RETRY_DELAYS[attempt],
+        )
+      } else {
+        setStatus({ available: false, provider: 'none', model: '', skills: [] })
+      }
     }
   }, [])
 
-  // Fetch status on mount
+  // Public fetchStatus — resets retries and re-fetches from scratch
+  const fetchStatus = useCallback(() => {
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current)
+      retryTimerRef.current = null
+    }
+    setStatus(null)
+    fetchWithRetry(0)
+  }, [fetchWithRetry])
+
+  // Fetch status on mount; clean up pending retry on unmount
   useEffect(() => {
-    fetchStatus()
-  }, [fetchStatus])
+    fetchWithRetry(0)
+    return () => {
+      if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+    }
+  }, [fetchWithRetry])
 
   // ── Availability check ──────────────────────────────────────────────────
+  // Returns true  — LLM confirmed available
+  // Returns false — LLM confirmed unavailable
+  // Returns null  — status not yet known (still loading / retrying)
   const isAvailable = useCallback(() => {
+    if (status === null) return null
     return status?.available ?? false
   }, [status])
 
@@ -167,7 +196,7 @@ export function LLMProvider({ children }) {
  * Provides:
  *   - ``status`` — current provider availability info
  *   - ``loading`` — true during any LLM API call
- *   - ``isAvailable()`` — quick check if LLM is configured
+ *   - ``isAvailable()`` — true/false/null (null = still determining)
  *   - ``generateElement(prompt, section, presetId, existingElements)``
  *   - ``augmentElement(prompt, section, presetId, elementId)``
  *   - ``runEditorial(prompt, timeline, scoredEvents, metrics, raceInfo)``
@@ -175,6 +204,20 @@ export function LLMProvider({ children }) {
  */
 export function useLLM() {
   const ctx = useContext(LLMContext)
-  if (!ctx) throw new Error('useLLM must be used within LLMProvider')
+  if (!ctx) {
+    // Fallback avoids hard-crashing screens that render before provider wiring settles.
+    return {
+      status: { available: false, provider: 'none', model: '', skills: [] },
+      loading: false,
+      lastResult: null,
+      error: 'LLMProvider unavailable',
+      fetchStatus: () => {},
+      isAvailable: () => false,
+      executeSkill: async () => null,
+      generateElement: async () => null,
+      augmentElement: async () => null,
+      runEditorial: async () => null,
+    }
+  }
   return ctx
 }

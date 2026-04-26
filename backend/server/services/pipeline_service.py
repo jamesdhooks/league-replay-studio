@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -187,20 +188,73 @@ class PipelineRun:
 
 # ── Pipeline Preset ─────────────────────────────────────────────────────────
 
+# ── Execution Spec Keys ─────────────────────────────────────────────────────
+# These are the canonical keys for the full Pipeline Execution Spec.
+# Anything not in this set is rejected as an unknown field when validating.
+EXECUTION_SPEC_FIELDS = frozenset({
+    # ── Execution path (step toggles) ──────────────────────────────────────
+    # These fields are NOT stored in presets.  They are set at run-time via
+    # CLI flags or per-project augmentations in the control-state envelope.
+    "skip_capture", "skip_analysis", "skip_compose", "skip_export",
+    "auto_edit",          # False = skip highlight-selection / editing step
+    "upload_to_youtube",  # True  = run the upload step after export
+    # ── Preset config (step behaviour/quality) ─────────────────────────────
+    # Upload
+    "youtube_privacy",
+    # Export
+    "export_preset", "output_dir",
+    # Highlight/editing config (applies when auto_edit is active)
+    "highlight_config",       # dict: weights, target_duration, min_severity, params, overrides
+    # Overlay
+    "overlay_preset_id", "overlay_variables",
+    # Capture
+    "capture_mode",           # "auto" | "script" | "legacy"
+    # Error handling
+    "failure_action", "notify_on_completion",
+    # Runtime flags
+    "non_interactive",        # bool: suppress all user-intervention steps
+    "video_script",           # list[dict]: pre-built composition script (runtime only)
+})
+
+# Subset of EXECUTION_SPEC_FIELDS that represent execution-path toggles.
+# These are intentionally excluded from PipelinePreset storage.
+STEP_TOGGLE_FIELDS = frozenset({
+    "skip_capture", "skip_analysis", "skip_compose", "skip_export",
+    "auto_edit", "upload_to_youtube",
+})
+
+
 @dataclass
 class PipelinePreset:
-    """Pipeline configuration preset."""
+    """Pipeline configuration preset.
+
+    Stores *how* each step is configured (quality, behaviour, error handling),
+    NOT which steps to run.  Step on/off toggles (skip_capture, auto_edit, etc.)
+    are execution-path decisions supplied at run-time via CLI flags or
+    per-project augmentations in the control-state envelope.
+    """
     id: str
     name: str
     description: str = ""
-    skip_capture: bool = False     # Skip capture if video already exists
-    skip_analysis: bool = False    # Skip analysis if events already exist
-    auto_edit: bool = True         # Automatically apply highlight config
-    export_preset: Optional[str] = None  # Encoding preset ID
-    upload_to_youtube: bool = False
+    schema_version: int = 1
+    # Export
+    export_preset: Optional[str] = None
+    output_dir: Optional[str] = None
+    # Highlight config snapshot
+    highlight_config: dict = field(default_factory=dict)
+    # Overlay
+    overlay_preset_id: Optional[str] = None
+    overlay_variables: dict = field(default_factory=dict)
+    # Capture
+    capture_mode: str = "auto"   # "auto" | "script" | "legacy"
+    # Upload config (privacy applies when upload step is active)
     youtube_privacy: str = "unlisted"
+    # Error handling
     failure_action: FailureAction = FailureAction.PAUSE
-    notify_on_completion: str = "toast"  # "toast", "system", "none"
+    notify_on_completion: str = "toast"
+    # Runtime flags
+    non_interactive: bool = False
+    # Metadata
     created_at: Optional[float] = None
     updated_at: Optional[float] = None
 
@@ -210,33 +264,39 @@ class PipelinePreset:
             "id": self.id,
             "name": self.name,
             "description": self.description,
-            "skip_capture": self.skip_capture,
-            "skip_analysis": self.skip_analysis,
-            "auto_edit": self.auto_edit,
+            "schema_version": self.schema_version,
             "export_preset": self.export_preset,
-            "upload_to_youtube": self.upload_to_youtube,
+            "output_dir": self.output_dir,
+            "highlight_config": self.highlight_config,
+            "overlay_preset_id": self.overlay_preset_id,
+            "overlay_variables": self.overlay_variables,
+            "capture_mode": self.capture_mode,
             "youtube_privacy": self.youtube_privacy,
             "failure_action": self.failure_action.value,
             "notify_on_completion": self.notify_on_completion,
+            "non_interactive": self.non_interactive,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PipelinePreset:
-        """Create from dict."""
+        """Create from dict.  Step-toggle keys are silently ignored."""
         return cls(
             id=data["id"],
             name=data["name"],
             description=data.get("description", ""),
-            skip_capture=data.get("skip_capture", False),
-            skip_analysis=data.get("skip_analysis", False),
-            auto_edit=data.get("auto_edit", True),
+            schema_version=data.get("schema_version", 1),
             export_preset=data.get("export_preset"),
-            upload_to_youtube=data.get("upload_to_youtube", False),
+            output_dir=data.get("output_dir"),
+            highlight_config=data.get("highlight_config") or {},
+            overlay_preset_id=data.get("overlay_preset_id"),
+            overlay_variables=data.get("overlay_variables") or {},
+            capture_mode=data.get("capture_mode", "auto"),
             youtube_privacy=data.get("youtube_privacy", "unlisted"),
             failure_action=FailureAction(data.get("failure_action", "pause")),
             notify_on_completion=data.get("notify_on_completion", "toast"),
+            non_interactive=data.get("non_interactive", False),
             created_at=data.get("created_at"),
             updated_at=data.get("updated_at"),
         )
@@ -268,8 +328,28 @@ CREATE TABLE IF NOT EXISTS pipeline_presets (
     updated_at      REAL
 );
 
+CREATE TABLE IF NOT EXISTS pipeline_step_logs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          TEXT NOT NULL,
+    step            TEXT NOT NULL,
+    level           TEXT NOT NULL DEFAULT 'info',
+    ts              REAL NOT NULL,
+    message         TEXT NOT NULL DEFAULT '',
+    detail          TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id)
+);
+
+CREATE TABLE IF NOT EXISTS project_control_state (
+    project_id      INTEGER NOT NULL,
+    preset_id       TEXT NOT NULL DEFAULT '',
+    augmentations_json TEXT NOT NULL DEFAULT '{}',
+    updated_at      REAL,
+    PRIMARY KEY (project_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_project ON pipeline_runs(project_id);
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_state ON pipeline_runs(state);
+CREATE INDEX IF NOT EXISTS idx_step_logs_run ON pipeline_step_logs(run_id);
 """
 
 
@@ -303,11 +383,42 @@ class PipelineService:
         return conn
 
     def _init_db(self) -> None:
-        """Initialise the pipeline database."""
+        """Initialise the pipeline database and run incremental migrations."""
         conn = self._get_connection()
         try:
             conn.executescript(_PIPELINE_SCHEMA)
             conn.commit()
+            # Migration: rename legacy table/column if they still exist.
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+            if "project_pipeline_overrides" in tables and "project_control_state" not in tables:
+                conn.execute(
+                    "ALTER TABLE project_pipeline_overrides RENAME TO project_control_state"
+                )
+                conn.commit()
+                logger.info("[Pipeline] Migrated table project_pipeline_overrides → project_control_state")
+            if "project_control_state" in tables:
+                cols = {r[1] for r in conn.execute(
+                    "PRAGMA table_info(project_control_state)"
+                ).fetchall()}
+                if "override_json" in cols and "augmentations_json" not in cols:
+                    conn.execute(
+                        "ALTER TABLE project_control_state RENAME COLUMN override_json TO augmentations_json"
+                    )
+                    conn.commit()
+                    logger.info("[Pipeline] Migrated column override_json → augmentations_json")
+
+            # Migration: remove legacy built-in presets that are no longer relevant.
+            deleted = conn.execute(
+                """
+                DELETE FROM pipeline_presets
+                WHERE id IN ('quick-highlight', 'full-pipeline', 'analysis-only')
+                """
+            ).rowcount
+            if deleted:
+                conn.commit()
+                logger.info("[Pipeline] Removed %d legacy default presets", deleted)
             logger.info("[Pipeline] Database initialised at %s", self._db_path)
         finally:
             conn.close()
@@ -363,6 +474,84 @@ class PipelineService:
         finally:
             conn.close()
 
+    @staticmethod
+    def _step_order() -> list[StepName]:
+        return [
+            StepName.ANALYSIS,
+            StepName.EDITING,
+            StepName.CAPTURE,
+            StepName.COMPOSE,
+            StepName.EXPORT,
+            StepName.UPLOAD,
+        ]
+
+    def _next_actionable_step(self, run: PipelineRun) -> Optional[StepName]:
+        for step_name in self._step_order():
+            step = run.steps.get(step_name)
+            if not step:
+                continue
+            if step.state in (StepState.PENDING, StepState.RUNNING, StepState.PAUSED, StepState.FAILED):
+                return step_name
+        return None
+
+    def _normalize_run_for_recovery(self, run: PipelineRun) -> bool:
+        """Repair stale persisted run state after process restart.
+
+        Rules:
+        - In-flight step states (running/paused) are reset to pending.
+        - Skip-toggled steps are forced to skipped.
+        - Any recovered active run is paused for explicit user resume.
+        - current_step is re-derived from step states.
+        """
+        changed = False
+
+        # Crash-safe reset of in-flight step markers.
+        for step_name in self._step_order():
+            step = run.steps.get(step_name)
+            if not step:
+                continue
+            if step.state in (StepState.RUNNING, StepState.PAUSED):
+                step.state = StepState.PENDING
+                step.progress = 0.0
+                step.started_at = None
+                step.completed_at = None
+                step.error = None
+                changed = True
+
+        # Re-apply execution-path skips from saved run config.
+        skip_map = {
+            StepName.ANALYSIS: bool(run.config.get("skip_analysis", False)),
+            StepName.CAPTURE: bool(run.config.get("skip_capture", False)),
+            StepName.COMPOSE: bool(run.config.get("skip_compose", False)),
+            StepName.EXPORT: bool(run.config.get("skip_export", False)),
+            StepName.UPLOAD: not bool(run.config.get("upload_to_youtube", False)),
+        }
+        for step_name, should_skip in skip_map.items():
+            if not should_skip:
+                continue
+            step = run.steps.get(step_name)
+            if not step:
+                continue
+            if step.state in (StepState.PENDING, StepState.RUNNING, StepState.PAUSED):
+                step.state = StepState.SKIPPED
+                step.progress = 0.0
+                step.started_at = None
+                step.completed_at = step.completed_at or run.started_at or time.time()
+                step.error = None
+                changed = True
+
+        if run.state in (PipelineState.RUNNING, PipelineState.PAUSED, PipelineState.WAITING_INTERVENTION):
+            if run.state != PipelineState.PAUSED:
+                run.state = PipelineState.PAUSED
+                changed = True
+
+            next_step = self._next_actionable_step(run)
+            if run.current_step != next_step:
+                run.current_step = next_step
+                changed = True
+
+        return changed
+
     def _restore_interrupted_run(self) -> None:
         """Restore any interrupted pipeline run after app restart."""
         conn = self._get_connection()
@@ -387,8 +576,8 @@ class PipelineService:
                     "completed_at": row["completed_at"],
                     "error": row["error"],
                 })
-                # Set to paused state for manual resume
-                run.state = PipelineState.PAUSED
+                # Normalize stale in-flight step state for safe resume.
+                self._normalize_run_for_recovery(run)
                 self._current_run = run
                 self._persist_run(run)
                 logger.info("[Pipeline] Restored interrupted run: %s", run.run_id)
@@ -412,46 +601,6 @@ class PipelineService:
             logger.info("[Pipeline] Loaded %d presets", len(self._presets))
         finally:
             conn.close()
-
-        # Add default presets if none exist
-        if not self._presets:
-            self._create_default_presets()
-
-    def _create_default_presets(self) -> None:
-        """Create default pipeline presets."""
-        defaults = [
-            PipelinePreset(
-                id="quick-highlight",
-                name="Quick Highlights",
-                description="Capture, analyse, export highlights — no upload",
-                auto_edit=True,
-                upload_to_youtube=False,
-                failure_action=FailureAction.PAUSE,
-            ),
-            PipelinePreset(
-                id="full-pipeline",
-                name="Full Pipeline",
-                description="Complete pipeline including YouTube upload",
-                auto_edit=True,
-                upload_to_youtube=True,
-                youtube_privacy="unlisted",
-                failure_action=FailureAction.PAUSE,
-            ),
-            PipelinePreset(
-                id="analysis-only",
-                name="Analysis Only",
-                description="Capture and analyse — stop before export",
-                skip_capture=True,
-                auto_edit=False,
-                upload_to_youtube=False,
-                failure_action=FailureAction.PAUSE,
-            ),
-        ]
-        for preset in defaults:
-            preset.created_at = time.time()
-            preset.updated_at = time.time()
-            self._save_preset(preset)
-            self._presets[preset.id] = preset
 
     def _save_preset(self, preset: PipelinePreset) -> None:
         """Save a preset to the database."""
@@ -498,6 +647,473 @@ class PipelineService:
                 self._broadcast_fn({"event": event, "data": data}),
                 self._loop,
             )
+
+    # ── Run Logging ─────────────────────────────────────────────────────────
+
+    def _log_step(
+        self,
+        step: StepName,
+        message: str,
+        level: str = "info",
+        detail: str = "",
+    ) -> None:
+        """Persist and broadcast a step-level log entry."""
+        run_id = self._current_run.run_id if self._current_run else ""
+        if not run_id:
+            return
+
+        ts = time.time()
+        entry = {
+            "run_id": run_id,
+            "project_id": self._current_run.project_id if self._current_run else None,
+            "step": step.value,
+            "level": level,
+            "ts": ts,
+            "message": message,
+            "detail": detail,
+        }
+
+        # Persist
+        try:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO pipeline_step_logs (run_id, step, level, ts, message, detail)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (run_id, step.value, level, ts, message, detail),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.debug("[Pipeline] Log persist error: %s", exc)
+
+        # Broadcast to frontend
+        self._broadcast("pipeline:log", entry)
+
+    def get_run_logs(
+        self,
+        run_id: str,
+        limit: int = 200,
+        step: Optional[str] = None,
+        level: Optional[str] = None,
+    ) -> list[dict]:
+        """Return persisted log entries for a run."""
+        conn = self._get_connection()
+        try:
+            query = "SELECT * FROM pipeline_step_logs WHERE run_id = ?"
+            params: list[Any] = [run_id]
+            if step:
+                query += " AND step = ?"
+                params.append(step)
+            if level:
+                query += " AND level = ?"
+                params.append(level)
+            query += " ORDER BY ts DESC LIMIT ?"
+            params.append(limit)
+            rows = conn.execute(query, params).fetchall()
+            return [
+                {
+                    "id": row["id"],
+                    "run_id": row["run_id"],
+                    "step": row["step"],
+                    "level": row["level"],
+                    "ts": row["ts"],
+                    "message": row["message"],
+                    "detail": row["detail"],
+                }
+                for row in reversed(rows)  # Return ascending order
+            ]
+        finally:
+            conn.close()
+
+    # ── Project Control State (internal helpers) ───────────────────────────
+
+    def _get_project_augmentations(self, project_id: int) -> dict:
+        """Return the saved pipeline preset + augmentations for a project.
+
+        This is an internal helper used by get_project_control_state and
+        get_effective_config.  External callers should use get_project_control_state.
+        """
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                "SELECT * FROM project_control_state WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+            if row:
+                return {
+                    "project_id": project_id,
+                    "preset_id": row["preset_id"] or "",
+                    "overrides": json.loads(row["augmentations_json"]),
+                    "updated_at": row["updated_at"],
+                }
+            return {"project_id": project_id, "preset_id": "", "overrides": {}, "updated_at": None}
+        finally:
+            conn.close()
+
+    def _save_project_augmentations(
+        self,
+        project_id: int,
+        preset_id: str = "",
+        overrides: Optional[dict] = None,
+    ) -> dict:
+        """Persist pipeline preset + augmentations for a project.
+
+        Only keys from EXECUTION_SPEC_FIELDS are written; all others are
+        silently discarded.  External callers should use save_project_control_state.
+        """
+        clean_augmentations: dict = {}
+        for k, v in (overrides or {}).items():
+            if k in EXECUTION_SPEC_FIELDS:
+                clean_augmentations[k] = v
+            else:
+                logger.warning("[Pipeline] Ignoring unknown augmentation key: %s", k)
+
+        conn = self._get_connection()
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO project_control_state
+                    (project_id, preset_id, augmentations_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (project_id, preset_id, json.dumps(clean_augmentations), time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        return self._get_project_augmentations(project_id)
+
+    def get_project_control_state(self, project_id: int) -> dict:
+        """Return unified persisted control state for a project.
+
+        This aggregates controls that currently live across multiple stores
+        (pipeline overrides DB, analysis DB, and script_state.json) so the
+        frontend can treat them as one canonical state envelope.
+        """
+        from server.services.project_service import project_service
+        from server.services.analysis_db import (
+            init_analysis_db,
+            get_project_db,
+            load_tuning_params,
+            get_highlight_config,
+        )
+        from server.services.script_state_service import script_state_service
+
+        project = project_service.get_project(project_id)
+        if not project:
+            raise ValueError(f"Project not found: {project_id}")
+
+        project_dir = project.get("project_dir", "")
+        state_record = self._get_project_augmentations(project_id)
+        effective = self.get_effective_config(project_id=project_id)
+
+        tuning_params = None
+        highlight_config = None
+        if project_dir:
+            try:
+                init_analysis_db(project_dir)
+                conn = get_project_db(project_dir)
+                try:
+                    tuning_params = load_tuning_params(conn)
+                    highlight_config = get_highlight_config(conn)
+                finally:
+                    conn.close()
+            except Exception:
+                tuning_params = None
+                highlight_config = None
+
+        script_state = script_state_service.load_state(project_dir) if project_dir else {}
+        composition_config = script_state_service.get_composition_config(project_dir) if project_dir else {}
+        overlay_ui_config = script_state_service.get_overlay_ui_config(project_dir) if project_dir else {}
+        pip_config = script_state_service.get_pip_config(project_dir) if project_dir else {}
+
+        return {
+            "project_id": project_id,
+            "schema_version": 1,
+            "preset_id": state_record.get("preset_id") or "",
+            "overrides": state_record.get("overrides") or {},
+            "effective_config": effective,
+            "controls": {
+                "pipeline": {
+                    "preset_id": state_record.get("preset_id") or "",
+                    "overrides": state_record.get("overrides") or {},
+                },
+                "analysis": {
+                    "tuning_params": tuning_params,
+                    "highlight_config": highlight_config,
+                },
+                "capture": {
+                    "capture_mode": script_state.get("preferred_capture_mode"),
+                    "capture_range": script_state.get("capture_range"),
+                    "preferred_segment_ids": script_state.get("preferred_segment_ids") or [],
+                },
+                "compose": {
+                    "composition_config": composition_config,
+                },
+                "overlay": {
+                    "overlay_ui_config": overlay_ui_config,
+                    "pip_config": pip_config,
+                },
+            },
+            "updated_at": state_record.get("updated_at"),
+        }
+
+    def save_project_control_state(self, project_id: int, payload: dict) -> dict:
+        """Persist unified project control state envelope.
+
+        Writes through to existing persistence layers for backward
+        compatibility while exposing a single save contract.
+        """
+        from server.services.project_service import project_service
+        from server.services.analysis_db import (
+            init_analysis_db,
+            get_project_db,
+            save_tuning_params,
+            save_highlight_config,
+        )
+        from server.services.script_state_service import script_state_service
+
+        project = project_service.get_project(project_id)
+        if not project:
+            raise ValueError(f"Project not found: {project_id}")
+
+        controls = payload.get("controls") or {}
+        project_dir = project.get("project_dir", "")
+
+        # 1) Pipeline preset + overrides
+        pipeline_controls = controls.get("pipeline") or {}
+        top_preset_id = payload.get("preset_id")
+        preset_id = top_preset_id if top_preset_id is not None else (pipeline_controls.get("preset_id") or "")
+        overrides = payload.get("overrides") if payload.get("overrides") is not None else pipeline_controls.get("overrides")
+        self._save_project_augmentations(
+            project_id=project_id,
+            preset_id=preset_id or "",
+            overrides=overrides or {},
+        )
+
+        # 2) Analysis controls
+        analysis_controls = controls.get("analysis") or {}
+        tuning_params = analysis_controls.get("tuning_params")
+        highlight_config = analysis_controls.get("highlight_config")
+        if project_dir and (tuning_params is not None or highlight_config is not None):
+            init_analysis_db(project_dir)
+            conn = get_project_db(project_dir)
+            try:
+                if isinstance(tuning_params, dict):
+                    save_tuning_params(conn, tuning_params)
+                if isinstance(highlight_config, dict):
+                    weights = highlight_config.get("weights") or {}
+                    target_duration = highlight_config.get("target_duration")
+                    min_severity = int(highlight_config.get("min_severity", 0) or 0)
+                    cfg_overrides = highlight_config.get("overrides") or {}
+                    params = highlight_config.get("params") or {}
+                    save_highlight_config(
+                        conn,
+                        weights=weights,
+                        target_duration=target_duration,
+                        min_severity=min_severity,
+                        overrides=cfg_overrides,
+                        params=params,
+                    )
+            finally:
+                conn.close()
+
+        # 3) Capture/compose/overlay controls (script_state)
+        if project_dir:
+            capture_controls = controls.get("capture") or {}
+            compose_controls = controls.get("compose") or {}
+            overlay_controls = controls.get("overlay") or {}
+
+            if capture_controls.get("capture_mode") is not None:
+                script_state_service.set_capture_mode(project_dir, capture_controls.get("capture_mode"))
+
+            if "capture_range" in capture_controls:
+                cap_range = capture_controls.get("capture_range")
+                if isinstance(cap_range, dict):
+                    script_state_service.set_capture_range(
+                        project_dir,
+                        cap_range.get("start"),
+                        cap_range.get("end"),
+                    )
+                else:
+                    script_state_service.set_capture_range(project_dir, None, None)
+
+            if "preferred_segment_ids" in capture_controls:
+                script_state_service.set_preferred_segment_ids(
+                    project_dir,
+                    capture_controls.get("preferred_segment_ids") or [],
+                )
+
+            if "composition_config" in compose_controls and isinstance(compose_controls.get("composition_config"), dict):
+                script_state_service.set_composition_config(project_dir, compose_controls.get("composition_config") or {})
+
+            if "overlay_ui_config" in overlay_controls and isinstance(overlay_controls.get("overlay_ui_config"), dict):
+                script_state_service.update_overlay_ui_config(project_dir, overlay_controls.get("overlay_ui_config") or {})
+
+            if "pip_config" in overlay_controls and isinstance(overlay_controls.get("pip_config"), dict):
+                script_state_service.update_pip_config(project_dir, overlay_controls.get("pip_config") or {})
+
+        return self.get_project_control_state(project_id)
+
+    def get_effective_config(
+        self,
+        project_id: int,
+        preset_id: Optional[str] = None,
+        runtime_overrides: Optional[dict] = None,
+    ) -> dict:
+        """Resolve the effective execution config for a project run.
+
+        Merge precedence (last wins):
+          1. Global preset defaults
+          2. Per-project augmentations (using project's saved preset_id unless overridden)
+          3. Runtime overrides (e.g. CLI flags)
+          4. Auto-populated project data (video_script from project DB)
+        """
+        # 1. Start with global preset
+        proj_state = self._get_project_augmentations(project_id)
+        resolved_preset_id = preset_id or proj_state.get("preset_id") or None
+
+        effective: dict = {}
+        if resolved_preset_id and resolved_preset_id in self._presets:
+            effective = dict(self._presets[resolved_preset_id].to_dict())
+        elif self._presets:
+            # Fall back to first non-builtin default
+            first_preset = next(iter(self._presets.values()))
+            effective = dict(first_preset.to_dict())
+
+        # 2. Apply project-level augmentations
+        for k, v in proj_state.get("overrides", {}).items():
+            if k in EXECUTION_SPEC_FIELDS:
+                effective[k] = v
+
+        # 3. Apply runtime overrides (CLI flags / frontend start config)
+        for k, v in (runtime_overrides or {}).items():
+            if k in EXECUTION_SPEC_FIELDS:
+                effective[k] = v
+
+        # 4. Auto-populate video_script from project record if not supplied explicitly
+        if not effective.get("video_script"):
+            try:
+                from server.services.project_service import project_service
+                project = project_service.get_project(project_id)
+                if project and isinstance(project.get("script"), list) and project["script"]:
+                    effective["video_script"] = project["script"]
+            except Exception:
+                pass  # Non-fatal — capture will fall back to legacy mode
+
+        effective["resolved_preset_id"] = resolved_preset_id
+        effective["project_id"] = project_id
+        return effective
+
+    def preflight_check(
+        self,
+        project_id: int,
+        preset_id: Optional[str] = None,
+        config: Optional[dict] = None,
+    ) -> list[dict]:
+        """Validate that the pipeline can start for a project.
+
+        Returns a list of issue dicts:
+          { "level": "error"|"warning", "code": str, "message": str }
+
+        An empty list means all checks passed.
+        """
+        issues: list[dict] = []
+
+        def _issue(level: str, code: str, message: str) -> None:
+            issues.append({"level": level, "code": code, "message": message})
+
+        # ── 1. Check not already running ─────────────────────────────────
+        with self._lock:
+            if self._current_run and self._current_run.state == PipelineState.RUNNING:
+                _issue("error", "ALREADY_RUNNING", "A pipeline is already running")
+                return issues  # No point checking further
+
+        # ── 2. Check project exists ───────────────────────────────────────
+        try:
+            from server.services.project_service import project_service
+            project = project_service.get_project(project_id)
+        except Exception:
+            project = None
+
+        if not project:
+            _issue("error", "PROJECT_NOT_FOUND", f"Project {project_id} not found")
+            return issues
+
+        # ── 3. Resolve effective config ───────────────────────────────────
+        try:
+            effective = self.get_effective_config(
+                project_id=project_id,
+                preset_id=preset_id,
+                runtime_overrides=config,
+            )
+        except Exception as exc:
+            _issue("error", "CONFIG_RESOLVE_FAILED", f"Could not resolve config: {exc}")
+            return issues
+
+        # ── 4. Output directory is writable ───────────────────────────────
+        output_dir = effective.get("output_dir") or project.get("project_dir", "")
+        if output_dir:
+            output_path = Path(output_dir)
+            if not output_path.exists():
+                try:
+                    output_path.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    _issue("error", "OUTPUT_DIR_NOT_WRITABLE",
+                           f"Output directory cannot be created: {output_dir}")
+            elif not os.access(str(output_path), os.W_OK):
+                _issue("error", "OUTPUT_DIR_NOT_WRITABLE",
+                       f"Output directory is not writable: {output_dir}")
+
+        # ── 5. Capture prerequisites ──────────────────────────────────────
+        if not effective.get("skip_capture"):
+            from server.services.iracing_bridge import bridge as iracing_bridge
+            if not iracing_bridge.is_connected:
+                # Check if a replay file already exists as fallback
+                replay_file = project.get("replay_file", "")
+                if not replay_file or not Path(replay_file).exists():
+                    _issue("error", "IRACING_NOT_CONNECTED",
+                           "iRacing is not connected and no replay file found — capture will fail")
+                else:
+                    _issue("warning", "IRACING_NOT_CONNECTED_REPLAY_OK",
+                           "iRacing is not connected but replay file exists — capture will be skipped")
+
+        # ── 6. Analysis prerequisites ─────────────────────────────────────
+        if not effective.get("skip_analysis"):
+            replay_file = project.get("replay_file", "")
+            if not replay_file:
+                _issue("warning", "NO_REPLAY_FILE",
+                       "No replay file set — analysis requires a replay file or prior capture")
+
+        # ── 7. Export preset exists ───────────────────────────────────────
+        export_preset_name = effective.get("export_preset")
+        if export_preset_name:
+            try:
+                from server.services.encoding_service import encoding_service
+                presets = encoding_service.list_presets() if hasattr(encoding_service, "list_presets") else []
+                names = [p.get("name", "") for p in presets]
+                if export_preset_name not in names and export_preset_name not in [p.get("id", "") for p in presets]:
+                    _issue("warning", "EXPORT_PRESET_NOT_FOUND",
+                           f"Export preset '{export_preset_name}' not found — default will be used")
+            except Exception:
+                pass  # Non-fatal
+
+        # ── 8. Upload readiness ───────────────────────────────────────────
+        if effective.get("upload_to_youtube"):
+            try:
+                from server.services.youtube_service import youtube_service
+                if not youtube_service.is_authenticated:
+                    _issue("warning", "YOUTUBE_NOT_AUTHENTICATED",
+                           "YouTube upload is enabled but not authenticated — upload step will fail")
+            except Exception:
+                pass  # Non-fatal
+
+        return issues
 
     # ── Status ──────────────────────────────────────────────────────────────
 
@@ -571,14 +1187,16 @@ class PipelineService:
             id=preset_id,
             name=data["name"],
             description=data.get("description", ""),
-            skip_capture=data.get("skip_capture", False),
-            skip_analysis=data.get("skip_analysis", False),
-            auto_edit=data.get("auto_edit", True),
             export_preset=data.get("export_preset"),
-            upload_to_youtube=data.get("upload_to_youtube", False),
+            output_dir=data.get("output_dir"),
+            highlight_config=data.get("highlight_config") or {},
+            overlay_preset_id=data.get("overlay_preset_id"),
+            overlay_variables=data.get("overlay_variables") or {},
+            capture_mode=data.get("capture_mode", "auto"),
             youtube_privacy=data.get("youtube_privacy", "unlisted"),
             failure_action=FailureAction(data.get("failure_action", "pause")),
             notify_on_completion=data.get("notify_on_completion", "toast"),
+            non_interactive=data.get("non_interactive", False),
             created_at=now,
             updated_at=now,
         )
@@ -596,14 +1214,16 @@ class PipelineService:
 
         preset.name = data.get("name", preset.name)
         preset.description = data.get("description", preset.description)
-        preset.skip_capture = data.get("skip_capture", preset.skip_capture)
-        preset.skip_analysis = data.get("skip_analysis", preset.skip_analysis)
-        preset.auto_edit = data.get("auto_edit", preset.auto_edit)
         preset.export_preset = data.get("export_preset", preset.export_preset)
-        preset.upload_to_youtube = data.get("upload_to_youtube", preset.upload_to_youtube)
+        preset.output_dir = data.get("output_dir", preset.output_dir)
+        preset.highlight_config = data.get("highlight_config", preset.highlight_config)
+        preset.overlay_preset_id = data.get("overlay_preset_id", preset.overlay_preset_id)
+        preset.overlay_variables = data.get("overlay_variables", preset.overlay_variables)
+        preset.capture_mode = data.get("capture_mode", preset.capture_mode)
         preset.youtube_privacy = data.get("youtube_privacy", preset.youtube_privacy)
         preset.failure_action = FailureAction(data.get("failure_action", preset.failure_action.value))
         preset.notify_on_completion = data.get("notify_on_completion", preset.notify_on_completion)
+        preset.non_interactive = data.get("non_interactive", preset.non_interactive)
         preset.updated_at = time.time()
 
         self._save_preset(preset)
@@ -636,10 +1256,12 @@ class PipelineService:
     ) -> dict:
         """Start a new pipeline run.
 
+        Merges effective config using: global preset → project overrides → runtime config.
+
         Args:
             project_id: The project to run the pipeline for.
-            preset_id: Optional preset ID to use for configuration.
-            config: Optional config dict (merged with preset if both provided).
+            preset_id: Optional global preset ID. Falls back to project's saved preset.
+            config: Optional runtime overrides (CLI flags, frontend custom config).
 
         Returns:
             The new pipeline run status dict.
@@ -649,12 +1271,12 @@ class PipelineService:
             if self._current_run and self._current_run.state == PipelineState.RUNNING:
                 raise ValueError("Pipeline already running")
 
-            # Build configuration
-            run_config = {}
-            if preset_id and preset_id in self._presets:
-                run_config = self._presets[preset_id].to_dict()
-            if config:
-                run_config.update(config)
+            # Build effective config via 3-layer merge
+            run_config = self.get_effective_config(
+                project_id=project_id,
+                preset_id=preset_id,
+                runtime_overrides=config,
+            )
 
             # Create new run
             run = PipelineRun(
@@ -665,13 +1287,20 @@ class PipelineService:
                 started_at=time.time(),
             )
 
-            # Configure steps based on config
+            # Configure step initial states based on config
             if run_config.get("skip_capture", False):
                 run.steps[StepName.CAPTURE].state = StepState.SKIPPED
             if run_config.get("skip_analysis", False):
                 run.steps[StepName.ANALYSIS].state = StepState.SKIPPED
+            if run_config.get("skip_compose", False):
+                run.steps[StepName.COMPOSE].state = StepState.SKIPPED
+            if run_config.get("skip_export", False):
+                run.steps[StepName.EXPORT].state = StepState.SKIPPED
             if not run_config.get("upload_to_youtube", False):
                 run.steps[StepName.UPLOAD].state = StepState.SKIPPED
+
+            # Set an immediate actionable step so frontend status is never null.
+            run.current_step = self._next_actionable_step(run)
 
             self._current_run = run
             self._persist_run(run)
@@ -765,6 +1394,72 @@ class PipelineService:
             self._broadcast("pipeline:cancelled", self._current_run.to_dict())
 
             return self._current_run.to_dict()
+
+    def reset(self, project_id: Optional[int] = None) -> dict:
+        """Reset pipeline state so execution can restart from the beginning.
+
+        Stops any current run, clears in-memory active run, and marks
+        matching persisted runs as cancelled for traceability.
+        """
+        with self._lock:
+            self._stop_event.set()
+            self._pause_event.set()
+
+            # Mark current run as cancelled before dropping it.
+            if self._current_run:
+                if project_id is None or self._current_run.project_id == project_id:
+                    self._current_run.state = PipelineState.CANCELLED
+                    self._current_run.error = "Reset by user"
+                    self._current_run.completed_at = time.time()
+                    self._persist_run(self._current_run)
+                    cancelled_run = self._current_run.to_dict()
+                    self._current_run = None
+                else:
+                    cancelled_run = None
+            else:
+                cancelled_run = None
+
+            # Keep history but ensure any active rows are no longer resumable.
+            conn = self._get_connection()
+            try:
+                if project_id is None:
+                    conn.execute(
+                        """
+                        UPDATE pipeline_runs
+                        SET state = 'cancelled',
+                            error = COALESCE(error, 'Reset by user'),
+                            completed_at = COALESCE(completed_at, ?),
+                            updated_at = datetime('now')
+                        WHERE state IN ('running', 'paused', 'waiting_intervention')
+                        """,
+                        (time.time(),),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE pipeline_runs
+                        SET state = 'cancelled',
+                            error = COALESCE(error, 'Reset by user'),
+                            completed_at = COALESCE(completed_at, ?),
+                            updated_at = datetime('now')
+                        WHERE project_id = ?
+                          AND state IN ('running', 'paused', 'waiting_intervention')
+                        """,
+                        (time.time(), project_id),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+
+            payload = {
+                "run": None,
+                "reset": True,
+                "project_id": project_id,
+                "cancelled_run": cancelled_run,
+            }
+            self._broadcast("pipeline:reset", payload)
+            logger.info("[Pipeline] Reset requested (project_id=%s)", project_id)
+            return payload
 
     def retry_step(self, step_name: str) -> dict:
         """Retry a failed step."""
@@ -1020,6 +1715,7 @@ class PipelineService:
 
         self._broadcast("pipeline:step_progress", {
             "run_id": self._current_run.run_id if self._current_run else None,
+            "project_id": self._current_run.project_id if self._current_run else None,
             "step": step_name.value,
             "progress": progress,
             "output": output,
@@ -1199,10 +1895,10 @@ class PipelineService:
         """Execute script-based capture for a Video Composition Script.
 
         For each segment: pause → seek → set camera → record → trim → save.
-        Then compile all clips into a single video.
         """
         from server.utils.script_capture import ScriptCaptureEngine
         from server.utils.capture_engine import CaptureEngine
+        from server.services.project_service import project_service
 
         project_dir = project.get("project_dir", "")
         clips_dir = str(Path(project_dir) / "clips")
@@ -1234,7 +1930,7 @@ class PipelineService:
             engine = ScriptCaptureEngine(
                 output_dir=clips_dir,
                 clip_padding=clip_padding,
-                clip_padding_after=config.get("clip_padding_after", 5.0),
+                clip_padding_after=config.get("clip_padding_after", 1.0),
                 progress_callback=progress_cb,
                 contiguous_gap_threshold=config.get("contiguous_gap_threshold", 1.0),
             )
@@ -1249,22 +1945,19 @@ class PipelineService:
             if not clips:
                 raise RuntimeError("No clips were captured")
 
-            self._update_step_progress(StepName.CAPTURE, 92.0, {
-                "message": "Compiling clips...",
+            project_service.save_project_metadata(project_id, {
+                "clips_manifest": engine.composition_manifest,
+                "capture_manifest": engine.composition_manifest,
             })
 
-            output_path = str(Path(project_dir) / "highlight_compiled.mp4")
-            compiled = engine.compile_clips(output_path)
-
-            if compiled:
-                logger.info("[Pipeline] Script capture compiled → %s", compiled)
-            else:
-                logger.warning("[Pipeline] Clip compilation failed")
+            self._update_step_progress(StepName.CAPTURE, 92.0, {
+                "message": "Capture complete — clips ready for Compose",
+                "clips": len(clips),
+            })
 
             self._update_step_progress(StepName.CAPTURE, 100.0, {
                 "message": "Script capture complete",
                 "clips": len(clips),
-                "compiled_path": compiled,
             })
         finally:
             capture_engine.stop()
@@ -1279,39 +1972,83 @@ class PipelineService:
 
         if config.get("skip_analysis"):
             logger.info("[Pipeline] Skipping analysis (configured)")
+            self._log_step(StepName.ANALYSIS, "Analysis skipped (configured)", level="info")
             return
 
-        # Import analysis manager
+        # Import analysis manager + DB helpers
         from server.services.replay_analysis import analysis_manager
-        from server.services.analysis_db import get_analysis_status as db_get_analysis_status
+        from server.services.analysis_db import (
+            init_analysis_db,
+            get_project_db,
+            get_analysis_status as db_get_analysis_status,
+        )
+        from server.services.project_service import project_service
+        from server.services.iracing_bridge import bridge as iracing_bridge
+
+        project = project_service.get_project(project_id)
+        if not project:
+            raise RuntimeError(f"Project {project_id} not found")
+        project_dir = project.get("project_dir") or ""
+        if not project_dir:
+            raise RuntimeError(f"Project {project_id} has no project_dir")
 
         # Check if analysis already exists
         try:
-            from server.services.project_service import project_service
-            project = project_service.get_project(project_id)
-            if project:
-                project_dir = Path(project["project_dir"])
-                status = db_get_analysis_status(project_dir)
-                if status and status.get("status") == "completed":
-                    logger.info("[Pipeline] Analysis already exists, skipping")
-                    self._update_step_progress(StepName.ANALYSIS, 100.0, {
-                        "skipped_reason": "Analysis already exists",
-                    })
-                    return
+            init_analysis_db(project_dir)
+            conn = get_project_db(project_dir)
+            try:
+                status = db_get_analysis_status(conn)
+            finally:
+                conn.close()
+
+            if status and status.get("status") == "completed":
+                logger.info("[Pipeline] Analysis already exists, skipping")
+                self._log_step(StepName.ANALYSIS, "Analysis already exists — reusing results", level="info")
+                self._update_step_progress(StepName.ANALYSIS, 100.0, {
+                    "skipped_reason": "Analysis already exists",
+                })
+                return
         except Exception as exc:
             logger.debug("[Pipeline] Could not check analysis status: %s", exc)
 
         # Define progress callback
         def on_progress(event_type: str, data: dict) -> None:
             if event_type == "step_completed":
-                # Map analysis progress to 0-100
-                progress = min(data.get("progress", 0), 100)
+                # Analysis emits progress_percent (0-100) via replay_analysis.
+                progress = float(data.get("progress_percent", data.get("progress", 0)) or 0)
+                progress = max(0.0, min(progress, 100.0))
                 self._update_step_progress(StepName.ANALYSIS, progress, data)
+                message = data.get("message") or data.get("description") or f"Analysis progress: {progress:.0f}%"
+                self._log_step(StepName.ANALYSIS, message, level="info")
 
-        # Start analysis
-        analysis_manager.analyze(project_id, on_progress=on_progress)
+        self._log_step(StepName.ANALYSIS, "Starting replay analysis", level="info")
+
+        # Launch analysis worker (pipeline-owned run).
+        session_info = dict(iracing_bridge.session_data) if iracing_bridge.is_connected else {}
+        if not self._loop or not self._loop.is_running():
+            raise RuntimeError("No running event loop available for analysis")
+
+        async def _start_analysis_task() -> bool:
+            return analysis_manager.start(
+                project_id=project_id,
+                project_dir=project_dir,
+                session_info=session_info,
+                on_progress=on_progress,
+            )
+
+        started = asyncio.run_coroutine_threadsafe(
+            _start_analysis_task(),
+            self._loop,
+        ).result(timeout=10)
+        if not started:
+            raise RuntimeError("Analysis is already running for this project")
+
+        self._update_step_progress(StepName.ANALYSIS, 1.0, {
+            "message": "Analysis worker started",
+        })
 
         # Wait for completion
+        idle_checks = 0
         while True:
             if self._stop_event.is_set():
                 analysis_manager.cancel(project_id)
@@ -1319,11 +2056,39 @@ class PipelineService:
             if self._pause_event.is_set():
                 raise InterruptedError("Analysis paused")
 
-            status = analysis_manager.get_status(project_id)
-            if status.get("status") == "completed":
+            manager_status = (analysis_manager.get_status(project_id) or {}).get("status")
+            if manager_status == "running":
+                idle_checks = 0
+                time.sleep(0.5)
+                continue
+
+            # Manager is idle: inspect persisted analysis run status.
+            try:
+                conn = get_project_db(project_dir)
+                try:
+                    db_status = db_get_analysis_status(conn)
+                finally:
+                    conn.close()
+            except Exception as exc:
+                raise RuntimeError(f"Failed reading analysis status: {exc}") from exc
+
+            state = str(db_status.get("status") or "").lower()
+            if state == "completed":
+                event_count = int(db_status.get("total_events") or db_status.get("event_count") or 0)
+                self._update_step_progress(StepName.ANALYSIS, 100.0, {
+                    "event_count": event_count,
+                })
+                self._log_step(StepName.ANALYSIS, f"Analysis complete — {event_count} events detected", level="success")
                 break
-            if status.get("status") == "error":
-                raise RuntimeError(status.get("error", "Analysis failed"))
+
+            if state == "error":
+                err = db_status.get("error_message") or "Analysis failed"
+                self._log_step(StepName.ANALYSIS, f"Analysis failed: {err}", level="error")
+                raise RuntimeError(err)
+
+            idle_checks += 1
+            if idle_checks >= 40:
+                raise RuntimeError(f"Analysis exited without terminal status (last db status={state or 'none'})")
 
             time.sleep(0.5)
 
@@ -1338,12 +2103,18 @@ class PipelineService:
             project_id = self._current_run.project_id if self._current_run else 0
 
         if not config.get("auto_edit", True):
+            # Non-interactive mode: skip editing if no script exists
+            if config.get("non_interactive", False):
+                self._log_step(StepName.EDITING, "Non-interactive mode: editing step skipped (no auto_edit)", level="warning")
+                return
+
             # Wait for user intervention
             with self._lock:
                 if self._current_run:
                     self._current_run.state = PipelineState.WAITING_INTERVENTION
                     self._persist_run(self._current_run)
 
+            self._log_step(StepName.EDITING, "Waiting for user to configure highlight selections", level="info")
             self._broadcast("pipeline:waiting_intervention", {
                 "run_id": self._current_run.run_id if self._current_run else None,
                 "step": StepName.EDITING.value,
@@ -1408,7 +2179,7 @@ class PipelineService:
             script=script,
             clips_manifest=clips_manifest,
             output_dir=output_dir,
-            preset_id=config.get("compose_preset", "youtube_1080p60"),
+            preset_id=config.get("compose_preset", "1080p"),
         )
 
         if not result.get("success"):
@@ -1472,7 +2243,7 @@ class PipelineService:
             raise ValueError("No video file to export")
 
         # Start encoding
-        export_preset = config.get("export_preset", "youtube_1080p60")
+        export_preset = config.get("export_preset", "1080p")
         job_id = encoding_service.start_job(
             project_id=project_id,
             input_file=input_file,

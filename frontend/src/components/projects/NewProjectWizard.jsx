@@ -1,7 +1,8 @@
-﻿import { useState, useEffect, useRef } from 'react'
-import { X, FolderOpen, FileSearch, ChevronRight, Sparkles } from 'lucide-react'
+﻿import { useState, useEffect, useRef, useCallback } from 'react'
+import { X, FolderOpen, FileSearch, ChevronRight, Sparkles, Gamepad2 } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext'
 import { useToast } from '../../context/ToastContext'
+import { apiGet } from '../../services/api'
 import { formatFileSize } from '../../utils/format'
 
 /**
@@ -22,6 +23,16 @@ function NewProjectWizard({ onClose, onCreated }) {
   const [replayFile, setReplayFile] = useState('')
   const [trackName, setTrackName] = useState('')
   const [creating, setCreating] = useState(false)
+
+  // Active iRacing session (for autofill chip)
+  const [activeSession, setActiveSession] = useState(null)
+
+  // Fetch active iRacing session on mount
+  useEffect(() => {
+    apiGet('/iracing/session')
+      .then(data => { if (data?.connected) setActiveSession(data) })
+      .catch(() => {}) // non-fatal
+  }, [])
 
   // Replay discovery
   const [discoveredFiles, setDiscoveredFiles] = useState([])
@@ -110,6 +121,7 @@ function NewProjectWizard({ onClose, onCreated }) {
               setName={setName}
               trackName={trackName}
               setTrackName={setTrackName}
+              activeSession={activeSession}
             />
           )}
           {step === 2 && (
@@ -172,9 +184,37 @@ function NewProjectWizard({ onClose, onCreated }) {
 
 // â”€â”€ Step Components â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-function Step1_Name({ name, setName, trackName, setTrackName }) {
+function Step1_Name({ name, setName, trackName, setTrackName, activeSession }) {
   return (
     <div className="space-y-4">
+      {/* Active iRacing session autofill chip */}
+      {activeSession?.track_name ? (
+        <button
+          type="button"
+          onClick={() => setTrackName(activeSession.track_name)}
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg border
+                     border-accent/30 bg-accent/5 hover:bg-accent/10 text-left
+                     transition-colors group"
+        >
+          <Gamepad2 className="w-3.5 h-3.5 text-accent shrink-0" />
+          <div className="flex-1 min-w-0">
+            <span className="text-xxs text-accent font-medium">Active session: </span>
+            <span className="text-xxs text-text-primary">{activeSession.track_name}</span>
+            {activeSession.session_type && (
+              <span className="text-xxs text-text-tertiary ml-1">({activeSession.session_type})</span>
+            )}
+          </div>
+          <span className="text-xxs text-accent font-semibold shrink-0 opacity-70 group-hover:opacity-100">
+            Auto-fill
+          </span>
+        </button>
+      ) : (
+        <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-border bg-bg-secondary/40">
+          <Gamepad2 className="w-3.5 h-3.5 text-text-disabled shrink-0" />
+          <span className="text-xxs text-text-disabled">No active iRacing session detected</span>
+        </div>
+      )}
+
       <div>
         <label className="block text-sm font-medium text-text-primary mb-1.5">
           Project Name <span className="text-danger">*</span>

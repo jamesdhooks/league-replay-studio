@@ -1,7 +1,8 @@
 {
-  "id": "preset_3233e642",
+  "id": "preset_0047e7a5",
   "name": "Test",
   "description": "Overlay design",
+  "style": "blank",
   "is_builtin": false,
   "version": "1.0.0",
   "sections": {

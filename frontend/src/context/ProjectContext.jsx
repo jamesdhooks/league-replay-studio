@@ -128,6 +128,14 @@ export function ProjectProvider({ children }) {
     return await apiGet(`/projects/${projectId}/files`)
   }, [])
 
+  const deleteProjectFiles = useCallback(async (projectId, paths) => {
+    return await apiPost(`/projects/${projectId}/files/delete`, { paths })
+  }, [])
+
+  const openProjectDirectory = useCallback(async (projectId) => {
+    return await apiPost(`/projects/${projectId}/open-directory`)
+  }, [])
+
   // ── Replay discovery ────────────────────────────────────────────────────
 
   const discoverReplays = useCallback(async (directory = '') => {
@@ -145,6 +153,7 @@ export function ProjectProvider({ children }) {
   const value = useMemo(() => ({
     projects,
     activeProject,
+    currentProject: activeProject,  // Alias for component compatibility
     loading,
     fetchProjects,
     createProject,
@@ -157,6 +166,8 @@ export function ProjectProvider({ children }) {
     setStep,
     advanceStep,
     getProjectFiles,
+    deleteProjectFiles,
+    openProjectDirectory,
     discoverReplays,
     suggestReplay,
   }), [
@@ -164,7 +175,7 @@ export function ProjectProvider({ children }) {
     fetchProjects, createProject, openProject, closeProject,
     updateProject, deleteProject, duplicateProject,
     getStepStatus, setStep, advanceStep,
-    getProjectFiles, discoverReplays, suggestReplay,
+    getProjectFiles, deleteProjectFiles, openProjectDirectory, discoverReplays, suggestReplay,
   ])
 
   return (

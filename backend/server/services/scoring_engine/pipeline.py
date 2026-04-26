@@ -76,8 +76,10 @@ def generate_highlights(
     # Stage 2: Apply manual overrides
     scored = _apply_overrides(scored, overrides, phase="pre")
 
-    # Stage 3: Allocate timeline
-    timeline = allocate_timeline(scored, target_duration, constraints)
+    # Stage 3: Allocate timeline (mutates constraints with "_diagnostics")
+    alloc_constraints = dict(constraints)
+    timeline = allocate_timeline(scored, target_duration, alloc_constraints)
+    selection_diagnostics = alloc_constraints.get("_diagnostics", {})
 
     # Stage 4: Resolve conflicts
     pip_threshold = constraints.get("pip_threshold", DEFAULT_PIP_THRESHOLD)
@@ -91,6 +93,8 @@ def generate_highlights(
 
     # Stage 7: Compute metrics
     metrics = _compute_metrics(scored, timeline, target_duration, race_duration, num_drivers)
+    if selection_diagnostics:
+        metrics["selection_diagnostics"] = selection_diagnostics
 
     logger.info(
         "generate_highlights: complete — %d scored, %d timeline segments, "
@@ -103,6 +107,7 @@ def generate_highlights(
         "scored_events": scored,
         "timeline": timeline,
         "metrics": metrics,
+        "selection_diagnostics": selection_diagnostics,
     }
 
 
@@ -115,7 +120,7 @@ def generate_video_script(
     race_info: Optional[dict] = None,
     section_config: Optional[dict] = None,
     clip_padding: float = DEFAULT_CLIP_PADDING,
-    clip_padding_after: float = 5.0,
+    clip_padding_after: float = 1.0,
         padding_by_type: Optional[dict] = None,
     tuning: Optional[dict] = None,
     camera_weights: Optional[dict[str, float]] = None,

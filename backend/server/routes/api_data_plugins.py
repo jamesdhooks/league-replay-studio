@@ -37,6 +37,7 @@ class PluginCreateRequest(BaseModel):
     name: str
     plugin_type: str  # driver_details | race_details | championship_standings
     endpoint_url: str
+    request_style: str = "post_body"  # post_body | path_param
     auth_method: str = "none"  # none | api_key | bearer | custom_header
     auth_config: dict[str, Any] = {}
     enabled: bool = True
@@ -46,9 +47,14 @@ class PluginUpdateRequest(BaseModel):
     name: Optional[str] = None
     plugin_type: Optional[str] = None
     endpoint_url: Optional[str] = None
+    request_style: Optional[str] = None
     auth_method: Optional[str] = None
     auth_config: Optional[dict[str, Any]] = None
     enabled: Optional[bool] = None
+
+
+class PluginPreviewRequest(BaseModel):
+    request_body: dict[str, Any] = {}
 
 
 # ── List / Create ───────────────────────────────────────────────────────────
@@ -67,6 +73,20 @@ async def create_plugin(body: PluginCreateRequest):
         return {"success": True, "plugin": plugin}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ── API format documentation ────────────────────────────────────────────────
+
+@router.get("/formats")
+async def get_formats():
+    """Get the expected API request/response formats for all plugin types."""
+    return {"formats": data_plugin_service.get_expected_formats()}
+
+
+@router.get("/variables")
+async def get_contributed_variables():
+    """Get variables contributed by each enabled plugin."""
+    return {"variables": data_plugin_service.get_available_variables()}
 
 
 # ── Single plugin CRUD ──────────────────────────────────────────────────────
@@ -110,15 +130,8 @@ async def test_plugin(plugin_id: str):
     return result
 
 
-# ── API format documentation ────────────────────────────────────────────────
-
-@router.get("/formats")
-async def get_formats():
-    """Get the expected API request/response formats for all plugin types."""
-    return {"formats": data_plugin_service.get_expected_formats()}
-
-
-@router.get("/variables")
-async def get_contributed_variables():
-    """Get variables contributed by each enabled plugin."""
-    return {"variables": data_plugin_service.get_available_variables()}
+@router.post("/{plugin_id}/preview")
+async def preview_plugin(plugin_id: str, body: PluginPreviewRequest):
+    """Execute a configured plugin with a caller-provided request body."""
+    result = await data_plugin_service.preview_plugin(plugin_id, body.request_body)
+    return result

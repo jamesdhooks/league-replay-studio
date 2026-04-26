@@ -51,6 +51,31 @@ MODE_TIME_RANGE    = "time_range"
 
 VALID_CAPTURE_MODES = {MODE_ALL, MODE_UNCAPTURED, MODE_SPECIFIC, MODE_TIME_RANGE}
 
+# ── Composition scope modes ──────────────────────────────────────────────────
+
+COMPOSE_MODE_ALL        = "all"
+COMPOSE_MODE_CAPTURED   = "captured_only"
+COMPOSE_MODE_SPECIFIC   = "specific_segments"
+COMPOSE_MODE_REGION     = "region"
+
+VALID_COMPOSE_MODES = {COMPOSE_MODE_ALL, COMPOSE_MODE_CAPTURED, COMPOSE_MODE_SPECIFIC, COMPOSE_MODE_REGION}
+
+# ── Gap policies ─────────────────────────────────────────────────────────────
+
+GAP_POLICY_COMPRESS   = "compress_gaps"
+GAP_POLICY_FILL_BLACK = "fill_black"
+GAP_POLICY_FADE       = "fade_bridge"
+
+VALID_GAP_POLICIES = {GAP_POLICY_COMPRESS, GAP_POLICY_FILL_BLACK, GAP_POLICY_FADE}
+
+DEFAULT_COMPOSITION_CONFIG: dict = {
+    "mode": COMPOSE_MODE_ALL,
+    "selected_segment_ids": [],
+    "region_start_seconds": None,
+    "region_end_seconds": None,
+    "gap_policy": GAP_POLICY_COMPRESS,
+}
+
 # File name for persisted state
 STATE_FILE = "capture_state.json"
 
@@ -117,9 +142,13 @@ class ScriptStateService:
             "locked_at": None,
             "segments": {},           # segment_id → {hash, capture_state, clip_path, ...}
             "capture_range": None,    # {start: float, end: float} or None
+            "preferred_capture_mode": MODE_ALL,
+            "preferred_segment_ids": [],
+            "preferred_composition_config": dict(DEFAULT_COMPOSITION_CONFIG),
             "trash": [],              # list of {segment_id, clip_path, invalidated_at, reason}
             "overlay_ui_config": {
                 "ui_zoom": 1.0,
+                "selected_preset_id": None,
             },
             "pip_config": {           # PiP overlay configuration
                 "enabled": False,
@@ -360,6 +389,42 @@ class ScriptStateService:
         self.save_state(project_dir, state)
         return state
 
+    def get_capture_mode(self, project_dir: str) -> str:
+        """Get the preferred capture mode for this project."""
+        state = self.load_state(project_dir)
+        mode = state.get("preferred_capture_mode", MODE_ALL)
+        return mode if mode in VALID_CAPTURE_MODES else MODE_ALL
+
+    def set_capture_mode(self, project_dir: str, mode: str) -> str:
+        """Persist preferred capture mode for this project."""
+        normalized = (mode or MODE_ALL).strip().lower()
+        if normalized not in VALID_CAPTURE_MODES:
+            raise ValueError(f"Invalid capture mode: {mode}")
+        state = self.load_state(project_dir)
+        state["preferred_capture_mode"] = normalized
+        self.save_state(project_dir, state)
+        return normalized
+
+    def get_preferred_segment_ids(self, project_dir: str) -> list[str]:
+        """Return the persisted specific-segment selection for capture mode."""
+        state = self.load_state(project_dir)
+        segment_ids = state.get("preferred_segment_ids", [])
+        if not isinstance(segment_ids, list):
+            return []
+        return [str(segment_id).strip() for segment_id in segment_ids if str(segment_id).strip()]
+
+    def set_preferred_segment_ids(self, project_dir: str, segment_ids: list[str] | None) -> list[str]:
+        """Persist the specific-segment selection for capture mode."""
+        normalized = [
+            str(segment_id).strip()
+            for segment_id in (segment_ids or [])
+            if str(segment_id).strip()
+        ]
+        state = self.load_state(project_dir)
+        state["preferred_segment_ids"] = normalized
+        self.save_state(project_dir, state)
+        return normalized
+
     def filter_segments_by_mode(
         self,
         project_dir: str,
@@ -382,13 +447,18 @@ class ScriptStateService:
         """
         state = self.load_state(project_dir)
         segments_state = state.get("segments", {})
+        selected_ids = {
+            str(s).strip()
+            for s in (segment_ids or [])
+            if str(s).strip()
+        }
 
         # Also apply capture_range if set
         capture_range = time_range or state.get("capture_range")
 
         result = []
         for seg in script:
-            if seg.get("type") == "transition":
+            if seg.get("type") in {"transition", "bridge"}:
                 continue
             seg_id = seg.get("id", seg.get("segment_id", ""))
 
@@ -410,13 +480,142 @@ class ScriptStateService:
                 if seg_state in (CAPTURE_UNCAPTURED, CAPTURE_INVALIDATED):
                     result.append(seg)
             elif mode == MODE_SPECIFIC:
-                if segment_ids and seg_id in segment_ids:
+                if str(seg_id).strip() in selected_ids:
                     result.append(seg)
             elif mode == MODE_TIME_RANGE:
                 # Already filtered by capture_range above
                 result.append(seg)
 
         return result
+
+    # ── Composition Config ───────────────────────────────────────────────────
+
+    def _normalize_composition_config(self, raw: dict | None) -> dict:
+        """Validate and normalise a composition config dict.
+
+        Unknown keys are dropped; missing keys fall back to defaults.
+        """
+        raw = raw or {}
+        mode = str(raw.get("mode", COMPOSE_MODE_ALL)).strip().lower()
+        if mode not in VALID_COMPOSE_MODES:
+            mode = COMPOSE_MODE_ALL
+
+        selected_ids = raw.get("selected_segment_ids") or []
+        if not isinstance(selected_ids, list):
+            selected_ids = []
+        selected_ids = [str(s).strip() for s in selected_ids if str(s).strip()]
+
+        region_start = raw.get("region_start_seconds")
+        region_end = raw.get("region_end_seconds")
+        try:
+            region_start = float(region_start) if region_start is not None else None
+        except (TypeError, ValueError):
+            region_start = None
+        try:
+            region_end = float(region_end) if region_end is not None else None
+        except (TypeError, ValueError):
+            region_end = None
+
+        gap_policy = str(raw.get("gap_policy", GAP_POLICY_COMPRESS)).strip().lower()
+        if gap_policy not in VALID_GAP_POLICIES:
+            gap_policy = GAP_POLICY_COMPRESS
+
+        return {
+            "mode": mode,
+            "selected_segment_ids": selected_ids,
+            "region_start_seconds": region_start,
+            "region_end_seconds": region_end,
+            "gap_policy": gap_policy,
+        }
+
+    def get_composition_config(self, project_dir: str) -> dict:
+        """Return the preferred composition config, normalised with defaults."""
+        state = self.load_state(project_dir)
+        raw = state.get("preferred_composition_config")
+        return self._normalize_composition_config(raw)
+
+    def set_composition_config(self, project_dir: str, updates: dict) -> dict:
+        """Merge *updates* into the persisted composition config.
+
+        Performs validation and returns the normalised config.
+        """
+        state = self.load_state(project_dir)
+        existing = state.get("preferred_composition_config") or {}
+        merged = {**existing, **updates}
+        normalised = self._normalize_composition_config(merged)
+        state["preferred_composition_config"] = normalised
+        self.save_state(project_dir, state)
+        logger.info("[ScriptState] Composition config saved: mode=%s gap=%s", normalised["mode"], normalised["gap_policy"])
+        return normalised
+
+    def filter_manifest_by_composition_config(
+        self,
+        project_dir: str,
+        script: list[dict],
+        clips_manifest: list[dict],
+        config: dict | None = None,
+    ) -> tuple[list[dict], list[dict]]:
+        """Filter *script* and *clips_manifest* according to a composition config.
+
+        Args:
+            project_dir:    Project directory for capture-state lookup.
+            script:         Full video script (may include transition entries).
+            clips_manifest: Captured clips manifest.
+            config:         Composition config dict (normalised). Defaults to
+                            persisted config if omitted.
+
+        Returns:
+            ``(filtered_script, filtered_manifest)`` tuple — both lists contain
+            only the segments / clips that should be composed.
+        """
+        if config is None:
+            config = self.get_composition_config(project_dir)
+
+        mode = config.get("mode", COMPOSE_MODE_ALL)
+        selected_ids: set[str] = {s for s in config.get("selected_segment_ids", []) if s}
+        region_start = config.get("region_start_seconds")
+        region_end = config.get("region_end_seconds")
+
+        seg_states = self.get_segment_states(project_dir)
+
+        def _seg_id(item: dict) -> str:
+            return str(item.get("id") or item.get("segment_id") or "").strip()
+
+        kept_ids: set[str] = set()
+        filtered_script: list[dict] = []
+
+        for seg in script:
+            seg_type = str(seg.get("type", "")).lower()
+            if seg_type in {"transition", "bridge"}:
+                filtered_script.append(seg)
+                continue
+
+            sid = _seg_id(seg)
+            seg_start = float(seg.get("start_time_seconds", 0))
+            seg_end = float(seg.get("end_time_seconds", seg_start))
+
+            if mode == COMPOSE_MODE_ALL:
+                keep = True
+            elif mode == COMPOSE_MODE_CAPTURED:
+                cap_state = seg_states.get(sid, {}).get("capture_state", CAPTURE_UNCAPTURED)
+                keep = cap_state == CAPTURE_CAPTURED
+            elif mode == COMPOSE_MODE_SPECIFIC:
+                keep = sid in selected_ids
+            elif mode == COMPOSE_MODE_REGION:
+                r_start = float(region_start) if region_start is not None else 0.0
+                r_end = float(region_end) if region_end is not None else float("inf")
+                # overlap: segment and region share any time
+                keep = seg_end > r_start and seg_start < r_end
+            else:
+                keep = True
+
+            if keep:
+                filtered_script.append(seg)
+                if sid:
+                    kept_ids.add(sid)
+
+        filtered_manifest = [c for c in clips_manifest if _seg_id(c) in kept_ids]
+        return filtered_script, filtered_manifest
 
     # ── Trash Bin ───────────────────────────────────────────────────────────
 
@@ -526,8 +725,12 @@ class ScriptStateService:
         except (TypeError, ValueError):
             ui_zoom = defaults["ui_zoom"]
         ui_zoom = max(0.5, min(2.0, ui_zoom))
+        selected_preset_id = config.get("selected_preset_id", defaults.get("selected_preset_id"))
+        if selected_preset_id is not None:
+            selected_preset_id = str(selected_preset_id).strip() or None
         return {
             "ui_zoom": ui_zoom,
+            "selected_preset_id": selected_preset_id,
         }
 
     def update_overlay_ui_config(self, project_dir: str, updates: dict) -> dict:
@@ -541,6 +744,14 @@ class ScriptStateService:
             except (TypeError, ValueError):
                 zoom_value = current["ui_zoom"]
             current["ui_zoom"] = max(0.5, min(2.0, zoom_value))
+
+        if "selected_preset_id" in updates:
+            raw = updates.get("selected_preset_id")
+            if raw is None:
+                current["selected_preset_id"] = None
+            else:
+                preset_id = str(raw).strip()
+                current["selected_preset_id"] = preset_id or None
 
         state["overlay_ui_config"] = current
         self.save_state(project_dir, state)

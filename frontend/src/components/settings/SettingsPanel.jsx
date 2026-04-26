@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from 'react'
 import {
   X,
   Settings,
+  Database,
   Film,
   Keyboard,
   Monitor,
@@ -21,6 +22,7 @@ import { useToast } from '../../context/ToastContext'
 import { apiGet, apiPost } from '../../services/api'
 import YouTubeSettings from '../youtube/YouTubeSettings'
 import SetupWizard from '../wizard/SetupWizard'
+import DataPluginsPanel from '../overlay/DataPluginsPanel'
 import { NumberInput, TextInput, BrowseInput, Select, Toggle, SettingGroup } from '../ui/inputs'
 
 /**
@@ -28,6 +30,7 @@ import { NumberInput, TextInput, BrowseInput, Select, Toggle, SettingGroup } fro
  */
 const CATEGORIES = [
   { id: 'general', label: 'General', icon: Settings },
+  { id: 'data', label: 'Data APIs', icon: Database },
   { id: 'camera', label: 'Camera Defaults', icon: Film },
   { id: 'encoding', label: 'Encoding', icon: Cpu },
   { id: 'ai', label: 'AI / LLM', icon: Sparkles },
@@ -164,6 +167,9 @@ function SettingsPanel({ onClose }) {
           {activeCategory === 'general' && (
             <GeneralSettings value={currentValue} onChange={setField} />
           )}
+          {activeCategory === 'data' && (
+            <DataApiSettings />
+          )}
           {activeCategory === 'camera' && (
             <CameraSettings value={currentValue} onChange={setField} />
           )}
@@ -264,6 +270,18 @@ function CameraSettings({ value, onChange }) {
           </div>
         )}
       </SettingGroup>
+    </div>
+  )
+}
+
+function DataApiSettings() {
+  return (
+    <div className="space-y-6 max-w-xl">
+      <SectionHeader
+        title="Data APIs"
+        description="Configure external data endpoints and API auth once. These settings are global and apply to all projects."
+      />
+      <DataPluginsPanel embedded />
     </div>
   )
 }

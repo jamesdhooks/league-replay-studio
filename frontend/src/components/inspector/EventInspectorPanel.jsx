@@ -24,6 +24,23 @@ const EVENT_TYPES = [
   'pace_lap', 'race_start', 'race_finish',
 ]
 
+function normalizeErrorText(value, fallback = 'Unknown error') {
+  if (typeof value === 'string') return value
+  if (value == null) return fallback
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (value instanceof Error && typeof value.message === 'string') return value.message
+  if (typeof value === 'object') {
+    if (typeof value.message === 'string') return value.message
+    if (typeof value.detail === 'string') return value.detail
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return fallback
+    }
+  }
+  return fallback
+}
+
 /**
  * EventInspectorPanel — Detail panel for the selected timeline event.
  *
@@ -142,7 +159,7 @@ export default function EventInspectorPanel({ projectId }) {
       })
       .catch(err => {
         if (ac.signal.aborted) return
-        setPreviewError(err?.detail ?? err?.message ?? 'Seek failed')
+        setPreviewError(normalizeErrorText(err?.detail ?? err?.message ?? err, 'Seek failed'))
       })
       .finally(() => {
         if (!ac.signal.aborted) setPreviewSeeking(false)
@@ -422,7 +439,7 @@ export default function EventInspectorPanel({ projectId }) {
             {!previewSeeking && previewError && (
               <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 gap-1.5 px-3 text-center">
                 <AlertTriangle className="w-4 h-4 text-warning" />
-                <span className="text-xxs text-text-disabled">{previewError}</span>
+                <span className="text-xxs text-text-disabled">{normalizeErrorText(previewError, 'Seek failed')}</span>
               </div>
             )}
           </>

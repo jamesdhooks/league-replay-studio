@@ -149,6 +149,43 @@ export function computeEventScore(event, weights, params = {}, raceDuration = 0)
     if (leadChanges > 0) {
       narrativeBonus += 0.6 + Math.min(leadChanges - 1, 3) * 0.3
     }
+    // Gap tightness bonus — rewards segments where cars were genuinely wheel-to-wheel.
+    // Scaled by battleGapBonus param (0 = off, default 0.5, max 2.0).
+    const gapBonus = params.battleGapBonus ?? 0.5
+    if (gapBonus > 0) {
+      // Prefer sub-window metrics when available so merged clusters score by
+      // their strongest contained battle moments instead of one diluted average.
+      const rawWindows = Array.isArray(metadata.sub_battles)
+        ? metadata.sub_battles
+        : (Array.isArray(metadata.driver_windows) ? metadata.driver_windows : [])
+
+      const windowBonuses = rawWindows
+        .map(w => {
+          const wLeadChanges = Number(w?.lead_changes || 0)
+          const wAvgGap = w?.avg_gap_seconds
+          let bonus = 0
+          if (wLeadChanges > 0) {
+            bonus += 0.4 + Math.min(wLeadChanges - 1, 2) * 0.2
+          }
+          if (wAvgGap != null) {
+            const gapFactor = Math.max(0, 1 - Number(wAvgGap) / 2.0)
+            bonus += gapFactor * gapBonus
+          }
+          return bonus
+        })
+        .filter(b => b > 0)
+        .sort((a, b) => b - a)
+
+      if (windowBonuses.length > 0) {
+        // Use the best one or two windows for narrative lift.
+        narrativeBonus += windowBonuses[0]
+        if (windowBonuses.length > 1) narrativeBonus += windowBonuses[1] * 0.5
+      } else if (metadata.avg_gap_seconds != null) {
+        // Fallback for legacy events without window-level metrics.
+        const gapFactor = Math.max(0, 1 - metadata.avg_gap_seconds / 2.0)
+        narrativeBonus += gapFactor * gapBonus
+      }
+    }
   }
   // In-battle overtakes are redundant with the parent battle clip — dampen them
   // so the fuller battle story is preferred over the isolated pass.
@@ -225,8 +262,8 @@ export function computeEventScore(event, weights, params = {}, raceDuration = 0)
   }
 
   // Stage 6 — User Weight Override
+  // NOTE: recorded here for display, but applied after per-type normalization in computeHighlightSelection.
   const userWeight = (weights[eventType] ?? 50) / 100.0
-  score *= userWeight
   components.user_weight = userWeight
 
   // Round score
@@ -318,34 +355,67 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     }
   })
 
-  // 1b. Normalize scores to 0–10 range so histogram buckets and tiers work
-  const rawScores = scored.filter(e => e.score > 0).map(e => e.score)
-  if (rawScores.length >= 2) {
-    const minScore = Math.min(...rawScores)
-    const maxScore = Math.max(...rawScores)
-    const range = maxScore - minScore
-    if (range > 0) {
-      for (const evt of scored) {
-        if (evt.score <= 0) continue
-        // Normalize to 0.5–10 (floor at 0.5 so nothing maps to exactly 0)
-        evt.score = Math.round((0.5 + ((evt.score - minScore) / range) * 9.5) * 100) / 100
-        evt.score_components.normalization = { raw: evt.raw_score, min: minScore, max: maxScore }
-      }
-    } else {
-      // All scores identical — set to midpoint
-      for (const evt of scored) {
-        if (evt.score <= 0) continue
-        evt.score = 5.0
-        evt.score_components.normalization = { raw: evt.raw_score, min: minScore, max: maxScore }
+  // 1b. Normalization — cross_type (default) or per_type (legacy).
+  //     cross_type stretches all positive raw scores onto a single 0.5–10 scale
+  //     so BASE_SCORES and inter-type score differences survive into selection.
+  //     The user weight slider then acts as an honest cross-type multiplier.
+  //     per_type is the legacy mode kept for back-compat.
+  const normalizationMode = (params.normalizationMode === 'per_type') ? 'per_type' : 'cross_type'
+  const positive = scored.filter(e => e.score > 0)
+
+  if (normalizationMode === 'cross_type') {
+    if (positive.length > 0) {
+      const allScores = positive.map(e => e.score)
+      const minScore = Math.min(...allScores)
+      const maxScore = Math.max(...allScores)
+      const range = maxScore - minScore
+      for (const evt of positive) {
+        const preNorm = evt.score
+        if (range > 0) {
+          evt.score = Math.round((0.5 + ((evt.score - minScore) / range) * 9.5) * 100) / 100
+        } else {
+          evt.score = 5.0
+        }
+        evt.score_components.normalization = { raw: preNorm, min: minScore, max: maxScore, mode: 'cross_type' }
+        evt.score_raw = evt.score
+        const userWeight = (weights[evt.event_type] ?? 50) / 100.0
+        evt.score = Math.round(evt.score * userWeight * 100) / 100
+        evt.score_components.user_weight = userWeight
       }
     }
-    // Re-classify tiers with normalized scores
-    for (const evt of scored) {
-      if (evt.score > TIER_S_THRESHOLD) evt.tier = 'S'
-      else if (evt.score >= TIER_A_THRESHOLD) evt.tier = 'A'
-      else if (evt.score >= TIER_B_THRESHOLD) evt.tier = 'B'
-      else evt.tier = 'C'
+  } else {
+    // Per-type normalization (legacy)
+    const typeGroups = {}
+    for (const evt of positive) {
+      if (!typeGroups[evt.event_type]) typeGroups[evt.event_type] = []
+      typeGroups[evt.event_type].push(evt)
     }
+    for (const [eventType, typeEvts] of Object.entries(typeGroups)) {
+      const typeScores = typeEvts.map(e => e.score)
+      const minScore = Math.min(...typeScores)
+      const maxScore = Math.max(...typeScores)
+      const range = maxScore - minScore
+      for (const evt of typeEvts) {
+        const preNorm = evt.score
+        if (range > 0) {
+          evt.score = Math.round((0.5 + ((evt.score - minScore) / range) * 9.5) * 100) / 100
+        } else {
+          evt.score = 5.0
+        }
+        evt.score_components.normalization = { raw: preNorm, min: minScore, max: maxScore, type: eventType, mode: 'per_type' }
+        evt.score_raw = evt.score
+        const userWeight = (weights[evt.event_type] ?? 50) / 100.0
+        evt.score = Math.round(evt.score * userWeight * 100) / 100
+        evt.score_components.user_weight = userWeight
+      }
+    }
+  }
+  // Re-classify tiers with final weighted normalized scores
+  for (const evt of scored) {
+    if (evt.score > TIER_S_THRESHOLD) evt.tier = 'S'
+    else if (evt.score >= TIER_A_THRESHOLD) evt.tier = 'A'
+    else if (evt.score >= TIER_B_THRESHOLD) evt.tier = 'B'
+    else evt.tier = 'C'
   }
 
   // 2. Multi-pass selection:
@@ -426,23 +496,64 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     }
   }
 
-  // Pass 2: Bucket fill — select by score within bucket budgets
+  // Pass 2: Bucket fill — Balanced Selection v3 marginal-utility loop.
+  // Effective score = score × type_decay × quota_pressure × bucket_diversity.
+  // When diversityStrength === 0, all factors collapse to 1.0 and behavior is
+  // identical to the legacy strict-by-score selection.
+  const diversityStrength = Math.max(0, Number(params.diversityStrength ?? 0))
+  const divScale = diversityStrength / 50
+  const typeDecayBase = Math.max(0.01, Math.min(1.0, Number(params.typeDecayBase ?? 0.85)))
+  const bucketRepeatPenalty = Math.max(0, Number(params.bucketRepeatPenalty ?? 0.25))
+  const floorBoost = 1.5
+  const mixMin = params.mixMin || {}
+  const mixMax = params.mixMax || {}
+  const target = Math.max(targetDuration || 1, 1)
+
+  // Track per-type stats from Pass 1 (must-have / overrides already in highlightIds).
+  const typeCount = {}
+  const typeUsedDuration = {}
+  const bucketTypeCount = {}  // key: `${bucket}|${type}`
+  for (const evt of scored) {
+    if (!highlightIds.has(evt.id)) continue
+    const t = evt.event_type
+    const b = evt.bucket || 'mid'
+    typeCount[t] = (typeCount[t] || 0) + 1
+    typeUsedDuration[t] = (typeUsedDuration[t] || 0) + evt.selectionDuration
+    const k = `${b}|${t}`
+    bucketTypeCount[k] = (bucketTypeCount[k] || 0) + 1
+  }
+
+  const typeDecayFactor = (count) =>
+    (divScale <= 0 || count <= 0) ? 1.0 : Math.pow(typeDecayBase, count * divScale)
+  const quotaPressure = (t) => {
+    const share = (typeUsedDuration[t] || 0) / target
+    const cap = mixMax[t]
+    if (cap != null && share >= Number(cap)) return 0
+    if (divScale > 0 && mixMin[t] != null && share < Number(mixMin[t])) {
+      return 1 + (floorBoost - 1) * divScale
+    }
+    return 1.0
+  }
+  const bucketDivFactor = (b, t) => {
+    const c = bucketTypeCount[`${b}|${t}`] || 0
+    return (divScale <= 0 || c <= 0) ? 1.0 : 1.0 / (1.0 + bucketRepeatPenalty * c * divScale)
+  }
+
+  // Build the eligible pool once, then re-rank each iteration so diversity
+  // factors (which depend on already-selected counts) update correctly.
+  const eligible = []
   for (const evt of sortedByScore) {
     if (highlightIds.has(evt.id) || fullVideoIds.has(evt.id) || excludedIds.has(evt.id)) continue
-
-    // Exclude cooldown-lap events
     if (raceFinishCutoff !== null
         && _POST_RACE_EXCLUDED.has(evt.event_type)
         && (evt.start_time_seconds || 0) > raceFinishCutoff) {
       excludedIds.add(evt.id)
       continue
     }
-
     if (evt.severity < minSeverity) {
       excludedIds.add(evt.id)
       continue
     }
-
     if (params.incidentPositionCutoff > 0) {
       const INCIDENT_TYPES = new Set([
         'incident', 'crash', 'spinout', 'car_contact', 'contact',
@@ -456,28 +567,56 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
         }
       }
     }
-
     if (evt.score <= 0) {
       excludedIds.add(evt.id)
       continue
     }
+    eligible.push(evt)
+  }
 
-    if (targetDuration && targetDuration > 0) {
-      if (highlightDuration + evt.selectionDuration > targetDuration * TARGET_DURATION_TOLERANCE) {
-        fullVideoIds.add(evt.id)
-        continue
+  const tierPriMap = { S: 4, A: 3, B: 2, C: 1 }
+  const placed = new Set()
+
+  // Marginal-utility greedy selection. Skips events that fail bucket budget or
+  // would exceed total duration tolerance; demotes those to full-video at the end.
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    if (targetDuration && highlightDuration >= targetDuration) break
+    let bestEvt = null
+    let bestEff = -1
+    for (const evt of eligible) {
+      if (placed.has(evt.id)) continue
+      const t = evt.event_type
+      const b = evt.bucket || 'mid'
+      const budget = bucketBudgets[b] || (targetDuration || 300) * 0.3
+      if ((bucketUsed[b] || 0) >= budget) continue
+      if (targetDuration > 0 && highlightDuration + evt.selectionDuration > targetDuration * TARGET_DURATION_TOLERANCE) continue
+      const q = quotaPressure(t)
+      if (q <= 0) continue
+      const eff = evt.score * q * typeDecayFactor(typeCount[t] || 0) * bucketDivFactor(b, t)
+        + (tierPriMap[evt.tier] || 0) * 0.001
+      if (eff > bestEff) {
+        bestEff = eff
+        bestEvt = evt
       }
     }
+    if (!bestEvt) break
+    const t = bestEvt.event_type
+    const b = bestEvt.bucket || 'mid'
+    placed.add(bestEvt.id)
+    highlightIds.add(bestEvt.id)
+    highlightDuration += bestEvt.selectionDuration
+    bucketUsed[b] = (bucketUsed[b] || 0) + bestEvt.selectionDuration
+    typeCount[t] = (typeCount[t] || 0) + 1
+    typeUsedDuration[t] = (typeUsedDuration[t] || 0) + bestEvt.selectionDuration
+    bucketTypeCount[`${b}|${t}`] = (bucketTypeCount[`${b}|${t}`] || 0) + 1
+  }
 
-    const budget = bucketBudgets[evt.bucket] || (targetDuration || 300) * 0.3
-    if ((bucketUsed[evt.bucket] || 0) >= budget) {
+  // Demote any remaining eligible events not selected → full-video tier.
+  for (const evt of eligible) {
+    if (!placed.has(evt.id) && !highlightIds.has(evt.id)) {
       fullVideoIds.add(evt.id)
-      continue
     }
-
-    highlightIds.add(evt.id)
-    highlightDuration += evt.selectionDuration
-    bucketUsed[evt.bucket] = (bucketUsed[evt.bucket] || 0) + evt.selectionDuration
   }
 
   // 3. Build scored events with inclusion tier, bucket, and reasons
@@ -548,6 +687,33 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     typeCounts[evt.event_type] = (typeCounts[evt.event_type] || 0) + 1
   }
 
+  // Selection diagnostics — per-type share vs configured mix targets/floors/caps
+  const typeDurations = {}
+  for (const evt of includedEvents) {
+    typeDurations[evt.event_type] = (typeDurations[evt.event_type] || 0) + evt.selectionDuration
+  }
+  const typeShares = {}
+  const targetForShare = Math.max(targetDuration || 1, 1)
+  for (const [t, d] of Object.entries(typeDurations)) {
+    typeShares[t] = Math.round((d / targetForShare) * 1000) / 1000
+  }
+  const floorsUnmet = Object.entries(params.mixMin || {})
+    .filter(([t, mn]) => (typeDurations[t] || 0) / targetForShare < Number(mn))
+    .map(([t]) => t)
+  const capsHit = Object.entries(params.mixMax || {})
+    .filter(([t, mx]) => mx != null && (typeDurations[t] || 0) / targetForShare >= Number(mx))
+    .map(([t]) => t)
+  const selectionDiagnostics = {
+    diversityStrength: params.diversityStrength ?? 0,
+    typeShares,
+    typeDurations,
+    mixMin: params.mixMin || {},
+    mixMax: params.mixMax || {},
+    mixTargets: params.mixTargets || {},
+    floorsUnmet,
+    capsHit,
+  }
+
   // Tier distribution
   const tierCounts = { S: 0, A: 0, B: 0, C: 0 }
   for (const evt of scored) {
@@ -568,6 +734,7 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     totalDrivers,
     typeCounts,
     tierCounts,
+    selectionDiagnostics,
   }
 
   return {
@@ -707,11 +874,14 @@ function makeSegment(type, evt, clipWindow, resolution, extra = {}) {
  * @param {number} raceDuration - Total race duration for gap analysis
  * @returns {{ timeline, metrics, fullVideoIds, demotedIds }}
  */
-export function buildProductionTimeline(selection, targetDuration, params, raceDuration) {
+export function buildProductionTimeline(selection, targetDuration, params, raceDuration, replayMode = 'highlights') {
   _nextSegId = 1
 
   const pipThreshold = params?.pipThreshold ?? 7.0
   const gapThreshold = Math.max(MIN_BRIDGE_DURATION, (targetDuration || 300) * GAP_THRESHOLD_FRACTION)
+
+  // Full race mode or no target duration → no budget cap; otherwise honour targetDuration * tolerance
+  const budgetCap = (replayMode === 'full' || !targetDuration) ? Infinity : targetDuration * TARGET_DURATION_TOLERANCE
 
   // Start with events already classified by computeHighlightSelection
   const highlights = selection.scoredEvents
@@ -802,7 +972,7 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
 
     if (overlaps.length === 0) {
       // Clean placement
-      if (usedBudget + window.clipDuration <= targetDuration * TARGET_DURATION_TOLERANCE || MANDATORY_TYPES.has(evt.event_type)) {
+      if (usedBudget + window.clipDuration <= budgetCap || MANDATORY_TYPES.has(evt.event_type)) {
         const seg = makeSegment('event', evt, window, 'placed')
         timeline.push(seg)
         usedBudget += window.clipDuration
@@ -819,7 +989,7 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
         // MERGE: same drivers, extend window
         const merged = unionWindows(existing, window)
         const durationDelta = merged.clipDuration - existing.clipDuration
-        if (usedBudget + durationDelta <= targetDuration * TARGET_DURATION_TOLERANCE || MANDATORY_TYPES.has(evt.event_type)) {
+        if (usedBudget + durationDelta <= budgetCap || MANDATORY_TYPES.has(evt.event_type)) {
           const allSources = [...(existing.sourceEvents || []), evt]
           const allDrivers = [...new Set([...(existing.involved_drivers || []), ...(evt.involved_drivers || [])])]
           const allDriverNames = [...new Set([...(existing.driver_names || []), ...(evt.driver_names || [])])]
@@ -852,7 +1022,7 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
         // PIP: both high-value, different drivers
         const pipWindow = unionWindows(existing, window)
         const durationDelta = pipWindow.clipDuration - existing.clipDuration
-        if (usedBudget + durationDelta <= targetDuration * TARGET_DURATION_TOLERANCE) {
+        if (usedBudget + durationDelta <= budgetCap) {
           const primary = existing.score >= evt.score ? existing : evt
           const secondary = existing.score >= evt.score ? evt : existing
           const allSources = [...(existing.sourceEvents || []), evt]
@@ -887,7 +1057,7 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
       } else {
         // Try trimming
         const trimmed = trimWindow(window, evt, existing)
-        if (trimmed && usedBudget + trimmed.clipDuration <= targetDuration * TARGET_DURATION_TOLERANCE) {
+        if (trimmed && usedBudget + trimmed.clipDuration <= budgetCap) {
           const seg = makeSegment('event', evt, trimmed, 'trimmed', {
             resolutionNote: `Trimmed to avoid overlap (${trimmed.clipDuration.toFixed(1)}s)`,
           })
@@ -976,7 +1146,7 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
     for (const candidate of contextCandidates) {
       if (contextUsedIds.has(candidate.id)) continue
       if (contextInThisGap >= MAX_CONTEXT_PER_GAP) break
-      if (usedBudget >= targetDuration * TARGET_DURATION_TOLERANCE) break
+      if (usedBudget >= budgetCap) break
 
       const cw = computeClipWindow(candidate, params)
       // Candidate must fit within the gap
@@ -1030,6 +1200,59 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
       }
     }
     finalTimeline.push(timeline[i])
+  }
+
+  // ── Full race mode: prepend/append bridges to cover 0 → raceDuration ─
+  if (replayMode === 'full' && raceDuration > 0) {
+    const firstSeg = finalTimeline[0]
+    const lastSeg = finalTimeline[finalTimeline.length - 1]
+
+    if (firstSeg && firstSeg.clipStart > MIN_BRIDGE_DURATION) {
+      finalTimeline.unshift({
+        id: `bridge_${_nextSegId++}`,
+        type: 'bridge',
+        clipStart: 0,
+        clipEnd: firstSeg.clipStart,
+        clipDuration: firstSeg.clipStart,
+        coreStart: 0,
+        coreEnd: firstSeg.clipStart,
+        sourceEvents: [],
+        primaryEventId: null,
+        event_type: null,
+        score: 0,
+        tier: null,
+        bucket: null,
+        involved_drivers: [],
+        driver_names: [],
+        severity: 0,
+        resolution: 'bridge',
+        resolutionNote: `Race start to first event (${firstSeg.clipStart.toFixed(1)}s)`,
+      })
+    }
+
+    const refreshedLast = finalTimeline[finalTimeline.length - 1]
+    if (refreshedLast && raceDuration - refreshedLast.clipEnd > MIN_BRIDGE_DURATION) {
+      finalTimeline.push({
+        id: `bridge_${_nextSegId++}`,
+        type: 'bridge',
+        clipStart: refreshedLast.clipEnd,
+        clipEnd: raceDuration,
+        clipDuration: raceDuration - refreshedLast.clipEnd,
+        coreStart: refreshedLast.clipEnd,
+        coreEnd: raceDuration,
+        sourceEvents: [],
+        primaryEventId: null,
+        event_type: null,
+        score: 0,
+        tier: null,
+        bucket: null,
+        involved_drivers: [],
+        driver_names: [],
+        severity: 0,
+        resolution: 'bridge',
+        resolutionNote: `Last event to race end (${(raceDuration - refreshedLast.clipEnd).toFixed(1)}s)`,
+      })
+    }
   }
 
   // ── Compute edit-time positions (for compact mode) ───────────────────

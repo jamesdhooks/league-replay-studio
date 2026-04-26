@@ -18,14 +18,24 @@ export function CompositionProvider({ children }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
+  const isJobActive = Boolean(activeJob && !['completed', 'error', 'cancelled'].includes(activeJob.state))
+
   // ── Fetch status ─────────────────────────────────────────────────────────
   const fetchStatus = useCallback(async () => {
     try {
       const data = await apiGet('/composition/status')
       setActiveJob(data.active_job || null)
       setRecentJobs(data.recent_jobs || [])
-      if (data.active_job?.log_entries) {
-        setLogEntries(data.active_job.log_entries)
+      const activeLogs = data.active_job?.log_entries
+      const recentLogs = Array.isArray(data.recent_jobs) && data.recent_jobs.length > 0
+        ? data.recent_jobs[0]?.log_entries
+        : null
+      if (Array.isArray(activeLogs)) {
+        setLogEntries(activeLogs)
+      } else if (Array.isArray(recentLogs)) {
+        setLogEntries(recentLogs)
+      } else {
+        setLogEntries([])
       }
       return data
     } catch (err) {
@@ -38,6 +48,7 @@ export function CompositionProvider({ children }) {
   const startComposition = useCallback(async ({
     projectId, script, clipsManifest, overlayConfig,
     transitionConfig, trimConfig, outputDir, presetId,
+    compositionSelection, gapPolicy,
   }) => {
     setLoading(true)
     setError(null)
@@ -50,11 +61,14 @@ export function CompositionProvider({ children }) {
         transition_config: transitionConfig || null,
         trim_config: trimConfig || null,
         output_dir: outputDir,
-        preset_id: presetId || 'youtube_1080p60',
+        preset_id: presetId || '1080p',
+        composition_selection: compositionSelection || null,
+        gap_policy: gapPolicy || null,
       })
       if (result.success && result.job) {
         setActiveJob(result.job)
         setLogEntries(result.job.log_entries || [])
+        fetchStatus().catch(() => {})
       }
       return result
     } catch (err) {
@@ -63,7 +77,7 @@ export function CompositionProvider({ children }) {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [fetchStatus])
 
   // ── Cancel ──────────────────────────────────────────────────────────────
   const cancelComposition = useCallback(async (jobId) => {
@@ -100,19 +114,22 @@ export function CompositionProvider({ children }) {
         }))
         setLogEntries([])
         setError(null)
+        fetchStatus().catch(() => {})
       }),
 
       wsClient.subscribe('composition:progress', (data) => {
-        setActiveJob(prev => prev ? {
-          ...prev,
-          state: data.state || prev.state,
-          progress_pct: data.progress_pct || prev.progress_pct,
-          step: data.step,
-          segment_index: data.segment_index,
-          total_segments: data.total_segments,
-        } : prev)
-        if (data.log_entries) {
-          setLogEntries(data.log_entries)
+        setActiveJob(prev => ({
+          ...(prev || {}),
+          job_id: data.job_id ?? prev?.job_id,
+          project_id: data.project_id ?? prev?.project_id,
+          state: data.state || prev?.state || 'processing',
+          progress_pct: data.progress_pct ?? prev?.progress_pct ?? 0,
+          step: data.step ?? prev?.step,
+          segment_index: data.segment_index ?? prev?.segment_index,
+          total_segments: data.total_segments ?? prev?.total_segments,
+        }))
+        if (Array.isArray(data.log_entries)) {
+          setLogEntries(prev => data.log_entries.length >= prev.length ? data.log_entries : prev)
         }
       }),
 
@@ -122,6 +139,7 @@ export function CompositionProvider({ children }) {
           { ...data, state: 'completed', progress_pct: 100 },
           ...prev.slice(0, 19),
         ])
+        fetchStatus().catch(() => {})
       }),
 
       wsClient.subscribe('composition:error', (data) => {
@@ -131,11 +149,22 @@ export function CompositionProvider({ children }) {
           ...prev.slice(0, 19),
         ])
         if (data.error) setError(data.error)
+        fetchStatus().catch(() => {})
       }),
     ]
 
     return () => unsubs.forEach(fn => fn())
-  }, [])
+  }, [fetchStatus])
+
+  // Fast compositions can finish before all websocket messages are painted.
+  // Poll status briefly while active to keep progress/logs in sync.
+  useEffect(() => {
+    if (!isJobActive) return
+    const id = setInterval(() => {
+      fetchStatus().catch(() => {})
+    }, 400)
+    return () => clearInterval(id)
+  }, [isJobActive, fetchStatus])
 
   // ── Context value ───────────────────────────────────────────────────────
   const value = useMemo(() => ({

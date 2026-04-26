@@ -58,6 +58,9 @@ router = APIRouter(prefix="/api/iracing", tags=["iracing"])
 # ruling out any path-separator or traversal characters.
 _SAFE_HLS_FILENAME_RE = re.compile(r'^(?:playlist\.m3u8|seg\d{5}\.ts)$')
 
+_SEEK_VALIDATE_SETTLE_S = 0.35
+_SEEK_VALIDATE_TOLERANCE_MS = 3000
+
 
 # ── Stream coordination ────────────────────────────────────────────────────────
 # Only ONE H.264-feed consumer (H.264 fMP4 or HLS segmenter) may be active at
@@ -345,8 +348,9 @@ class SeekRequest(BaseModel):
 
 
 class SeekTimeRequest(BaseModel):
-    session_num: int = Field(..., ge=0, description="Session index (0-based)")
+    session_num: Optional[int] = Field(None, ge=0, description="Session index (0-based); omitted = auto")
     session_time_ms: int = Field(..., ge=0, description="Milliseconds from session start")
+    resolve_session: bool = Field(True, description="Auto-correct session when seek drift indicates wrong context")
 
 
 class SpeedRequest(BaseModel):
@@ -457,11 +461,130 @@ async def replay_seek_time(body: SeekTimeRequest) -> dict:
     """Seek the replay to a specific session number and time in milliseconds."""
     if not bridge.is_connected:
         raise HTTPException(status_code=409, detail="iRacing is not connected")
-    success = bridge.replay_search_session_time(body.session_num, body.session_time_ms)
+
+    available_sessions = bridge.session_data.get("sessions", [])
+
+    def _candidate_sessions() -> list[int]:
+        values: list[int] = []
+        if body.session_num is not None:
+            values.append(int(body.session_num))
+
+        current = bridge.get_replay_session_num()
+        if current >= 0 and current not in values:
+            values.append(current)
+
+        for s in available_sessions:
+            try:
+                idx = int(s.get("index", -1))
+            except (TypeError, ValueError):
+                idx = -1
+            if idx >= 0 and idx not in values:
+                values.append(idx)
+
+        if not values:
+            values.append(0)
+        return values
+
+    async def _seek_and_measure(session_num: int) -> tuple[bool, Optional[int], Optional[int], Optional[int]]:
+        ok = bridge.replay_search_session_time(session_num, body.session_time_ms)
+        if not ok:
+            return False, None, None, None
+
+        await asyncio.sleep(_SEEK_VALIDATE_SETTLE_S)
+        snap = bridge.capture_snapshot() or {}
+        actual_ms = int((snap.get("session_time") or 0.0) * 1000)
+        replay_session_num = snap.get("replay_session_num")
+        try:
+            replay_session_num = int(replay_session_num) if replay_session_num is not None else None
+        except (TypeError, ValueError):
+            replay_session_num = None
+
+        drift_ms = abs(actual_ms - int(body.session_time_ms))
+        return True, drift_ms, replay_session_num, actual_ms
+
+    candidates = _candidate_sessions()
+    requested_session = candidates[0]
+
+    ok, drift_ms, replay_session_num, actual_ms = await _seek_and_measure(requested_session)
+
+    best_session = requested_session
+    best_ok = ok
+    best_drift = drift_ms
+    best_replay_session = replay_session_num
+    best_actual_ms = actual_ms
+
+    needs_resolution = bool(body.resolve_session) and (
+        (not ok)
+        or (drift_ms is not None and drift_ms > _SEEK_VALIDATE_TOLERANCE_MS)
+    )
+
+    if needs_resolution:
+        for candidate in candidates:
+            if candidate == requested_session:
+                continue
+            c_ok, c_drift, c_replay_session, c_actual_ms = await _seek_and_measure(candidate)
+            if not c_ok:
+                continue
+            if not best_ok:
+                best_session = candidate
+                best_ok = True
+                best_drift = c_drift
+                best_replay_session = c_replay_session
+                best_actual_ms = c_actual_ms
+                continue
+            if c_drift is None:
+                continue
+            if best_drift is None or c_drift < best_drift:
+                best_session = candidate
+                best_drift = c_drift
+                best_replay_session = c_replay_session
+                best_actual_ms = c_actual_ms
+
+        should_accept_resolution = (
+            best_session != requested_session
+            and best_drift is not None
+            and best_drift <= _SEEK_VALIDATE_TOLERANCE_MS
+        )
+
+        if should_accept_resolution:
+            command_log.record(
+                "seek-time-session-resolved",
+                {
+                    "requested_session_num": requested_session,
+                    "resolved_session_num": best_session,
+                    "session_time_ms": body.session_time_ms,
+                    "requested_drift_ms": drift_ms,
+                    "resolved_drift_ms": best_drift,
+                },
+                source="api_iracing",
+            )
+            # Ensure replay is parked on the selected session after probing.
+            best_ok, best_drift, best_replay_session, best_actual_ms = await _seek_and_measure(best_session)
+        else:
+            best_session = requested_session
+
+    success = best_ok
     if not success:
         raise HTTPException(status_code=500, detail="Failed to seek replay to time")
-    command_log.record("seek-time", {"session_num": body.session_num, "session_time_ms": body.session_time_ms})
-    return {"status": "ok", "session_num": body.session_num, "session_time_ms": body.session_time_ms}
+    command_log.record(
+        "seek-time",
+        {
+            "session_num": best_session,
+            "requested_session_num": body.session_num,
+            "session_time_ms": body.session_time_ms,
+            "drift_ms": best_drift,
+            "replay_session_num": best_replay_session,
+        },
+    )
+    return {
+        "status": "ok",
+        "session_num": best_session,
+        "requested_session_num": body.session_num,
+        "session_time_ms": body.session_time_ms,
+        "drift_ms": best_drift,
+        "actual_ms": best_actual_ms,
+        "replay_session_num": best_replay_session,
+    }
 
 
 @router.post("/replay/speed")
@@ -661,10 +784,33 @@ async def list_windows() -> list[dict]:
 @router.get("/capture-target")
 async def get_capture_target() -> dict:
     """Return the current capture target (hwnd or 'auto')."""
-    from server.utils.window_capture import get_capture_target as _get
+    from server.utils.window_capture import (
+        find_iracing_window,
+        get_capture_target as _get,
+        list_visible_windows,
+    )
 
     hwnd = _get()
-    return {"mode": "manual" if hwnd else "auto", "hwnd": hwnd}
+    width = None
+    height = None
+
+    if hwnd:
+        for win in list_visible_windows():
+            if int(win.get("hwnd") or 0) == int(hwnd):
+                width = int(win.get("width") or 0) or None
+                height = int(win.get("height") or 0) or None
+                break
+    else:
+        rect = find_iracing_window() or {}
+        width = int(rect.get("width") or 0) or None
+        height = int(rect.get("height") or 0) or None
+
+    return {
+        "mode": "manual" if hwnd else "auto",
+        "hwnd": hwnd,
+        "width": width,
+        "height": height,
+    }
 
 
 class CaptureTargetRequest(BaseModel):
@@ -674,19 +820,38 @@ class CaptureTargetRequest(BaseModel):
 @router.post("/capture-target")
 async def set_capture_target_endpoint(body: CaptureTargetRequest) -> dict:
     """Set a manual capture target by window handle."""
-    from server.utils.window_capture import set_capture_target
+    from server.utils.window_capture import list_visible_windows, set_capture_target
 
     set_capture_target(body.hwnd)
-    return {"status": "ok", "mode": "manual", "hwnd": body.hwnd}
+    width = None
+    height = None
+    for win in list_visible_windows():
+        if int(win.get("hwnd") or 0) == int(body.hwnd):
+            width = int(win.get("width") or 0) or None
+            height = int(win.get("height") or 0) or None
+            break
+    return {
+        "status": "ok",
+        "mode": "manual",
+        "hwnd": body.hwnd,
+        "width": width,
+        "height": height,
+    }
 
 
 @router.delete("/capture-target")
 async def reset_capture_target() -> dict:
     """Reset capture target to auto-detect iRacing window."""
-    from server.utils.window_capture import set_capture_target
+    from server.utils.window_capture import find_iracing_window, set_capture_target
 
     set_capture_target(None)
-    return {"status": "ok", "mode": "auto"}
+    rect = find_iracing_window() or {}
+    return {
+        "status": "ok",
+        "mode": "auto",
+        "width": int(rect.get("width") or 0) or None,
+        "height": int(rect.get("height") or 0) or None,
+    }
 
 
 @router.get("/screenshot")

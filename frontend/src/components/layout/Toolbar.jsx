@@ -1,16 +1,40 @@
 import {
   Settings,
   HelpCircle,
-  Undo2,
-  Redo2,
   Save,
+  SaveAll,
   ArrowLeft,
-  Wifi,
-  WifiOff,
+  PanelBottomOpen,
+  PanelBottomClose,
+  Hash,
 } from 'lucide-react'
+import { useMemo, useCallback, useEffect, useState, useRef } from 'react'
 import StepIndicator from '../projects/StepIndicator'
 import { useIRacing } from '../../context/IRacingContext'
+import { useProject } from '../../context/ProjectContext'
 import { useSettings } from '../../context/SettingsContext'
+import { useCapture } from '../../context/CaptureContext'
+import { usePipeline } from '../../context/PipelineContext'
+
+function areValuesEqual(a, b) {
+  if (a === b) return true
+  if (typeof a === 'object' && a !== null && typeof b === 'object' && b !== null) {
+    return JSON.stringify(a) === JSON.stringify(b)
+  }
+  return false
+}
+
+function computeAugmentations(overrides = {}, preset = null) {
+  if (!overrides || typeof overrides !== 'object') return {}
+  const out = {}
+  Object.entries(overrides).forEach(([key, value]) => {
+    const base = preset ? preset[key] : undefined
+    if (!areValuesEqual(value, base)) {
+      out[key] = value
+    }
+  })
+  return out
+}
 
 /**
  * Top toolbar with app title, navigation, and action buttons.
@@ -19,30 +43,144 @@ import { useSettings } from '../../context/SettingsContext'
  * @param {Object} props
  * @param {string} [props.projectName] - Active project name (if any)
  * @param {() => void} [props.onOpenSettings] - Callback to open settings panel
- * @param {boolean} [props.canUndo] - Whether undo is available
- * @param {boolean} [props.canRedo] - Whether redo is available
- * @param {() => void} [props.onUndo] - Undo callback
- * @param {() => void} [props.onRedo] - Redo callback
- * @param {string} [props.undoDescription] - Description of next undo operation
- * @param {string} [props.redoDescription] - Description of next redo operation
  */
 function Toolbar({
   activeProject, onBack, onStepClick, stepReadiness,
+  pipelineExecutionSteps, pipelineRunningStep,
+  pipelineAdvancedMode = false, onTogglePipelineAdvancedMode,
   analysisProgress,
   onOpenSettings, onOpenHelp,
-  canUndo = false, canRedo = false, onUndo, onRedo,
-  undoDescription, redoDescription,
 }) {
-  const { isConnected, sessionData } = useIRacing()
+  const { isConnected, sessionData, subsessionId } = useIRacing()
   const { settings } = useSettings()
+  const { updateProject } = useProject()
+  const { software } = useCapture()
+  const {
+    presets,
+    projectControlStateMap,
+    getProjectControlState,
+    saveProjectControlState,
+    createPreset,
+    updatePreset,
+  } = usePipeline()
+
+  const activeControlState = activeProject?.id ? (projectControlStateMap[activeProject.id] || null) : null
+  const resolvedPresetId = activeControlState?.preset_id || ''
+  const resolvedOverrides = activeControlState?.overrides || {}
+  const [presetBusy, setPresetBusy] = useState(false)
+
+  useEffect(() => {
+    if (!activeProject?.id) return
+    getProjectControlState(activeProject.id).catch(() => {})
+  }, [activeProject?.id, getProjectControlState])
+
+  const selectedPresetId = resolvedPresetId
+  const selectedPreset = useMemo(
+    () => presets.find(p => p.id === selectedPresetId) || null,
+    [presets, selectedPresetId],
+  )
+  const localAugmentations = useMemo(
+    () => computeAugmentations(resolvedOverrides, selectedPreset),
+    [resolvedOverrides, selectedPreset],
+  )
+  const hasLocalOverrides = Boolean(Object.keys(localAugmentations).length > 0)
+
+  const handlePresetChange = useCallback(async (presetId) => {
+    if (!activeProject?.id) return
+    setPresetBusy(true)
+    try {
+      if (activeControlState) {
+        await saveProjectControlState(activeProject.id, {
+          schema_version: activeControlState.schema_version || 1,
+          preset_id: activeControlState.preset_id || '',
+          overrides: resolvedOverrides || {},
+          controls: activeControlState.controls || {},
+        })
+      }
+      await saveProjectControlState(activeProject.id, {
+        schema_version: 1,
+        preset_id: presetId,
+        overrides: resolvedOverrides || {},
+        controls: activeControlState?.controls || {},
+      })
+    } finally {
+      setPresetBusy(false)
+    }
+  }, [activeProject?.id, activeControlState, resolvedOverrides, saveProjectControlState])
+
+  const handleSaveToPreset = useCallback(async () => {
+    if (!selectedPreset) return
+    setPresetBusy(true)
+    try {
+      await updatePreset(selectedPreset.id, {
+        ...(resolvedOverrides || {}),
+      })
+    } finally {
+      setPresetBusy(false)
+    }
+  }, [selectedPreset, resolvedOverrides, updatePreset])
+
+  const handleSaveAsPreset = useCallback(async () => {
+    if (!activeProject?.id) return
+    const name = window.prompt('New preset name')
+    if (!name) return
+    setPresetBusy(true)
+    try {
+      const created = await createPreset({
+        name,
+        description: `Saved from ${activeProject.name}`,
+        ...(selectedPreset || {}),
+        ...(resolvedOverrides || {}),
+      })
+      await saveProjectControlState(activeProject.id, {
+        schema_version: 1,
+        preset_id: created.id,
+        overrides: resolvedOverrides || {},
+        controls: activeControlState?.controls || {},
+      })
+    } finally {
+      setPresetBusy(false)
+    }
+  }, [activeProject?.id, activeProject?.name, selectedPreset, resolvedOverrides, activeControlState?.controls, createPreset, saveProjectControlState])
 
   const captureSoftware = settings?.capture_software
-  const captureLabel = {
-    obs: 'OBS',
-    shadowplay: 'ShadowPlay',
-    relive: 'ReLive',
-    manual: 'Manual',
-  }[captureSoftware] ?? 'No Software'
+  const CAPTURE_LABELS = { obs: 'OBS', shadowplay: 'ShadowPlay', relive: 'ReLive', native: 'LRS Native', manual: 'Manual' }
+  const captureLabel = CAPTURE_LABELS[captureSoftware] ?? 'No Software'
+  // Look up running state for the selected software
+  const activeSoftwareInfo = software.find(s => s.id === captureSoftware)
+  const captureRunning = activeSoftwareInfo?.running ?? false
+
+  // ── Session badge state ────────────────────────────────────────────────
+  const [showSessionMenu, setShowSessionMenu] = useState(false)
+  const sessionMenuRef = useRef(null)
+  useEffect(() => {
+    if (!showSessionMenu) return
+    const handler = (e) => {
+      if (sessionMenuRef.current && !sessionMenuRef.current.contains(e.target)) {
+        setShowSessionMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showSessionMenu])
+
+  const storedSessionId = activeProject?.subsession_id || 0
+  const liveSessionId = subsessionId || 0
+  const sessionIdMismatch = liveSessionId > 0 && storedSessionId > 0 && liveSessionId !== storedSessionId
+  const sessionIdSyncReady = liveSessionId > 0 && !storedSessionId
+
+  const handleCaptureSession = useCallback(async () => {
+    if (!activeProject?.id || !liveSessionId) return
+    try { await updateProject(activeProject.id, { subsession_id: liveSessionId }) } catch {}
+    setShowSessionMenu(false)
+  }, [activeProject?.id, liveSessionId, updateProject])
+
+  const handleClearSession = useCallback(async () => {
+    if (!activeProject?.id) return
+    try { await updateProject(activeProject.id, { subsession_id: 0 }) } catch {}
+    setShowSessionMenu(false)
+  }, [activeProject?.id, updateProject])
+
   return (
     <header className="relative h-toolbar flex items-center px-4 bg-bg-secondary border-b border-border
                         select-none shrink-0 bg-noise">
@@ -95,15 +233,21 @@ function Toolbar({
             currentStep={activeProject.current_step}
             onStepClick={onStepClick}
             stepReadiness={stepReadiness}
+            executionStates={pipelineExecutionSteps}
+            runningStep={pipelineRunningStep}
             progress={activeProject.current_step === 'analysis' ? analysisProgress : null}
           />
         </div>
       )}
 
       {/* Right section */}
-      <div className="ml-auto flex items-center gap-2 shrink-0">
+      <div className="ml-auto flex items-center gap-1 shrink-0">
         {/* iRacing connection status card */}
-        <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs select-none
+        <div
+          title={isConnected
+            ? (sessionData?.track_name ? `iRacing · ${sessionData.track_name}${sessionData?.drivers?.length > 0 ? ` · ${sessionData.drivers.length}d` : ''}` : 'iRacing · Connected')
+            : 'iRacing not connected'}
+          className={`flex items-center gap-1 px-2 py-0.5 rounded-md border text-xxs select-none
           ${ isConnected
             ? 'bg-success/10 border-success/20 text-success'
             : 'bg-surface border-border text-text-disabled'
@@ -111,37 +255,145 @@ function Toolbar({
           <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
             isConnected ? 'bg-success animate-pulse-soft' : 'bg-text-disabled'
           }`} />
-          { isConnected
-            ? (sessionData?.track_name ? `iRacing · ${sessionData.track_name}` : 'iRacing · Connected')
-            : 'iRacing'
-          }
-          {isConnected && sessionData?.drivers?.length > 0 && (
-            <span className="ml-0.5 text-success/70">{sessionData.drivers.length}d</span>
-          )}
+          <span>iRacing</span>
         </div>
 
-        {/* Capture software — always grey, shows configured software name */}
-        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs select-none
-                        bg-surface border-border text-text-secondary">
-          <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-text-disabled" />
+        {/* Capture software — green if running, yellow if configured but not running */}
+        <div className={`flex items-center gap-1 px-2 py-0.5 rounded-md border text-xxs select-none
+          ${ captureRunning
+            ? 'bg-success/10 border-success/20 text-success'
+            : captureSoftware
+              ? 'bg-warning/10 border-warning/20 text-warning'
+              : 'bg-surface border-border text-text-disabled'
+          }`}
+          title={captureRunning ? `${captureLabel} is running` : `${captureLabel} is not running`}
+        >
+          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+            captureRunning ? 'bg-success animate-pulse-soft' : captureSoftware ? 'bg-warning' : 'bg-text-disabled'
+          }`} />
           {captureLabel}
         </div>
 
+        {/* Session ID badge — only when a project is open */}
+        {activeProject && (
+          <div className="relative" ref={sessionMenuRef}>
+            <button
+              onClick={() => setShowSessionMenu(v => !v)}
+              title={
+                storedSessionId
+                  ? `Stored session #${storedSessionId}${liveSessionId && liveSessionId !== storedSessionId ? ` · Live: #${liveSessionId}` : ''}`
+                  : sessionIdSyncReady
+                    ? `Click to capture live session #${liveSessionId}`
+                    : 'No session ID stored — connect a replay to capture one'
+              }
+              className={`flex items-center gap-1 px-2 py-0.5 rounded-md border text-xxs select-none cursor-pointer transition-colors
+                ${sessionIdMismatch
+                  ? 'bg-warning/10 border-warning/20 text-warning hover:bg-warning/15'
+                  : sessionIdSyncReady
+                    ? 'bg-accent/10 border-accent/30 text-accent hover:bg-accent/15'
+                    : storedSessionId
+                      ? 'bg-surface border-border text-text-secondary hover:text-text-primary hover:bg-surface-hover'
+                      : 'bg-surface border-border text-text-disabled hover:text-text-secondary'
+                }`}
+            >
+              <Hash className="w-3 h-3 shrink-0" />
+              <span>{storedSessionId ? String(storedSessionId) : '—'}</span>
+            </button>
+            {showSessionMenu && (
+              <div className="absolute right-0 top-full mt-1 z-50 min-w-[200px] rounded-lg border border-border bg-bg-secondary shadow-lg py-1">
+                <p className="px-3 pt-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">Session ID</p>
+                {storedSessionId > 0 && (
+                  <div className="px-3 py-1 text-xs text-text-secondary font-mono">
+                    Stored: #{storedSessionId}
+                  </div>
+                )}
+                {liveSessionId > 0 && (
+                  <div className="px-3 py-1 text-xs text-text-secondary font-mono">
+                    Live: #{liveSessionId}
+                  </div>
+                )}
+                <div className="border-t border-border my-1" />
+                {liveSessionId > 0 && (
+                  <button
+                    onClick={handleCaptureSession}
+                    className="w-full text-left px-3 py-1.5 text-xs text-text-primary hover:bg-surface-hover"
+                  >
+                    {storedSessionId ? 'Replace with current replay' : 'Capture current replay'}
+                  </button>
+                )}
+                {storedSessionId > 0 && (
+                  <button
+                    onClick={handleClearSession}
+                    className="w-full text-left px-3 py-1.5 text-xs text-warning hover:bg-surface-hover"
+                  >
+                    Clear stored ID
+                  </button>
+                )}
+                {!liveSessionId && !storedSessionId && (
+                  <p className="px-3 py-1.5 text-xs text-text-tertiary">Connect a replay to capture</p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         <ToolbarDivider />
-        <ToolbarButton icon={Save} title="Save (Ctrl+S)" disabled />
-        <ToolbarDivider />
-        <ToolbarButton
-          icon={Undo2}
-          title={canUndo ? `Undo: ${undoDescription || 'last action'} (Ctrl+Z)` : 'Undo (Ctrl+Z)'}
-          disabled={!canUndo}
-          onClick={onUndo}
-        />
-        <ToolbarButton
-          icon={Redo2}
-          title={canRedo ? `Redo: ${redoDescription || 'last action'} (Ctrl+Y)` : 'Redo (Ctrl+Y)'}
-          disabled={!canRedo}
-          onClick={onRedo}
-        />
+        {activeProject && (
+          <div className="flex items-center gap-1">
+            <select
+              value={selectedPresetId}
+              onChange={(e) => handlePresetChange(e.target.value)}
+              disabled={presetBusy}
+              className="h-7 px-2 rounded-md border border-border bg-bg-primary text-xxs text-text-secondary
+                         focus:outline-none focus:border-accent min-w-[100px] max-w-[140px]"
+              title="Project preset"
+            >
+              <option value="">Project Default</option>
+              {presets.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+            <button
+              onClick={handleSaveToPreset}
+              disabled={presetBusy || !selectedPreset}
+              className="h-7 w-7 inline-flex items-center justify-center rounded-md border border-border text-text-secondary
+                         hover:text-text-primary hover:bg-bg-hover disabled:opacity-50"
+              title="Save current project augmentations into selected preset"
+            >
+              <Save className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={handleSaveAsPreset}
+              disabled={presetBusy}
+              className="h-7 w-7 inline-flex items-center justify-center rounded-md border border-border text-text-secondary
+                         hover:text-text-primary hover:bg-bg-hover disabled:opacity-50"
+              title="Save as new preset"
+            >
+              <SaveAll className="w-3.5 h-3.5" />
+            </button>
+            {hasLocalOverrides && (
+              <span className="px-1.5 py-0.5 rounded border border-warning/30 bg-warning/10 text-warning text-[10px] font-medium uppercase tracking-wide">
+                Dirty
+              </span>
+            )}
+          </div>
+        )}
+        {activeProject && (
+          <>
+            <ToolbarDivider />
+            <button
+              onClick={onTogglePipelineAdvancedMode}
+              className={`h-7 w-7 inline-flex items-center justify-center rounded-md border transition-colors ${
+                pipelineAdvancedMode
+                  ? 'border-accent/40 text-accent bg-accent/10 hover:bg-accent/15'
+                  : 'border-border text-text-secondary hover:text-text-primary hover:bg-bg-hover'
+              }`}
+              title={pipelineAdvancedMode ? 'Disable docked pipeline footer' : 'Enable docked pipeline footer'}
+            >
+              {pipelineAdvancedMode ? <PanelBottomClose className="w-3.5 h-3.5" /> : <PanelBottomOpen className="w-3.5 h-3.5" />}
+            </button>
+          </>
+        )}
         <ToolbarDivider />
         <ToolbarButton icon={Settings} title="Settings" onClick={onOpenSettings} />
         <ToolbarButton icon={HelpCircle} title="Help" onClick={onOpenHelp} />
@@ -159,13 +411,13 @@ function ToolbarButton({ icon: Icon, title, disabled = false, onClick }) {
       onClick={onClick}
       disabled={disabled}
       title={title}
-      className={`p-2 rounded-xl transition-all duration-150 cursor-pointer ${
+      className={`p-1.5 rounded-lg transition-all duration-150 cursor-pointer ${
         disabled
           ? 'text-text-disabled cursor-not-allowed opacity-40'
           : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary active:scale-95'
       }`}
     >
-      <Icon className="w-5 h-5" />
+      <Icon className="w-4 h-4" />
     </button>
   )
 }
@@ -174,7 +426,7 @@ function ToolbarButton({ icon: Icon, title, disabled = false, onClick }) {
  * Vertical divider between toolbar button groups.
  */
 function ToolbarDivider() {
-  return <div className="w-px h-6 bg-border mx-1.5" />
+  return <div className="w-px h-5 bg-border mx-1" />
 }
 
 export default Toolbar

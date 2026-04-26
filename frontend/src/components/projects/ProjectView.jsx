@@ -1,7 +1,9 @@
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { Loader2 } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext'
 import { useAnalysis } from '../../context/AnalysisContext'
+import { usePipeline } from '../../context/PipelineContext'
+import { useIRacing } from '../../context/IRacingContext'
 import AnalysisPanel from '../analysis/AnalysisPanel'
 import HighlightPanel from '../highlights/HighlightPanel'
 import OverlayStudio from '../overlay/OverlayStudio'
@@ -9,7 +11,7 @@ import CapturePanel from '../capture/CapturePanel'
 import EncodingPanel from '../encoding/EncodingPanel'
 import CompositionPanel from '../encoding/CompositionPanel'
 import YouTubePanel from '../youtube/YouTubePanel'
-import PipelinePanel from '../pipeline/PipelinePanel'
+import PipelineAutoView from '../pipeline/PipelineAutoView'
 import StepGate from '../common/StepGate'
 import { useHighlight } from '../../context/HighlightContext'
 
@@ -18,10 +20,19 @@ import { useHighlight } from '../../context/HighlightContext'
  * Shows a content-area spinner while the project record is loading,
  * then renders step content.
  */
-function ProjectView({ project, isLoading }) {
-  const { advanceStep, updateProject } = useProject()
+function ProjectView({ project, isLoading, pipelineAdvancedMode = false }) {
+  const { advanceStep, updateProject, setStep } = useProject()
   const { events, eventSummary } = useAnalysis()
   const { videoScript, scriptProjectId } = useHighlight()
+  const { currentRun, currentStep: pipelineCurrentStep } = usePipeline()
+  const { subsessionId } = useIRacing()
+  const lastPipelineStepRef = useRef(null)
+
+  // Auto-capture subsession ID from live replay when project has none stored yet.
+  useEffect(() => {
+    if (!subsessionId || !project?.id || project.subsession_id) return
+    updateProject(project.id, { subsession_id: subsessionId }).catch(() => {})
+  }, [subsessionId, project?.id, project?.subsession_id, updateProject])
 
   const handleAdvance = useCallback(async () => {
     try {
@@ -48,6 +59,28 @@ function ProjectView({ project, isLoading }) {
     })
   }, [project?.id, updateProject])
 
+  // Auto-follow only on real pipeline step transitions.
+  // This preserves manual tab selection within a step and re-syncs only when
+  // execution advances to the next step.
+  useEffect(() => {
+    if (!project?.id) return
+    const runActive = Boolean(currentRun && ['running', 'paused', 'waiting_intervention'].includes(currentRun.state))
+    if (!runActive || !pipelineCurrentStep) {
+      lastPipelineStepRef.current = pipelineCurrentStep || null
+      return
+    }
+
+    const prevPipelineStep = lastPipelineStepRef.current
+    lastPipelineStepRef.current = pipelineCurrentStep
+
+    // Ignore steady-state updates; only react when step actually changes.
+    if (!prevPipelineStep || prevPipelineStep === pipelineCurrentStep) return
+    if (project.current_step === 'pipeline') return
+    if (project.current_step === pipelineCurrentStep) return
+
+    setStep(project.id, pipelineCurrentStep).catch(() => {})
+  }, [project?.id, project?.current_step, pipelineCurrentStep, currentRun, setStep])
+
   // While the project record itself is still fetching, show a neutral spinner
   // in the content area (not the analysis-specific one).
   if (isLoading) {
@@ -59,7 +92,14 @@ function ProjectView({ project, isLoading }) {
     )
   }
 
-  const hasAnalysis = (events?.length > 0) || (eventSummary?.total_events > 0)
+  // hasAnalysis checks if analysis has been completed.
+  // On app reload, eventSummary might not be loaded yet, so we also check if the project
+  // has progressed past the analysis step (indicating it was done at some point).
+  const STEP_ORDER = ['pipeline', 'analysis', 'editing', 'overlay', 'capture', 'compose', 'export', 'upload']
+  const analysisStepIndex = STEP_ORDER.indexOf('analysis')
+  const currentStepIndex = STEP_ORDER.indexOf(project.current_step)
+  const projectHasPassedAnalysis = currentStepIndex > analysisStepIndex
+  const hasAnalysis = projectHasPassedAnalysis || (events?.length > 0) || (eventSummary?.total_events > 0)
 
   // Determine what to show in the main content area based on current step
   const renderStepContent = () => {
@@ -97,7 +137,7 @@ function ProjectView({ project, isLoading }) {
             projectId={project.id}
             script={resolvedScript}
             clipsManifest={project.clips_manifest || project.clips || []}
-            outputDir={project.output_dir || project.project_dir || ''}
+            outputDir={project.project_dir || project.output_dir || ''}
           />
         )
 
@@ -108,7 +148,7 @@ function ProjectView({ project, isLoading }) {
         return <YouTubePanel />
 
       case 'pipeline':
-        return <PipelinePanel />
+        return <PipelineAutoView />
 
       default:
         return (
@@ -127,9 +167,16 @@ function ProjectView({ project, isLoading }) {
   }
 
   return (
-    <div className="flex flex-1 overflow-hidden">
-        {/* Step content */}
+    <div className="flex flex-1 w-full min-w-0 overflow-hidden flex-col">
+      {/* Step content */}
+      <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
         {renderStepContent()}
+      </div>
+
+      {/* Advanced mode: dock the same automated pipeline surface under tab content */}
+      {pipelineAdvancedMode && project.current_step !== 'pipeline' && (
+        <PipelineAutoView docked />
+      )}
     </div>
   )
 }

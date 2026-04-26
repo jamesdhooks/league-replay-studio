@@ -1,11 +1,13 @@
 import { useState, useCallback } from 'react'
 import {
-  Settings,
-  XCircle,
+  Plus,
+  Edit2,
+  Trash2,
 } from 'lucide-react'
+import PresetEditor from './PresetEditor'
 
 /**
- * PresetsTab — Pipeline presets management.
+ * PresetsTab — Pipeline presets management with full editor.
  */
 function PresetsTab({
   presets,
@@ -15,170 +17,158 @@ function PresetsTab({
   showSuccess,
   showError,
 }) {
-  const [editingPreset, setEditingPreset] = useState(null)
+  const [editingPresetId, setEditingPresetId] = useState(null)
   const [showCreateForm, setShowCreateForm] = useState(false)
-  const [formData, setFormData] = useState({
-    name: '',
-    description: '',
-    skip_capture: false,
-    skip_analysis: false,
-    auto_edit: true,
-    upload_to_youtube: false,
-    youtube_privacy: 'unlisted',
-    failure_action: 'pause',
-    notify_on_completion: 'toast',
-  })
+  const [isLoading, setIsLoading] = useState(false)
 
-  const handleCreate = useCallback(async () => {
-    if (!formData.name) {
-      showError('Name is required')
-      return
-    }
+  const handleCreate = useCallback(async (data) => {
+    setIsLoading(true)
     try {
-      await createPreset(formData)
-      showSuccess('Preset created')
+      await createPreset(data)
+      showSuccess('Preset created successfully')
       setShowCreateForm(false)
-      setFormData({
-        name: '',
-        description: '',
-        skip_capture: false,
-        skip_analysis: false,
-        auto_edit: true,
-        upload_to_youtube: false,
-        youtube_privacy: 'unlisted',
-        failure_action: 'pause',
-        notify_on_completion: 'toast',
-      })
     } catch (err) {
       showError(err.message || 'Failed to create preset')
+    } finally {
+      setIsLoading(false)
     }
-  }, [formData, createPreset, showSuccess, showError])
+  }, [createPreset, showSuccess, showError])
+
+  const handleUpdate = useCallback(async (data) => {
+    setIsLoading(true)
+    try {
+      await updatePreset(editingPresetId, data)
+      showSuccess('Preset updated successfully')
+      setEditingPresetId(null)
+    } catch (err) {
+      showError(err.message || 'Failed to update preset')
+    } finally {
+      setIsLoading(false)
+    }
+  }, [editingPresetId, updatePreset, showSuccess, showError])
 
   const handleDelete = useCallback(async (presetId) => {
-    if (!confirm('Delete this preset?')) return
+    if (!confirm('Are you sure you want to delete this preset?')) return
+    setIsLoading(true)
     try {
       await deletePreset(presetId)
       showSuccess('Preset deleted')
     } catch (err) {
       showError(err.message || 'Failed to delete preset')
+    } finally {
+      setIsLoading(false)
     }
   }, [deletePreset, showSuccess, showError])
 
+  const editingPreset = presets.find(p => p.id === editingPresetId)
+
   return (
     <div className="space-y-4">
-      {/* Create new */}
-      {!showCreateForm && (
-        <button
-          onClick={() => setShowCreateForm(true)}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-bg-secondary text-text-secondary rounded-lg hover:bg-bg-hover hover:text-text-primary border border-border transition-colors text-xs font-medium"
-        >
-          <Settings className="w-3.5 h-3.5" />
-          Create New Preset
-        </button>
-      )}
+      {/* Header */}
+      <div className="flex items-center justify-between pb-4 border-b border-border">
+        <h3 className="text-sm font-semibold text-text-primary">Presets</h3>
+        {!showCreateForm && !editingPresetId && (
+          <button
+            onClick={() => setShowCreateForm(true)}
+            className="flex items-center justify-center gap-1.5 px-3 py-1.5 bg-accent hover:bg-accent-hover text-white rounded-lg font-medium text-xs transition-colors"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            New Preset
+          </button>
+        )}
+      </div>
 
+      {/* Create form */}
       {showCreateForm && (
-        <div className="p-4 bg-bg-secondary rounded-lg border border-border space-y-3">
-          <div>
-            <label className="block text-xxs text-text-tertiary uppercase tracking-wider font-semibold mb-1">Name</label>
-            <input
-              type="text"
-              value={formData.name}
-              onChange={(e) => setFormData(f => ({ ...f, name: e.target.value }))}
-              className="w-full px-3 py-2 bg-bg-primary border border-border rounded-md text-xs text-text-primary focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-              placeholder="My Preset"
-            />
-          </div>
-          <div>
-            <label className="block text-xxs text-text-tertiary uppercase tracking-wider font-semibold mb-1">Description</label>
-            <input
-              type="text"
-              value={formData.description}
-              onChange={(e) => setFormData(f => ({ ...f, description: e.target.value }))}
-              className="w-full px-3 py-2 bg-bg-primary border border-border rounded-md text-xs text-text-primary focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-              placeholder="Describe this preset..."
-            />
-          </div>
-          {/* Quick toggles */}
-          <div className="space-y-2">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={formData.upload_to_youtube}
-                onChange={(e) => setFormData(f => ({ ...f, upload_to_youtube: e.target.checked }))}
-                className="w-4 h-4 rounded border-border bg-bg-primary text-accent focus:ring-accent"
-              />
-              <span className="text-xs text-text-secondary">Upload to YouTube</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={formData.auto_edit}
-                onChange={(e) => setFormData(f => ({ ...f, auto_edit: e.target.checked }))}
-                className="w-4 h-4 rounded border-border bg-bg-primary text-accent focus:ring-accent"
-              />
-              <span className="text-xs text-text-secondary">Auto-apply highlights</span>
-            </label>
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={handleCreate}
-              className="flex-1 px-3 py-2 bg-accent hover:bg-accent-hover text-white rounded-md text-xs font-medium transition-colors"
-            >
-              Create
-            </button>
-            <button
-              onClick={() => setShowCreateForm(false)}
-              className="px-3 py-2 bg-bg-primary text-text-secondary hover:bg-bg-hover border border-border rounded-md text-xs font-medium transition-colors"
-            >
-              Cancel
-            </button>
-          </div>
+        <div className="p-4 bg-bg-secondary border border-border rounded-lg">
+          <PresetEditor
+            preset={null}
+            onSave={handleCreate}
+            onCancel={() => setShowCreateForm(false)}
+            isLoading={isLoading}
+          />
         </div>
       )}
 
-      {/* Preset list */}
-      <div className="space-y-2">
-        {presets.map(preset => (
-          <div
-            key={preset.id}
-            className="p-3 bg-bg-secondary rounded-lg border border-border"
-          >
-            <div className="flex items-start justify-between">
-              <div>
-                <div className="text-xs font-medium text-text-primary">{preset.name}</div>
-                <p className="text-xxs text-text-tertiary mt-0.5">{preset.description}</p>
-                <div className="flex flex-wrap gap-1.5 mt-2">
-                  {preset.upload_to_youtube && (
-                    <span className="px-1.5 py-0.5 text-xxs bg-danger/10 text-danger border border-danger/20 rounded font-medium">
-                      YouTube
-                    </span>
-                  )}
-                  {preset.auto_edit && (
-                    <span className="px-1.5 py-0.5 text-xxs bg-accent/10 text-accent border border-accent/20 rounded font-medium">
-                      Auto-edit
-                    </span>
-                  )}
-                  <span className="px-1.5 py-0.5 text-xxs bg-bg-primary text-text-tertiary border border-border rounded">
-                    On fail: {preset.failure_action}
-                  </span>
-                </div>
-              </div>
-              <button
-                onClick={() => handleDelete(preset.id)}
-                className="p-1 text-text-tertiary hover:text-danger transition-colors"
-              >
-                <XCircle className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          </div>
-        ))}
+      {/* Edit form */}
+      {editingPreset && (
+        <div className="p-4 bg-bg-secondary border border-border rounded-lg">
+          <PresetEditor
+            preset={editingPreset}
+            onSave={handleUpdate}
+            onCancel={() => setEditingPresetId(null)}
+            isLoading={isLoading}
+          />
+        </div>
+      )}
 
-        {presets.length === 0 && !showCreateForm && (
-          <div className="text-center py-8 text-text-tertiary text-xs">
-            No presets yet. Create one to get started.
+      {/* Presets list */}
+      {!showCreateForm && !editingPresetId && (
+        <div className="space-y-2">
+          {presets.length === 0 ? (
+            <div className="text-center py-8 text-text-tertiary text-xs">
+              No presets yet. Create one to get started.
+            </div>
+          ) : (
+            presets.map(preset => (
+              <PresetCard
+                key={preset.id}
+                preset={preset}
+                onEdit={() => setEditingPresetId(preset.id)}
+                onDelete={() => handleDelete(preset.id)}
+                disabled={isLoading}
+              />
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PresetCard({ preset, onEdit, onDelete, disabled }) {
+  // Build tag list from config highlights
+  const tags = []
+  if (preset.capture_mode && preset.capture_mode !== 'auto') tags.push(preset.capture_mode)
+  if (preset.export_preset) tags.push(preset.export_preset)
+  if (preset.non_interactive) tags.push('Headless')
+  if (preset.failure_action && preset.failure_action !== 'pause') tags.push(preset.failure_action)
+  if (preset.youtube_privacy && preset.youtube_privacy !== 'unlisted') tags.push(preset.youtube_privacy)
+
+  return (
+    <div className="p-3 bg-bg-primary border border-border rounded-lg hover:bg-bg-secondary transition-colors">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex-1 min-w-0">
+          <h4 className="text-xs font-semibold text-text-primary">{preset.name}</h4>
+          {preset.description && (
+            <p className="text-xxs text-text-tertiary mt-0.5">{preset.description}</p>
+          )}
+          <div className="flex flex-wrap gap-1 mt-2">
+            {tags.map(tag => (
+              <span key={tag} className="px-1.5 py-0.5 text-xxs bg-accent/10 text-accent border border-accent/20 rounded font-medium">
+                {tag}
+              </span>
+            ))}
           </div>
-        )}
+        </div>
+        <div className="flex gap-1">
+          <button
+            onClick={onEdit}
+            disabled={disabled}
+            className="p-1.5 text-text-tertiary hover:text-accent transition-colors disabled:opacity-50"
+            title="Edit preset"
+          >
+            <Edit2 className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={onDelete}
+            disabled={disabled}
+            className="p-1.5 text-text-tertiary hover:text-danger transition-colors disabled:opacity-50"
+            title="Delete preset"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </div>
     </div>
   )

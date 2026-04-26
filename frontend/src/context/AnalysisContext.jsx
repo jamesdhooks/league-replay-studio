@@ -27,8 +27,10 @@ export function AnalysisProvider({ children }) {
   // ── WebSocket subscription for pipeline events ──────────────────────────
   useEffect(() => {
     const unsubscribe = wsClient.subscribeCategory('pipeline', (eventName, data) => {
-      // Only process events for the currently tracked project
-      if (activeProjectRef.current && data.project_id !== activeProjectRef.current) {
+      // Only filter when both sides are known — events that omit project_id are
+      // allowed through so pipeline-internal broadcasts (step_progress, log) that
+      // historically didn't carry project_id still reach the handler.
+      if (activeProjectRef.current && data.project_id != null && data.project_id !== activeProjectRef.current) {
         return
       }
 
@@ -67,11 +69,13 @@ export function AnalysisProvider({ children }) {
 
       switch (eventName) {
         case 'pipeline:started':
+          if (!data?.stage?.startsWith?.('analysis') && data?.current_step !== 'analysis' && data?.step !== 'analysis') {
+            break
+          }
+          if (data?.project_id) activeProjectRef.current = data.project_id
           setIsAnalyzing(true)
-          // Only enter scan phase for full analysis or scan-only; not for detect-only re-runs
           if (data.phase !== 'detect') setIsScanning(true)
           setError(null)
-          // Append a separator instead of clobbering the log
           setAnalysisLog(prev => [
             ...prev,
             { id: ++logIdRef.current, level: 'info', ts: Date.now(), message: '── New analysis run ──', detail: '' },
@@ -88,7 +92,8 @@ export function AnalysisProvider({ children }) {
           })
           break
 
-        case 'pipeline:step_completed':
+        case 'pipeline:step_completed': {
+          if (!data?.stage?.startsWith?.('analysis')) break
           if (data.stage === 'analysis_detect') setIsScanning(false)
           appendLog(
             data.description || data.message || 'Analyzing...',
@@ -106,6 +111,50 @@ export function AnalysisProvider({ children }) {
             currentLap: data.current_lap ?? prev?.currentLap,
             carCount: data.car_count ?? prev?.carCount,
           }))
+          setIsAnalyzing(true)
+          break
+        }
+
+        case 'pipeline:step_progress': {
+          if (data?.step !== 'analysis') break
+
+          const out = data?.output || {}
+          const stage = out.stage || 'analysis_scan'
+          const percent = Number(data?.progress ?? out.progress_percent ?? 0)
+
+          if (stage === 'analysis_detect') setIsScanning(false)
+          else if (stage === 'analysis_scan') setIsScanning(true)
+
+          const message = out.message || out.description || `Analysis ${Math.round(percent)}%`
+          const detail = out.detail || ''
+
+          if (out.description || out.message || out.detail) {
+            appendLog(
+              out.description || out.message,
+              detail,
+              stage === 'analysis_detect' ? 'detect' : 'info',
+            )
+          }
+
+          setProgress(prev => ({
+            ...prev,
+            percent: Number.isFinite(percent) ? percent : (prev?.percent ?? 0),
+            message,
+            detail: detail || prev?.detail || '',
+            stage,
+            currentTime: out.current_time ?? prev?.currentTime ?? 0,
+            totalTicks: out.total_ticks ?? prev?.totalTicks ?? 0,
+            currentLap: out.current_lap ?? prev?.currentLap,
+            carCount: out.car_count ?? prev?.carCount,
+          }))
+          setIsAnalyzing(true)
+          break
+        }
+
+        case 'pipeline:log':
+          if (data?.step !== 'analysis') break
+          appendLog(data.message || 'Analyzing...', data.detail || '', data.level || 'info')
+          setIsAnalyzing(true)
           break
 
         case 'pipeline:completed': {
@@ -145,6 +194,9 @@ export function AnalysisProvider({ children }) {
         }
 
         case 'pipeline:error':
+          if (!data?.stage?.startsWith?.('analysis') && data?.step !== 'analysis') {
+            break
+          }
           setIsAnalyzing(false)
           setIsScanning(false)
           appendLog(data.message || 'Analysis failed', '', 'error')

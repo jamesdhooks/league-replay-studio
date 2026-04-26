@@ -34,7 +34,7 @@ class EncodeRequest(BaseModel):
     project_id: int
     input_file: str
     output_dir: str
-    preset_id: str = "youtube_1080p60"
+    preset_id: str = "1080p"
     edl: Optional[list[dict[str, Any]]] = None
     job_type: str = "full"
     custom_preset: Optional[dict[str, Any]] = None

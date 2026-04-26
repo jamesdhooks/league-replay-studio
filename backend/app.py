@@ -55,7 +55,7 @@ from server.routes.api_youtube import router as youtube_router
 from server.routes.api_pipeline import router as pipeline_router
 from server.utils.command_log import command_log
 from server.routes.api_wizard import router as wizard_router
-from server.routes.api_llm import router as llm_router
+from server.routes.api_llm import router as llm_router, set_broadcast_fn as set_llm_broadcast_fn
 from server.routes.api_collection import router as collection_router
 from server.routes.api_composition import router as composition_router
 from server.routes.api_script_state import router as script_state_router
@@ -69,6 +69,9 @@ from server.services.preview_service import preview_service
 from server.services.overlay_service import overlay_service
 from server.services.youtube_service import youtube_service
 from server.services.pipeline_service import pipeline_service
+from server.services.composition_service import composition_service
+from server.services.project_watch_service import project_watch_service
+from server.services.tailwind_service import startup_refresh as tailwind_startup_refresh
 
 logger.info("[App] All imports OK")
 
@@ -218,24 +221,52 @@ async def lifespan(app: FastAPI):
 
     pipeline_service.set_broadcast_fn(_broadcast_pipeline)
 
+    # ── Wire composition service ─────────────────────────────────────────
+    composition_service.set_loop(loop)
+
+    async def _broadcast_composition(message: dict) -> None:
+        await ws_manager.broadcast(message)
+
+    composition_service.set_broadcast_fn(_broadcast_composition)
+
+    # ── Wire project file watch service ───────────────────────────────────
+    project_watch_service.set_loop(loop)
+
+    async def _broadcast_project_watch(message: dict) -> None:
+        await ws_manager.broadcast(message)
+
+    project_watch_service.set_broadcast_fn(_broadcast_project_watch)
+    project_watch_service.start()
+
     # ── Register LLM skills ─────────────────────────────────────────────────
     from server.services.llm_skills import register_default_skills
     register_default_skills()
     logger.info("[App] LLM skills registered")
+
+    def _llm_broadcast(message: dict) -> None:
+        if loop.is_running():
+            asyncio.run_coroutine_threadsafe(ws_manager.broadcast(message), loop)
+
+    set_llm_broadcast_fn(_llm_broadcast)
+
     # ── Wire command log broadcast ────────────────────────────────────────
     def _command_log_broadcast(message: dict) -> None:
         if loop.is_running():
             asyncio.run_coroutine_threadsafe(ws_manager.broadcast(message), loop)
 
+    command_log.configure_file(LOG_DIR / "iracing_comm.log")
     command_log.set_broadcast_fn(_command_log_broadcast)
+    logger.info("[App] iRacing command log file: %s", str(LOG_DIR / "iracing_comm.log"))
     # ── Background update check ──────────────────────────────────────────────
     from server.services.update_service import update_service
     asyncio.create_task(update_service.startup_check(delay=10.0))
+    asyncio.create_task(tailwind_startup_refresh())
 
     logger.info("[App] Startup complete — v%s", __version__)
     yield
 
     # ── Shutdown ────────────────────────────────────────────────────────────
+    project_watch_service.stop()
     iracing_bridge.stop()
     logger.info("[App] Shutting down")
 
@@ -246,10 +277,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS for local development (Vite dev server on port 3189)
+# CORS for local development (Vite dev server on port 4299)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3189", "http://127.0.0.1:3189"],
+    allow_origins=["http://localhost:4299", "http://127.0.0.1:4299"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -508,7 +539,7 @@ def _apply_app_user_model_id() -> None:
 
 # ── Server runner ────────────────────────────────────────────────────────────
 
-def start_server(port: int = 6177, reload_enabled: bool = False) -> None:
+def start_server(port: int = 6378, reload_enabled: bool = False) -> None:
     """Start the FastAPI server with uvicorn."""
     import uvicorn
     if sys.platform.startswith("win") and hasattr(asyncio, "WindowsProactorEventLoopPolicy"):
@@ -541,7 +572,7 @@ def start_server(port: int = 6177, reload_enabled: bool = False) -> None:
 
 def main() -> None:
     """Launch the application — pywebview window or browser."""
-    port = int(os.environ.get("LRS_PORT", "6177"))
+    port = int(os.environ.get("LRS_PORT", "6378"))
     argv = sys.argv[1:]
     web_only = (os.environ.get("WEB_ONLY", "0") == "1") or ("--web" in argv)
     reload_requested = (os.environ.get("LRS_RELOAD", "0") == "1") or ("--reload" in argv)

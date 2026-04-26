@@ -146,7 +146,7 @@ export function EncodingProvider({ children }) {
         project_id: projectId,
         input_file: inputFile,
         output_dir: outputDir,
-        preset_id: presetId || 'youtube_1080p60',
+        preset_id: presetId || '1080p',
         edl: edl || null,
         job_type: jobType || 'full',
         custom_preset: customPreset || null,
@@ -183,7 +183,13 @@ export function EncodingProvider({ children }) {
         setActiveJobs(prev => {
           const exists = prev.some(j => j.job_id === data.job_id)
           if (exists) return prev
-          return [...prev, { ...data, state: 'encoding', progress: { percentage: 0 } }]
+          return [...prev, {
+            ...data,
+            state: 'encoding',
+            current_step: data.current_step || 'initializing',
+            progress: { percentage: 0, current_step: data.current_step || 'initializing' },
+            log_entries: [],
+          }]
         })
         setError(null)
       }),
@@ -192,16 +198,94 @@ export function EncodingProvider({ children }) {
         setActiveJobs(prev =>
           prev.map(j =>
             j.job_id === data.job_id
-              ? { ...j, progress: data, state: 'encoding' }
+              ? {
+                ...j,
+                progress: data,
+                current_step: data.current_step || j.current_step || 'encoding',
+                state: 'encoding',
+              }
+              : j
+          )
+        )
+      }),
+
+      wsClient.subscribe('encoding:log', (data) => {
+        const appendLog = (job) => {
+          const nextEntries = [
+            ...(Array.isArray(job.log_entries) ? job.log_entries : []),
+            {
+              ts: data.ts || Date.now() / 1000,
+              level: data.level || 'info',
+              message: data.message || '',
+              detail: data.detail || null,
+            },
+          ]
+          return {
+            ...job,
+            current_step: data.current_step || job.current_step,
+            log_entries: nextEntries.slice(-600),
+          }
+        }
+
+        setActiveJobs(prev => prev.map(j => (j.job_id === data.job_id ? appendLog(j) : j)))
+        setRecentJobs(prev => prev.map(j => (j.job_id === data.job_id ? appendLog(j) : j)))
+      }),
+
+      wsClient.subscribe('encoding:gpu_telemetry', (data) => {
+        setActiveJobs(prev =>
+          prev.map(j =>
+            j.job_id === data.job_id
+              ? {
+                ...j,
+                gpu_telemetry: {
+                  utilization: data.utilization,
+                  memory_used_mb: data.memory_used_mb,
+                  memory_total_mb: data.memory_total_mb,
+                  memory_percent: data.memory_percent,
+                  temperature_c: data.temperature_c,
+                  power_draw_w: data.power_draw_w,
+                },
+              }
+              : j
+          )
+        )
+        setRecentJobs(prev =>
+          prev.map(j =>
+            j.job_id === data.job_id
+              ? {
+                ...j,
+                gpu_telemetry: {
+                  utilization: data.utilization,
+                  memory_used_mb: data.memory_used_mb,
+                  memory_total_mb: data.memory_total_mb,
+                  memory_percent: data.memory_percent,
+                  temperature_c: data.temperature_c,
+                  power_draw_w: data.power_draw_w,
+                },
+              }
               : j
           )
         )
       }),
 
       wsClient.subscribe('encoding:completed', (data) => {
-        setActiveJobs(prev => prev.filter(j => j.job_id !== data.job_id))
+        let completedJob = null
+        setActiveJobs(prev => {
+          completedJob = prev.find(j => j.job_id === data.job_id) || null
+          return prev.filter(j => j.job_id !== data.job_id)
+        })
         setRecentJobs(prev => [
-          { ...data, state: 'completed', progress: { percentage: 100 } },
+          {
+            ...(completedJob || {}),
+            ...data,
+            state: 'completed',
+            current_step: data.current_step || 'completed',
+            progress: {
+              ...((completedJob && completedJob.progress) || {}),
+              percentage: 100,
+              current_step: data.current_step || 'completed',
+            },
+          },
           ...prev.slice(0, 19),
         ])
         // Refresh completed exports list
@@ -209,9 +293,18 @@ export function EncodingProvider({ children }) {
       }),
 
       wsClient.subscribe('encoding:error', (data) => {
-        setActiveJobs(prev => prev.filter(j => j.job_id !== data.job_id))
+        let failedJob = null
+        setActiveJobs(prev => {
+          failedJob = prev.find(j => j.job_id === data.job_id) || null
+          return prev.filter(j => j.job_id !== data.job_id)
+        })
         setRecentJobs(prev => [
-          { ...data, state: data.state || 'error' },
+          {
+            ...(failedJob || {}),
+            ...data,
+            current_step: data.current_step || (failedJob?.current_step || 'error'),
+            state: data.state || 'error',
+          },
           ...prev.slice(0, 19),
         ])
         if (data.error) setError(data.error)

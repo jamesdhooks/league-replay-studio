@@ -1,47 +1,63 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { Loader2, ZoomIn, ZoomOut, Maximize2, Move, MousePointer2 } from 'lucide-react'
+import { useEffect, useRef, useCallback, useState } from 'react'
+import { Loader2, Move } from 'lucide-react'
+import IsolatedHtmlPreview from '../ui/IsolatedHtmlPreview'
 
 /**
  * EditorPreview — Live preview display for the overlay editor.
  *
- * Shows the rendered overlay frame with:
- *  - Render timing metrics
- *  - Zoom controls
- *  - Element picker mode toggle (visual selection)
- *  - Resize handles on selected elements
+ * Shows the rendered overlay frame for the Build workspace.
  */
 export default function EditorPreview({
   previewData,
+  previewHtml,
   previewError,
   isRendering,
-  renderTime,
   resolution,
   elementPickerActive,
-  onToggleElementPicker,
   onElementSelected,
-  previewSection = 'race',
-  onSectionChange,
+  previewRenderMode = 'png',
+  overlayVisible = true,
+  previewZoom = 1,
+  showStreamUnderlay = false,
+  highlightSelector = null,
+  highlightNonce = 0,
 }) {
-  const [zoom, setZoom] = useState(0.5)
   const containerRef = useRef(null)
+  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 })
 
-  // ── Zoom controls ────────────────────────────────────────────────────────
-  const zoomIn = useCallback(() => setZoom(z => Math.min(z + 0.1, 2)), [])
-  const zoomOut = useCallback(() => setZoom(z => Math.max(z - 0.1, 0.1)), [])
-  const zoomFit = useCallback(() => {
-    if (containerRef.current && resolution) {
-      const container = containerRef.current.getBoundingClientRect()
-      const scaleW = (container.width - 32) / resolution.width
-      const scaleH = (container.height - 32) / resolution.height
-      setZoom(Math.min(scaleW, scaleH, 1))
-    }
-  }, [resolution])
-
-  // Auto-fit on mount and when resolution changes
   useEffect(() => {
-    const timer = setTimeout(zoomFit, 100)
-    return () => clearTimeout(timer)
-  }, [zoomFit])
+    const node = containerRef.current
+    if (!node) return undefined
+
+    const measure = () => {
+      const rect = node.getBoundingClientRect()
+      setViewportSize({ width: Math.max(0, rect.width), height: Math.max(0, rect.height) })
+    }
+
+    const observer = new ResizeObserver(measure)
+    observer.observe(node)
+    measure()
+
+    return () => observer.disconnect()
+  }, [])
+
+  const renderWidth = Number(resolution?.width) || 1920
+  const renderHeight = Number(resolution?.height) || 1080
+  const targetAspect = renderWidth > 0 && renderHeight > 0 ? renderWidth / renderHeight : (16 / 9)
+  const availW = Number(viewportSize.width) || renderWidth
+  const availH = Number(viewportSize.height) || renderHeight
+  let frameWidth = availW
+  let frameHeight = frameWidth / targetAspect
+  if (frameHeight > availH) {
+    frameHeight = availH
+    frameWidth = frameHeight * targetAspect
+  }
+
+  const fitScale = Math.min(
+    frameWidth / renderWidth,
+    frameHeight / renderHeight,
+  )
+  const appliedScale = fitScale
 
   // ── Handle click on preview for element picking ──────────────────────────
   const handlePreviewClick = useCallback((e) => {
@@ -49,103 +65,57 @@ export default function EditorPreview({
 
     const img = e.currentTarget
     const rect = img.getBoundingClientRect()
-    const x = Math.round(((e.clientX - rect.left) / rect.width) * (resolution?.width || 1920))
-    const y = Math.round(((e.clientY - rect.top) / rect.height) * (resolution?.height || 1080))
+    const x = Math.round(((e.clientX - rect.left) / rect.width) * renderWidth)
+    const y = Math.round(((e.clientY - rect.top) / rect.height) * renderHeight)
     onElementSelected({ x, y })
-  }, [elementPickerActive, onElementSelected, resolution])
+  }, [elementPickerActive, onElementSelected, renderHeight, renderWidth])
 
   return (
-    <div className="flex flex-col h-full bg-bg-primary">
-
-      {/* ── Preview toolbar ──────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-bg-secondary/50">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-medium text-text-secondary">Preview</span>
-
-          {/* Section picker */}
-          {onSectionChange && (
-            <div className="flex items-center gap-0.5 bg-bg-primary rounded p-0.5">
-              {[{v:'intro',l:'Intro'},{v:'qualifying_results',l:'Qual'},{v:'race',l:'Race'},{v:'race_results',l:'Results'}].map(({v, l}) => (
-                <button
-                  key={v}
-                  onClick={() => onSectionChange(v)}
-                  className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
-                    previewSection === v
-                      ? 'bg-accent text-white'
-                      : 'text-text-tertiary hover:text-text-primary'
-                  }`}
-                >
-                  {l}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {/* Render timing */}
-          {renderTime != null && (
-            <span className={`text-[10px] px-1.5 py-0.5 rounded tabular-nums ${
-              renderTime < 200 ? 'bg-green-900/30 text-green-400' : 'bg-yellow-900/30 text-yellow-400'
-            }`}>
-              {renderTime}ms
-            </span>
-          )}
-
-          {isRendering && (
-            <Loader2 className="w-3 h-3 animate-spin text-blue-400" />
-          )}
-        </div>
-
-        <div className="flex items-center gap-1">
-          {/* Element picker toggle */}
-          <button
-            onClick={onToggleElementPicker}
-            className={`p-1 rounded text-xs ${
-              elementPickerActive
-                ? 'bg-blue-600 text-white'
-                : 'text-text-tertiary hover:text-text-primary hover:bg-bg-secondary'
-            }`}
-            title="Element picker — click on preview to select elements"
-          >
-            <MousePointer2 className="w-3.5 h-3.5" />
-          </button>
-
-          {/* Zoom controls */}
-          <button onClick={zoomOut} className="p-1 rounded text-text-tertiary hover:text-text-primary hover:bg-bg-secondary" title="Zoom out">
-            <ZoomOut className="w-3.5 h-3.5" />
-          </button>
-          <span className="text-[10px] text-text-tertiary tabular-nums w-8 text-center">
-            {Math.round(zoom * 100)}%
-          </span>
-          <button onClick={zoomIn} className="p-1 rounded text-text-tertiary hover:text-text-primary hover:bg-bg-secondary" title="Zoom in">
-            <ZoomIn className="w-3.5 h-3.5" />
-          </button>
-          <button onClick={zoomFit} className="p-1 rounded text-text-tertiary hover:text-text-primary hover:bg-bg-secondary" title="Fit to view">
-            <Maximize2 className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      </div>
-
-      {/* ── Preview canvas ───────────────────────────────────────────────── */}
+    <div className="h-full min-h-0 flex flex-col bg-bg-primary">
       <div
         ref={containerRef}
-        className="flex-1 overflow-auto flex items-center justify-center p-4"
-        style={{ background: 'repeating-conic-gradient(#1a1a2e 0% 25%, #12121e 0% 50%) 0 0 / 20px 20px' }}
+        className="relative flex-1 min-h-0 flex items-center justify-center bg-[#0a0a0a] overflow-hidden"
       >
-        {previewData ? (
-          <img
-            src={`data:image/png;base64,${previewData}`}
-            alt="Overlay preview"
-            onClick={handlePreviewClick}
-            className={`shadow-2xl border border-border/30 ${
-              elementPickerActive ? 'cursor-crosshair' : 'cursor-default'
-            }`}
+        {(overlayVisible && (previewRenderMode === 'png' ? previewData : previewHtml)) ? (
+          <div
+            className="relative border border-border/30 rounded overflow-hidden"
             style={{
-              width: (resolution?.width || 1920) * zoom,
-              height: (resolution?.height || 1080) * zoom,
-              imageRendering: zoom > 1 ? 'pixelated' : 'auto',
+              width: `${Math.max(1, frameWidth)}px`,
+              height: `${Math.max(1, frameHeight)}px`,
             }}
-            draggable={false}
-          />
+          >
+            {overlayVisible && previewRenderMode === 'png' && previewData ? (
+              <img
+                src={`data:image/png;base64,${previewData}`}
+                alt="Overlay preview"
+                onClick={handlePreviewClick}
+                className={`${
+                  elementPickerActive ? 'cursor-crosshair pointer-events-auto' : 'cursor-default pointer-events-none'
+                } absolute inset-0 w-full h-full object-contain shadow-2xl`}
+                style={{
+                  transformOrigin: 'center center',
+                  transform: `scale(${previewZoom})`,
+                  imageRendering: previewZoom > 1 ? 'pixelated' : 'auto',
+                }}
+                draggable={false}
+              />
+            ) : (
+              <IsolatedHtmlPreview
+                html={previewHtml}
+                highlightSelector={highlightSelector}
+                highlightNonce={highlightNonce}
+                zoom={previewZoom}
+                className="absolute left-1/2 top-1/2 border-0 bg-transparent pointer-events-none"
+                style={{
+                  width: `${renderWidth}px`,
+                  height: `${renderHeight}px`,
+                  transformOrigin: 'center center',
+                  transform: `translate(-50%, -50%) scale(${appliedScale})`,
+                  background: 'transparent',
+                }}
+              />
+            )}
+          </div>
         ) : (
           <div className="flex flex-col items-center gap-3 text-text-tertiary">
             {isRendering ? (
@@ -161,6 +131,13 @@ export default function EditorPreview({
                 <span className="text-sm text-danger">Preview render failed</span>
                 <span className="text-xs text-text-tertiary max-w-md text-center">{previewError}</span>
               </>
+            ) : !overlayVisible && showStreamUnderlay ? null : !overlayVisible ? (
+              <>
+                <div className="w-24 h-14 rounded border-2 border-dashed border-border flex items-center justify-center">
+                  <Move className="w-6 h-6 text-text-tertiary/50" />
+                </div>
+                <span className="text-sm">Overlay hidden</span>
+              </>
             ) : (
               <>
                 <div className="w-24 h-14 rounded border-2 border-dashed border-border flex items-center justify-center">
@@ -170,14 +147,6 @@ export default function EditorPreview({
               </>
             )}
           </div>
-        )}
-      </div>
-
-      {/* ── Resolution info ──────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between px-3 py-1.5 border-t border-border text-[10px] text-text-tertiary">
-        <span>{resolution?.width || 1920} × {resolution?.height || 1080}</span>
-        {previewData && (
-          <span>{Math.round((previewData.length * 3) / 4 / 1024)} KB</span>
         )}
       </div>
     </div>

@@ -16,8 +16,12 @@ export function PipelineProvider({ children }) {
   const [currentRun, setCurrentRun] = useState(null)
   const [runHistory, setRunHistory] = useState([])
   const [presets, setPresets] = useState([])
+  const [projectControlStateMap, setProjectControlStateMap] = useState({})
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+
+  // Log entries (rolling, capped at 500)
+  const [logEntries, setLogEntries] = useState([])
 
   // Derived state
   const isRunning = currentRun?.state === 'running'
@@ -69,6 +73,18 @@ export function PipelineProvider({ children }) {
     }
   }, [])
 
+  const runPreflight = useCallback(async ({ projectId, presetId, config }) => {
+    try {
+      return await apiPost('/pipeline/preflight', {
+        project_id: projectId,
+        preset_id: presetId,
+        config,
+      })
+    } catch (err) {
+      return { ok: false, issues: [{ level: 'error', code: 'PREFLIGHT_ERROR', message: err.message }] }
+    }
+  }, [])
+
   const pausePipeline = useCallback(async () => {
     try {
       const data = await apiPost('/pipeline/pause')
@@ -102,6 +118,20 @@ export function PipelineProvider({ children }) {
     }
   }, [])
 
+  const resetPipeline = useCallback(async ({ projectId } = {}) => {
+    try {
+      const data = await apiPost('/pipeline/reset', {
+        project_id: projectId,
+      })
+      setCurrentRun(null)
+      setLogEntries([])
+      return data?.result || { reset: true }
+    } catch (err) {
+      console.error('[Pipeline] Reset failed:', err)
+      throw err
+    }
+  }, [])
+
   const retryStep = useCallback(async (stepName) => {
     try {
       const data = await apiPost('/pipeline/retry', { step_name: stepName })
@@ -121,6 +151,22 @@ export function PipelineProvider({ children }) {
     } catch (err) {
       console.error('[Pipeline] Skip failed:', err)
       throw err
+    }
+  }, [])
+
+  // ── Log fetch ─────────────────────────────────────────────────────────────
+  const fetchRunLogs = useCallback(async (runId, { limit = 200, step, level } = {}) => {
+    try {
+      const params = new URLSearchParams({ limit })
+      if (step)  params.set('step', step)
+      if (level) params.set('level', level)
+      const data = await apiGet(`/pipeline/runs/${runId}/logs?${params}`)
+      const entries = data.logs || []
+      setLogEntries(entries)
+      return entries
+    } catch (err) {
+      console.error('[Pipeline] fetchRunLogs failed:', err)
+      return []
     }
   }, [])
 
@@ -165,6 +211,29 @@ export function PipelineProvider({ children }) {
       return true
     } catch (err) {
       console.error('[Pipeline] Delete preset failed:', err)
+      throw err
+    }
+  }, [])
+
+  // ── Unified project control-state envelope ─────────────────────────────
+  const getProjectControlState = useCallback(async (projectId) => {
+    try {
+      const data = await apiGet(`/pipeline/projects/${projectId}/control-state`)
+      setProjectControlStateMap(prev => ({ ...prev, [projectId]: data }))
+      return data
+    } catch (err) {
+      console.error('[Pipeline] getProjectControlState failed:', err)
+      throw err
+    }
+  }, [])
+
+  const saveProjectControlState = useCallback(async (projectId, payload = {}) => {
+    try {
+      const data = await apiPut(`/pipeline/projects/${projectId}/control-state`, payload)
+      setProjectControlStateMap(prev => ({ ...prev, [projectId]: data }))
+      return data
+    } catch (err) {
+      console.error('[Pipeline] saveProjectControlState failed:', err)
       throw err
     }
   }, [])
@@ -318,16 +387,60 @@ export function PipelineProvider({ children }) {
         })
         break
 
+      case 'pipeline:log':
+        setLogEntries(prev => {
+          const next = [...prev, data]
+          return next.length > 500 ? next.slice(next.length - 500) : next
+        })
+        break
+
+      case 'pipeline:reset':
+        setCurrentRun(null)
+        setLogEntries([])
+        break
+
       default:
         break
     }
   }, [])
+
+  // ── Clear logs when a new run starts ─────────────────────────────────────
+  useEffect(() => {
+    if (currentRun?.run_id) {
+      setLogEntries([])
+    }
+  }, [currentRun?.run_id])
 
   // ── Fetch initial state on mount ────────────────────────────────────────
   useEffect(() => {
     fetchStatus()
     fetchPresets()
   }, [fetchStatus, fetchPresets])
+
+  // ── Fallback polling for active runs ───────────────────────────────────
+  // WebSocket updates are preferred, but this keeps current_step and state
+  // in sync if step events are missed or delayed.
+  useEffect(() => {
+    if (!currentRun?.run_id) return
+    if (!['running', 'paused', 'waiting_intervention'].includes(currentRun.state)) return
+
+    let inFlight = false
+    const tick = async () => {
+      if (inFlight) return
+      inFlight = true
+      try {
+        await fetchStatus()
+      } catch {
+        // Non-fatal: next tick can recover.
+      } finally {
+        inFlight = false
+      }
+    }
+
+    tick()
+    const intervalId = setInterval(tick, 1000)
+    return () => clearInterval(intervalId)
+  }, [currentRun?.run_id, currentRun?.state, fetchStatus])
 
   // ── Context value ───────────────────────────────────────────────────────
   const value = useMemo(() => ({
@@ -339,6 +452,10 @@ export function PipelineProvider({ children }) {
     currentStep,
     steps: currentRun?.steps || {},
 
+    // Logs
+    logEntries,
+    fetchRunLogs,
+
     // History
     runHistory,
     fetchHistory,
@@ -346,9 +463,11 @@ export function PipelineProvider({ children }) {
     // Control
     fetchStatus,
     startPipeline,
+    runPreflight,
     pausePipeline,
     resumePipeline,
     cancelPipeline,
+    resetPipeline,
     retryStep,
     skipStep,
 
@@ -358,15 +477,19 @@ export function PipelineProvider({ children }) {
     createPreset,
     updatePreset,
     deletePreset,
+    projectControlStateMap,
+    getProjectControlState,
+    saveProjectControlState,
 
     // Loading/Error
     loading,
     error,
   }), [
     currentRun, isRunning, isPaused, canResume, currentStep,
+    logEntries, fetchRunLogs,
     runHistory, fetchHistory,
-    fetchStatus, startPipeline, pausePipeline, resumePipeline, cancelPipeline, retryStep, skipStep,
-    presets, fetchPresets, createPreset, updatePreset, deletePreset,
+    fetchStatus, startPipeline, runPreflight, pausePipeline, resumePipeline, cancelPipeline, resetPipeline, retryStep, skipStep,
+    presets, fetchPresets, createPreset, updatePreset, deletePreset, projectControlStateMap, getProjectControlState, saveProjectControlState,
     loading, error,
   ])
 

@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width={{ resolution.width }}, height={{ resolution.height }}">
+  <script id="lrs-tailwind-runtime">{% include '_shared/tailwind.runtime.js' %}</script>
+  <style>
+    {% include '_shared/tailwind.css' %}
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: {{ resolution.width }}px; height: {{ resolution.height }}px; background: transparent; overflow: hidden; }
+    body {
+      font-family: var(--font-primary, 'Inter', 'Roboto', sans-serif);
+      color: var(--color-primary, #333333);
+    }
+
+    /* Custom variables for light theme */
+    :root {
+      --color-primary: #333333;
+      --color-secondary: #666666;
+      --color-accent: #007bff; /* A clean blue */
+      --color-background: rgba(255, 255, 255, 0.95); /* Light, slightly transparent white */
+      --color-background-alt: rgba(245, 245, 245, 0.95); /* Slightly darker light for alt rows */
+      --color-border: rgba(200, 200, 200, 0.8); /* Light grey border */
+      --color-highlight-player: rgba(220, 235, 255, 0.95); /* Light blue for player */
+      --color-highlight-leader: rgba(255, 240, 220, 0.95); /* Light orange for leader */
+      --font-primary: 'Inter', 'Roboto', sans-serif;
+      --font-mono: 'Roboto Mono', 'SF Mono', monospace;
+    }
+
+    .overlay-element {
+      background: var(--color-background);
+      border: 1px solid var(--color-border);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    }
+    .overlay-header {
+      background: var(--color-background-alt);
+      border-bottom: 1px solid var(--color-border);
+    }
+    .overlay-row {
+      background: var(--color-background);
+    }
+    .overlay-row-alt {
+      background: var(--color-background-alt);
+    }
+    .overlay-player {
+      background: var(--color-highlight-player);
+    }
+    .overlay-leader {
+      background: var(--color-highlight-leader);
+    }
+    .text-primary { color: var(--color-primary); }
+    .text-secondary { color: var(--color-secondary); }
+    .text-accent { color: var(--color-accent); }
+    .border-accent { border-color: var(--color-accent); }
+    .bg-accent { background-color: var(--color-accent); }
+
+    /* Font scaling with clamp() */
+    .clamp-xs { font-size: clamp(0.6rem, 0.8vw, 0.75rem); }
+    .clamp-sm { font-size: clamp(0.75rem, 1vw, 0.875rem); }
+    .clamp-base { font-size: clamp(0.875rem, 1.2vw, 1rem); }
+    .clamp-lg { font-size: clamp(1rem, 1.5vw, 1.125rem); }
+    .clamp-xl { font-size: clamp(1.125rem, 1.8vw, 1.25rem); }
+    .clamp-2xl { font-size: clamp(1.25rem, 2vw, 1.5rem); }
+    .clamp-3xl { font-size: clamp(1.5rem, 2.5vw, 1.875rem); }
+    .clamp-4xl { font-size: clamp(1.875rem, 3vw, 2.25rem); }
+    .clamp-5xl { font-size: clamp(2.25rem, 4vw, 3rem); }
+    .clamp-6xl { font-size: clamp(3rem, 5vw, 3.75rem); }
+    .clamp-7xl { font-size: clamp(3.75rem, 6vw, 4.5rem); }
+  </style>
+</head>
+<body>
+  {% set quali_rows = frame.qualifying_standings if frame.qualifying_standings is defined and frame.qualifying_standings else frame.standings %}
+  {% set result_rows = frame.final_standings if frame.final_standings is defined and frame.final_standings else frame.standings %}
+  <div class="overlay">
+
+  {% if frame.section is defined and frame.section == 'intro' %}
+    <div class="absolute inset-0 px-10 py-10 flex flex-col justify-between text-primary">
+      {% if frame.logo_primary %}
+        <img src="{{ frame.logo_primary }}" alt="Series Logo" class="absolute top-10 left-10 h-20 object-contain">
+      {% endif %}
+
+      <div class="overlay-element rounded-lg px-12 py-12 max-w-5xl mx-auto text-center">
+        <div class="h-1 bg-accent w-20 rounded-full mb-4 mx-auto"></div>
+        <div class="text-secondary uppercase tracking-widest clamp-base mb-2">Track Feature 1</div>
+        <div class="clamp-7xl font-black uppercase leading-none">{{ frame.track_name | default('Circuit Name') }}</div>
+        <div class="mt-6 flex flex-col items-center justify-center gap-4 text-secondary clamp-lg">
+          <div>{{ frame.series_name | default('Championship event') }}</div>
+          <div class="uppercase tracking-wide">
+            <div>{{ frame.race_season | default('Season') }}</div>
+            <div class="mt-1">{{ frame.race_date | default('Race Day') }}</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+  {% elif frame.section is defined and frame.section == 'qualifying_results' %}
+    <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[80vw] h-[85vh]">
+      <div class="overlay-element rounded-lg overflow-hidden flex flex-col">
+        <div class="overlay-header px-8 py-5 flex items-end justify-between text-primary">
+          <div>
+            <div class="text-accent clamp-sm uppercase tracking-wide">Qualifying Results</div>
+            <div class="clamp-4xl font-black uppercase mt-1">{{ frame.track_name | default('Circuit Name') }}</div>
+          </div>
+          <div class="text-right">
+            <div class="text-secondary clamp-base uppercase tracking-wide">{{ frame.series_name | default('Series') }}</div>
+            <div class="text-secondary clamp-sm mt-1 uppercase tracking-wide">Grid locked</div>
+          </div>
+        </div>
+        <div class="px-6 py-5 flex-1 min-h-0 flex flex-col">
+          <div class="grid grid-cols-[80px_minmax(0,1.6fr)_100px_140px_120px] gap-3 px-6 py-4 clamp-base uppercase tracking-wide text-secondary border-b border-solid border-border">
+            <div>Pos</div>
+            <div>Driver</div>
+            <div class="text-right">Number</div>
+            <div class="text-right">Qualifying</div>
+            <div class="text-right">Delta</div>
+          </div>
+          <div class="flex-1 min-h-0 overflow-hidden py-2 space-y-1">
+            {% for entry in quali_rows[:10] %}
+            <div class="grid grid-cols-[80px_minmax(0,1.6fr)_100px_140px_120px] gap-3 items-center rounded-sm px-6 py-3 text-primary
+              {% if entry.is_player | default(false) %}overlay-player
+              {% elif loop.first %}overlay-leader
+              {% elif loop.index is even %}overlay-row-alt
+              {% else %}overlay-row{% endif %}">
+              <div class="flex items-center gap-2">
+                <div class="clamp-xs uppercase tracking-wide text-secondary">P</div>
+                <div class="clamp-3xl font-black tabular-nums">{{ entry.position | default(loop.index) }}</div>
+              </div>
+              <div class="min-w-0">
+                <div class="clamp-2xl font-semibold truncate">{{ entry.driver_name | default('Driver') }}</div>
+                <div class="mt-0.5 clamp-xs uppercase tracking-wide text-secondary">{{ entry.driver_short_name | default('DRV') }}</div>
+              </div>
+              <div class="text-right clamp-xl font-semibold tabular-nums text-primary">#{{ entry.car_number | default('') }}</div>
+              <div class="text-right clamp-2xl font-bold tabular-nums font-mono">{{ entry.qualifying_time | default(entry.fastest_lap_time | default('--:--.---')) }}</div>
+              <div class="text-right clamp-xl font-semibold tabular-nums text-secondary">{{ entry.gap_to_leader | default(entry.gap | default('Pole')) }}</div>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+    </div>
+
+  {% elif frame.section is defined and frame.section == 'race_results' %}
+    <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[80vw] h-[85vh]">
+      <div class="overlay-element rounded-lg overflow-hidden flex flex-col">
+        <div class="overlay-header px-8 py-5 flex items-end justify-between text-primary">
+          <div>
+            <div class="text-accent clamp-sm uppercase tracking-wide">Final Classification</div>
+            <div class="clamp-4xl font-black uppercase mt-1">{{ frame.track_name | default('Circuit Name') }}</div>
+          </div>
+          <div class="text-right">
+            <div class="text-secondary clamp-base uppercase tracking-wide">{{ frame.series_name | default('Series') }}</div>
+            <div class="text-secondary clamp-sm mt-1 uppercase tracking-wide">Official result</div>
+          </div>
+        </div>
+        <div class="px-6 py-5 flex-1 min-h-0 flex flex-col">
+          <div class="grid grid-cols-[70px_minmax(0,1.4fr)_120px_80px_120px_120px] gap-3 px-6 py-4 clamp-base uppercase tracking-wide text-secondary border-b border-solid border-border">
+            <div>Pos</div>
+            <div>Driver</div>
+            <div class="text-right">Gap</div>
+            <div class="text-right">Inc</div>
+            <div class="text-right">Fastest</div>
+            <div class="text-right">Average</div>
+          </div>
+          <div class="flex-1 min-h-0 overflow-hidden py-2 space-y-1">
+            {% for entry in result_rows[:10] %}
+            <div class="grid grid-cols-[70px_minmax(0,1.4fr)_120px_80px_120px_120px] gap-3 items-center rounded-sm px-6 py-3 text-primary
+              {% if entry.is_player | default(false) %}overlay-player
+              {% elif loop.first %}overlay-leader
+              {% elif loop.index is even %}overlay-row-alt
+              {% else %}overlay-row{% endif %}">
+              <div class="clamp-3xl font-black tabular-nums">{{ entry.position | default(loop.index) }}</div>
+              <div class="min-w-0">
+                <div class="clamp-2xl font-semibold truncate">{{ entry.driver_name | default('Driver') }}</div>
+                <div class="mt-0.5 clamp-xs uppercase tracking-wide text-secondary">{{ entry.driver_short_name | default('DRV') }} · #{{ entry.car_number | default('') }}</div>
+              </div>
+              <div class="text-right clamp-xl font-semibold tabular-nums text-primary">{{ entry.gap_to_leader | default(entry.gap | default('Winner')) }}</div>
+              <div class="text-right clamp-xl font-semibold tabular-nums text-secondary">{{ entry.incidents if entry.incidents is not none else '--' }}</div>
+              <div class="text-right clamp-xl font-semibold tabular-nums font-mono text-primary">{{ entry.fastest_lap_time | default(entry.best_lap_time | default('--:--.---')) }}</div>
+              <div class="text-right clamp-xl font-semibold tabular-nums font-mono text-secondary">{{ entry.average_lap_time | default('--:--.---') }}</div>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+    </div>
+
+  {% else %}
+    <div class="absolute left-6 top-6 bottom-6 w-[18rem] overlay-element rounded-lg overflow-hidden flex flex-col">
+      <div class="overlay-header px-4 py-2 flex items-center justify-between text-primary">
+        <div>
+          <div class="text-accent clamp-sm uppercase tracking-wide">Live Standings</div>
+          <div class="clamp-lg font-semibold mt-0.5">{{ frame.series_name | default('Series') }}</div>
+        </div>
+        <div class="flex items-end gap-4">
+          <div class="text-right">
+            <div class="text-secondary clamp-xs uppercase tracking-wide">Lap</div>
+            <div class="clamp-xl font-black tabular-nums">{{ frame.current_lap | default(1) }}<span class="text-secondary clamp-sm">/{{ frame.total_laps | default(20) }}</span></div>
+          </div>
+          <div class="text-right">
+            <div class="text-secondary clamp-xs uppercase tracking-wide">Session</div>
+            <div class="clamp-xl font-black tabular-nums font-mono">{{ frame.session_time | default('00:00:00') }}</div>
+          </div>
+        </div>
+      </div>
+      <div class="flex-1 min-h-0 overflow-hidden py-2 space-y-1">
+        {% for entry in frame.standings[:12] %}
+        <div class="grid grid-cols-[60px_minmax(0,1fr)_100px] gap-3 items-center rounded-sm px-4 py-2 text-primary
+          {% if entry.is_player | default(false) %}overlay-player
+          {% elif loop.first %}overlay-leader
+          {% elif loop.index is even %}overlay-row-alt
+          {% else %}overlay-row{% endif %}">
+          <div class="clamp-2xl font-black tabular-nums">{{ entry.position | default(loop.index) }}</div>
+          <div class="clamp-xl font-black tracking-wide uppercase">{{ entry.driver_short_name | default('DRV') }}</div>
+          <div class="text-right clamp-lg font-semibold tabular-nums font-mono">{{ entry.gap | default('Leader' if loop.first else '--') }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="absolute left-[21rem] right-6 bottom-6 flex items-end justify-between gap-6">
+      <div class="overlay-element rounded-lg px-6 py-4 min-w-[26rem] text-primary">
+        <div class="text-secondary clamp-xs uppercase tracking-wide">Focused Driver</div>
+        <div class="mt-2 flex items-end gap-4">
+          <div class="w-1 rounded-full self-stretch bg-accent" style="background: {{ frame.team_color | default('var(--color-accent)') }};"></div>
+          <div class="flex-1">
+            <div class="flex items-end gap-3">
+              <div class="clamp-6xl font-black leading-none">P{{ frame.position | default(1) }}</div>
+              <div class="pb-1 text-secondary clamp-lg uppercase tracking-wide">{{ frame.driver_short_name | default('DRV') }}</div>
+            </div>
+            <div class="mt-1 clamp-3xl font-semibold">{{ frame.driver_name | default('Driver Name') }}</div>
+            <div class="mt-1 text-secondary clamp-sm uppercase tracking-wide">{{ frame.car_name | default('Car') }} · #{{ frame.car_number | default('') }}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="overlay-element rounded-lg px-5 py-4 min-w-[16rem] text-right text-primary">
+        <div class="text-secondary clamp-xs uppercase tracking-wide">Relative To Next</div>
+        <div class="mt-1 clamp-4xl font-black tabular-nums font-mono">{{ frame.relative_gap | default('Leader') }}</div>
+        <div class="mt-2 text-secondary clamp-xs uppercase tracking-wide">Last Lap</div>
+        <div class="mt-0.5 clamp-2xl font-semibold tabular-nums font-mono">{{ frame.last_lap_time | default('--:--.---') }}</div>
+      </div>
+    </div>
+  {% endif %}
+
+  </div>
+</body>
+</html>

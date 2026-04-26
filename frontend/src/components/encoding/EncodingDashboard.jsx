@@ -25,7 +25,6 @@ export default function EncodingDashboard({ job, gpuInfo }) {
   const fps = progress.fps || 0
   const speed = progress.speed || ''
   const bitrate = progress.bitrate || ''
-  const outputSize = job.output_size_bytes || 0
   const elapsed = job.elapsed_seconds || 0
 
   // Parse speed multiplier for GPU gauge (e.g. "2.5x" → 2.5)
@@ -35,18 +34,35 @@ export default function EncodingDashboard({ job, gpuInfo }) {
     return match ? parseFloat(match[1]) : 0
   }, [speed])
 
-  // GPU utilisation estimate based on encoding speed vs FPS
-  // This is an approximation — real GPU util would need nvidia-smi / nvml
+  // GPU utilisation: prefer measured telemetry from nvidia-smi, fall back to estimate
+  const gpuTelemetry = job.gpu_telemetry
   const gpuUtil = useMemo(() => {
-    if (!fps || !job.preset?.fps) return 0
-    // If encoding FPS equals target FPS, GPU is ~50% utilized (has headroom)
-    // If encoding FPS << target, GPU is at 100%
-    const targetFps = job.preset.fps || 60
-    const ratio = fps / targetFps
-    if (ratio >= 2) return 30
-    if (ratio >= 1) return 60
-    return Math.min(100, Math.round(100 - (ratio * 40)))
-  }, [fps, job.preset?.fps])
+    // If we have measured telemetry from nvidia-smi, use it
+    if (gpuTelemetry && typeof gpuTelemetry.utilization === 'number') {
+      return gpuTelemetry.utilization
+    }
+
+    // Otherwise, estimate from FFmpeg telemetry
+    if (speedMultiplier > 0) {
+      // Very fast encode usually means lower stress; near-realtime usually higher.
+      if (speedMultiplier >= 3) return 30
+      if (speedMultiplier >= 2) return 45
+      if (speedMultiplier >= 1.25) return 62
+      if (speedMultiplier >= 1) return 75
+      if (speedMultiplier >= 0.75) return 88
+      return 96
+    }
+
+    const targetFps = Number(job.preset?.fps) || 60
+    if (fps > 0 && targetFps > 0) {
+      const ratio = fps / targetFps
+      if (ratio >= 2) return 35
+      if (ratio >= 1) return 60
+      return Math.min(100, Math.round(100 - (ratio * 40)))
+    }
+
+    return 0
+  }, [gpuTelemetry, speedMultiplier, fps, job.preset?.fps])
 
   const isGpuEncoder = job.encoder?.type === 'gpu'
 
@@ -91,6 +107,7 @@ export default function EncodingDashboard({ job, gpuInfo }) {
           )}
           <span className="text-xs font-medium text-text-primary">
             {isGpuEncoder ? 'GPU' : 'CPU'} Utilisation
+            {gpuTelemetry && <span className="text-xxs text-text-tertiary ml-1">(measured)</span>}
           </span>
           <div className="flex-1" />
           <span className="text-xs font-mono text-text-secondary">{gpuUtil}%</span>
@@ -107,6 +124,32 @@ export default function EncodingDashboard({ job, gpuInfo }) {
             style={{ width: `${gpuUtil}%` }}
           />
         </div>
+
+        {/* GPU telemetry details */}
+        {gpuTelemetry && (
+          <div className="grid grid-cols-3 gap-2 mt-2 text-xxs">
+            <div>
+              <div className="text-text-tertiary">Memory</div>
+              <div className="text-text-primary font-mono">
+                {gpuTelemetry.memory_percent}%
+              </div>
+            </div>
+            <div>
+              <div className="text-text-tertiary">Temp</div>
+              <div className="text-text-primary font-mono">
+                {gpuTelemetry.temperature_c}°C
+              </div>
+            </div>
+            {gpuTelemetry.power_draw_w !== null && (
+              <div>
+                <div className="text-text-tertiary">Power</div>
+                <div className="text-text-primary font-mono">
+                  {gpuTelemetry.power_draw_w.toFixed(1)}W
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Encoder info */}
         <div className="flex items-center justify-between mt-2">

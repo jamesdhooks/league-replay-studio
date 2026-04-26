@@ -72,6 +72,32 @@ def detect_capture_software() -> list[dict[str, Any]]:
             "default_hotkey_stop": sw_info["default_hotkey_stop"],
         })
 
+    # Native capture (C++ DXGI/WGC bridge — available if lrs_capture.exe is built)
+    native_available = False
+    try:
+        from server.utils.native_capture_bridge import _find_native_exe
+        native_available = _find_native_exe() is not None
+    except Exception:
+        pass
+    results.append({
+        "id": "native",
+        "label": "LRS Native",
+        "running": native_available,  # "running" means the exe is present/ready
+        "available": native_available,
+        "default_hotkey_start": "",
+        "default_hotkey_stop": "",
+    })
+
+    # Manual capture — always available, no process to check
+    results.append({
+        "id": "manual",
+        "label": "Manual",
+        "running": True,  # always "ready" since no software needed
+        "available": True,
+        "default_hotkey_start": "",
+        "default_hotkey_stop": "",
+    })
+
     return results
 
 

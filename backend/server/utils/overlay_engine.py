@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -32,6 +33,17 @@ def _format_exc(exc: Exception) -> str:
     if msg:
         return msg
     return exc.__class__.__name__
+
+
+def _extract_undefined_var(exc: Exception) -> str | None:
+    """Extract undefined Jinja variable from common error message formats."""
+    msg = str(exc).strip()
+    if not msg:
+        return None
+    match = re.search(r"'([^']+)' is undefined", msg)
+    if match:
+        return match.group(1)
+    return None
 
 # ── Resolution presets ───────────────────────────────────────────────────────
 
@@ -81,6 +93,9 @@ class OverlayEngine:
         self._current_resolution = RESOLUTIONS[DEFAULT_RESOLUTION].copy()
         self._custom_template_dirs: list[Path] = []
         self._animation_profile_cache: dict[str, dict[str, Any]] = {}
+        # The engine uses a single shared Playwright page. Concurrent render
+        # calls must be serialized or screenshots can capture another request's DOM.
+        self._render_lock = asyncio.Lock()
 
     @property
     def initialized(self) -> bool:
@@ -206,7 +221,13 @@ class OverlayEngine:
             template = env.get_template(template_path)
             return template.render(**context)
         except Exception as exc:
-            logger.error("[Overlay] Template render failed (%s): %s", template_id, exc)
+            undefined_var = _extract_undefined_var(exc)
+            logger.exception(
+                "[Overlay] Template render failed (template_id=%s, template_path=%s, undefined_var=%s)",
+                template_id,
+                template_path,
+                undefined_var,
+            )
             raise
 
     async def _collect_animation_profile(self, cache_key: str | None = None) -> dict[str, Any]:
@@ -369,6 +390,41 @@ class OverlayEngine:
             float(animation_time_ms),
         )
 
+    async def _wait_for_tailwind_runtime_css(self) -> None:
+        """Wait briefly for runtime Tailwind CSS to be generated when present.
+
+        The local ``tailwind.runtime.js`` compiles utility CSS asynchronously after
+        DOM/class discovery. In PNG mode, capturing too early can miss those styles.
+        This helper is intentionally best-effort with a short timeout.
+        """
+        try:
+            await self._page.wait_for_function(
+                """() => {
+                    const scripts = Array.from(document.scripts || []);
+                    const hasTailwindRuntime = scripts.some((script) => {
+                        const src = String(script.src || '');
+                        return src.includes('tailwind.runtime.js');
+                    });
+
+                    if (!hasTailwindRuntime) {
+                        return true;
+                    }
+
+                    const styles = Array.from(document.querySelectorAll('style'));
+                    return styles.some((styleEl) => {
+                        const css = String(styleEl.textContent || '');
+                        // Runtime-generated Tailwind CSS usually contains custom props
+                        // and utility selectors, while empty placeholders should fail.
+                        return css.length > 0 && (css.includes('--tw-') || css.includes('.text-') || css.includes('.bg-'));
+                    });
+                }""",
+                timeout=2500,
+            )
+        except Exception:
+            # Best-effort only: rendering should continue even if runtime styles
+            # cannot be detected in time.
+            logger.debug("[Overlay] Tailwind runtime CSS wait timed out; continuing render")
+
     async def _prepare_rendered_html(
         self,
         rendered_html: str,
@@ -377,7 +433,11 @@ class OverlayEngine:
     ) -> dict[str, Any] | None:
         cache_key = hashlib.sha1(rendered_html.encode("utf-8")).hexdigest()
         await self._page.set_content(rendered_html, wait_until="domcontentloaded")
-        await self._page.wait_for_load_state("networkidle")
+        try:
+            await self._page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            logger.warning("[Overlay] networkidle wait timed out; continuing render")
+        await self._wait_for_tailwind_runtime_css()
         await self._page.evaluate(
             """() => new Promise((resolve) => {
                 requestAnimationFrame(() => requestAnimationFrame(resolve));
@@ -424,28 +484,29 @@ class OverlayEngine:
         start = time.perf_counter()
 
         try:
-            # Render the Jinja2 template to HTML
-            html = self.render_template_html(template_id, {
-                "frame": frame_data,
-                "resolution": self._current_resolution,
-            })
+            async with self._render_lock:
+                # Render the Jinja2 template to HTML
+                html = self.render_template_html(template_id, {
+                    "frame": frame_data,
+                    "resolution": self._current_resolution,
+                })
 
-            animation_profile = await self._prepare_rendered_html(
-                html,
-                analyze_animations=analyze_animations,
-                animation_time_ms=animation_time_ms,
-            )
+                animation_profile = await self._prepare_rendered_html(
+                    html,
+                    analyze_animations=analyze_animations,
+                    animation_time_ms=animation_time_ms,
+                )
 
-            # Screenshot with transparent background
-            screenshot_opts: dict[str, Any] = {
-                "type": "png",
-                "omit_background": True,
-                "full_page": False,
-            }
-            if output_path:
-                screenshot_opts["path"] = output_path
+                # Screenshot with transparent background
+                screenshot_opts: dict[str, Any] = {
+                    "type": "png",
+                    "omit_background": True,
+                       "full_page": True,
+                }
+                if output_path:
+                    screenshot_opts["path"] = output_path
 
-            png_bytes = await self._page.screenshot(**screenshot_opts)
+                png_bytes = await self._page.screenshot(**screenshot_opts)
 
             elapsed_ms = (time.perf_counter() - start) * 1000
 
@@ -469,8 +530,23 @@ class OverlayEngine:
 
         except Exception as exc:
             elapsed_ms = (time.perf_counter() - start) * 1000
-            logger.error("[Overlay] render_frame failed: %s (%.1fms)", exc, elapsed_ms)
-            return {"success": False, "error": _format_exc(exc), "elapsed_ms": round(elapsed_ms, 2)}
+            undefined_var = _extract_undefined_var(exc)
+            logger.exception(
+                "[Overlay] render_frame failed (template_id=%s, section=%s, undefined_var=%s, %.1fms)",
+                template_id,
+                frame_data.get("section", "unknown") if isinstance(frame_data, dict) else "unknown",
+                undefined_var,
+                elapsed_ms,
+            )
+            result = {
+                "success": False,
+                "error": _format_exc(exc),
+                "error_type": exc.__class__.__name__,
+                "elapsed_ms": round(elapsed_ms, 2),
+            }
+            if undefined_var:
+                result["undefined_var"] = undefined_var
+            return result
 
     # ── Raw HTML rendering (for editor) ────────────────────────────────────
 
@@ -505,40 +581,43 @@ class OverlayEngine:
         start = time.perf_counter()
 
         try:
-            # Render Jinja2 expressions in the raw HTML
-            from jinja2 import Template as JinjaTemplate
+            async with self._render_lock:
+                # Render Jinja2 expressions in the raw HTML.
+                # Use the environment-based from_string so that {% include %} and
+                # other loader-dependent directives (e.g. _shared/tailwind.runtime.js)
+                # are resolved correctly via the FileSystemLoader.
+                try:
+                    env = self._get_jinja_env()
+                    jinja_tmpl = env.from_string(html_content)
+                    rendered_html = jinja_tmpl.render(
+                        frame=frame_data,
+                        resolution=self._current_resolution,
+                    )
+                except Exception as tmpl_exc:
+                    return {
+                        "success": False,
+                        "error": f"Template error: {tmpl_exc}",
+                        "elapsed_ms": round((time.perf_counter() - start) * 1000, 2),
+                    }
 
-            try:
-                jinja_tmpl = JinjaTemplate(html_content)
-                rendered_html = jinja_tmpl.render(
-                    frame=frame_data,
-                    resolution=self._current_resolution,
+                animation_profile = await self._prepare_rendered_html(
+                    rendered_html,
+                    analyze_animations=analyze_animations,
+                    animation_time_ms=animation_time_ms,
                 )
-            except Exception as tmpl_exc:
-                return {
-                    "success": False,
-                    "error": f"Template error: {tmpl_exc}",
-                    "elapsed_ms": round((time.perf_counter() - start) * 1000, 2),
-                }
 
-            animation_profile = await self._prepare_rendered_html(
-                rendered_html,
-                analyze_animations=analyze_animations,
-                animation_time_ms=animation_time_ms,
-            )
+                png_bytes: bytes = b""
+                if render_screenshot:
+                    # Screenshot with transparent background
+                    screenshot_opts: dict[str, Any] = {
+                        "type": "png",
+                        "omit_background": True,
+                           "full_page": True,
+                    }
+                    if output_path:
+                        screenshot_opts["path"] = output_path
 
-            png_bytes: bytes = b""
-            if render_screenshot:
-                # Screenshot with transparent background
-                screenshot_opts: dict[str, Any] = {
-                    "type": "png",
-                    "omit_background": True,
-                    "full_page": False,
-                }
-                if output_path:
-                    screenshot_opts["path"] = output_path
-
-                png_bytes = await self._page.screenshot(**screenshot_opts)
+                    png_bytes = await self._page.screenshot(**screenshot_opts)
 
             elapsed_ms = (time.perf_counter() - start) * 1000
 

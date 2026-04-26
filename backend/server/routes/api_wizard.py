@@ -69,5 +69,5 @@ async def wizard_detect():
         "capture_software": capture_software,
         "capture_software_found": capture_software_found,
         "gpu": gpu_info,
-        "recommended_preset": "youtube_1080p60",
+        "recommended_preset": "1080p",
     }

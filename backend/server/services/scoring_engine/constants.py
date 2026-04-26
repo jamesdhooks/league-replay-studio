@@ -65,6 +65,36 @@ DEFAULT_PIP_THRESHOLD = 7.0
 # Reference speed for normalisation (70 m/s ≈ 250 km/h)
 REFERENCE_SPEED_MS = 70.0
 
+# ── Diversity / mix-balancing defaults (Balanced Selection v3) ──────────────
+# Selecting events strictly by score caused the type with the most strong
+# candidates to dominate the final script regardless of slider intent. The
+# "balanced selection" loop in timeline.allocate_timeline() multiplies each
+# candidate's score by these factors before picking the next event:
+#   effective = score
+#             × type_decay_base ** (type_count_so_far * scale)        # B
+#             × quota_pressure(type_share, mix_min, mix_max)          # A
+#             × 1 / (1 + bucket_repeat_penalty * bucket_type_count * scale)  # E
+# where scale = diversity_strength / 50 (so 0 disables every term, 50 nominal,
+# 100 aggressive).
+
+# Default normalization mode for score_events().
+#   "cross_type" — normalize all events on a single global scale so BASE_SCORES
+#                  and inter-type score differences survive into selection.
+#                  This is the recommended default; weight sliders become true
+#                  cross-type multipliers (50 = ×0.5, 100 = ×1.0).
+#   "per_type"   — legacy behavior: each event type is independently stretched
+#                  to [0.5–10], which erases base score differences and is the
+#                  root cause of single-type dominance in older configs.
+DEFAULT_NORMALIZATION_MODE = "cross_type"
+
+# Per-event-type diversity controls. mix_min < target_share < mix_max.
+DEFAULT_DIVERSITY_STRENGTH = 50          # 0–100; 0 reproduces legacy score-greedy selection
+DEFAULT_TYPE_DECAY_BASE = 0.85           # Nth event of a type effectively scored × base^(N*scale)
+DEFAULT_BUCKET_REPEAT_PENALTY = 0.25     # Penalty per same-type event already in the same temporal bucket
+DEFAULT_FLOOR_BOOST = 1.5                # Multiplier applied to events of an under-floor type
+DEFAULT_MIX_MAX = 1.0                    # Hard cap default = no cap
+DEFAULT_MAX_FLOOR_REBALANCE_SWAPS = 3    # Cap on Pass 4 swap thrash
+
 # ── Video Sections ──────────────────────────────────────────────────────────
 # The final highlight video is composed of four ordered sections.
 # Each non-race section uses a static "TV cam" (iRacing camera group)

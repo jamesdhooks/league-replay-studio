@@ -11,7 +11,7 @@ import EventTile from './EventTile'
 import ProductionColumn from './ProductionColumn'
 import RangeSlider from '../ui/RangeSlider'
 import { TimeGutter, TimeGutterH } from './TimeGutter'
-import SectionCollapseHeader from '../ui/SectionCollapseHeader'
+import CollapsiblePanelHeader from '../ui/CollapsiblePanelHeader'
 
 /**
  * HighlightHistogram — Unified score histogram + result timeline.
@@ -292,7 +292,7 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
     <div className="flex flex-col h-full min-h-0 overflow-hidden">
 
       {/* ── Header bar ─────────────────────────────────────────────────── */}
-      <SectionCollapseHeader
+      <CollapsiblePanelHeader
         open={!histogramCollapsed}
         onToggle={() => onToggle ? onToggle() : _setLocalCollapsed(v => !v)}
         icon={Columns3}
@@ -474,9 +474,9 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
                     <EventTile
                       key={evt.id} event={evt} totalDuration={totalDuration}
                       isHovered={hoveredId === evt.id} isSelected={selectedEventId === evt.id}
-                      onClick={() => handleClick(evt)} onEnter={() => setHoveredId(evt.id)}
+                      onClick={() => handleClick(evt)}
+                      onEnter={(e) => { setHoveredId(evt.id); setTooltip({ evt, x: e.clientX, y: e.clientY }) }}
                       onLeave={() => { setHoveredId(null); setTooltip(null) }} onRightClick={() => toggleOverride(evt.id)}
-                    onEnter={(e) => { setHoveredId(evt.id); setTooltip({ evt, x: e.clientX, y: e.clientY }) }}
                       horizontal
                       paddingBefore={paddingBefore}
                       paddingAfter={paddingAfter}
@@ -590,9 +590,9 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
                   <EventTile
                     key={evt.id} event={evt} totalDuration={totalDuration}
                     isHovered={hoveredId === evt.id} isSelected={selectedEventId === evt.id}
-                    onClick={() => handleClick(evt)} onEnter={() => setHoveredId(evt.id)}
-                    onLeave={() => { setHoveredId(null); setTooltip(null) }} onRightClick={() => toggleOverride(evt.id)}
+                    onClick={() => handleClick(evt)}
                     onEnter={(e) => { setHoveredId(evt.id); setTooltip({ evt, x: e.clientX, y: e.clientY }) }}
+                    onLeave={() => { setHoveredId(null); setTooltip(null) }} onRightClick={() => toggleOverride(evt.id)}
                     paddingBefore={paddingBefore}
                     paddingAfter={paddingAfter}
                   />

@@ -31,7 +31,7 @@ import textwrap
 from typing import Any
 
 from server.services.llm_service import LLMSkill
-from server.services.preset_service import DEFAULT_ELEMENTS
+from server.services.preset_service import DEFAULT_ELEMENTS, _load_builtin_html
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +288,11 @@ Frame Variables  ({{ frame.* }})
       .is_player      : bool   — Whether this is the focused/hero
                                  driver.
       .gap            : string — "+1.234", "+5.4", or "Leader".
+    frame.assets         : object   — Asset-variable URL map.
+      .logo_primary : string URL for mapped asset.
+      .team_badge   : string URL for mapped asset.
+    IMPORTANT: For image/asset bindings, use {{ frame.assets.<name> }}.
+    Do NOT use {{ frame.<name> }} for assets.
 
 Position Context  ({{ pos.* }})
 -------------------------------
@@ -478,6 +483,14 @@ class OverlayDesignSkill(LLMSkill):
             =================
             {available_assets}
 
+            ASSET TOKEN RULE
+            ================
+            • When the user requests images, logos, or any asset binding,
+              reference assets ONLY as {{{{ frame.assets.<variable_name> }}}}.
+            • Never reference assets as {{{{ frame.<variable_name> }}}}.
+            • Example:
+              <img src="{{{{ frame.assets.logo_primary }}}}" alt="Logo" />
+
             OUTPUT FORMAT
             ==============
             Return a single JSON object (no markdown fences, no extra text):
@@ -516,6 +529,8 @@ class OverlayDesignSkill(LLMSkill):
             7. z_index must be 0–100.
             8. Do NOT add position:absolute in the template — the wrapper
                div handles positioning.
+            9. For asset/image URLs, use {{{{ frame.assets.<name> }}}} only
+              (never {{{{ frame.<name> }}}}).
         """)
 
     # ── schema ──────────────────────────────────────────────────────────
@@ -705,6 +720,14 @@ class OverlayAugmentSkill(LLMSkill):
             =================
             {available_assets}
 
+            ASSET TOKEN RULE
+            ================
+            • When the user asks for image/logo/asset usage, reference
+              assets ONLY as {{{{ frame.assets.<variable_name> }}}}.
+            • Never reference assets as {{{{ frame.<variable_name> }}}}.
+            • Example:
+              <img src="{{{{ frame.assets.logo_primary }}}}" alt="Logo" />
+
             MODIFICATION GUIDELINES
             ========================
             • Preserve the element's "id" — it MUST stay the same.
@@ -757,6 +780,8 @@ class OverlayAugmentSkill(LLMSkill):
             7. Do NOT add position:absolute in the template — the wrapper
                div handles positioning.
             8. The returned "id" MUST equal "{target.get('id', 'element_id')}".
+            9. For asset/image URLs, use {{{{ frame.assets.<name> }}}} only
+              (never {{{{ frame.<name> }}}}).
         """)
 
     # ── schema ──────────────────────────────────────────────────────────
@@ -893,6 +918,10 @@ class OverlayHtmlEditSkill(LLMSkill):
         current_html = context.get("current_html", "")
         section = context.get("section", "race")
         template_id = context.get("template_id", "unknown")
+        scope_mode = context.get("scope_mode", "section")
+        workspace_path = context.get("workspace_path", "build")
+        section_html_map = context.get("section_html_map", {})
+        section_map_json = json.dumps(section_html_map, indent=2)
 
         return textwrap.dedent(f"""\
             You are an expert HTML/CSS/Jinja2 broadcast overlay designer
@@ -916,16 +945,31 @@ class OverlayHtmlEditSkill(LLMSkill):
             • Preserve ALL existing Jinja2 template variables
               ({{{{ frame.* }}}}, {{{{ resolution.* }}}}, etc.) unless the
               user explicitly asks to remove one.
+            • For image/logo/asset references, use
+              {{{{ frame.assets.<variable_name> }}}} (not {{{{ frame.<variable_name> }}}}).
             • Preserve the overall document structure (<!DOCTYPE html>,
               <html>, <head>, <body>) if present.
             • Apply the user's requested change precisely.
 
             CURRENT SECTION: {section}
             TEMPLATE ID:     {template_id}
+            WORKSPACE PATH:  {workspace_path}
+            SCOPE MODE:      {scope_mode}
+
+            SCOPING RULES
+            =============
+            • If SCOPE MODE is "section", prioritize edits that are clearly
+              targeted to CURRENT SECTION and avoid broad global restyles.
+            • If SCOPE MODE is "all_sections", it is allowed to apply cross-
+              template style changes that affect all sections.
 
             CURRENT HTML TEMPLATE
             =====================
             {current_html}
+
+            SECTION HTML MAP (when available)
+            =================================
+            {section_map_json}
 
             OUTPUT FORMAT
             =============
@@ -933,7 +977,9 @@ class OverlayHtmlEditSkill(LLMSkill):
 
             {{
               "html": "<full modified HTML string>",
-              "explanation": "Brief description of what was changed."
+              "explanation": "Brief description of what was changed.",
+              "touched_sections": ["race"],
+              "change_summary": "Short bullet-style summary of key edits"
             }}
         """)
 
@@ -946,6 +992,11 @@ class OverlayHtmlEditSkill(LLMSkill):
             "properties": {
                 "html": {"type": "string"},
                 "explanation": {"type": "string"},
+                "touched_sections": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "change_summary": {"type": "string"},
             },
         }
 
@@ -961,7 +1012,221 @@ class OverlayHtmlEditSkill(LLMSkill):
         if "explanation" not in output:
             logger.warning("[OverlayHtmlEditSkill] validation failed: Missing 'explanation' key")
             return False, "Missing 'explanation' key."
+        if "touched_sections" in output and not isinstance(output["touched_sections"], list):
+            logger.warning("[OverlayHtmlEditSkill] validation failed: 'touched_sections' is not a list")
+            return False, "'touched_sections' must be a list when provided."
+        if "change_summary" in output and not isinstance(output["change_summary"], str):
+          raw_summary = output.get("change_summary")
+          if isinstance(raw_summary, list):
+            output["change_summary"] = "\n".join(str(item) for item in raw_summary if item is not None)
+          elif isinstance(raw_summary, dict):
+            output["change_summary"] = json.dumps(raw_summary, ensure_ascii=True)
+          elif raw_summary is None:
+            output["change_summary"] = ""
+          else:
+            output["change_summary"] = str(raw_summary)
+          logger.warning("[OverlayHtmlEditSkill] normalized non-string 'change_summary' to string")
         logger.info("[OverlayHtmlEditSkill] validation passed")
+        return True, ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Skill 5 — Overlay Full Design Generator
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class OverlayFullDesignSkill(LLMSkill):
+    """Generate a complete, production-ready overlay HTML file from a style description.
+
+    The LLM receives the broadcast reference template plus the full template
+    variable reference and produces a single Jinja2/HTML file that covers all
+    four sections (intro, qualifying_results, race, race_results) styled
+    according to the user's description.
+    """
+
+    skill_id = "overlay_full_design"
+    name = "Overlay Full Design Generator"
+    description = (
+        "Generate a complete broadcast overlay (all four sections) from a "
+        "natural-language style description.  Returns a single self-contained "
+        "Jinja2/HTML file."
+    )
+
+    # ── prompt ──────────────────────────────────────────────────────────
+
+    def build_system_prompt(self, context: dict) -> str:
+        reference_html = _load_builtin_html("broadcast")
+        return textwrap.dedent(f"""\
+            You are an expert broadcast graphics designer for motorsport
+            productions in League Replay Studio.
+
+            Your task is to generate a COMPLETE, production-ready overlay HTML
+            file that covers all four video sections: intro, qualifying_results,
+            race, and race_results.
+
+            The user will describe the visual style they want.  Translate that
+            description into a polished Jinja2/HTML overlay that fits the style
+            perfectly.
+
+            ═══════════════════════════════════════════════════════
+            {_TEMPLATE_VARIABLE_REFERENCE}
+            ═══════════════════════════════════════════════════════
+
+            EXTRA TEMPLATE VARIABLES (build mode)
+            ======================================
+            In addition to the variables above, the following are available:
+              frame.qualifying_standings : array — Qualifying-specific standings.
+                                                   Falls back to frame.standings.
+              frame.final_standings      : array — Final race result standings.
+                                                   Falls back to frame.standings.
+              frame.track_name   : string — Venue name for display.
+              frame.race_season          : string — Season identifier.
+              frame.race_date            : string — Race date string.
+              frame.driver_short_name    : string — Focused driver short code.
+              entry.driver_short_name    : string — Short name in standings rows.
+              entry.qualifying_time      : string — Best lap in qualifying.
+              entry.fastest_lap_time     : string — Fastest lap time in race.
+              entry.average_lap_time     : string — Average lap time.
+              entry.gap_to_leader        : string — Time gap to race leader.
+              entry.incidents            : int    — Incident count for driver.
+              resolution.width           : int    — Canvas width (pixels).
+              resolution.height          : int    — Canvas height (pixels).
+
+            SECTION STRUCTURE
+            =================
+            The single HTML file MUST contain all four sections using the
+            following Jinja2 conditional pattern (already used in the
+            reference template):
+
+              {{% if frame.section is defined and frame.section == 'intro' %}}
+                ...intro content...
+              {{% elif frame.section is defined and frame.section == 'qualifying_results' %}}
+                ...qualifying content...
+              {{% elif frame.section is defined and frame.section == 'race_results' %}}
+                ...results content...
+              {{% else %}}
+                ...race content (default)...
+              {{% endif %}}
+
+            TECHNICAL REQUIREMENTS
+            ======================
+            • The file MUST start with <!DOCTYPE html> and include <html>,
+              <head>, <body> tags.
+            • body MUST have: background: transparent; overflow: hidden
+              so the overlay composites over video.
+            • Resolution is set dynamically:
+                <meta name="viewport" content="width={{{{ resolution.width }}}}, height={{{{ resolution.height }}}}">
+              html and body dimensions:
+                width: {{{{ resolution.width }}}}px; height: {{{{ resolution.height }}}}px
+            • You MAY use Tailwind CSS via a runtime script block (copy the
+              pattern from the reference template exactly).
+            • All custom CSS MUST be in a <style> block in <head>.
+            • Use CSS variables (--color-primary, --color-accent, etc.) for
+              every colour so users can re-theme without editing HTML.
+            • Use clamp() for font sizes so they scale with resolution.
+            • Use Jinja2 default filters: {{{{ frame.track_name | default('Circuit') }}}}
+
+            DESIGN GUIDELINES
+            =================
+            • Be creative and true to the user's style description.
+            • Every section should be visually cohesive with the overall style.
+            • Intro: atmospheric, full-screen title card with series/track info.
+            • Qualifying: standings table showing position, driver, number,
+              qualifying time, gap.  Use quali_rows variable.
+            • Race: live timing tower (top 8–12 drivers), focused driver card,
+              lap counter, flag indicator.  Data updates every frame.
+            • Results: final classification table showing all finishers with
+              podium highlight, gap times.  Use result_rows variable.
+            • Qualifying and results tables should define:
+                {{% set quali_rows = frame.qualifying_standings if
+                  frame.qualifying_standings is defined and
+                  frame.qualifying_standings else frame.standings %}}
+                {{% set result_rows = frame.final_standings if
+                  frame.final_standings is defined and
+                  frame.final_standings else frame.standings %}}
+              at the top of the <body>, before the section conditionals.
+
+            REFERENCE TEMPLATE (Broadcast Style)
+            =====================================
+            Study this reference template carefully.  It shows the exact
+            Jinja2 patterns, CSS class conventions, and structural approach
+            you MUST follow.  Generate a NEW design inspired by this structure
+            but visually styled per the user's description:
+
+            ```html
+            {reference_html}
+            ```
+
+            OUTPUT FORMAT
+            =============
+            Return a single JSON object — NO markdown fences, NO extra text:
+
+            {{{{
+              "html": "<complete HTML file as a single string>",
+              "style_summary": "2-3 sentence description of the design choices made."
+            }}}}
+
+            RULES
+            =====
+            1. Return ONLY the JSON object — no markdown, no commentary.
+            2. The "html" value must be a valid, complete HTML document.
+            3. Use ONLY template variables from the reference above.
+            4. Every section (intro, qualifying_results, race, race_results)
+               must be handled in the Jinja2 conditional chain.
+            5. body background must be transparent.
+            6. Use CSS variables for all colours.
+            7. Use clamp() for all font sizes.
+            8. Do NOT load external assets (images, fonts) — use web-safe
+               fonts or system fonts only (Google Fonts CDN is allowed).
+        """)
+
+    # ── schema ──────────────────────────────────────────────────────────
+
+    def get_response_schema(self) -> dict:
+        return {
+            "type": "object",
+            "required": ["html", "style_summary"],
+            "properties": {
+                "html": {"type": "string"},
+                "style_summary": {"type": "string"},
+            },
+        }
+
+    # ── validation ──────────────────────────────────────────────────────
+
+    def validate_output(self, output: dict) -> tuple[bool, str]:
+        if "html" not in output:
+            logger.warning("[OverlayFullDesignSkill] validation failed: Missing 'html' key")
+            return False, "Missing 'html' key."
+        if not isinstance(output["html"], str) or not output["html"].strip():
+            logger.warning("[OverlayFullDesignSkill] validation failed: 'html' is empty")
+            return False, "'html' must be a non-empty string."
+        if "style_summary" not in output:
+            logger.warning("[OverlayFullDesignSkill] validation failed: Missing 'style_summary' key")
+            return False, "Missing 'style_summary' key."
+        if not isinstance(output["style_summary"], str):
+            logger.warning("[OverlayFullDesignSkill] validation failed: 'style_summary' must be a string")
+            return False, "'style_summary' must be a string."
+        # Basic sanity: must look like an HTML document
+        html_lower = output["html"].lower()
+        if "<html" not in html_lower and "<!doctype" not in html_lower:
+            logger.warning("[OverlayFullDesignSkill] validation failed: 'html' does not appear to be a valid HTML document")
+            return False, "'html' does not appear to be a valid HTML document."
+
+        # Ensure section-aware logic exists so intro/qualifying/race/results can render distinctly.
+        required_section_tokens = ["frame.section", "intro", "qualifying_results", "race", "race_results"]
+        missing_tokens = [token for token in required_section_tokens if token not in html_lower]
+        if missing_tokens:
+          logger.warning(
+            "[OverlayFullDesignSkill] validation failed: missing section tokens: %s",
+            ", ".join(missing_tokens),
+          )
+          return (
+            False,
+            "'html' must include section-aware logic using frame.section for intro, qualifying_results, race, and race_results.",
+          )
+
+        logger.info("[OverlayFullDesignSkill] validation passed")
         return True, ""
 
 
@@ -973,3 +1238,4 @@ def register_default_skills():
     llm_service.register_skill(OverlayDesignSkill())
     llm_service.register_skill(OverlayAugmentSkill())
     llm_service.register_skill(OverlayHtmlEditSkill())
+    llm_service.register_skill(OverlayFullDesignSkill())

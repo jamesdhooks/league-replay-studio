@@ -12,7 +12,7 @@ import TimelineToolbar from '../timeline/TimelineToolbar'
 import RangeSlider from '../ui/RangeSlider'
 import { Film, Play, Pause, SkipBack, SkipForward, FileText, Copy, X, Loader2 } from 'lucide-react'
 import PlaybackControls from '../ui/PlaybackControls'
-import SectionCollapseHeader from '../ui/SectionCollapseHeader'
+import CollapsiblePanelHeader from '../ui/CollapsiblePanelHeader'
 import ConfigurableTimelineTracks from '../ui/ConfigurableTimelineTracks'
 
 
@@ -175,6 +175,7 @@ export default function HighlightTimeline({ onInspect }) {
   const [showScriptReport, setShowScriptReport] = useState(false)
   const [seekError, setSeekError] = useState(null)
   const scrollRef = useRef(null)
+  const optimisticClearTimeoutRef = useRef(null)
   // segId → car_idx override for driver focus; reset whenever script is regenerated
   const [driverFocusOverrides, setDriverFocusOverrides] = useState({})
   useEffect(() => { setDriverFocusOverrides({}) }, [videoScript])
@@ -317,11 +318,11 @@ export default function HighlightTimeline({ onInspect }) {
     setRangeEnd(e)
   }, [])
 
-  const [raceSessionNum, setRaceSessionNum] = useState(0)
+  const [raceSessionNum, setRaceSessionNum] = useState(null)
   useEffect(() => {
     if (!activeProject?.id) return
     apiGet(`/projects/${activeProject.id}/analysis/race-duration`)
-      .then(d => setRaceSessionNum(d?.race_session_num ?? 0))
+      .then(d => setRaceSessionNum(d?.race_session_num ?? null))
       .catch(() => {})
   }, [activeProject?.id])
 
@@ -380,6 +381,72 @@ export default function HighlightTimeline({ onInspect }) {
   const totalEditDuration = editSegments.length > 0
     ? editSegments[editSegments.length - 1].editEnd : 0
 
+  const inferredSessionNumBySegId = useMemo(() => {
+    const parsedRaceSession = Number(raceSessionNum)
+    const raceSession = Number.isFinite(parsedRaceSession) && parsedRaceSession >= 0
+      ? Math.trunc(parsedRaceSession)
+      : null
+
+    const parseSessionNum = (value) => {
+      const n = Number(value)
+      if (!Number.isFinite(n) || n < 0) return null
+      return Math.trunc(n)
+    }
+
+    const directByIndex = editSegments.map(seg => parseSessionNum(seg.session_num))
+    const nonZeroCounts = new Map()
+    for (const num of directByIndex) {
+      if (num != null && num > 0) {
+        nonZeroCounts.set(num, (nonZeroCounts.get(num) || 0) + 1)
+      }
+    }
+
+    let dominantNonZero = null
+    let dominantCount = -1
+    for (const [num, count] of nonZeroCounts.entries()) {
+      if (count > dominantCount) {
+        dominantNonZero = num
+        dominantCount = count
+      }
+    }
+
+    const preferredSession = (raceSession != null && raceSession > 0)
+      ? raceSession
+      : dominantNonZero
+
+    const nearestNeighborSession = (idx) => {
+      for (let radius = 1; radius < editSegments.length; radius += 1) {
+        const left = idx - radius
+        const right = idx + radius
+        if (left >= 0) {
+          const candidate = directByIndex[left]
+          if (candidate != null && (preferredSession == null || candidate > 0)) return candidate
+        }
+        if (right < editSegments.length) {
+          const candidate = directByIndex[right]
+          if (candidate != null && (preferredSession == null || candidate > 0)) return candidate
+        }
+      }
+      return null
+    }
+
+    const byId = new Map()
+    editSegments.forEach((seg, idx) => {
+      const direct = directByIndex[idx]
+      let resolved = direct
+
+      // Avoid falling back to session 0 when we have a known non-zero race session.
+      if (resolved == null || (resolved === 0 && preferredSession != null)) {
+        resolved = nearestNeighborSession(idx)
+      }
+      if (resolved == null) resolved = preferredSession
+      if (resolved == null) resolved = raceSession
+      byId.set(seg.id, resolved)
+    })
+
+    return byId
+  }, [editSegments, raceSessionNum])
+
   // Dynamic zoom: the scrollable content width = containerW / rangeWidth so that
   // the range slider zoom level stretches/shrinks the timeline instead of panning.
   const rangeWidth = rangeEnd - rangeStart
@@ -396,14 +463,64 @@ export default function HighlightTimeline({ onInspect }) {
 
   const effectiveActiveSegId = scrubSegId || activeSegId
 
+  const playableEditSegments = useMemo(
+    () => editSegments.filter(seg => (seg.editDur || 0) > 0 && seg.type !== 'bridge'),
+    [editSegments],
+  )
+
+  const clampEditTime = useCallback((editTime) => {
+    const safe = Number.isFinite(editTime) ? editTime : 0
+    return Math.max(0, Math.min(totalEditDuration, safe))
+  }, [totalEditDuration])
+
+  // Resolve edit-time onto a concrete non-bridge segment and offset.
+  // Boundaries prefer the next segment except for the very end of script.
+  const resolveSegmentAtEditTime = useCallback((editTime) => {
+    if (!playableEditSegments.length || editTime == null) return null
+    const clampedEditTime = clampEditTime(editTime)
+    const lastSeg = playableEditSegments[playableEditSegments.length - 1]
+
+    if (clampedEditTime >= totalEditDuration) {
+      return {
+        seg: lastSeg,
+        segmentEditOffset: lastSeg.editDur,
+        clampedEditTime,
+      }
+    }
+
+    let seg = playableEditSegments.find(s => clampedEditTime >= s.editStart && clampedEditTime < s.editEnd)
+
+    if (!seg) {
+      if (clampedEditTime <= playableEditSegments[0].editStart) {
+        seg = playableEditSegments[0]
+      } else {
+        seg = playableEditSegments.find(s => s.editStart >= clampedEditTime) || lastSeg
+      }
+    }
+
+    const segmentEditOffset = Math.max(0, Math.min(seg.editDur, clampedEditTime - seg.editStart))
+    return { seg, segmentEditOffset, clampedEditTime }
+  }, [clampEditTime, playableEditSegments, totalEditDuration])
+
+  const mapResolvedEditTimeToRaceTime = useCallback((resolved) => {
+    if (!resolved?.seg) return null
+    const { seg, segmentEditOffset } = resolved
+    const clipStart = seg.clipStartTime ?? seg.start_time_seconds ?? 0
+    const clipEnd = seg.clipEndTime ?? seg.end_time_seconds ?? clipStart
+    const ratio = seg.editDur > 0 ? (segmentEditOffset / seg.editDur) : 0
+    const mapped = clipStart + ratio * Math.max(0, clipEnd - clipStart)
+    return Number.isFinite(mapped) ? mapped : clipStart
+  }, [])
+
   // Session-time (race timeline) -> edit-time (final-script timeline) mapping.
   const mapSessionTimeToEditTime = useCallback((sessionTime, preferredSegId = null) => {
-    if (!editSegments.length || sessionTime == null) return null
+    if (!playableEditSegments.length || sessionTime == null) return null
 
-    const containing = editSegments.filter(seg => {
+    const containing = playableEditSegments.filter((seg, idx) => {
       const s = seg.clipStartTime ?? seg.start_time_seconds ?? 0
       const e = seg.clipEndTime ?? seg.end_time_seconds ?? s
-      return sessionTime >= s && sessionTime <= e
+      const isLast = idx === playableEditSegments.length - 1
+      return sessionTime >= s && (sessionTime < e || (isLast && sessionTime <= e))
     })
 
     let seg = containing[0]
@@ -413,11 +530,29 @@ export default function HighlightTimeline({ onInspect }) {
     }
 
     if (!seg) {
-      seg = editSegments.reduce((best, cur) => {
-        const bestDist = Math.abs((best.clipStartTime ?? best.start_time_seconds ?? 0) - sessionTime)
-        const curDist = Math.abs((cur.clipStartTime ?? cur.start_time_seconds ?? 0) - sessionTime)
-        return curDist < bestDist ? cur : best
-      }, editSegments[0])
+      let prevSeg = null
+      let nextSeg = null
+
+      for (const candidate of playableEditSegments) {
+        const candidateStart = candidate.clipStartTime ?? candidate.start_time_seconds ?? 0
+        const candidateEnd = candidate.clipEndTime ?? candidate.end_time_seconds ?? candidateStart
+
+        if (candidateEnd <= sessionTime) prevSeg = candidate
+        if (!nextSeg && candidateStart > sessionTime) nextSeg = candidate
+      }
+
+      if (prevSeg && nextSeg) {
+        const prevEnd = prevSeg.clipEndTime ?? prevSeg.end_time_seconds ?? (prevSeg.clipStartTime ?? prevSeg.start_time_seconds ?? 0)
+        const nextStart = nextSeg.clipStartTime ?? nextSeg.start_time_seconds ?? prevEnd
+        const gapDuration = Math.max(0.001, nextStart - prevEnd)
+        const gapProgress = Math.max(0, Math.min(1, (sessionTime - prevEnd) / gapDuration))
+        return prevSeg.editEnd + ((nextSeg.editStart - prevSeg.editEnd) * gapProgress)
+      }
+
+      if (prevSeg) return prevSeg.editEnd
+      if (nextSeg) return nextSeg.editStart
+
+      seg = playableEditSegments[0]
     }
 
     const segStart = seg.clipStartTime ?? seg.start_time_seconds ?? 0
@@ -425,34 +560,27 @@ export default function HighlightTimeline({ onInspect }) {
     const offset = Math.max(0, Math.min(seg.editDur, sessionTime - segStart))
     const maxOffset = Math.max(0, segEnd - segStart)
     return seg.editStart + Math.max(0, Math.min(offset, maxOffset))
-  }, [editSegments])
+  }, [playableEditSegments])
 
   // Edit-time -> race session-time (used to sync histogram playhead during scrub).
   const mapEditTimeToRaceTime = useCallback((editTime) => {
-    if (!editSegments.length || editTime == null) return null
-    const clamped = Math.max(0, Math.min(totalEditDuration, editTime))
-    const seg = editSegments.find(s => clamped >= s.editStart && clamped <= s.editEnd)
-      || editSegments[editSegments.length - 1]
-    if (!seg) return null
-    const offset = Math.max(0, Math.min(seg.editDur, clamped - seg.editStart))
-    const clipStart = seg.clipStartTime ?? seg.start_time_seconds ?? 0
-    const clipEnd   = seg.clipEndTime   ?? seg.end_time_seconds   ?? clipStart
-    const ratio     = seg.editDur > 0 ? offset / seg.editDur : 0
-    return clipStart + ratio * Math.max(0, clipEnd - clipStart)
-  }, [editSegments, totalEditDuration])
+    const resolved = resolveSegmentAtEditTime(editTime)
+    return mapResolvedEditTimeToRaceTime(resolved)
+  }, [mapResolvedEditTimeToRaceTime, resolveSegmentAtEditTime])
 
-  // Edit-time -> segment + offset mapping used by drag release.
-  const resolveSegmentAtEditTime = useCallback((editTime) => {
-    if (!editSegments.length || editTime == null) return null
-    const clamped = Math.max(0, Math.min(totalEditDuration, editTime))
-    const seg = editSegments.find(s => clamped >= s.editStart && clamped <= s.editEnd)
-      || editSegments[editSegments.length - 1]
-    if (!seg) return null
-    return {
-      seg,
-      segmentEditOffset: Math.max(0, Math.min(seg.editDur, clamped - seg.editStart)),
-    }
-  }, [editSegments, totalEditDuration])
+  const getSessionNumForSegment = useCallback((seg) => {
+    if (!seg) return raceSessionNum
+    const inferred = inferredSessionNumBySegId.get(seg.id)
+    if (Number.isFinite(inferred) && inferred >= 0) return Math.trunc(inferred)
+    const segSession = Number(seg.session_num)
+    if (Number.isFinite(segSession) && segSession >= 0) return Math.trunc(segSession)
+    return raceSessionNum
+  }, [raceSessionNum, inferredSessionNumBySegId])
+
+  const getSessionNumForEditTime = useCallback((editTime) => {
+    const resolved = resolveSegmentAtEditTime(editTime)
+    return getSessionNumForSegment(resolved?.seg)
+  }, [resolveSegmentAtEditTime, getSessionNumForSegment])
 
   const getEditTimeFromClientX = useCallback((clientX) => {
     const el = scrollRef.current
@@ -460,14 +588,16 @@ export default function HighlightTimeline({ onInspect }) {
     const rect = el.getBoundingClientRect()
     const x = clientX - rect.left + el.scrollLeft
     const pct = Math.max(0, Math.min(1, x / activeContentW))
-    return pct * totalEditDuration
-  }, [activeContentW, totalEditDuration])
+    return clampEditTime(pct * totalEditDuration)
+  }, [activeContentW, clampEditTime, totalEditDuration])
 
   const fallbackEditTime = useCallback(() => {
-    if (!effectiveActiveSegId) return 0
-    const seg = editSegments.find(s => s.id === effectiveActiveSegId)
-    return seg ? seg.editStart : 0
-  }, [editSegments, effectiveActiveSegId])
+    if (effectiveActiveSegId) {
+      const seg = editSegments.find(s => s.id === effectiveActiveSegId)
+      if (seg) return seg.editStart
+    }
+    return playableEditSegments[0]?.editStart ?? 0
+  }, [editSegments, effectiveActiveSegId, playableEditSegments])
 
   const {
     replaySpeed,
@@ -491,6 +621,7 @@ export default function HighlightTimeline({ onInspect }) {
   } = useAuthoritativeReplayPlayhead({
     isConnected,
     raceSessionNum,
+    getSessionNumForLocalTime: getSessionNumForEditTime,
     localDuration: totalEditDuration,
     storageKey: 'lrs:editing:timeline:speed',
     defaultSpeed: 1,
@@ -536,11 +667,12 @@ export default function HighlightTimeline({ onInspect }) {
     })
   }, [])
 
-  const seekScriptPosition = useCallback(async (editTime) => {
+  const seekScriptPosition = useCallback(async (editTime, { keepPlaying = false } = {}) => {
     const resolved = resolveSegmentAtEditTime(editTime)
     if (!resolved) return
-    const { seg, segmentEditOffset } = resolved
-    const sessionTime = (seg.clipStartTime ?? seg.start_time_seconds ?? 0) + segmentEditOffset
+    const { seg } = resolved
+    const sessionTime = mapResolvedEditTimeToRaceTime(resolved)
+    if (sessionTime == null) return
     const cameras = sessionData?.cameras || []
 
     setActiveSegId(seg.id)
@@ -548,14 +680,17 @@ export default function HighlightTimeline({ onInspect }) {
 
     // Seek with one retry on failure
     let seekOk = false
+    let seekErrorDetail = null
     for (let attempt = 0; attempt < 2 && !seekOk; attempt++) {
       try {
         await apiPost('/iracing/replay/seek-time', {
-          session_num: raceSessionNum,
+          session_num: getSessionNumForSegment(seg),
           session_time_ms: Math.round(sessionTime * 1000),
+          resolve_session: false,
         })
         seekOk = true
       } catch (err) {
+        seekErrorDetail = err?.detail ?? err?.message ?? 'Seek failed'
         if (attempt === 1) setSeekError('Seek failed — iRacing may not be ready')
       }
     }
@@ -572,7 +707,15 @@ export default function HighlightTimeline({ onInspect }) {
       }
     } catch { /* non-fatal */ }
 
-    try { await apiPost('/iracing/replay/pause') } catch { /* non-fatal */ }
+    if (keepPlaying) {
+      try {
+        const validSpeed = Math.max(1, Math.round(replaySpeed || 1))
+        await apiPost('/iracing/replay/speed', { speed: validSpeed })
+        await apiPost('/iracing/replay/play')
+      } catch { /* non-fatal */ }
+    } else {
+      try { await apiPost('/iracing/replay/pause') } catch { /* non-fatal */ }
+    }
 
     // Log the seek event so the event feed captures manual scrubs
     pushScriptAction({
@@ -583,9 +726,11 @@ export default function HighlightTimeline({ onInspect }) {
       cameraLabel: null,
       driverName:  null,
       raceTime:    sessionTime,
+      seekOk,
+      seekFeedback: seekOk ? 'Seek OK' : (seekErrorDetail || 'Seek failed'),
       involvedDrivers: [],
     })
-  }, [resolveSegmentAtEditTime, sessionData, raceSessionNum, getFocusCarIdx, cameraOverrides, pushScriptAction])
+  }, [resolveSegmentAtEditTime, mapResolvedEditTimeToRaceTime, sessionData, getSessionNumForSegment, getFocusCarIdx, cameraOverrides, pushScriptAction, replaySpeed])
 
   const handlePlayheadPointerDown = useCallback((e) => {
     if (!hasData || e.button !== 0) return
@@ -596,6 +741,12 @@ export default function HighlightTimeline({ onInspect }) {
 
     // Mark clock as user-scrubbing so the 50ms ticker won't fight our UI updates
     setClockUserScrubbing(true)
+
+    // Cancel any pending optimistic-playhead clear from a previous scrub.
+    if (optimisticClearTimeoutRef.current) {
+      clearTimeout(optimisticClearTimeoutRef.current)
+      optimisticClearTimeoutRef.current = null
+    }
 
     const applyDrag = (clientX) => {
       const editTime = getEditTimeFromClientX(clientX)
@@ -618,18 +769,20 @@ export default function HighlightTimeline({ onInspect }) {
       setIsDraggingPlayhead(false)
 
       const finalEditTime = getEditTimeFromClientX(up.clientX)
+      const resolved = resolveSegmentAtEditTime(finalEditTime)
+      const resolvedEditTime = resolved?.clampedEditTime ?? finalEditTime
+      const resolvedRaceTime = mapResolvedEditTimeToRaceTime(resolved)
       setScrubSegId(null)
-      setOptimisticEditTime(finalEditTime)
+      setOptimisticEditTime(resolvedEditTime)
       
       // Re-anchor the clock to the new scrub position so it resumes from here
       const clk = scriptClockRef.current
       if (clk) {
-        reanchorClock(finalEditTime)
+        reanchorClock(resolvedEditTime)
         setClockUserScrubbing(false)
         // Update segStartSec if we're in the middle of a segment for drift detection
-        const resolved = resolveSegmentAtEditTime(finalEditTime)
-        if (resolved?.seg) {
-          clk.segStartSec = resolved.seg.start_time_seconds
+        if (resolved?.seg && resolvedRaceTime != null) {
+          clk.segStartSec = resolvedRaceTime - resolved.segmentEditOffset
           clk.segStartWallMs = performance.now()
           clk.segAccPausedMsAtSegStart = 0
         }
@@ -637,13 +790,16 @@ export default function HighlightTimeline({ onInspect }) {
       
       // If executing, tell the loop to jump forward without cycling through intermediate segments
       if (scriptClockRef.current) {
-        scrubResyncRef.current = { editTime: finalEditTime }
+        scrubResyncRef.current = { editTime: resolvedEditTime }
       }
 
-      await seekScriptPosition(finalEditTime)
+      await seekScriptPosition(resolvedEditTime, { keepPlaying: executing })
 
       // Keep optimistic line briefly so UI feels immediate while replay-state poll catches up.
-      setTimeout(() => setOptimisticEditTime(null), 1200)
+      optimisticClearTimeoutRef.current = setTimeout(() => {
+        setOptimisticEditTime(null)
+        optimisticClearTimeoutRef.current = null
+      }, 1200)
     }
 
     document.addEventListener('mousemove', onMove)
@@ -652,12 +808,20 @@ export default function HighlightTimeline({ onInspect }) {
     hasData,
     getEditTimeFromClientX,
     mapEditTimeToRaceTime,
+    mapResolvedEditTimeToRaceTime,
     reanchorClock,
     resolveSegmentAtEditTime,
     seekScriptPosition,
     seekTo,
     setClockUserScrubbing,
   ])
+
+  useEffect(() => () => {
+    if (optimisticClearTimeoutRef.current) {
+      clearTimeout(optimisticClearTimeoutRef.current)
+      optimisticClearTimeoutRef.current = null
+    }
+  }, [])
 
   const virtualPlayheadX = useMemo(() => {
     if (virtualPlayheadTime == null) return null
@@ -699,6 +863,18 @@ export default function HighlightTimeline({ onInspect }) {
     [activeSegId, editSegments]
   )
 
+  const resolveExecutionStart = useCallback((requestedEditTime) => {
+    const resolved = resolveSegmentAtEditTime(requestedEditTime)
+    if (!resolved?.seg) {
+      return { fromIndex: 0, startEditTime: clampEditTime(0) }
+    }
+    const fromIndex = editSegments.findIndex(s => s.id === resolved.seg.id)
+    return {
+      fromIndex: Math.max(0, fromIndex),
+      startEditTime: resolved.clampedEditTime,
+    }
+  }, [clampEditTime, editSegments, resolveSegmentAtEditTime])
+
   // ── Seek to a single segment (no looping) ──────────────────────────────────
   const seekToSegment = useCallback(async (idx) => {
     if (idx < 0 || idx >= editSegments.length) return
@@ -707,8 +883,9 @@ export default function HighlightTimeline({ onInspect }) {
     const cameras = sessionData?.cameras || []
     try {
       await apiPost('/iracing/replay/seek-time', {
-        session_num: raceSessionNum,
+        session_num: getSessionNumForSegment(seg),
         session_time_ms: Math.round((seg.clipStartTime ?? seg.start_time_seconds ?? 0) * 1000),
+        resolve_session: false,
       })
     } catch (err) {
       showError(`Seek failed: ${err?.message || 'iRacing not responding'}`)
@@ -726,10 +903,10 @@ export default function HighlightTimeline({ onInspect }) {
       }
     } catch { /* non-fatal */ }
     try { await apiPost('/iracing/replay/pause') } catch { /* non-fatal */ }
-  }, [editSegments, raceSessionNum, sessionData, getFocusCarIdx, cameraOverrides])
+  }, [editSegments, getSessionNumForSegment, sessionData, getFocusCarIdx, cameraOverrides])
 
   // ── Execute Script ──────────────────────────────────────────────────────────
-  const executeScript = useCallback(async (fromIndex = 0) => {
+  const executeScript = useCallback(async ({ fromIndex = 0, startEditTime = null } = {}) => {
     const segs = editSegments.slice(fromIndex)
     if (!segs.length) return
     const abort = { cancelled: false }
@@ -746,9 +923,9 @@ export default function HighlightTimeline({ onInspect }) {
     // The browser is the source of truth for timing. iRacing receives
     // seek/camera/play commands at boundaries; its session_time cannot
     // push the playhead while the script is running.
-    const startEditTime = editSegments[fromIndex]?.editStart ?? 0
+    let pendingStartEditTime = clampEditTime(startEditTime ?? editSegments[fromIndex]?.editStart ?? 0)
     startClock({
-      startLocalTime: startEditTime,
+      startLocalTime: pendingStartEditTime,
       speed,
       getExpectedSessionTime: ({ wallNow, clock }) => {
         if (clock.segStartSec == null) return null
@@ -774,21 +951,29 @@ export default function HighlightTimeline({ onInspect }) {
         const clk = scriptClockRef.current
         if (!clk) { resolve(); return }
         if (clk.paused) return
-        const now = clk.startEditTime +
+        const now = clk.startLocalTime +
           ((performance.now() - clk.startWallMs - clk.accPausedMs) / 1000) * clk.speed
         if (now >= targetEditTime) { clearInterval(check); resolve() }
       }, 50)
     })
 
-    for (const seg of segs) {
+    for (let segIndex = 0; segIndex < segs.length; segIndex += 1) {
+      const seg = segs[segIndex]
       if (abort.cancelled) break
 
-      // Scrub resync: skip segments that fall entirely before the target position
-      // without firing any API commands. When we reach the segment that contains
-      // the target time, clear the resync flag and execute that segment normally.
+      // Scrub resync: jump directly to the segment containing the target edit-time,
+      // whether it is ahead of or behind the current loop index.
       if (scrubResyncRef.current != null) {
-        if (seg.editEnd <= scrubResyncRef.current.editTime) continue
-        scrubResyncRef.current = null  // this segment contains the target; proceed normally
+        const targetEditTime = scrubResyncRef.current.editTime
+        const targetSegIndex = segs.findIndex(s => s.type !== 'bridge' && targetEditTime < s.editEnd)
+        if (targetSegIndex < 0) {
+          scrubResyncRef.current = null
+          continue
+        }
+        pendingStartEditTime = targetEditTime
+        scrubResyncRef.current = null
+        segIndex = Math.max(-1, targetSegIndex - 1)
+        continue
       }
 
       // Bridges are zero-duration cut markers — skip all API calls.
@@ -797,7 +982,15 @@ export default function HighlightTimeline({ onInspect }) {
       // overridden by the segment that follows.
       if (seg.type === 'bridge') continue
 
-      const startSec = seg.clipStartTime ?? seg.start_time_seconds ?? 0
+      const segStartSec = seg.clipStartTime ?? seg.start_time_seconds ?? 0
+      const shouldApplyPendingStart = Number.isFinite(pendingStartEditTime)
+        && pendingStartEditTime >= seg.editStart
+        && pendingStartEditTime < seg.editEnd
+      const startOffsetForSeg = shouldApplyPendingStart
+        ? Math.max(0, Math.min(seg.editDur, pendingStartEditTime - seg.editStart))
+        : 0
+      if (shouldApplyPendingStart) pendingStartEditTime = null
+      const startSec = segStartSec + startOffsetForSeg
       const hasSchedule = Array.isArray(seg.camera_schedule) && seg.camera_schedule.length > 1
 
       setActiveSegId(seg.id)
@@ -814,8 +1007,9 @@ export default function HighlightTimeline({ onInspect }) {
 
       try {
         await apiPost('/iracing/replay/seek-time', {
-          session_num: raceSessionNum,
+          session_num: getSessionNumForSegment(seg),
           session_time_ms: Math.round(startSec * 1000),
+          resolve_session: false,
         })
       } catch (err) {
         showError(`Seek failed: ${err?.message || 'iRacing not responding'}`)
@@ -838,6 +1032,7 @@ export default function HighlightTimeline({ onInspect }) {
         let prevCarIdx   = undefined  // undefined ≠ null (null means "no specific car")
         for (const win of seg.camera_schedule) {
           if (abort.cancelled) break
+          if (win.end <= startSec) continue
           const cam = cameras.find(c => c.group_name === win.camera)
           if (cam) {
             const carIdx = win.driver_idx ?? null
@@ -860,7 +1055,7 @@ export default function HighlightTimeline({ onInspect }) {
                 section: seg.section || 'race',
                 cameraLabel: win.camera,
                 driverName: drvName,
-                raceTime: win.start,
+                raceTime: Math.max(startSec, win.start),
                 involvedDrivers: seg.driver_names || [],
               })
               prevGroupNum = cam.group_num
@@ -868,7 +1063,7 @@ export default function HighlightTimeline({ onInspect }) {
             }
           }
           // Wait until the browser clock reaches the end of this window.
-          const winEditEnd = seg.editStart + (win.end - startSec)
+          const winEditEnd = seg.editStart + (win.end - segStartSec)
           await waitForEditTime(winEditEnd)
         }
       } else {
@@ -918,7 +1113,7 @@ export default function HighlightTimeline({ onInspect }) {
     setActiveSegId(null)
     scrubResyncRef.current = null
     stopClock()
-  }, [editSegments, raceSessionNum, sessionData, replaySpeed, getFocusCarIdx, pushScriptAction, clearScriptActionLog, cameraOverrides])
+  }, [editSegments, getSessionNumForSegment, sessionData, replaySpeed, getFocusCarIdx, pushScriptAction, clearScriptActionLog, cameraOverrides, clampEditTime])
 
   const pauseExecution = useCallback(() => {
     pausedRef.current = true
@@ -1147,11 +1342,11 @@ export default function HighlightTimeline({ onInspect }) {
 
       {/* Header / collapse toggle */}
       <div className="flex items-center border-b border-border bg-bg-secondary shrink-0">
-        <SectionCollapseHeader
+        <CollapsiblePanelHeader
           open={!collapsed}
           onToggle={() => setCollapsed(v => !v)}
           icon={Film}
-          title="Race Script"
+          title="Script Timeline"
           subtitle={!collapsed && hasData
             ? `${clipCount} highlights${contextCount > 0 ? ` · ${contextCount} context` : ''} · ${fmtDur(totalVideoDuration)} total`
             : null}
@@ -1184,7 +1379,10 @@ export default function HighlightTimeline({ onInspect }) {
           nextTitle="Next segment"
           isPlaying={executing && !paused}
           onPlayPause={() => {
-            if (!executing) return executeScript(Math.max(0, activeSegIndex))
+            if (!executing) {
+              const playheadEditTime = virtualPlayheadTime ?? scriptEditTime ?? 0
+              return executeScript(resolveExecutionStart(playheadEditTime))
+            }
             if (paused)     return resumeExecution()
             return pauseExecution()
           }}
@@ -1237,6 +1435,8 @@ export default function HighlightTimeline({ onInspect }) {
               </div>
             )}
             <ConfigurableTimelineTracks
+              containerClassName="flex-1 flex min-h-0 h-full overflow-hidden bg-bg-secondary"
+              scrollClassName="flex-1 min-h-0 overflow-x-hidden overflow-y-auto"
               gutterWidth={GUTTER_W}
               rows={[
                 {

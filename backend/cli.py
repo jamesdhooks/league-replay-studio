@@ -105,6 +105,26 @@ Examples:
         help="Project ID (integer) or project name to operate on",
     )
 
+    # ── Project creation ────────────────────────────────────────────────────
+    parser.add_argument(
+        "--create-project",
+        metavar="NAME",
+        dest="create_project",
+        help="Create a new project with this name if it does not already exist",
+    )
+    parser.add_argument(
+        "--replay-file",
+        metavar="PATH",
+        dest="replay_file",
+        help="Path to a .rpy replay file — used during --create-project or to override project replay",
+    )
+    parser.add_argument(
+        "--from-active-session",
+        action="store_true",
+        dest="from_active_session",
+        help="When creating a project, auto-populate metadata from the active iRacing session",
+    )
+
     # ── Operations (mutually exclusive) ────────────────────────────────────
     ops = parser.add_mutually_exclusive_group()
     ops.add_argument(
@@ -135,7 +155,7 @@ Examples:
     parser.add_argument(
         "--preset",
         metavar="NAME",
-        help='Export preset name or ID (e.g. "YouTube 1080p60")',
+        help='Pipeline preset name or ID',
     )
     parser.add_argument(
         "--output",
@@ -145,7 +165,7 @@ Examples:
     parser.add_argument(
         "--upload",
         action="store_true",
-        help="Upload the exported video to YouTube after encoding",
+        help="Run the upload step after export (upload_to_youtube=True)",
     )
     parser.add_argument(
         "--gpu",
@@ -153,6 +173,52 @@ Examples:
         type=int,
         default=None,
         help="GPU index to use for encoding (0-based). Defaults to auto-select.",
+    )
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        dest="non_interactive",
+        help=(
+            "Headless mode: suppress all user-intervention steps. "
+            "Steps that require manual action are skipped with a warning. "
+            "Fails immediately on critical errors instead of pausing."
+        ),
+    )
+
+    # ── Execution-path step toggles (--full-pipeline only) ───────────────────
+    step_toggles = parser.add_argument_group(
+        "execution path",
+        "Control which pipeline steps run.  Only applies to --full-pipeline.",
+    )
+    step_toggles.add_argument(
+        "--skip-capture",
+        action="store_true",
+        dest="skip_capture",
+        help="Skip the capture step (use an existing video file)",
+    )
+    step_toggles.add_argument(
+        "--skip-analysis",
+        action="store_true",
+        dest="skip_analysis",
+        help="Skip event analysis (use existing analysis results)",
+    )
+    step_toggles.add_argument(
+        "--skip-compose",
+        action="store_true",
+        dest="skip_compose",
+        help="Skip the composition / overlay step",
+    )
+    step_toggles.add_argument(
+        "--skip-export",
+        action="store_true",
+        dest="skip_export",
+        help="Skip the final export / encode step",
+    )
+    step_toggles.add_argument(
+        "--skip-edit",
+        action="store_true",
+        dest="skip_edit",
+        help="Disable automatic highlight selection (auto_edit=False)",
     )
 
     # ── Verbosity ────────────────────────────────────────────────────────────
@@ -187,11 +253,129 @@ def _resolve_project(project_arg: str) -> Optional[dict]:
     except ValueError:
         pass
 
-    # Search by name
-    all_projects = svc.list_projects(page=1, per_page=200)
-    for proj in all_projects.get("projects", []):
+    # Search by name (exact, then case-insensitive)
+    all_projects = svc.list_projects(search=project_arg)
+    for proj in all_projects:
         if proj["name"].lower() == project_arg.lower():
             return svc.get_project(proj["id"])
+
+    return None
+
+
+def _create_project_from_replay(
+    name: str,
+    replay_file: str,
+    quiet: bool = False,
+) -> Optional[dict]:
+    """Create a project from an explicit replay file path."""
+    from server.services.project_service import ProjectService
+
+    if not Path(replay_file).exists():
+        print(f"ERROR: Replay file not found: {replay_file}", file=sys.stderr)
+        return None
+
+    svc = ProjectService()
+    if not quiet:
+        print(f"Creating project '{name}' from replay: {replay_file}")
+
+    try:
+        project = svc.create_project(
+            name=name,
+            replay_file=replay_file,
+        )
+        if not quiet:
+            print(f"  Created project #{project['id']}: {project['name']}")
+        return project
+    except Exception as exc:
+        print(f"ERROR: Could not create project: {exc}", file=sys.stderr)
+        return None
+
+
+def _create_project_from_active_session(
+    name: str,
+    quiet: bool = False,
+) -> Optional[dict]:
+    """Create a project using metadata from the active iRacing session."""
+    from server.services.iracing_bridge import bridge as iracing_bridge
+    from server.services.project_service import ProjectService
+
+    if not iracing_bridge.is_connected:
+        print("ERROR: iRacing is not connected. Cannot auto-populate from active session.", file=sys.stderr)
+        return None
+
+    session_data = iracing_bridge.session_data
+    track_name = session_data.get("track_name", "")
+    session_type = session_data.get("session_type", "")
+    drivers = [d for d in session_data.get("drivers", []) if not d.get("is_spectator", False)]
+    num_drivers = len(drivers)
+
+    if not quiet:
+        print(f"Auto-populating from active iRacing session:")
+        print(f"  Track:    {track_name or 'unknown'}")
+        print(f"  Type:     {session_type or 'unknown'}")
+        print(f"  Drivers:  {num_drivers}")
+        print(f"Creating project '{name}'...")
+
+    svc = ProjectService()
+    try:
+        project = svc.create_project(
+            name=name,
+            track_name=track_name,
+            session_type=session_type,
+            num_drivers=num_drivers,
+        )
+        if not quiet:
+            print(f"  Created project #{project['id']}: {project['name']}")
+        return project
+    except Exception as exc:
+        print(f"ERROR: Could not create project: {exc}", file=sys.stderr)
+        return None
+
+
+def _resolve_or_create_project(
+    project_arg: Optional[str],
+    create_name: Optional[str],
+    replay_file: Optional[str],
+    from_active_session: bool,
+    quiet: bool,
+) -> Optional[dict]:
+    """Resolve or create a project depending on CLI flags.
+
+    Priority:
+      1. If --create-project NAME is given and the project already exists by
+         that name, return the existing project (idempotent).
+      2. If --create-project NAME is given and the project doesn't exist:
+         a. If --replay-file provided  → create from replay.
+         b. If --from-active-session  → create from active iRacing session.
+         c. Otherwise fail with a clear message.
+      3. If only --project is given, resolve by ID or name (no creation).
+    """
+    name = create_name or project_arg
+
+    if create_name:
+        # Try to find existing project with this name first (idempotent)
+        existing = _resolve_project(create_name)
+        if existing:
+            if not quiet:
+                print(f"Project '{create_name}' already exists (#{existing['id']}), using it.")
+            return existing
+
+        # Create new project
+        if replay_file:
+            return _create_project_from_replay(create_name, replay_file, quiet)
+        elif from_active_session:
+            return _create_project_from_active_session(create_name, quiet)
+        else:
+            print(
+                f"ERROR: --create-project requires either --replay-file PATH "
+                f"or --from-active-session.",
+                file=sys.stderr,
+            )
+            return None
+
+    # No create flag — just resolve existing project
+    if project_arg:
+        return _resolve_project(project_arg)
 
     return None
 
@@ -259,7 +443,7 @@ def _run_encode(
         return ExitCode.PROJECT_ERROR
 
     # Resolve preset
-    preset_id = "youtube_1080p60"  # default
+    preset_id = "1080p"  # default
     if preset_name:
         all_presets = svc.get_presets()
         matched = next(
@@ -344,8 +528,14 @@ def _run_full_pipeline(
     upload: bool,
     preset_name: Optional[str],
     output_override: Optional[str],
-    quiet: bool,
-    verbose: bool,
+    skip_capture: bool = False,
+    skip_analysis: bool = False,
+    skip_compose: bool = False,
+    skip_export: bool = False,
+    skip_edit: bool = False,
+    non_interactive: bool = False,
+    quiet: bool = False,
+    verbose: bool = False,
 ) -> int:
     """Run the full automated pipeline synchronously."""
     import time
@@ -356,19 +546,49 @@ def _run_full_pipeline(
 
     svc = PipelineService()
 
-    # Build config
-    config: dict = {}
+    # Resolve preset ID
+    pipeline_preset_id: Optional[str] = None
     if preset_name:
-        # Use preset ID for pipeline
-        config["preset_name"] = preset_name
+        presets = svc.list_presets()
+        matched = next(
+            (p for p in presets
+             if p.get("id", "").lower() == preset_name.lower()
+             or p.get("name", "").lower() == preset_name.lower()),
+            None,
+        )
+        if not matched:
+            available = ", ".join(p.get("name", p.get("id", "")) for p in presets)
+            print(f"ERROR: Unknown pipeline preset '{preset_name}'. Available: {available}", file=sys.stderr)
+            return ExitCode.PROJECT_ERROR
+        pipeline_preset_id = matched["id"]
+
+    # Build runtime overrides — execution path flags + other CLI options
+    runtime: dict = {}
+    if skip_capture:
+        runtime["skip_capture"] = True
+    if skip_analysis:
+        runtime["skip_analysis"] = True
+    if skip_compose:
+        runtime["skip_compose"] = True
+    if skip_export:
+        runtime["skip_export"] = True
+    if skip_edit:
+        runtime["auto_edit"] = False
     if upload:
-        config["upload_to_youtube"] = True
+        runtime["upload_to_youtube"] = True
     if output_override:
-        config["output_dir"] = output_override
+        runtime["output_dir"] = output_override
+    if non_interactive:
+        runtime["non_interactive"] = True
+        runtime["failure_action"] = "abort"
 
-    result = svc.start(project_id=project["id"], config=config if config else None)
+    result = svc.start(
+        project_id=project["id"],
+        preset_id=pipeline_preset_id,
+        config=runtime if runtime else None,
+    )
 
-    if not result.get("success"):
+    if not result.get("run"):
         print(f"ERROR: Failed to start pipeline: {result.get('error', 'Unknown error')}", file=sys.stderr)
         return ExitCode.PROJECT_ERROR
 
@@ -452,8 +672,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     _configure_logging(args.verbose, args.quiet)
 
-    # ── Require --project for all operations ───────────────────────────────
-    if not args.project:
+    # ── Check if this is actually a CLI invocation ─────────────────────────
+    has_project = bool(args.project or getattr(args, "create_project", None))
+    if not has_project:
         # No project and no operation → not CLI mode (caller should launch GUI)
         return -1  # Special: not a CLI invocation
 
@@ -461,10 +682,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         from version import APP_NAME, __version__
         print(f"{APP_NAME} v{__version__} — CLI Mode")
 
-    # ── Resolve project ────────────────────────────────────────────────────
-    project = _resolve_project(args.project)
+    # ── Resolve / create project ───────────────────────────────────────────
+    project = _resolve_or_create_project(
+        project_arg=args.project,
+        create_name=getattr(args, "create_project", None),
+        replay_file=getattr(args, "replay_file", None),
+        from_active_session=getattr(args, "from_active_session", False),
+        quiet=args.quiet,
+    )
     if not project:
-        print(f"ERROR: Project not found: '{args.project}'", file=sys.stderr)
+        print(
+            f"ERROR: Project not found: '{args.project or getattr(args, 'create_project', '')}'",
+            file=sys.stderr,
+        )
         return ExitCode.PROJECT_ERROR
 
     # ── Dispatch operation ──────────────────────────────────────────────────
@@ -477,6 +707,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             upload=args.upload,
             preset_name=args.preset,
             output_override=args.output,
+            skip_capture=getattr(args, "skip_capture", False),
+            skip_analysis=getattr(args, "skip_analysis", False),
+            skip_compose=getattr(args, "skip_compose", False),
+            skip_export=getattr(args, "skip_export", False),
+            skip_edit=getattr(args, "skip_edit", False),
+            non_interactive=getattr(args, "non_interactive", False),
             quiet=args.quiet,
             verbose=args.verbose,
         )

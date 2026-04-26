@@ -94,13 +94,20 @@ def _on_progress(event_type: str, data: dict) -> None:
 class AnalyzeRequest(BaseModel):
     """Optional parameters for starting analysis."""
     battle_gap_threshold: Optional[float] = None
+    battle_max_segment: Optional[float] = None
+    battle_min_duration: Optional[float] = None
+    battle_max_cluster_drivers: Optional[int] = None
+    battle_merge_min_overlap_seconds: Optional[float] = None
+    battle_merge_max_idle_gap_seconds: Optional[float] = None
+    battle_merge_max_position_delta: Optional[int] = None
     crash_min_time_loss: Optional[float] = None
     crash_min_off_track_duration: Optional[float] = None
     spinout_min_time_loss: Optional[float] = None
     spinout_max_time_loss: Optional[float] = None
     contact_time_window: Optional[float] = None
     contact_proximity: Optional[float] = None
-    close_call_proximity: Optional[float] = None
+    close_call_proximity_seconds: Optional[float] = None
+    close_call_proximity: Optional[float] = None  # legacy key
     close_call_max_off_track: Optional[float] = None
     force_rescan: bool = False
 
@@ -108,13 +115,20 @@ class AnalyzeRequest(BaseModel):
 class RedetectRequest(BaseModel):
     """Parameters for re-running detection with tuned thresholds."""
     battle_gap_threshold: Optional[float] = 0.5
+    battle_max_segment: Optional[float] = 45.0
+    battle_min_duration: Optional[float] = 10.0
+    battle_max_cluster_drivers: Optional[int] = 4
+    battle_merge_min_overlap_seconds: Optional[float] = 2.0
+    battle_merge_max_idle_gap_seconds: Optional[float] = 5.0
+    battle_merge_max_position_delta: Optional[int] = 2
     crash_min_time_loss: Optional[float] = 10.0
     crash_min_off_track_duration: Optional[float] = 3.0
     spinout_min_time_loss: Optional[float] = 2.0
     spinout_max_time_loss: Optional[float] = 10.0
     contact_time_window: Optional[float] = 2.0
     contact_proximity: Optional[float] = 0.05
-    close_call_proximity: Optional[float] = 0.02
+    close_call_proximity_seconds: Optional[float] = 2.0
+    close_call_proximity: Optional[float] = None  # legacy key
     close_call_max_off_track: Optional[float] = 3.0
 
 
@@ -132,9 +146,13 @@ def _build_session_info_from_body(body) -> dict:
     """Extract tuning parameters from a request body into a session_info dict."""
     info: dict[str, Any] = {}
     param_keys = [
-        "battle_gap_threshold", "crash_min_time_loss", "crash_min_off_track_duration",
+        "battle_gap_threshold", "battle_max_segment", "battle_min_duration",
+        "battle_max_cluster_drivers", "battle_merge_min_overlap_seconds",
+        "battle_merge_max_idle_gap_seconds", "battle_merge_max_position_delta",
+        "crash_min_time_loss", "crash_min_off_track_duration",
         "spinout_min_time_loss", "spinout_max_time_loss", "contact_time_window",
-        "contact_proximity", "close_call_proximity", "close_call_max_off_track",
+        "contact_proximity", "close_call_proximity_seconds", "close_call_proximity",
+        "close_call_max_off_track",
     ]
     if body:
         for key in param_keys:
@@ -402,11 +420,16 @@ async def redetect_events(project_id: int, body: RedetectRequest):
         try:
             save_tuning_params(conn, {k: v for k, v in vars(body).items()
                                        if k in [
-                                           "battle_gap_threshold", "crash_min_time_loss",
+                                           "battle_gap_threshold", "battle_max_segment",
+                                           "battle_min_duration", "battle_max_cluster_drivers",
+                                           "battle_merge_min_overlap_seconds",
+                                           "battle_merge_max_idle_gap_seconds",
+                                           "battle_merge_max_position_delta",
+                                           "crash_min_time_loss",
                                            "crash_min_off_track_duration", "spinout_min_time_loss",
                                            "spinout_max_time_loss", "contact_time_window",
-                                           "contact_proximity", "close_call_proximity",
-                                           "close_call_max_off_track",
+                                           "contact_proximity", "close_call_proximity_seconds",
+                                           "close_call_proximity", "close_call_max_off_track",
                                        ] and v is not None})
         finally:
             conn.close()
@@ -833,11 +856,16 @@ async def save_tuning(project_id: int, body: RedetectRequest):
         try:
             params = {k: v for k, v in vars(body).items()
                       if k in [
-                          "battle_gap_threshold", "crash_min_time_loss",
+                          "battle_gap_threshold", "battle_max_segment",
+                          "battle_min_duration", "battle_max_cluster_drivers",
+                          "battle_merge_min_overlap_seconds",
+                          "battle_merge_max_idle_gap_seconds",
+                          "battle_merge_max_position_delta",
+                          "crash_min_time_loss",
                           "crash_min_off_track_duration", "spinout_min_time_loss",
                           "spinout_max_time_loss", "contact_time_window",
-                          "contact_proximity", "close_call_proximity",
-                          "close_call_max_off_track",
+                          "contact_proximity", "close_call_proximity_seconds",
+                          "close_call_proximity", "close_call_max_off_track",
                       ] and v is not None}
             save_tuning_params(conn, params)
             return {"status": "saved", "tuning_params": params}
@@ -1771,7 +1799,7 @@ class VideoScriptRequest(BaseModel):
     constraints: dict = {}
     section_config: dict = {}
     clip_padding: float = 2.0        # Seconds of pre-roll before each clip
-    clip_padding_after: float = 5.0  # Seconds of post-roll after each clip
+    clip_padding_after: float = 1.0  # Seconds of post-roll after each clip
     padding_by_type: dict = {}        # Per-event-type overrides: { type: { "before": s, "after": s } }
     tuning: dict = {}  # iRD-inspired scoring tuning knobs
     camera_weights: dict = {}   # { group_name: weight (0–100) } — empty = all equal
@@ -1972,12 +2000,27 @@ async def generate_video_script_endpoint(project_id: int, body: VideoScriptReque
                 production_timeline=body.production_timeline,
             )
 
+            # Add session_num context to each segment for capture phase
+            race_session_num = int(_meta_val("race_session_num", 0))
+            for segment in result.get("script", []):
+                # Segments are typically in the race session, but intro/results may vary
+                # Store race_session_num so capture can use it directly without probing
+                if "session_num" not in segment:
+                    section = segment.get("section", "race")
+                    if section == "race":
+                        segment["session_num"] = race_session_num
+                    else:
+                        # Intro/results may be in session 0 (qualifying) or earlier
+                        # Default to 0; probing will find the correct session if needed
+                        segment["session_num"] = 0
+
             logger.info(
                 "[Highlights API] Video script generated for project #%d: "
-                "%d script segments, %d sections",
+                "%d script segments, %d sections (race_session_num=%d)",
                 project_id,
                 len(result.get("script", [])),
                 len(result.get("sections", [])),
+                race_session_num,
             )
 
             # Persist the generated script so downstream steps (overlay/capture/export)

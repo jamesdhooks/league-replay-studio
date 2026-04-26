@@ -26,6 +26,8 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
+from server.utils.command_log import command_log
+
 logger = logging.getLogger(__name__)
 
 # ── Optional irsdk import (graceful fallback when not installed) ─────────────
@@ -127,13 +129,30 @@ class IRacingBridge:
         Returns False if iRacing is not connected.
         """
         if not self._connected or self._ir is None:
+            command_log.record(
+                "set-replay-speed",
+                {"speed": speed},
+                result="not_connected",
+                source="bridge",
+            )
             return False
         try:
             self._ir.replay_set_play_speed(speed, False)
             logger.debug("[IRacingBridge] Replay speed → %d×", speed)
+            command_log.record(
+                "set-replay-speed",
+                {"speed": speed},
+                source="bridge",
+            )
             return True
         except Exception as exc:
             logger.error("[IRacingBridge] set_replay_speed error: %s", exc)
+            command_log.record(
+                "set-replay-speed",
+                {"speed": speed, "error": str(exc)},
+                result="error",
+                source="bridge",
+            )
             return False
 
     def seek_to_frame(self, frame: int) -> bool:
@@ -143,24 +162,58 @@ class IRacingBridge:
         Returns False if iRacing is not connected.
         """
         if not self._connected or self._ir is None:
+            command_log.record(
+                "seek-frame",
+                {"frame": frame},
+                result="not_connected",
+                source="bridge",
+            )
             return False
         try:
             self._ir.replay_set_play_position(irsdk.RpyPosMode.begin, frame)
             logger.debug("[IRacingBridge] Seek → frame %d", frame)
+            command_log.record(
+                "seek-frame",
+                {"frame": frame},
+                source="bridge",
+            )
             return True
         except Exception as exc:
             logger.error("[IRacingBridge] seek_to_frame error: %s", exc)
+            command_log.record(
+                "seek-frame",
+                {"frame": frame, "error": str(exc)},
+                result="error",
+                source="bridge",
+            )
             return False
 
     def cam_switch_position(self, position: int, group_num: int) -> bool:
         """Point camera at race position *position* (1=leader)."""
         if not self._connected or self._ir is None:
+            command_log.record(
+                "camera-position",
+                {"position": position, "group_num": group_num},
+                result="not_connected",
+                source="bridge",
+            )
             return False
         try:
             self._ir.cam_switch_pos(position, group_num, 0)
+            command_log.record(
+                "camera-position",
+                {"position": position, "group_num": group_num},
+                source="bridge",
+            )
             return True
         except Exception as exc:
             logger.error("[IRacingBridge] cam_switch_position error: %s", exc)
+            command_log.record(
+                "camera-position",
+                {"position": position, "group_num": group_num, "error": str(exc)},
+                result="error",
+                source="bridge",
+            )
             return False
 
     def cam_switch_car(self, car_idx: int, group_num: int) -> bool:
@@ -171,6 +224,12 @@ class IRacingBridge:
         internal CarIdx).
         """
         if not self._connected or self._ir is None:
+            command_log.record(
+                "camera-car",
+                {"car_idx": car_idx, "group_num": group_num},
+                result="not_connected",
+                source="bridge",
+            )
             return False
         # Resolve car_idx → car_number (racing number)
         car_num = car_idx  # fallback
@@ -184,9 +243,20 @@ class IRacingBridge:
         try:
             self._ir.cam_switch_num(car_num, group_num, 0)
             logger.debug("[IRacingBridge] cam_switch_num car_num=%d group=%d (from car_idx=%d)", car_num, group_num, car_idx)
+            command_log.record(
+                "camera-car",
+                {"car_idx": car_idx, "group_num": group_num, "car_num": car_num},
+                source="bridge",
+            )
             return True
         except Exception as exc:
             logger.error("[IRacingBridge] cam_switch_car error: %s", exc)
+            command_log.record(
+                "camera-car",
+                {"car_idx": car_idx, "group_num": group_num, "car_num": car_num, "error": str(exc)},
+                result="error",
+                source="bridge",
+            )
             return False
 
     def cam_set_state(self, state_flags: int) -> bool:
@@ -197,13 +267,30 @@ class IRacingBridge:
           0x0010 (use_auto_shot_selection) → iRacing auto camera selection
         """
         if not self._connected or self._ir is None:
+            command_log.record(
+                "camera-state",
+                {"state_flags": state_flags},
+                result="not_connected",
+                source="bridge",
+            )
             return False
         try:
             self._ir.cam_set_state(state_flags)
             logger.debug("[IRacingBridge] cam_set_state -> 0x%04x", state_flags)
+            command_log.record(
+                "camera-state",
+                {"state_flags": state_flags},
+                source="bridge",
+            )
             return True
         except Exception as exc:
             logger.error("[IRacingBridge] cam_set_state error: %s", exc)
+            command_log.record(
+                "camera-state",
+                {"state_flags": state_flags, "error": str(exc)},
+                result="error",
+                source="bridge",
+            )
             return False
 
     def replay_search(self, mode: int) -> bool:
@@ -214,12 +301,29 @@ class IRacingBridge:
           prev_lap=4, next_lap=5, prev_incident=8, next_incident=9
         """
         if not self._connected or self._ir is None:
+            command_log.record(
+                "replay-search",
+                {"mode": mode},
+                result="not_connected",
+                source="bridge",
+            )
             return False
         try:
             self._ir.replay_search(mode)
+            command_log.record(
+                "replay-search",
+                {"mode": mode},
+                source="bridge",
+            )
             return True
         except Exception as exc:
             logger.error("[IRacingBridge] replay_search error: %s", exc)
+            command_log.record(
+                "replay-search",
+                {"mode": mode, "error": str(exc)},
+                result="error",
+                source="bridge",
+            )
             return False
 
     def replay_search_session_time(self, session_num: int, session_time_ms: int) -> bool:
@@ -229,12 +333,33 @@ class IRacingBridge:
         session_time_ms: Milliseconds from session start
         """
         if not self._connected or self._ir is None:
+            command_log.record(
+                "seek-session-time",
+                {"session_num": session_num, "session_time_ms": session_time_ms},
+                result="not_connected",
+                source="bridge",
+            )
             return False
         try:
             self._ir.replay_search_session_time(session_num, session_time_ms)
+            command_log.record(
+                "seek-session-time",
+                {"session_num": session_num, "session_time_ms": session_time_ms},
+                source="bridge",
+            )
             return True
         except Exception as exc:
             logger.error("[IRacingBridge] replay_search_session_time error: %s", exc)
+            command_log.record(
+                "seek-session-time",
+                {
+                    "session_num": session_num,
+                    "session_time_ms": session_time_ms,
+                    "error": str(exc),
+                },
+                result="error",
+                source="bridge",
+            )
             return False
 
     def get_replay_session_num(self) -> int:
@@ -601,6 +726,11 @@ class IRacingBridge:
                     avg_lap_time = float(sessions[0].get("ResultsAverageLapTime", 0) or 0)
                 except (ValueError, TypeError):
                     avg_lap_time = 0.0
+
+            # iRacing SessionInfo.ResultsAverageLapTime is commonly encoded in
+            # 1/10000s units. Normalize to seconds for downstream detectors.
+            if avg_lap_time > 1000:
+                avg_lap_time = avg_lap_time / 10000.0
 
             # Parse per-driver incident counts from ResultsPositions in the
             # SessionInfo YAML.  Unlike SessionLog.Messages (which is empty

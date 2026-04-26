@@ -10,6 +10,7 @@ capture range, and PiP configuration.
   GET  /api/script-state/{project_id}/summary       — Capture progress summary
   POST /api/script-state/{project_id}/compare       — Compare new script (hash-based)
   POST /api/script-state/{project_id}/capture-range  — Set capture range
+    PUT  /api/script-state/{project_id}/capture-selection — Set preferred specific-segment selection
   POST /api/script-state/{project_id}/invalidate    — Invalidate a segment
   POST /api/script-state/{project_id}/mark-captured — Mark segment as captured
   GET  /api/script-state/{project_id}/trash         — Get trash bin contents
@@ -31,7 +32,15 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from server.services.project_service import project_service
-from server.services.script_state_service import script_state_service
+from server.services.script_state_service import (
+    MODE_ALL,
+    VALID_CAPTURE_MODES,
+    VALID_COMPOSE_MODES,
+    VALID_GAP_POLICIES,
+    GAP_POLICY_COMPRESS,
+    COMPOSE_MODE_ALL,
+    script_state_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +70,14 @@ class CompareRequest(BaseModel):
 class CaptureRangeRequest(BaseModel):
     start: float | None = None
     end: float | None = None
+
+
+class CaptureModeRequest(BaseModel):
+    mode: str
+
+
+class CaptureSelectionRequest(BaseModel):
+    segment_ids: list[str] | None = None
 
 
 class InvalidateRequest(BaseModel):
@@ -97,6 +114,15 @@ class PipConfigUpdate(BaseModel):
 
 class OverlayUiConfigUpdate(BaseModel):
     ui_zoom: float | None = None
+    selected_preset_id: str | None = None
+
+
+class CompositionConfigUpdate(BaseModel):
+    mode: str | None = None
+    selected_segment_ids: list[str] | None = None
+    region_start_seconds: float | None = None
+    region_end_seconds: float | None = None
+    gap_policy: str | None = None
 
 
 # ── Script Lock ─────────────────────────────────────────────────────────────
@@ -160,6 +186,105 @@ async def set_capture_range(project_id: int, body: CaptureRangeRequest):
     project_dir = _get_project_dir(project_id)
     state = script_state_service.set_capture_range(project_dir, body.start, body.end)
     return {"success": True, "capture_range": state.get("capture_range")}
+
+
+@router.get("/{project_id}/capture-mode")
+async def get_capture_mode(project_id: int):
+    """Get preferred capture mode for the project."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Source of truth: script_state (updated on every mode change).
+    # Project metadata is treated as a secondary mirror for backward
+    # compatibility and cross-surface visibility.
+    project_dir = _get_project_dir(project_id)
+    state_mode = script_state_service.get_capture_mode(project_dir)
+
+    meta_mode = str(project.get("preferred_capture_mode") or "").strip().lower()
+    if state_mode in VALID_CAPTURE_MODES:
+        if meta_mode != state_mode:
+            logger.info(
+                "[ScriptState API] capture-mode read project=%s state=%s meta=%s -> syncing metadata",
+                project_id,
+                state_mode,
+                meta_mode or "<empty>",
+            )
+            project_service.save_project_metadata(project_id, {"preferred_capture_mode": state_mode})
+        else:
+            logger.info(
+                "[ScriptState API] capture-mode read project=%s source=script_state mode=%s",
+                project_id,
+                state_mode,
+            )
+        return {
+            "mode": state_mode,
+            "mode_source": "script_state",
+            "meta_mode": meta_mode or None,
+        }
+
+    # If script_state is missing/corrupt, fall back to valid metadata and
+    # write it back into script_state for future reads.
+    if meta_mode in VALID_CAPTURE_MODES:
+        logger.info(
+            "[ScriptState API] capture-mode read project=%s source=project_meta mode=%s -> writing to script_state",
+            project_id,
+            meta_mode,
+        )
+        script_state_service.set_capture_mode(project_dir, meta_mode)
+        return {
+            "mode": meta_mode,
+            "mode_source": "project_meta",
+            "meta_mode": meta_mode,
+        }
+
+    logger.info(
+        "[ScriptState API] capture-mode read project=%s source=default mode=%s state=%s meta=%s",
+        project_id,
+        MODE_ALL,
+        state_mode,
+        meta_mode or "<empty>",
+    )
+    return {"mode": MODE_ALL}
+
+
+@router.put("/{project_id}/capture-mode")
+async def set_capture_mode(project_id: int, body: CaptureModeRequest):
+    """Persist preferred capture mode for the project metadata (project.json)."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    mode = (body.mode or MODE_ALL).strip().lower()
+    if mode not in VALID_CAPTURE_MODES:
+        raise HTTPException(status_code=422, detail=f"Invalid capture mode: {body.mode}")
+
+    project_dir = project.get("project_dir", "")
+    if project_dir:
+        script_state_service.set_capture_mode(project_dir, mode)
+
+    project_service.save_project_metadata(project_id, {"preferred_capture_mode": mode})
+    logger.info(
+        "[ScriptState API] capture-mode write project=%s requested=%s persisted_state=%s persisted_meta=%s",
+        project_id,
+        body.mode,
+        bool(project_dir),
+        True,
+    )
+    return {
+        "success": True,
+        "mode": mode,
+        "persisted_state": bool(project_dir),
+        "persisted_meta": True,
+    }
+
+
+@router.put("/{project_id}/capture-selection")
+async def set_capture_selection(project_id: int, body: CaptureSelectionRequest):
+    """Persist preferred specific-segment selection for the project."""
+    project_dir = _get_project_dir(project_id)
+    segment_ids = script_state_service.set_preferred_segment_ids(project_dir, body.segment_ids)
+    return {"success": True, "segment_ids": segment_ids}
 
 
 # ── Segment State Changes ──────────────────────────────────────────────────
@@ -258,3 +383,42 @@ async def update_overlay_ui_config(project_id: int, body: OverlayUiConfigUpdate)
     project_dir = _get_project_dir(project_id)
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     return script_state_service.update_overlay_ui_config(project_dir, updates)
+
+
+# ── Composition Config ──────────────────────────────────────────────────────
+
+@router.get("/{project_id}/composition-config")
+async def get_composition_config(project_id: int):
+    """Get the preferred composition config for the project.
+
+    Returns normalised config with defaults for any missing keys.
+    """
+    project_dir = _get_project_dir(project_id)
+    config = script_state_service.get_composition_config(project_dir)
+    return {"config": config}
+
+
+@router.put("/{project_id}/composition-config")
+async def update_composition_config(project_id: int, body: CompositionConfigUpdate):
+    """Persist preferred composition config for the project.
+
+    Only supplied (non-null) fields are merged into the stored config.
+    """
+    project_dir = _get_project_dir(project_id)
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+
+    if "mode" in updates:
+        mode = str(updates["mode"]).strip().lower()
+        if mode not in VALID_COMPOSE_MODES:
+            raise HTTPException(status_code=422, detail=f"Invalid composition mode: {updates['mode']}")
+        updates["mode"] = mode
+
+    if "gap_policy" in updates:
+        policy = str(updates["gap_policy"]).strip().lower()
+        if policy not in VALID_GAP_POLICIES:
+            raise HTTPException(status_code=422, detail=f"Invalid gap policy: {updates['gap_policy']}")
+        updates["gap_policy"] = policy
+
+    config = script_state_service.set_composition_config(project_dir, updates)
+    logger.info("[ScriptState API] composition-config updated project=%s mode=%s gap=%s", project_id, config["mode"], config["gap_policy"])
+    return {"success": True, "config": config}

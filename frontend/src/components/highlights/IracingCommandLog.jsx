@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Terminal, Trash2 } from 'lucide-react'
-import SectionCollapseHeader from '../ui/SectionCollapseHeader'
+import CollapsiblePanelHeader from '../ui/CollapsiblePanelHeader'
 import { wsClient } from '../../services/websocket'
 import { apiDelete, apiGet } from '../../services/api'
 
@@ -128,7 +128,7 @@ export default function IracingCommandLog() {
         <div
           className="flex items-center gap-1.5 border-b border-border bg-bg-secondary shrink-0"
         >
-          <SectionCollapseHeader
+          <CollapsiblePanelHeader
             open={!collapsed}
             onToggle={() => setCollapsed(c => !c)}
             icon={Terminal}

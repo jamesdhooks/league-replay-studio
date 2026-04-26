@@ -146,6 +146,7 @@ export function CaptureProvider({ children }) {
   const [scriptCaptureClips, setScriptCaptureClips] = useState([])
   const [scriptCompiledPath, setScriptCompiledPath] = useState(null)
   const [scriptCaptureError, setScriptCaptureError] = useState(null)
+  const [scriptCaptureCancelling, setScriptCaptureCancelling] = useState(false)
   const [scriptCaptureLog, setScriptCaptureLog] = useState([])
   const [scriptCaptureStrategies, setScriptCaptureStrategies] = useState([])
   const [scriptCurrentSegment, setScriptCurrentSegment] = useState(null)
@@ -157,6 +158,7 @@ export function CaptureProvider({ children }) {
     setScriptCaptureClips([])
     setScriptCompiledPath(null)
     setScriptCaptureError(null)
+    setScriptCaptureCancelling(false)
     setScriptCaptureLog([])
     setScriptCaptureStrategies([])
     setScriptCurrentSegment(null)
@@ -165,9 +167,12 @@ export function CaptureProvider({ children }) {
         project_id: projectId,
         script,
         clip_padding: options.clipPadding ?? 2.0,
-        clip_padding_after: options.clipPaddingAfter ?? 5.0,
+        clip_padding_after: options.clipPaddingAfter ?? 1.0,
         output_filename: options.outputFilename ?? 'highlight_compiled.mp4',
         contiguous_gap_threshold: options.contiguousGapThreshold ?? 1.0,
+        capture_mode: options.captureMode ?? 'all',
+        segment_ids: options.segmentIds ?? null,
+        time_range: options.timeRange ?? null,
       })
       return result
     } catch (err) {
@@ -179,8 +184,15 @@ export function CaptureProvider({ children }) {
 
   const cancelScriptCapture = useCallback(async () => {
     try {
+      setScriptCaptureCancelling(true)
+      setScriptCaptureProgress(prev => ({
+        ...(prev || {}),
+        message: 'Cancellation requested...',
+        step: 'cancelling',
+      }))
       await apiPost('/capture/script-capture/cancel')
     } catch (err) {
+      setScriptCaptureCancelling(false)
       console.error('[Capture] Script cancel error:', err)
     }
   }, [])
@@ -223,6 +235,7 @@ export function CaptureProvider({ children }) {
       // Script capture events
       wsClient.subscribe('capture:script_started', (data) => {
         setScriptCaptureRunning(true)
+        setScriptCaptureCancelling(false)
         setScriptCaptureError(null)
         setScriptCaptureLog([])
         setScriptCaptureStrategies([])
@@ -244,8 +257,24 @@ export function CaptureProvider({ children }) {
             strategies: data.strategies,
           }))
         } else if (step === 'log_entry') {
-          setScriptCaptureLog(prev => [...prev, data.log_entry])
+          setScriptCaptureLog(prev => {
+            const nextEntry = data.log_entry
+            const lastEntry = prev[prev.length - 1]
+            if (
+              lastEntry
+              && nextEntry
+              && lastEntry.timestamp === nextEntry.timestamp
+              && lastEntry.segment_id === nextEntry.segment_id
+              && lastEntry.action === nextEntry.action
+              && lastEntry.detail === nextEntry.detail
+              && lastEntry.attempt === nextEntry.attempt
+            ) {
+              return prev
+            }
+            return [...prev, nextEntry]
+          })
         } else if (step === 'capturing') {
+          setScriptCaptureCancelling(false)
           setScriptCurrentSegment({
             segment_id: data.segment_id,
             section: data.section,
@@ -263,6 +292,9 @@ export function CaptureProvider({ children }) {
             strategy: data.strategy,
           })
         } else {
+          if (step === 'cancelling') {
+            setScriptCaptureCancelling(true)
+          }
           setScriptCaptureProgress(prev => ({
             ...prev,
             message: data.message || prev?.message || '',
@@ -272,6 +304,7 @@ export function CaptureProvider({ children }) {
       }),
       wsClient.subscribe('capture:script_completed', (data) => {
         setScriptCaptureRunning(false)
+        setScriptCaptureCancelling(false)
         setScriptCaptureClips(data.clips || [])
         setScriptCompiledPath(data.compiled_path || null)
         setScriptCaptureStrategies(data.strategies || [])
@@ -287,6 +320,7 @@ export function CaptureProvider({ children }) {
       }),
       wsClient.subscribe('capture:script_error', (data) => {
         setScriptCaptureRunning(false)
+        setScriptCaptureCancelling(false)
         setScriptCaptureError(data.error || 'Script capture failed')
         setScriptCurrentSegment(null)
       }),
@@ -316,6 +350,7 @@ export function CaptureProvider({ children }) {
     scriptCaptureClips,
     scriptCompiledPath,
     scriptCaptureError,
+    scriptCaptureCancelling,
     scriptCaptureLog,
     scriptCaptureStrategies,
     scriptCurrentSegment,
@@ -333,6 +368,7 @@ export function CaptureProvider({ children }) {
     software, activeSoftware, hotkeys, watchDir,
     captureState, elapsedSeconds, filePath, fileSize, error, testResult, loading,
     scriptCaptureRunning, scriptCaptureProgress, scriptCaptureClips, scriptCompiledPath, scriptCaptureError,
+    scriptCaptureCancelling,
     scriptCaptureLog, scriptCaptureStrategies, scriptCurrentSegment,
     detectSoftware, fetchStatus, testHotkey, startCapture, stopCapture, resetCapture,
     startScriptCapture, cancelScriptCapture,

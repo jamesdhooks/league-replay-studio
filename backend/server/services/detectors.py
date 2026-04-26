@@ -37,6 +37,7 @@ from __future__ import annotations
 import bisect
 import json
 import logging
+import math
 import sqlite3
 from collections import defaultdict
 from typing import Any
@@ -87,6 +88,26 @@ SESSION_STATE_COOLDOWN   = 6
 REFERENCE_SPEED_MS = 70.0    # ~250 km/h — used to normalise speed to 0–1
 TIME_LOSS_WEIGHT   = 0.6     # weight for time-loss component in blended severity
 SPEED_WEIGHT       = 0.4     # weight for speed component in blended severity
+
+
+def _normalize_avg_lap_time_seconds(value: Any, fallback: float = 90.0) -> float:
+    """Return avg lap time in seconds.
+
+    Some iRacing fields are encoded in 1/10000 second units. If a value looks
+    implausibly large for lap seconds, convert it.
+    """
+    try:
+        lap_time = float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+    if lap_time <= 0:
+        return fallback
+
+    if lap_time > 1000:
+        lap_time = lap_time / 10000.0
+
+    return lap_time
 
 
 # ── Base class ───────────────────────────────────────────────────────────────
@@ -468,8 +489,21 @@ class BattleDetector(BaseDetector):
 
     def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
         gap_threshold = session_info.get("battle_gap_threshold", 0.5)  # seconds
-        avg_lap_time  = session_info.get("avg_lap_time", 90.0) or 90.0
-        battle_hold   = session_info.get("battle_sticky_period", 120)
+        avg_lap_time  = _normalize_avg_lap_time_seconds(session_info.get("avg_lap_time", 90.0))
+        max_segment = float(session_info.get("battle_max_segment", self.MAX_SEGMENT))
+        min_duration = float(session_info.get("battle_min_duration", self.MIN_DURATION))
+        max_cluster_drivers = int(session_info.get("battle_max_cluster_drivers", 4))
+        min_overlap_seconds = float(session_info.get("battle_merge_min_overlap_seconds", 2.0))
+        max_idle_gap_seconds = float(session_info.get("battle_merge_max_idle_gap_seconds", 5.0))
+        max_position_delta = int(session_info.get("battle_merge_max_position_delta", 2))
+        max_segment = max(5.0, max_segment)
+        min_duration = max(1.0, min_duration)
+        max_cluster_drivers = max(2, max_cluster_drivers)
+        min_overlap_seconds = max(0.1, min_overlap_seconds)
+        max_idle_gap_seconds = max(0.0, max_idle_gap_seconds)
+        max_position_delta = max(0, max_position_delta)
+        if min_duration > max_segment:
+            min_duration = max_segment
         # Convert gap from seconds to lap fraction for cont_dist comparison
         gap_laps = gap_threshold / avg_lap_time
 
@@ -564,7 +598,7 @@ class BattleDetector(BaseDetector):
         events: list[dict] = []
         for b in finished:
             duration = b["end_time"] - b["start_time"]
-            if duration < self.MIN_DURATION:
+            if duration < min_duration:
                 continue
 
             pair = (b["ahead_idx"], b["behind_idx"])
@@ -572,119 +606,293 @@ class BattleDetector(BaseDetector):
             pos_bonus = max(0, 3 - (pos - 1))
 
             # Short battles: emit as-is
-            if duration <= self.MAX_SEGMENT:
+            if duration <= max_segment:
                 dur_bonus = min(3, int(duration / 20))
-                severity = min(10, 4 + pos_bonus + dur_bonus)
-                events.append(self._make_event(b, severity, pair, lead_changes, closest_gaps, tick_frames))
+                lc_times_in = [t for t in lead_changes.get(pair, []) if b["start_time"] <= t <= b["end_time"]]
+                lc_bonus = min(2, len(lc_times_in))
+                gap_bonus = self._compute_gap_bonus(closest_gaps, pair, b["start_time"], b["end_time"], avg_lap_time)
+                severity = min(10, 4 + pos_bonus + dur_bonus + lc_bonus + gap_bonus)
+                events.append(self._make_event(b, severity, pair, lead_changes, closest_gaps, tick_frames, avg_lap_time))
                 continue
 
             # Long battles: extract sub-segments around lead changes or tightest gaps
-            segments = self._extract_segments(b, pair, lead_changes, closest_gaps, tick_frames, battle_hold)
+            segments = self._extract_segments(
+                b,
+                pair,
+                lead_changes,
+                closest_gaps,
+                tick_frames,
+                max_segment,
+                min_duration,
+            )
             for seg in segments:
                 seg_dur = seg["end_time"] - seg["start_time"]
                 dur_bonus = min(3, int(seg_dur / 20))
                 has_lead_change = seg.get("has_lead_change", False)
                 lc_bonus = 2 if has_lead_change else 0
-                severity = min(10, 4 + pos_bonus + dur_bonus + lc_bonus)
-                events.append(self._make_event(seg, severity, pair, lead_changes, closest_gaps, tick_frames))
+                gap_bonus = self._compute_gap_bonus(closest_gaps, pair, seg["start_time"], seg["end_time"], avg_lap_time)
+                severity = min(10, 4 + pos_bonus + dur_bonus + lc_bonus + gap_bonus)
+                events.append(self._make_event(seg, severity, pair, lead_changes, closest_gaps, tick_frames, avg_lap_time))
 
-        events = self._merge_overlapping_battles(events)
+        events = self._merge_overlapping_battles(
+            events,
+            max_cluster_drivers=max_cluster_drivers,
+            min_overlap_seconds=min_overlap_seconds,
+            max_idle_gap_seconds=max_idle_gap_seconds,
+            max_position_delta=max_position_delta,
+        )
+        events = self._enforce_max_segment_duration(events, max_segment)
         events.sort(key=lambda e: e["start_time"])
         logger.info("[Detector:Battle] Found %d battles", len(events))
         return events
 
     @staticmethod
-    def _merge_overlapping_battles(events: list[dict]) -> list[dict]:
-        """Merge battle events that overlap in time and share at least one driver.
+    def _enforce_max_segment_duration(events: list[dict], max_segment: float) -> list[dict]:
+        """Hard-cap finalized battle event duration.
 
-        Example: A-B (0:56–1:17) and B-C (0:56–1:26) both contain driver B and
-        overlap → merged into one A-B-C event spanning 0:56–1:26.
+        Some multi-driver overlap patterns can still merge transitively into very
+        long windows. Split those into contiguous chunks so no single battle
+        event exceeds max_segment.
+        """
+        if max_segment <= 0:
+            return events
+
+        capped: list[dict] = []
+        for ev in events:
+            start = float(ev["start_time"])
+            end = float(ev["end_time"])
+            duration = end - start
+            if duration <= max_segment:
+                capped.append(ev)
+                continue
+
+            chunk_count = int(math.ceil(duration / max_segment))
+            for i in range(chunk_count):
+                chunk_start = start + i * max_segment
+                chunk_end = min(end, chunk_start + max_segment)
+                chunk = dict(ev)
+                chunk["start_time"] = chunk_start
+                chunk["end_time"] = chunk_end
+
+                meta = dict(chunk.get("metadata", {}))
+                meta["duration_seconds"] = round(chunk_end - chunk_start, 1)
+
+                # If this is a merged multi-driver battle, keep only windows that
+                # intersect this chunk, clipped to chunk bounds.
+                driver_windows = meta.get("driver_windows")
+                if isinstance(driver_windows, list):
+                    clipped_windows = []
+                    for w in driver_windows:
+                        w_start = w.get("start_time")
+                        w_end = w.get("end_time")
+                        if w_start is None or w_end is None:
+                            continue
+                        if w_end <= chunk_start or w_start >= chunk_end:
+                            continue
+                        clipped = dict(w)
+                        clipped["start_time"] = max(chunk_start, float(w_start))
+                        clipped["end_time"] = min(chunk_end, float(w_end))
+                        clipped["drivers"] = list(w.get("drivers") or [])
+                        clipped_windows.append(clipped)
+                    meta["driver_windows"] = clipped_windows
+                    if clipped_windows:
+                        chunk_drivers: set[int] = set()
+                        for w in clipped_windows:
+                            chunk_drivers.update(w.get("drivers") or [])
+                        chunk["involved_drivers"] = sorted(chunk_drivers)
+
+                chunk["metadata"] = meta
+                capped.append(chunk)
+
+        return capped
+
+    @staticmethod
+    def _merge_overlapping_battles(
+        events: list[dict],
+        max_cluster_drivers: int,
+        min_overlap_seconds: float,
+        max_idle_gap_seconds: float,
+        max_position_delta: int,
+    ) -> list[dict]:
+        """Merge pair battles into bounded, coherent clusters.
+
+        Rules:
+          1) Two segments must overlap by at least min_overlap_seconds.
+          2) They must share at least one driver.
+          3) A merged cluster may not exceed max_cluster_drivers.
+          4) Consecutive sub-windows inside a cluster may not have an idle gap
+             larger than max_idle_gap_seconds.
         """
         if len(events) <= 1:
             return events
 
-        changed = True
-        while changed:
-            changed = False
-            used = [False] * len(events)
-            result: list[dict] = []
-            for i, ev in enumerate(events):
-                if used[i]:
-                    continue
-                group = [ev]
-                used[i] = True
-                # Grow the group transitively: any event sharing a driver with
-                # any group member AND overlapping the current merged window joins.
-                j = 0
-                while j < len(events):
-                    if used[j]:
-                        j += 1
-                        continue
-                    other = events[j]
-                    g_start = min(g["start_time"] for g in group)
-                    g_end   = max(g["end_time"]   for g in group)
-                    g_drivers: set[int] = set()
-                    for g in group:
-                        g_drivers.update(g.get("involved_drivers") or [])
-                    o_drivers = set(other.get("involved_drivers") or [])
-                    overlaps      = other["start_time"] <= g_end and other["end_time"] >= g_start
-                    shares_driver = bool(g_drivers & o_drivers)
-                    if overlaps and shares_driver:
-                        group.append(other)
-                        used[j] = True
-                        changed = True
-                        j = 0  # restart scan — new group member may enable further merges
-                        continue
-                    j += 1
+        sorted_events = sorted(events, key=lambda e: (e["start_time"], e["end_time"]))
+        clusters: list[list[dict]] = []
 
-                if len(group) == 1:
-                    result.append(group[0])
-                else:
-                    all_drivers: list[int] = list(
-                        dict.fromkeys(d for g in group for d in (g.get("involved_drivers") or []))
-                    )
-                    merged_start  = min(g["start_time"]  for g in group)
-                    merged_end    = max(g["end_time"]    for g in group)
-                    anchor_start  = min(group, key=lambda g: g["start_time"])
-                    anchor_end    = max(group, key=lambda g: g["end_time"])
-                    total_lc      = sum(g.get("metadata", {}).get("lead_changes", 0) for g in group)
-                    min_gaps      = [g.get("metadata", {}).get("min_gap_laps") for g in group
-                                     if g.get("metadata", {}).get("min_gap_laps") is not None]
-                    # Preserve the original pairwise windows so downstream code
-                    # can determine which drivers are active at any point in time.
-                    driver_windows = [
-                        {
-                            "start_time": g["start_time"],
-                            "end_time":   g["end_time"],
-                            "drivers":    list(g.get("involved_drivers") or []),
-                        }
-                        for g in sorted(group, key=lambda x: x["start_time"])
-                    ]
-                    result.append({
-                        "event_type":       EVENT_BATTLE,
-                        "start_time":       merged_start,
-                        "end_time":         merged_end,
-                        "start_frame":      anchor_start.get("start_frame"),
-                        "end_frame":        anchor_end.get("end_frame"),
-                        "lap_number":       anchor_start.get("lap_number"),
-                        "severity":         max(g["severity"] for g in group),
-                        "involved_drivers": all_drivers,
-                        "position":         min(g.get("position", 99) for g in group),
-                        "metadata": {
-                            "duration_seconds": round(merged_end - merged_start, 1),
-                            "lead_changes":     total_lc,
-                            "min_gap_laps":     round(min(min_gaps), 5) if min_gaps else None,
-                            "driver_windows":   driver_windows,
-                        },
-                    })
-            events = result
-        return events
+        for ev in sorted_events:
+            placed = False
+            for cluster in clusters:
+                if BattleDetector._can_join_cluster(
+                    ev,
+                    cluster,
+                    max_cluster_drivers=max_cluster_drivers,
+                    min_overlap_seconds=min_overlap_seconds,
+                    max_idle_gap_seconds=max_idle_gap_seconds,
+                    max_position_delta=max_position_delta,
+                ):
+                    cluster.append(ev)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append([ev])
 
-    def _make_event(self, b, severity, pair, lead_changes, closest_gaps, tick_frames):
+        return [BattleDetector._assemble_cluster(cluster) for cluster in clusters]
+
+    @staticmethod
+    def _can_join_cluster(
+        event: dict,
+        cluster: list[dict],
+        max_cluster_drivers: int,
+        min_overlap_seconds: float,
+        max_idle_gap_seconds: float,
+        max_position_delta: int,
+    ) -> bool:
+        event_drivers = set(event.get("involved_drivers") or [])
+        if not event_drivers:
+            return False
+
+        cluster_drivers: set[int] = set()
+        for c in cluster:
+            cluster_drivers.update(c.get("involved_drivers") or [])
+        if len(cluster_drivers | event_drivers) > max_cluster_drivers:
+            return False
+
+        # Must be coherently connected to at least one existing member.
+        has_bridge = any(
+            BattleDetector._events_can_merge(c, event, min_overlap_seconds, max_position_delta)
+            for c in cluster
+        )
+        if not has_bridge:
+            return False
+
+        windows = BattleDetector._cluster_driver_windows(cluster + [event])
+        if not windows:
+            return False
+        windows.sort(key=lambda w: (w["start_time"], w["end_time"]))
+        for prev, nxt in zip(windows, windows[1:]):
+            idle_gap = nxt["start_time"] - prev["end_time"]
+            if idle_gap > max_idle_gap_seconds:
+                return False
+        return True
+
+    @staticmethod
+    def _events_can_merge(a: dict, b: dict, min_overlap_seconds: float, max_position_delta: int) -> bool:
+        a_drivers = set(a.get("involved_drivers") or [])
+        b_drivers = set(b.get("involved_drivers") or [])
+        if not (a_drivers and b_drivers and (a_drivers & b_drivers)):
+            return False
+
+        # Explicit locality guard: battles far apart in running order should not
+        # merge into one narrative unit, even if a transitive bridge exists.
+        a_pos = a.get("position")
+        b_pos = b.get("position")
+        if a_pos is not None and b_pos is not None:
+            try:
+                if abs(int(a_pos) - int(b_pos)) > max_position_delta:
+                    return False
+            except Exception:
+                pass
+
+        overlap = min(a["end_time"], b["end_time"]) - max(a["start_time"], b["start_time"])
+        return overlap >= min_overlap_seconds
+
+    @staticmethod
+    def _cluster_driver_windows(cluster: list[dict]) -> list[dict]:
+        windows = []
+        for ev in cluster:
+            meta = ev.get("metadata") or {}
+            # Keep each source event as an explicit sub-window with local metrics.
+            windows.append({
+                "start_time": ev["start_time"],
+                "end_time": ev["end_time"],
+                "drivers": list(ev.get("involved_drivers") or []),
+                "lead_changes": int(meta.get("lead_changes") or 0),
+                "min_gap_seconds": meta.get("min_gap_seconds"),
+                "avg_gap_seconds": meta.get("avg_gap_seconds"),
+                "window_score": ev.get("severity"),
+            })
+        return windows
+
+    @staticmethod
+    def _assemble_cluster(cluster: list[dict]) -> dict:
+        if len(cluster) == 1:
+            return cluster[0]
+
+        all_drivers: list[int] = list(
+            dict.fromkeys(d for g in cluster for d in (g.get("involved_drivers") or []))
+        )
+        merged_start = min(g["start_time"] for g in cluster)
+        merged_end = max(g["end_time"] for g in cluster)
+        anchor_start = min(cluster, key=lambda g: g["start_time"])
+        anchor_end = max(cluster, key=lambda g: g["end_time"])
+        total_lc = sum((g.get("metadata") or {}).get("lead_changes", 0) for g in cluster)
+
+        min_gaps_laps = [
+            (g.get("metadata") or {}).get("min_gap_laps")
+            for g in cluster
+            if (g.get("metadata") or {}).get("min_gap_laps") is not None
+        ]
+        min_gaps_seconds = [
+            (g.get("metadata") or {}).get("min_gap_seconds")
+            for g in cluster
+            if (g.get("metadata") or {}).get("min_gap_seconds") is not None
+        ]
+
+        weighted_avg_gap_sum = 0.0
+        weighted_avg_gap_dur = 0.0
+        for g in cluster:
+            meta = g.get("metadata") or {}
+            avg_gap_s = meta.get("avg_gap_seconds")
+            if avg_gap_s is None:
+                continue
+            dur = max(0.0, float(g["end_time"]) - float(g["start_time"]))
+            weighted_avg_gap_sum += float(avg_gap_s) * dur
+            weighted_avg_gap_dur += dur
+
+        avg_gap_seconds = None
+        if weighted_avg_gap_dur > 0:
+            avg_gap_seconds = round(weighted_avg_gap_sum / weighted_avg_gap_dur, 3)
+
+        driver_windows = BattleDetector._cluster_driver_windows(cluster)
+        driver_windows.sort(key=lambda x: (x["start_time"], x["end_time"]))
+
+        return {
+            "event_type": EVENT_BATTLE,
+            "start_time": merged_start,
+            "end_time": merged_end,
+            "start_frame": anchor_start.get("start_frame"),
+            "end_frame": anchor_end.get("end_frame"),
+            "lap_number": anchor_start.get("lap_number"),
+            "severity": max(g["severity"] for g in cluster),
+            "involved_drivers": all_drivers,
+            "position": min(g.get("position", 99) for g in cluster),
+            "metadata": {
+                "duration_seconds": round(merged_end - merged_start, 1),
+                "lead_changes": total_lc,
+                "min_gap_laps": round(min(min_gaps_laps), 5) if min_gaps_laps else None,
+                "min_gap_seconds": round(min(min_gaps_seconds), 3) if min_gaps_seconds else None,
+                "avg_gap_seconds": avg_gap_seconds,
+                "chain_length": len(driver_windows),
+                "driver_windows": driver_windows,
+            },
+        }
+
+    def _make_event(self, b, severity, pair, lead_changes, closest_gaps, tick_frames, avg_lap_time=90.0):
         lc = lead_changes.get(pair, [])
         lc_in_window = [t for t in lc if b["start_time"] <= t <= b["end_time"]]
         gaps_in_window = [g for t, g in closest_gaps.get(pair, []) if b["start_time"] <= t <= b["end_time"]]
         min_gap = min(gaps_in_window) if gaps_in_window else None
+        avg_gap = sum(gaps_in_window) / len(gaps_in_window) if gaps_in_window else None
         duration = b["end_time"] - b["start_time"]
 
         return {
@@ -701,10 +909,32 @@ class BattleDetector(BaseDetector):
                 "duration_seconds":   round(duration, 1),
                 "lead_changes":       len(lc_in_window),
                 "min_gap_laps":       round(min_gap, 5) if min_gap is not None else None,
+                "avg_gap_laps":       round(avg_gap, 5) if avg_gap is not None else None,
+                "min_gap_seconds":    round(min_gap * avg_lap_time, 3) if min_gap is not None else None,
+                "avg_gap_seconds":    round(avg_gap * avg_lap_time, 3) if avg_gap is not None else None,
             },
         }
 
-    def _extract_segments(self, battle, pair, lead_changes, closest_gaps, tick_frames, battle_hold):
+    @staticmethod
+    def _compute_gap_bonus(closest_gaps, pair, start_time, end_time, avg_lap_time):
+        """Return a 0–2 bonus based on how tight the closest gap was in this window.
+
+        Uses seconds (via avg_lap_time) so the threshold is track-agnostic:
+          <0.2 s gap  → +2  (virtually side-by-side)
+          <0.5 s gap  → +1  (very close)
+          otherwise   → +0
+        """
+        gaps = [g for t, g in closest_gaps.get(pair, []) if start_time <= t <= end_time]
+        if not gaps:
+            return 0
+        min_gap_s = min(gaps) * avg_lap_time
+        if min_gap_s < 0.2:
+            return 2
+        if min_gap_s < 0.5:
+            return 1
+        return 0
+
+    def _extract_segments(self, battle, pair, lead_changes, closest_gaps, tick_frames, max_segment, min_duration):
         """Extract the most exciting sub-segments from a long battle."""
         b_start = battle["start_time"]
         b_end = battle["end_time"]
@@ -721,8 +951,8 @@ class BattleDetector(BaseDetector):
                 seg_end = min(b_end, lc_t + self.SEGMENT_PAD)
                 # Expand to at least MIN_DURATION
                 seg_dur = seg_end - seg_start
-                if seg_dur < self.MIN_DURATION:
-                    expand = (self.MIN_DURATION - seg_dur) / 2
+                if seg_dur < min_duration:
+                    expand = (min_duration - seg_dur) / 2
                     seg_start = max(b_start, seg_start - expand)
                     seg_end = min(b_end, seg_end + expand)
                 segments.append({
@@ -746,31 +976,39 @@ class BattleDetector(BaseDetector):
             result = []
             for seg in merged:
                 seg_dur = seg["end_time"] - seg["start_time"]
-                if seg_dur > self.MAX_SEGMENT:
-                    seg["end_time"] = seg["start_time"] + self.MAX_SEGMENT
+                if seg_dur > max_segment:
+                    seg["end_time"] = seg["start_time"] + max_segment
                 result.append(seg)
             return result
 
-        # No lead changes: pick the segment with the tightest gap
-        gaps = [(t, g) for t, g in closest_gaps.get(pair, []) if b_start <= t <= b_end]
-        if gaps:
-            tightest_t = min(gaps, key=lambda x: x[1])[0]
-            half = self.MAX_SEGMENT / 2
-            seg_start = max(b_start, tightest_t - half)
-            seg_end = min(b_end, seg_start + self.MAX_SEGMENT)
+        # No lead changes: split into evenly-sized chunks (iRD style), while
+        # respecting min_duration to avoid tiny tail segments.
+        min_segments = max(1, math.ceil(duration / max_segment))
+        max_segments = max(1, math.floor(duration / min_duration))
+        seg_count = min_segments if min_segments <= max_segments else 1
+
+        if seg_count == 1:
             return [{
-                **battle, "start_time": seg_start, "end_time": seg_end,
-                "start_frame": self._interpolate_frame(seg_start, battle, tick_frames),
-                "end_frame": self._interpolate_frame(seg_end, battle, tick_frames),
+                **battle,
+                "start_time": b_start,
+                "end_time": b_end,
                 "has_lead_change": False,
             }]
 
-        # Fallback: first MAX_SEGMENT seconds
-        return [{
-            **battle,
-            "end_time": min(b_end, b_start + self.MAX_SEGMENT),
-            "has_lead_change": False,
-        }]
+        seg_duration = duration / seg_count
+        segments = []
+        for i in range(seg_count):
+            seg_start = b_start + (i * seg_duration)
+            seg_end = b_end if i == seg_count - 1 else b_start + ((i + 1) * seg_duration)
+            segments.append({
+                **battle,
+                "start_time": seg_start,
+                "end_time": seg_end,
+                "start_frame": self._interpolate_frame(seg_start, battle, tick_frames),
+                "end_frame": self._interpolate_frame(seg_end, battle, tick_frames),
+                "has_lead_change": False,
+            })
+        return segments
 
     @staticmethod
     def _interpolate_frame(time_s, battle, tick_frames):
@@ -1812,8 +2050,24 @@ class CloseCallDetector(BaseDetector):
     event_type = EVENT_CLOSE_CALL
     DEDUP_SECONDS = 10.0
     def detect(self, db: sqlite3.Connection, session_info: dict) -> list[dict]:
-        proximity_pct = session_info.get("close_call_proximity_pct", 0.02)
-        avg_lap_time = session_info.get("avg_lap_time", 90.0) or 90.0
+        avg_lap_time = _normalize_avg_lap_time_seconds(session_info.get("avg_lap_time", 90.0))
+        # Primary tuning knob is seconds for cross-track consistency.
+        # Legacy keys are still accepted for backward compatibility.
+        proximity_seconds = session_info.get("close_call_proximity_seconds")
+        if proximity_seconds is None:
+            legacy = session_info.get("close_call_proximity_pct")
+            if legacy is not None:
+                proximity_seconds = float(legacy) * avg_lap_time
+        if proximity_seconds is None:
+            legacy = session_info.get("close_call_proximity")
+            if legacy is not None:
+                legacy_val = float(legacy)
+                # Historical values <= 1.0 were lap-fraction percentages.
+                proximity_seconds = legacy_val * avg_lap_time if legacy_val <= 1.0 else legacy_val
+        if proximity_seconds is None:
+            proximity_seconds = 2.0
+
+        proximity_laps = max(0.0005, float(proximity_seconds) / avg_lap_time)
         max_time_loss = session_info.get("close_call_max_time_loss", 2.0)
 
         # Find cars that go off-track while a nearby car stays on-track,
@@ -1879,7 +2133,7 @@ class CloseCallDetector(BaseDetector):
                 LIMIT 1
             """, (tick_id, car_idx, SURFACE_ON_TRACK,
                   row["lap_pct"], row["lap_pct"],
-                  proximity_pct)).fetchone()
+                  proximity_laps)).fetchone()
 
             if not nearby:
                 continue

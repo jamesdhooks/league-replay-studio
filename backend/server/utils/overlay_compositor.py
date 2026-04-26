@@ -174,7 +174,7 @@ class OverlayCompositor:
         return None
 
     @staticmethod
-    def _build_frame_samples(
+    async def _build_frame_samples(
         clip_duration_seconds: float,
         fps: float,
         frame_builder: Any,
@@ -186,7 +186,10 @@ class OverlayCompositor:
         samples: list[dict[str, Any]] = []
         for frame_index in range(total_frames):
             elapsed = min(clip_duration_seconds, frame_index / fps)
-            frame_data = dict(frame_builder(elapsed))
+            frame_result = frame_builder(elapsed)
+            if asyncio.iscoroutine(frame_result):
+                frame_result = await frame_result
+            frame_data = dict(frame_result)
             frame_data.setdefault("overlay_clip_elapsed_seconds", round(elapsed, 4))
             frame_data.setdefault("overlay_clip_duration_seconds", round(clip_duration_seconds, 4))
             samples.append({
@@ -289,7 +292,7 @@ class OverlayCompositor:
             ffmpeg, "-hide_banner", "-loglevel", "warning", "-y",
             "-i", safe_clip,
             "-i", safe_overlay,
-            "-filter_complex", "[0:v][1:v]overlay=0:0[out]",
+            "-filter_complex", "[1:v][0:v]scale2ref=flags=lanczos[ovr][base];[base][ovr]overlay=0:0[out]",
             "-map", "[out]",
             # copy audio track if present; '?' suffix makes this mapping optional
             # (prevents errors when the source clip has no audio stream)
@@ -383,7 +386,10 @@ class OverlayCompositor:
         for idx, overlay in enumerate(safe_overlays, start=1):
             out_stream = f"[v{idx}]"
             filter_parts.append(
-                f"{prev_stream}[{idx}:v]overlay=0:0:enable='between(t,{float(overlay['start']):.3f},{float(overlay['end']):.3f})'{out_stream}"
+                f"[{idx}:v]{prev_stream}scale2ref=flags=lanczos[ov{idx}][base{idx}]"
+            )
+            filter_parts.append(
+                f"[base{idx}][ov{idx}]overlay=0:0:enable='between(t,{float(overlay['start']):.3f},{float(overlay['end']):.3f})'{out_stream}"
             )
             prev_stream = out_stream
 
@@ -502,7 +508,9 @@ class OverlayCompositor:
         filter_parts: list[str] = []
         prev_stream = "[0:v]"
         for idx, overlay in enumerate(validated, start=1):
-            prepared_stream = f"[ov{idx}]"
+            prepared_stream = f"[ovsrc{idx}]"
+            scaled_stream = f"[ov{idx}]"
+            base_stream = f"[base{idx}]"
             out_stream = f"[v{idx}]"
             if overlay["type"] == "sequence":
                 filter_parts.append(
@@ -511,7 +519,10 @@ class OverlayCompositor:
             else:
                 filter_parts.append(f"[{idx}:v]setpts=PTS{prepared_stream}")
             filter_parts.append(
-                f"{prev_stream}{prepared_stream}overlay=0:0:enable='between(t,{float(overlay['start']):.3f},{float(overlay['end']):.3f})'{out_stream}"
+                f"{prepared_stream}{prev_stream}scale2ref=flags=lanczos{scaled_stream}{base_stream}"
+            )
+            filter_parts.append(
+                f"{base_stream}{scaled_stream}overlay=0:0:enable='between(t,{float(overlay['start']):.3f},{float(overlay['end']):.3f})'{out_stream}"
             )
             prev_stream = out_stream
 
@@ -624,6 +635,7 @@ class OverlayCompositor:
         focused_car_idx: Optional[int] = None,
         series_name: str = "",
         track_name: str = "",
+        subsession_id: int = 0,
         temp_dir: Optional[str] = None,
         clip_duration_seconds: float = 0.0,
         animation_orchestration: bool = True,
@@ -685,6 +697,14 @@ class OverlayCompositor:
                 track_name=track_name,
             )
 
+        # Prefer real plugin data when a subsession context is available.
+        if subsession_id > 0:
+            try:
+                from server.services.data_plugin_service import data_plugin_service
+                frame_data = await data_plugin_service.enrich_frame_data(frame_data, subsession_id)
+            except Exception as exc:
+                logger.warning("[OverlayCompositor] Plugin enrichment failed: %s", exc)
+
         # 2. Write overlay PNG to a temp file in a resolved directory
         use_temp = temp_dir is None
         tmp_dir_obj = tempfile.mkdtemp() if use_temp else None
@@ -715,10 +735,25 @@ class OverlayCompositor:
 
             resolved_png = Path(png_path).resolve()  # lgtm[py/path-injection]
             if not render_result.get("success") or not resolved_png.is_file():  # lgtm[py/path-injection]
+                diagnostics.update({
+                    "error": "render_failed",
+                    "render_error": render_result.get("error"),
+                    "render_error_type": render_result.get("error_type"),
+                    "render_undefined_var": render_result.get("undefined_var"),
+                    "render_elapsed_ms": render_result.get("elapsed_ms"),
+                    "template_id": template_id,
+                    "clip_path": clip_path,
+                })
                 logger.error(
-                    "[OverlayCompositor] Overlay render failed for template %s", template_id
+                    "[OverlayCompositor] Overlay render failed for template=%s section=%s clip=%s error=%s error_type=%s undefined_var=%s",
+                    template_id,
+                    section,
+                    clip_path,
+                    render_result.get("error"),
+                    render_result.get("error_type"),
+                    render_result.get("undefined_var"),
                 )
-                self._set_last_diagnostics({**diagnostics, "error": "render_failed"})
+                self._set_last_diagnostics(diagnostics)
                 return None
 
             animation_profile = render_result.get("animation_profile") or {}
@@ -752,7 +787,7 @@ class OverlayCompositor:
 
             from server.utils.frame_data_builder import build_frame_data
 
-            def build_sample_frame(elapsed: float) -> dict[str, Any]:
+            async def build_sample_frame(elapsed: float) -> dict[str, Any]:
                 sampled = build_frame_data(
                     project_dir=project_dir,
                     session_time=session_time + elapsed,
@@ -761,11 +796,17 @@ class OverlayCompositor:
                     series_name=series_name,
                     track_name=track_name,
                 )
+                if subsession_id > 0:
+                    try:
+                        from server.services.data_plugin_service import data_plugin_service
+                        sampled = await data_plugin_service.enrich_frame_data(sampled, subsession_id)
+                    except Exception as exc:
+                        logger.warning("[OverlayCompositor] Sample plugin enrichment failed: %s", exc)
                 sampled["overlay_clip_elapsed_seconds"] = round(elapsed, 4)
                 sampled["overlay_clip_duration_seconds"] = round(clip_duration, 4)
                 return sampled
 
-            samples = self._build_frame_samples(clip_duration, clip_fps, build_sample_frame)
+            samples = await self._build_frame_samples(clip_duration, clip_fps, build_sample_frame)
             if not samples:
                 diagnostics["reason"] = "no_samples_generated"
                 self._set_last_diagnostics(diagnostics)
@@ -929,6 +970,7 @@ class OverlayCompositor:
         focused_car_idx: Optional[int] = None,
         series_name: str = "",
         track_name: str = "",
+        subsession_id: int = 0,
         clip_duration_seconds: float = 0.0,
         temp_dir: Optional[str] = None,
         animation_orchestration: bool = True,
@@ -993,6 +1035,14 @@ class OverlayCompositor:
                 series_name=series_name,
                 track_name=track_name,
             )
+
+        # Prefer real plugin data when a subsession context is available.
+        if subsession_id > 0:
+            try:
+                from server.services.data_plugin_service import data_plugin_service
+                frame_data = await data_plugin_service.enrich_frame_data(frame_data, subsession_id)
+            except Exception as exc:
+                logger.warning("[OverlayCompositor] Preset plugin enrichment failed: %s", exc)
 
         # 3. Build pagination schedule (if enabled for this section).
         schedule = self._build_pagination_schedule(
@@ -1136,7 +1186,7 @@ class OverlayCompositor:
 
             from server.utils.frame_data_builder import build_frame_data
 
-            def build_sample_frame(elapsed: float) -> dict[str, Any]:
+            async def build_sample_frame(elapsed: float) -> dict[str, Any]:
                 if project_dir:
                     sampled = build_frame_data(
                         project_dir=project_dir,
@@ -1148,6 +1198,12 @@ class OverlayCompositor:
                     )
                 else:
                     sampled = dict(frame_data)
+                if subsession_id > 0:
+                    try:
+                        from server.services.data_plugin_service import data_plugin_service
+                        sampled = await data_plugin_service.enrich_frame_data(sampled, subsession_id)
+                    except Exception as exc:
+                        logger.warning("[OverlayCompositor] Preset sample plugin enrichment failed: %s", exc)
                 sampled["overlay_clip_elapsed_seconds"] = round(elapsed, 4)
                 sampled["overlay_clip_duration_seconds"] = round(clip_duration, 4)
                 page_index = self._resolve_page_index(schedule, elapsed) if schedule else None
@@ -1155,7 +1211,7 @@ class OverlayCompositor:
                     sampled["overlay_page_index"] = page_index
                 return sampled
 
-            samples = self._build_frame_samples(clip_duration, clip_fps, build_sample_frame)
+            samples = await self._build_frame_samples(clip_duration, clip_fps, build_sample_frame)
             if not samples:
                 diagnostics["reason"] = "no_samples_generated"
                 self._set_last_diagnostics(diagnostics)
@@ -1431,6 +1487,7 @@ class OverlayCompositor:
         project_dir: Optional[str] = None,
         series_name: str = "",
         track_name: str = "",
+        subsession_id: int = 0,
         focused_car_idx: Optional[int] = None,
         progress_callback: Optional[Any] = None,
         animation_orchestration: bool = True,
@@ -1523,6 +1580,7 @@ class OverlayCompositor:
                     focused_car_idx=focused_car_idx,
                     series_name=series_name,
                     track_name=track_name,
+                    subsession_id=subsession_id,
                     clip_duration_seconds=clip_duration_seconds,
                     animation_orchestration=animation_orchestration,
                     trigger_sensitivity=trigger_sensitivity,
@@ -1541,6 +1599,7 @@ class OverlayCompositor:
                     focused_car_idx=focused_car_idx,
                     series_name=series_name,
                     track_name=track_name,
+                    subsession_id=subsession_id,
                     clip_duration_seconds=clip_duration_seconds,
                     animation_orchestration=animation_orchestration,
                     trigger_sensitivity=trigger_sensitivity,

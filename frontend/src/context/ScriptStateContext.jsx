@@ -26,12 +26,36 @@ export const CAPTURE_MODES = {
   TIME_RANGE:       'time_range',
 }
 
+// ── Composition scope modes ──────────────────────────────────────────────────
+export const COMPOSE_MODES = {
+  ALL:        'all',
+  CAPTURED:   'captured_only',
+  SPECIFIC:   'specific_segments',
+  REGION:     'region',
+}
+
+// ── Gap policies ─────────────────────────────────────────────────────────────
+export const GAP_POLICIES = {
+  COMPRESS:   'compress_gaps',
+  FILL_BLACK: 'fill_black',
+  FADE:       'fade_bridge',
+}
+
+export const DEFAULT_COMPOSITION_CONFIG = {
+  mode: COMPOSE_MODES.ALL,
+  selected_segment_ids: [],
+  region_start_seconds: null,
+  region_end_seconds: null,
+  gap_policy: GAP_POLICIES.COMPRESS,
+}
+
 export function ScriptStateProvider({ children }) {
   // ── State ──────────────────────────────────────────────────────────────
   const [scriptLocked, setScriptLocked] = useState(false)
   const [lockedAt, setLockedAt]         = useState(null)
   const [segments, setSegments]         = useState({})       // segment_id → {hash, capture_state, clip_path, ...}
   const [captureRange, setCaptureRange] = useState(null)     // {start, end} or null
+  const [preferredSegmentIds, setPreferredSegmentIds] = useState([])
   const [trash, setTrash]               = useState([])       // invalidated clip entries
   const [pipConfig, setPipConfig]       = useState({
     enabled: false,
@@ -45,7 +69,9 @@ export function ScriptStateProvider({ children }) {
   })
   const [overlayUiConfig, setOverlayUiConfig] = useState({
     ui_zoom: 1.0,
+    selected_preset_id: null,
   })
+  const [compositionConfig, setCompositionConfig] = useState(DEFAULT_COMPOSITION_CONFIG)
   const [loading, setLoading]           = useState(false)
   const [error, setError]               = useState(null)
 
@@ -66,6 +92,7 @@ export function ScriptStateProvider({ children }) {
     setLockedAt(state.locked_at ?? null)
     setSegments(state.segments ?? {})
     setCaptureRange(state.capture_range ?? null)
+    setPreferredSegmentIds(state.preferred_segment_ids ?? [])
     setTrash(state.trash ?? [])
     if (state.pip_config) setPipConfig(state.pip_config)
     if (state.overlay_ui_config) setOverlayUiConfig(state.overlay_ui_config)
@@ -244,6 +271,32 @@ export function ScriptStateProvider({ children }) {
     }
   }, [])
 
+  // ── Composition Config ──────────────────────────────────────────────────
+
+  const fetchCompositionConfig = useCallback(async (projectId) => {
+    try {
+      const result = await apiGet(`/script-state/${projectId}/composition-config`)
+      const cfg = result?.config ?? DEFAULT_COMPOSITION_CONFIG
+      setCompositionConfig(cfg)
+      return cfg
+    } catch (err) {
+      setError(err.message)
+      return DEFAULT_COMPOSITION_CONFIG
+    }
+  }, [])
+
+  const updateCompositionConfig = useCallback(async (projectId, updates) => {
+    try {
+      const result = await apiPut(`/script-state/${projectId}/composition-config`, updates)
+      const cfg = result?.config ?? DEFAULT_COMPOSITION_CONFIG
+      setCompositionConfig(cfg)
+      return cfg
+    } catch (err) {
+      setError(err.message)
+      throw err
+    }
+  }, [])
+
   // ── Filter ─────────────────────────────────────────────────────────────
 
   const filterSegments = useCallback(async (projectId, script, mode = 'all', opts = {}) => {
@@ -261,10 +314,50 @@ export function ScriptStateProvider({ children }) {
     }
   }, [])
 
+  const fetchCaptureMode = useCallback(async (projectId) => {
+    try {
+      const result = await apiGet(`/script-state/${projectId}/capture-mode`)
+      if (!result || typeof result !== 'object') {
+        return { mode: CAPTURE_MODES.ALL, mode_source: 'default' }
+      }
+      return {
+        ...result,
+        mode: result?.mode || CAPTURE_MODES.ALL,
+      }
+    } catch (err) {
+      setError(err.message)
+      return { mode: CAPTURE_MODES.ALL, mode_source: 'default', error: err.message }
+    }
+  }, [])
+
+  const updateCaptureMode = useCallback(async (projectId, mode) => {
+    try {
+      const result = await apiPut(`/script-state/${projectId}/capture-mode`, { mode })
+      return result || { mode }
+    } catch (err) {
+      setError(err.message)
+      throw err
+    }
+  }, [])
+
+  const updateCaptureSelection = useCallback(async (projectId, segmentIds) => {
+    try {
+      const result = await apiPut(`/script-state/${projectId}/capture-selection`, {
+        segment_ids: segmentIds ?? [],
+      })
+      setPreferredSegmentIds(result.segment_ids ?? [])
+      return result.segment_ids ?? []
+    } catch (err) {
+      setError(err.message)
+      throw err
+    }
+  }, [])
+
   // ── Context value ──────────────────────────────────────────────────────
   const value = useMemo(() => ({
     // State
-    scriptLocked, lockedAt, segments, captureRange, trash, pipConfig, overlayUiConfig,
+    scriptLocked, lockedAt, segments, captureRange, preferredSegmentIds, trash, pipConfig, overlayUiConfig,
+    compositionConfig,
     summary, loading, error,
     // Actions
     fetchState, lockScript, unlockScript, compareScript,
@@ -273,8 +366,11 @@ export function ScriptStateProvider({ children }) {
     fetchPipConfig, updatePipConfig,
     fetchOverlayUiConfig, updateOverlayUiConfig,
     filterSegments,
+    fetchCaptureMode, updateCaptureMode, updateCaptureSelection,
+    fetchCompositionConfig, updateCompositionConfig,
   }), [
-    scriptLocked, lockedAt, segments, captureRange, trash, pipConfig, overlayUiConfig,
+    scriptLocked, lockedAt, segments, captureRange, preferredSegmentIds, trash, pipConfig, overlayUiConfig,
+    compositionConfig,
     summary, loading, error,
     fetchState, lockScript, unlockScript, compareScript,
     setCaptureRangeApi, invalidateSegment, markCaptured,
@@ -282,6 +378,8 @@ export function ScriptStateProvider({ children }) {
     fetchPipConfig, updatePipConfig,
     fetchOverlayUiConfig, updateOverlayUiConfig,
     filterSegments,
+    fetchCaptureMode, updateCaptureMode, updateCaptureSelection,
+    fetchCompositionConfig, updateCompositionConfig,
   ])
 
   return (

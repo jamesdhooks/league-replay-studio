@@ -25,6 +25,7 @@ from typing import Optional
 from .constants import (
     BASE_SCORES,
     BUCKET_BOUNDARIES,
+    DEFAULT_NORMALIZATION_MODE,
     MANDATORY_TYPES,
     REFERENCE_SPEED_MS,
     TIER_A_THRESHOLD,
@@ -95,6 +96,12 @@ def score_events(
     preferred_driver_boost: float = float(tuning.get("preferredDriverBoost", 1.3))
     incident_position_cutoff: int = int(tuning.get("incidentPositionCutoff", 0))
     max_race_finishes: int = int(tuning.get("maxRaceFinishes", 0))
+    # Normalization mode — "cross_type" (default) preserves base-score differences
+    # between event types so weight sliders and BASE_SCORES are honest cross-type
+    # multipliers. "per_type" is the legacy behavior kept for back-compat.
+    normalization_mode: str = str(tuning.get("normalizationMode", DEFAULT_NORMALIZATION_MODE)).lower()
+    if normalization_mode not in ("cross_type", "per_type"):
+        normalization_mode = DEFAULT_NORMALIZATION_MODE
 
     _INCIDENT_TYPES = frozenset({"incident", "crash", "spinout", "contact", "close_call"})
     _FIRST_LAP_BUCKET_END = BUCKET_BOUNDARIES["intro"][1]  # 0.15 of race
@@ -276,11 +283,11 @@ def score_events(
         components["exposure_adj"] = round(exposure_adj, 3)
 
         # Stage 7 — User Weight Override
+        # NOTE: recorded here for display; applied after per-type normalisation below.
         user_weight = weights.get(event_type, 50) / 100.0
-        score *= user_weight
         components["user_weight"] = user_weight
 
-        # Stage 8 — Tier Classification
+        # Stage 8 — Tier Classification (preliminary; re-done after normalisation)
         score = round(score, 2)
         if score > TIER_S_THRESHOLD:
             tier = "S"
@@ -314,41 +321,70 @@ def score_events(
             "score_components": components,
         })
 
-    # ── Normalize scores to 0–10 range ──────────────────────────────────
-    raw_scores = [r["score"] for r in results if r["score"] > 0]
-    if len(raw_scores) >= 2:
-        min_raw = min(raw_scores)
-        max_raw = max(raw_scores)
-        score_range = max_raw - min_raw
-        if score_range > 0:
-            for r in results:
-                if r["score"] <= 0:
-                    continue
-                # Normalize to 0.5–10 (floor at 0.5 so nothing maps to exactly 0)
-                r["score"] = round(0.5 + ((r["score"] - min_raw) / score_range) * 9.5, 2)
-                r["score_components"]["normalization"] = {
-                    "raw": r["raw_score"], "min": min_raw, "max": max_raw,
-                }
-        else:
-            for r in results:
-                if r["score"] <= 0:
-                    continue
-                r["score"] = 5.0
-                r["score_components"]["normalization"] = {
-                    "raw": r["raw_score"], "min": min_raw, "max": max_raw,
-                }
+    # ── Normalization: cross_type (default) or per_type (legacy) ──────────
+    # cross_type: stretch all positive raw scores onto a single 0.5–10 scale
+    # so BASE_SCORES and inter-type differences survive into selection. The
+    # user weight slider then acts as an honest cross-type multiplier.
+    # per_type: legacy independent stretching per event type (kept for back-compat
+    # so saved configs still produce identical output).
+    positive = [r for r in results if r["score"] > 0]
 
-        # Re-classify tiers with normalized scores
-        for r in results:
-            s = r["score"]
-            if s > TIER_S_THRESHOLD:
-                r["tier"] = "S"
-            elif s >= TIER_A_THRESHOLD:
-                r["tier"] = "A"
-            elif s >= TIER_B_THRESHOLD:
-                r["tier"] = "B"
-            else:
-                r["tier"] = "C"
+    if normalization_mode == "cross_type":
+        if positive:
+            min_raw = min(r["score"] for r in positive)
+            max_raw = max(r["score"] for r in positive)
+            score_range = max_raw - min_raw
+            for r in positive:
+                pre_norm = r["score"]
+                if score_range > 0:
+                    r["score"] = round(0.5 + ((r["score"] - min_raw) / score_range) * 9.5, 2)
+                else:
+                    r["score"] = 5.0
+                r["score_components"]["normalization"] = {
+                    "raw": pre_norm, "min": min_raw, "max": max_raw, "mode": "cross_type",
+                }
+                # Persist the post-normalization, pre-weight score for UI/diagnostics
+                r["score_raw"] = r["score"]
+                uw = r["score_components"].get("user_weight", 1.0)
+                r["score"] = round(r["score"] * uw, 2)
+                r["score_components"]["user_weight"] = uw
+    else:
+        # Per-type normalization (legacy)
+        type_groups: dict[str, list[dict]] = defaultdict(list)
+        for r in positive:
+            type_groups[r.get("event_type", "")].append(r)
+
+        for event_type, group in type_groups.items():
+            type_scores = [r["score"] for r in group]
+            min_raw = min(type_scores)
+            max_raw = max(type_scores)
+            score_range = max_raw - min_raw
+            for r in group:
+                pre_norm = r["score"]
+                if score_range > 0:
+                    r["score"] = round(0.5 + ((r["score"] - min_raw) / score_range) * 9.5, 2)
+                else:
+                    r["score"] = 5.0
+                r["score_components"]["normalization"] = {
+                    "raw": pre_norm, "min": min_raw, "max": max_raw,
+                    "type": event_type, "mode": "per_type",
+                }
+                r["score_raw"] = r["score"]
+                uw = r["score_components"].get("user_weight", 1.0)
+                r["score"] = round(r["score"] * uw, 2)
+                r["score_components"]["user_weight"] = uw
+
+    # Re-classify tiers with final weighted normalized scores
+    for r in results:
+        s = r["score"]
+        if s > TIER_S_THRESHOLD:
+            r["tier"] = "S"
+        elif s >= TIER_A_THRESHOLD:
+            r["tier"] = "A"
+        elif s >= TIER_B_THRESHOLD:
+            r["tier"] = "B"
+        else:
+            r["tier"] = "C"
 
     # ── Max race-finish cap ────────────────────────────────────────────
     if max_race_finishes > 0:

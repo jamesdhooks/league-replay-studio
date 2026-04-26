@@ -1,4 +1,6 @@
+import { useId } from 'react'
 import SectionCollapseHeader from './SectionCollapseHeader'
+import { useLocalStorage } from '../../hooks/useLocalStorage'
 
 /**
  * CollapsibleSection — reusable collapsible header + content block.
@@ -9,8 +11,10 @@ import SectionCollapseHeader from './SectionCollapseHeader'
  * @param {Object} props
  * @param {import('lucide-react').LucideIcon} [props.icon] - Lucide icon component for the section
  * @param {string} props.label - Section title (uppercase tracking)
- * @param {boolean} props.open - Whether the section content is visible
- * @param {() => void} props.onToggle - Callback to toggle open/closed
+ * @param {boolean} [props.open] - Controlled open state
+ * @param {() => void} [props.onToggle] - Controlled toggle callback
+ * @param {string} [props.storageKey] - Optional localStorage key for persisted open state
+ * @param {boolean} [props.defaultOpen=true] - Initial open state for persisted/uncontrolled mode
  * @param {string} [props.iconColor] - Tailwind color class for the icon (default: text-text-tertiary)
  * @param {React.ReactNode} [props.right] - Optional right-aligned content (badges, buttons, metrics)
  * @param {React.ReactNode} props.children - Section body (rendered when open)
@@ -18,17 +22,34 @@ import SectionCollapseHeader from './SectionCollapseHeader'
 export default function CollapsibleSection({
   icon: Icon,
   label,
-  open,
+  open: controlledOpen,
   onToggle,
+  storageKey,
+  defaultOpen = true,
   iconColor = 'text-text-tertiary',
   right,
   children,
 }) {
+  const autoId = useId()
+  const resolvedStorageKey = storageKey || `lrs:ui:collapsible:${autoId}`
+  const [storedOpen, setStoredOpen] = useLocalStorage(resolvedStorageKey, defaultOpen)
+  const isControlled = typeof controlledOpen === 'boolean'
+  const open = isControlled ? controlledOpen : storedOpen
+
+  const handleToggle = () => {
+    if (isControlled) {
+      onToggle?.()
+      return
+    }
+    setStoredOpen((prev) => !prev)
+    onToggle?.()
+  }
+
   return (
-    <div className="px-3 py-2 border-t border-border-subtle shrink-0">
+    <div className="border-t border-border-subtle shrink-0">
       <SectionCollapseHeader
         open={open}
-        onToggle={onToggle}
+        onToggle={handleToggle}
         icon={Icon}
         title={label}
         right={right}
@@ -36,7 +57,7 @@ export default function CollapsibleSection({
         iconClassName={iconColor}
         titleClassName="text-text-tertiary"
       />
-      {open && <div className="pt-2">{children}</div>}
+      {open && <div className="px-2 pb-1.5">{children}</div>}
     </div>
   )
 }

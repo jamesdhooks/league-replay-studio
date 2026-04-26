@@ -16,6 +16,9 @@ REST endpoints for the one-click automated pipeline.
   GET  /api/pipeline/presets/{id}  — Get single preset
   PUT  /api/pipeline/presets/{id}  — Update preset
   DELETE /api/pipeline/presets/{id} — Delete preset
+  GET  /api/pipeline/runs/{id}/logs — Get step log entries for a run
+  GET  /api/pipeline/projects/{id}/control-state — Full canonical control state
+  PUT  /api/pipeline/projects/{id}/control-state — Save canonical control state
 """
 
 from __future__ import annotations
@@ -56,28 +59,59 @@ class CreatePresetRequest(BaseModel):
     """Request to create a new pipeline preset."""
     name: str
     description: Optional[str] = ""
-    skip_capture: bool = False
-    skip_analysis: bool = False
-    auto_edit: bool = True
+    # Export
     export_preset: Optional[str] = None
-    upload_to_youtube: bool = False
+    output_dir: Optional[str] = None
+    # Highlight config snapshot
+    highlight_config: Optional[dict] = None
+    # Overlay
+    overlay_preset_id: Optional[str] = None
+    overlay_variables: Optional[dict] = None
+    # Capture
+    capture_mode: str = "auto"
+    # Upload config (applies when upload step is active)
     youtube_privacy: str = "unlisted"
+    # Error handling
     failure_action: str = "pause"
     notify_on_completion: str = "toast"
+    # Runtime flags
+    non_interactive: bool = False
 
 
 class UpdatePresetRequest(BaseModel):
     """Request to update a pipeline preset."""
     name: Optional[str] = None
     description: Optional[str] = None
-    skip_capture: Optional[bool] = None
-    skip_analysis: Optional[bool] = None
-    auto_edit: Optional[bool] = None
     export_preset: Optional[str] = None
-    upload_to_youtube: Optional[bool] = None
+    output_dir: Optional[str] = None
+    highlight_config: Optional[dict] = None
+    overlay_preset_id: Optional[str] = None
+    overlay_variables: Optional[dict] = None
+    capture_mode: Optional[str] = None
     youtube_privacy: Optional[str] = None
     failure_action: Optional[str] = None
     notify_on_completion: Optional[str] = None
+    non_interactive: Optional[bool] = None
+
+
+class ProjectControlStateRequest(BaseModel):
+    """Request to save full project control state envelope."""
+    schema_version: Optional[int] = 1
+    preset_id: Optional[str] = ""
+    overrides: Optional[dict] = None
+    controls: Optional[dict] = None
+
+
+class PreflightRequest(BaseModel):
+    """Request to run a pipeline preflight check."""
+    project_id: int
+    preset_id: Optional[str] = None
+    config: Optional[dict] = None
+
+
+class ResetPipelineRequest(BaseModel):
+    """Request to reset current pipeline state."""
+    project_id: Optional[int] = None
 
 
 # ── Status endpoints ─────────────────────────────────────────────────────────
@@ -90,6 +124,31 @@ async def get_pipeline_status():
         Current pipeline run state, steps progress, and control flags.
     """
     return pipeline_service.status
+
+
+@router.post("/preflight")
+async def pipeline_preflight(req: PreflightRequest):
+    """Run a preflight check before starting the pipeline.
+
+    Validates that all prerequisites are met: project exists, output directory
+    is writable, iRacing is connected (if capture needed), YouTube is
+    authenticated (if upload enabled), etc.
+
+    Returns:
+        { "ok": bool, "issues": [{ "level": "error"|"warning", "code": str, "message": str }] }
+    """
+    try:
+        issues = pipeline_service.preflight_check(
+            project_id=req.project_id,
+            preset_id=req.preset_id,
+            config=req.config,
+        )
+        has_errors = any(i["level"] == "error" for i in issues)
+        return {"ok": not has_errors, "issues": issues}
+    except Exception as exc:
+        logger.exception("[Pipeline API] Preflight check failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
 
 
 @router.get("/history")
@@ -181,6 +240,17 @@ async def cancel_pipeline():
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("[Pipeline API] Cancel failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/reset")
+async def reset_pipeline(req: ResetPipelineRequest):
+    """Reset active pipeline state to allow restart from the beginning."""
+    try:
+        result = pipeline_service.reset(project_id=req.project_id)
+        return {"result": result, "message": "Pipeline reset"}
+    except Exception as exc:
+        logger.exception("[Pipeline API] Reset failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -312,3 +382,57 @@ async def delete_preset(preset_id: str):
     if not pipeline_service.delete_preset(preset_id):
         raise HTTPException(status_code=404, detail=f"Preset not found: {preset_id}")
     return {"message": "Preset deleted"}
+
+
+# ── Run logs endpoint ──────────────────────────────────────────────────────────────
+
+@router.get("/runs/{run_id}/logs")
+async def get_run_logs(
+    run_id: str,
+    limit: int = Query(default=200, ge=1, le=2000),
+    step: Optional[str] = Query(default=None),
+    level: Optional[str] = Query(default=None),
+):
+    """Get persisted step log entries for a pipeline run.
+
+    Args:
+        run_id: The pipeline run ID.
+        limit: Maximum entries to return (default 200, max 2000).
+        step: Optional filter by step name.
+        level: Optional filter by log level (info/warning/error/success).
+
+    Returns:
+        List of log entries ordered oldest-first.
+    """
+    logs = pipeline_service.get_run_logs(run_id, limit=limit, step=step, level=level)
+    return {"run_id": run_id, "logs": logs}
+
+
+# ── Project control-state endpoints ─────────────────────────────────────────
+
+@router.get("/projects/{project_id}/control-state")
+async def get_project_control_state(project_id: int):
+    """Get unified full control-state envelope for a project.
+
+    Aggregates controls persisted across pipeline overrides, analysis DB,
+    and script_state into one response contract.
+    """
+    try:
+        return pipeline_service.get_project_control_state(project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("[Pipeline API] Get project control-state failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.put("/projects/{project_id}/control-state")
+async def save_project_control_state(project_id: int, req: ProjectControlStateRequest):
+    """Save unified full control-state envelope for a project."""
+    try:
+        return pipeline_service.save_project_control_state(project_id, req.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("[Pipeline API] Save project control-state failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

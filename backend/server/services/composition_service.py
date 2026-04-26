@@ -15,6 +15,7 @@ Real-time progress is emitted via WebSocket events.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import re
 import subprocess
@@ -31,7 +32,7 @@ from server.utils.ffmpeg_builder import (
     get_video_duration,
     validate_output_file,
 )
-from server.utils.gpu_detection import find_ffmpeg, find_ffprobe, get_best_encoder
+from server.utils.gpu_detection import find_ffmpeg, find_ffprobe
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,16 @@ logger = logging.getLogger(__name__)
 
 _ALLOWED_VIDEO_EXTENSIONS: frozenset[str] = frozenset({".mp4", ".mov", ".mkv", ".avi", ".ts"})
 _ALLOWED_OUTPUT_EXTENSIONS: frozenset[str] = frozenset({".mp4", ".mov", ".mkv"})
+
+# ── Gap policy constants ──────────────────────────────────────────────────────
+
+GAP_POLICY_COMPRESS   = "compress_gaps"
+GAP_POLICY_FILL_BLACK = "fill_black"
+GAP_POLICY_FADE       = "fade_bridge"
+
+# Cap on generated black-clip duration (seconds) for fill_black policy
+FILL_BLACK_MAX_GAP_SECONDS = 30.0
+OVERLAY_COMPOSITE_TIMEOUT_SECONDS = 30.0
 
 
 # ── Composition states ──────────────────────────────────────────────────────
@@ -102,6 +113,7 @@ class CompositionJob:
         trim_config: dict[str, Any],
         output_dir: str,
         preset_id: str,
+        gap_policy: str = GAP_POLICY_COMPRESS,
     ) -> None:
         self.job_id = job_id
         self.project_id = project_id
@@ -112,6 +124,7 @@ class CompositionJob:
         self.trim_config = trim_config
         self.output_dir = output_dir
         self.preset_id = preset_id
+        self.gap_policy = gap_policy
 
         self.state = CompositionState.IDLE
         self.started_at: float | None = None
@@ -144,6 +157,7 @@ class CompositionJob:
             "log_entries": [e.to_dict() for e in self.log_entries[-50:]],
             "clip_count": len(self.clips_manifest),
             "preset_id": self.preset_id,
+            "gap_policy": self.gap_policy,
         }
 
 
@@ -245,7 +259,8 @@ class CompositionService:
         transition_config: dict[str, Any] | None = None,
         trim_config: dict[str, Any] | None = None,
         output_dir: str = "",
-        preset_id: str = "youtube_1080p60",
+        preset_id: str = "1080p",
+        gap_policy: str = GAP_POLICY_COMPRESS,
     ) -> dict[str, Any]:
         """Submit a composition job for background execution.
 
@@ -261,7 +276,7 @@ class CompositionService:
             transition_config: ``{"fade_threshold": float, "fade_duration": float}``.
             trim_config:       ``{"trim_start_buffer": float, "trim_end_buffer": float}``.
             output_dir:        Directory to write the final video.
-            preset_id:         Encoding preset for the final stitch.
+            preset_id:         Legacy passthrough field (composition ignores encoding presets).
 
         Returns:
             ``{"success": True, "job": <job_dict>}`` or error dict.
@@ -278,13 +293,24 @@ class CompositionService:
             return {"success": False, "error": "Invalid output directory path"}
         out_resolved = out_path.resolve()
 
-        # Restrict to allowed base directories (project data paths).
+        # Restrict to allowed base directories (application data paths or the
+        # owning project's directory tree for projects stored externally).
+        from server.services.project_service import project_service
+        project = project_service.get_project(project_id)
+        project_dir = project.get("project_dir", "") if project else ""
+
         from server.config import DATA_DIR, PROJECTS_DIR
         allowed_bases = [DATA_DIR.resolve(), PROJECTS_DIR.resolve()]
+        if project_dir:
+            try:
+                allowed_bases.append(Path(project_dir).resolve())
+            except OSError:
+                pass
+
         if not any(out_resolved == base or out_resolved.is_relative_to(base) for base in allowed_bases):
             return {
                 "success": False,
-                "error": "Output directory must be within the application data directory",
+                "error": "Output directory must be within the current project directory or application data directory",
             }
         out_resolved.mkdir(parents=True, exist_ok=True)  # lgtm[py/path-injection]
 
@@ -297,6 +323,16 @@ class CompositionService:
         if not find_ffmpeg():
             return {"success": False, "error": "FFmpeg not found. Install FFmpeg to compose videos."}
 
+        # ── Enrich clips with project_dir for overlay frame_data building ──────
+        # The overlay compositor needs project_dir to query telemetry for standings.
+        # Enrich the manifest with project_dir if not already present.
+        enriched_project_dir = project.get("project_dir", "") if project else ""
+        if enriched_project_dir:
+            clips_manifest = [
+                {**clip, "project_dir": clip.get("project_dir") or enriched_project_dir}
+                for clip in clips_manifest
+            ]
+
         job_id = uuid.uuid4().hex[:12]
         job = CompositionJob(
             job_id=job_id,
@@ -308,6 +344,7 @@ class CompositionService:
             trim_config=trim_config or {"trim_start_buffer": 0.0, "trim_end_buffer": 0.0},
             output_dir=str(out_resolved),
             preset_id=preset_id,
+            gap_policy=gap_policy if gap_policy in {GAP_POLICY_COMPRESS, GAP_POLICY_FILL_BLACK, GAP_POLICY_FADE} else GAP_POLICY_COMPRESS,
         )
 
         self._jobs[job_id] = job
@@ -315,8 +352,8 @@ class CompositionService:
         self._cancel_event.clear()
 
         logger.info(
-            "[Composition] Job %s submitted: %d clips, preset=%s, output=%s",
-            job_id, len(clips_manifest), preset_id, out_resolved,
+            "[Composition] Job %s submitted: %d clips, output=%s",
+            job_id, len(clips_manifest), out_resolved,
         )
 
         # Start background thread
@@ -394,6 +431,7 @@ class CompositionService:
             if self._is_cancelled(job):
                 return
             job.state = CompositionState.TRIMMING
+            self._log(job, "trim", f"Preparing trim step for {len(job.clips_manifest)} clips")
             trimmed = self._step_trim(job, ffmpeg_path, ffprobe_path)
             if trimmed is None:
                 return  # _step_trim already called _fail
@@ -402,6 +440,7 @@ class CompositionService:
             if self._is_cancelled(job):
                 return
             job.state = CompositionState.OVERLAYING
+            self._log(job, "overlay", f"Preparing overlay step for {len(trimmed)} clips")
             overlaid = self._step_overlay(job, trimmed, ffmpeg_path)
             if overlaid is None:
                 return
@@ -409,12 +448,14 @@ class CompositionService:
             # ── Step 2b: PiP overlay (for PiP segments) ────────────────────
             if self._is_cancelled(job):
                 return
+            self._log(job, "pip", "Preparing PiP step")
             overlaid = self._step_pip_overlay(job, overlaid, ffmpeg_path)
 
             # ── Step 3: Build clip list with transitions ────────────────────
             if self._is_cancelled(job):
                 return
             job.state = CompositionState.STITCHING
+            self._log(job, "transition", f"Preparing transition step for {len(overlaid)} clips")
             final_clip_list = self._step_transitions(job, overlaid, ffmpeg_path, ffprobe_path)
             if final_clip_list is None:
                 return
@@ -422,6 +463,7 @@ class CompositionService:
             # ── Step 4: Stitch / concatenate ────────────────────────────────
             if self._is_cancelled(job):
                 return
+            self._log(job, "stitch", f"Preparing stitch step for {len(final_clip_list)} clips")
             output_file = self._step_stitch(job, final_clip_list, ffmpeg_path, ffprobe_path)
             if output_file is None:
                 return
@@ -432,6 +474,13 @@ class CompositionService:
             job.output_file = output_file
             job.progress_pct = 100.0
             elapsed = round(time.time() - (job.started_at or 0), 1)
+
+            from server.services.project_service import project_service
+            project_service.save_project_metadata(job.project_id, {
+                "last_composition_output": output_file,
+                "last_composition_completed_at": job.completed_at,
+                "last_composition_job_id": job.job_id,
+            })
 
             self._log(job, "complete", f"Composition finished in {elapsed}s → {output_file}")
             self._emit(EventType.COMPOSITION_COMPLETED, {
@@ -496,11 +545,14 @@ class CompositionService:
                 results.append({**clip, "trimmed_path": None})
                 continue
 
-            # Calculate trim boundaries
-            # Segment timing from the script
+            # Calculate trim boundaries. Newer capture manifests provide exact
+            # source offsets into the recorded file for each script segment.
+            # Fall back to legacy duration-based trimming when offsets are absent.
             seg_start = float(clip.get("start_time_seconds", 0))
             seg_end = float(clip.get("end_time_seconds", seg_start + 30))
             seg_duration = seg_end - seg_start
+            source_offset_start = clip.get("source_offset_start_seconds")
+            source_offset_end = clip.get("source_offset_end_seconds")
 
             # The captured clip may have pre/post buffer from the capture step.
             # We trim to remove that buffer, keeping only the segment content
@@ -509,12 +561,19 @@ class CompositionService:
             if ffprobe_path:
                 clip_duration = get_video_duration(ffprobe_path, clip_path)
 
-            # Trim from the start buffer, to segment duration + end buffer
-            trim_ss = max(0.0, trim_start_buf)
-            if clip_duration and clip_duration > 0:
-                trim_to = min(clip_duration, seg_duration + trim_start_buf - trim_end_buf)
+            if source_offset_start is not None and source_offset_end is not None:
+                trim_ss = max(0.0, float(source_offset_start) + trim_start_buf)
+                if clip_duration and clip_duration > 0:
+                    trim_to = min(clip_duration, float(source_offset_end) - trim_end_buf)
+                else:
+                    trim_to = float(source_offset_end) - trim_end_buf
             else:
-                trim_to = seg_duration + trim_start_buf - trim_end_buf
+                # Legacy manifest format: use segment duration only.
+                trim_ss = max(0.0, trim_start_buf)
+                if clip_duration and clip_duration > 0:
+                    trim_to = min(clip_duration, seg_duration + trim_start_buf - trim_end_buf)
+                else:
+                    trim_to = seg_duration + trim_start_buf - trim_end_buf
             trim_to = max(trim_ss + 0.1, trim_to)  # ensure positive duration
 
             safe_id = _sanitise_id(seg_id)
@@ -620,6 +679,14 @@ class CompositionService:
             safe_id = _sanitise_id(seg_id)
             overlaid_path = str(out_dir / f"{safe_id}_overlaid.mp4")
 
+            self._log(
+                job,
+                "overlay",
+                f"About to overlay {seg_id} (section={section}, template={section_template})",
+                segment_id=seg_id,
+            )
+            self._emit_progress(job, "overlaying", idx, total)
+
             # Build frame data for this clip's telemetry snapshot
             project_dir = clip.get("project_dir", "")
             series_name = clip.get("series_name", "")
@@ -651,6 +718,7 @@ class CompositionService:
                     clip_path=trimmed,
                     template_id=section_template,
                     output_path=overlaid_path,
+                    project_id=job.project_id,
                     frame_data=frame_data,
                     project_dir=project_dir,
                     session_time=session_time,
@@ -669,10 +737,47 @@ class CompositionService:
                 job.overlaid_clips.append(overlaid)
                 self._log(job, "overlay", f"Overlaid {seg_id} → {overlaid}", segment_id=seg_id)
             else:
-                # Fall back to trimmed clip if overlay fails
-                clip["overlaid_path"] = trimmed
-                self._log(job, "overlay", f"Overlay failed for {seg_id}, using trimmed clip",
-                          success=False, segment_id=seg_id)
+                # Overlay failure is fatal once overlaying is enabled.
+                diag = compositor.last_diagnostics
+                diag_reason = str(diag.get("error") or diag.get("reason") or "unknown")
+                diag_error = str(diag.get("render_error") or diag.get("error") or "")
+                diag_undefined_var = str(diag.get("render_undefined_var") or "")
+                if diag_error:
+                    logger.warning(
+                        "[Composition] Overlay fallback for %s (template=%s, reason=%s, error=%s, undefined_var=%s)",
+                        seg_id,
+                        section_template,
+                        diag_reason,
+                        diag_error,
+                        diag_undefined_var or "-",
+                    )
+                else:
+                    logger.warning(
+                        "[Composition] Overlay fallback for %s (template=%s, reason=%s, undefined_var=%s)",
+                        seg_id,
+                        section_template,
+                        diag_reason,
+                        diag_undefined_var or "-",
+                    )
+
+                detail = f" reason={diag_reason}"
+                if diag_error:
+                    detail += f" error={diag_error}"
+                if diag_undefined_var:
+                    detail += f" undefined_var={diag_undefined_var}"
+                self._log(
+                    job,
+                    "overlay",
+                    f"Overlay failed for {seg_id} ({detail.strip()})",
+                    success=False,
+                    segment_id=seg_id,
+                )
+
+                self._fail(
+                    job,
+                    f"Overlay failed for segment '{seg_id}' using template '{section_template}' ({detail.strip()})",
+                )
+                return None
 
             pct = 25 + ((idx + 1) / total) * 40  # overlay is 25-65%
             job.progress_pct = pct
@@ -692,6 +797,7 @@ class CompositionService:
         clip_path: str,
         template_id: str,
         output_path: str,
+        project_id: int | None = None,
         frame_data: dict[str, Any] | None = None,
         project_dir: str = "",
         session_time: float = 0.0,
@@ -707,24 +813,141 @@ class CompositionService:
         ``render_and_composite`` method.  This is safe because we are in
         a dedicated daemon thread, not the main asyncio loop.
         """
+        overlay_engine = self._get_overlay_engine()
+
+        # Ensure composition jobs can resolve overlay preset HTML files from
+        # data-backed preset/template directories, not just built-in templates.
+        if overlay_engine and hasattr(overlay_engine, "set_custom_template_dirs"):
+            template_dirs: list[Path] = []
+            try:
+                from server.services.overlay_service import CUSTOM_TEMPLATES_DIR, OVERRIDES_DIR
+                if project_id is not None:
+                    override_root = OVERRIDES_DIR / str(project_id)
+                    if override_root.exists():
+                        template_dirs.append(override_root)
+                if CUSTOM_TEMPLATES_DIR.exists():
+                    template_dirs.append(CUSTOM_TEMPLATES_DIR)
+            except Exception:
+                logger.debug("[Composition] Could not load overlay custom template dirs", exc_info=True)
+
+            try:
+                from server.services.preset_service import PRESETS_DIR
+                if PRESETS_DIR.exists():
+                    template_dirs.append(PRESETS_DIR)
+            except Exception:
+                logger.debug("[Composition] Could not load overlay preset template dir", exc_info=True)
+
+            overlay_engine.set_custom_template_dirs(template_dirs)
+
+        async def _compose() -> str | None:
+            return await compositor.render_and_composite(
+                clip_path=clip_path,
+                template_id=template_id,
+                output_path=output_path,
+                overlay_engine=overlay_engine,
+                frame_data=frame_data,
+                project_dir=project_dir or None,
+                session_time=session_time,
+                section=section,
+                focused_car_idx=focused_car_idx,
+                series_name=series_name,
+                track_name=track_name,
+                clip_duration_seconds=clip_duration_seconds,
+            )
+
+        # Playwright objects are created on the app's main asyncio loop.
+        # Running render coroutines on a per-thread loop can deadlock/hang.
+        if self._loop and self._loop.is_running():
+            start_ts = time.perf_counter()
+            logger.info(
+                "[Composition] Overlay composite dispatching on main loop (template=%s, section=%s)",
+                template_id,
+                section,
+            )
+            future = asyncio.run_coroutine_threadsafe(_compose(), self._loop)
+            try:
+                result = future.result(timeout=OVERLAY_COMPOSITE_TIMEOUT_SECONDS)
+                elapsed = (time.perf_counter() - start_ts) * 1000.0
+                logger.info(
+                    "[Composition] Overlay composite end (template=%s, section=%s, success=%s, %.1fms)",
+                    template_id,
+                    section,
+                    bool(result),
+                    elapsed,
+                )
+                return result
+            except concurrent.futures.TimeoutError:
+                future.cancel()
+                logger.error(
+                    "[Composition] Overlay composite timed out after %.1fs (template=%s, section=%s, clip=%s)",
+                    OVERLAY_COMPOSITE_TIMEOUT_SECONDS,
+                    template_id,
+                    section,
+                    clip_path,
+                )
+                if hasattr(compositor, "_set_last_diagnostics"):
+                    compositor._set_last_diagnostics({
+                        "error": "overlay_timeout",
+                        "reason": "overlay_composite_timeout",
+                        "template_id": template_id,
+                        "section": section,
+                        "clip_path": clip_path,
+                    })
+                return None
+            except Exception:
+                logger.exception(
+                    "[Composition] Overlay composite crashed (template=%s, section=%s, clip=%s)",
+                    template_id,
+                    section,
+                    clip_path,
+                )
+                raise
+
         loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(
-                compositor.render_and_composite(
-                    clip_path=clip_path,
-                    template_id=template_id,
-                    output_path=output_path,
-                    overlay_engine=self._get_overlay_engine(),
-                    frame_data=frame_data,
-                    project_dir=project_dir or None,
-                    session_time=session_time,
-                    section=section,
-                    focused_car_idx=focused_car_idx,
-                    series_name=series_name,
-                    track_name=track_name,
-                    clip_duration_seconds=clip_duration_seconds,
-                )
+            start_ts = time.perf_counter()
+            logger.info(
+                "[Composition] Overlay composite begin (template=%s, section=%s, clip=%s, timeout=%.1fs)",
+                template_id,
+                section,
+                clip_path,
+                OVERLAY_COMPOSITE_TIMEOUT_SECONDS,
             )
+            result = loop.run_until_complete(asyncio.wait_for(_compose(), timeout=OVERLAY_COMPOSITE_TIMEOUT_SECONDS))
+            elapsed = (time.perf_counter() - start_ts) * 1000.0
+            logger.info(
+                "[Composition] Overlay composite end (template=%s, section=%s, success=%s, %.1fms)",
+                template_id,
+                section,
+                bool(result),
+                elapsed,
+            )
+            return result
+        except TimeoutError:
+            logger.error(
+                "[Composition] Overlay composite timed out after %.1fs (template=%s, section=%s, clip=%s)",
+                OVERLAY_COMPOSITE_TIMEOUT_SECONDS,
+                template_id,
+                section,
+                clip_path,
+            )
+            if hasattr(compositor, "_set_last_diagnostics"):
+                compositor._set_last_diagnostics({
+                    "error": "overlay_timeout",
+                    "reason": "overlay_composite_timeout",
+                    "template_id": template_id,
+                    "section": section,
+                    "clip_path": clip_path,
+                })
+            return None
+        except Exception:
+            logger.exception(
+                "[Composition] Overlay composite crashed (template=%s, section=%s, clip=%s)",
+                template_id,
+                section,
+                clip_path,
+            )
+            raise
         finally:
             loop.close()
 
@@ -877,25 +1100,32 @@ class CompositionService:
         ffmpeg_path: str,
         ffprobe_path: str | None,
     ) -> list[str] | None:
-        """Insert fade-to-black transitions between non-contiguous clips.
+        """Insert transition material between non-contiguous clips.
 
-        Clips whose time gap exceeds ``fade_threshold`` get a short black
-        clip with fade-out / fade-in inserted between them.
+        Dispatches to the correct strategy based on ``job.gap_policy``:
+
+        * ``compress_gaps`` — stitch clips directly (no inserted material).
+        * ``fill_black``    — insert a silent black clip sized to the actual gap
+                              duration (capped at ``FILL_BLACK_MAX_GAP_SECONDS``).
+        * ``fade_bridge``   — original fade-to-black behaviour: insert when gap
+                              exceeds ``fade_threshold``.
 
         Returns:
-            Ordered list of file paths (clips + transitions) ready for
+            Ordered list of file paths (clips + inserted material) ready for
             concatenation, or ``None`` on failure.
         """
         fade_threshold = float(job.transition_config.get("fade_threshold", 5.0))
         fade_duration = float(job.transition_config.get("fade_duration", 1.5))
+        gap_policy = job.gap_policy or GAP_POLICY_COMPRESS
         trans_dir = Path(job.output_dir) / "transitions"
         trans_dir.mkdir(parents=True, exist_ok=True)
 
-        # Collect the valid overlaid (or trimmed) clips in script order
         ordered: list[dict[str, Any]] = [c for c in clips if c.get("overlaid_path")]
         if not ordered:
             self._fail(job, "No valid clips for transition insertion")
             return None
+
+        self._log(job, "transition", f"Gap policy: {gap_policy} · {len(ordered)} clips")
 
         final_list: list[str] = []
         total = len(ordered)
@@ -907,26 +1137,51 @@ class CompositionService:
             clip_file = clip["overlaid_path"]
             final_list.append(clip_file)
 
-            # Check if a transition is needed before the *next* clip
             if idx < total - 1:
                 next_clip = ordered[idx + 1]
                 current_end = float(clip.get("end_time_seconds", 0))
                 next_start = float(next_clip.get("start_time_seconds", 0))
                 gap = next_start - current_end
+                seg_id = clip.get("id", f"clip_{idx}")
 
-                if gap > fade_threshold:
-                    seg_id = clip.get("id", f"clip_{idx}")
-                    trans_path = self._generate_fade_transition(
-                        ffmpeg_path, ffprobe_path, clip_file, fade_duration, trans_dir, idx,
-                    )
-                    if trans_path:
-                        final_list.append(trans_path)
-                        job.transition_clips.append(trans_path)
-                        self._log(
-                            job, "transition",
-                            f"Fade transition inserted after {seg_id} (gap={gap:.1f}s)",
-                            segment_id=seg_id,
+                if gap_policy == GAP_POLICY_COMPRESS:
+                    # No inserted material — gaps are silently removed.
+                    pass
+
+                elif gap_policy == GAP_POLICY_FILL_BLACK:
+                    # Insert a black clip matching the actual gap duration.
+                    if gap > 0:
+                        capped_gap = min(max(gap, 0.0), FILL_BLACK_MAX_GAP_SECONDS)
+                        black_path = self._generate_black_clip(
+                            ffmpeg_path, ffprobe_path, clip_file, capped_gap, trans_dir, idx,
                         )
+                        if black_path:
+                            final_list.append(black_path)
+                            job.transition_clips.append(black_path)
+                            self._log(
+                                job, "transition",
+                                f"Black clip inserted after {seg_id} (gap={gap:.1f}s → capped={capped_gap:.1f}s)",
+                                segment_id=seg_id,
+                            )
+
+                elif gap_policy == GAP_POLICY_FADE:
+                    # Original behaviour: fade when gap exceeds threshold.
+                    if gap > fade_threshold:
+                        trans_path = self._generate_fade_transition(
+                            ffmpeg_path, ffprobe_path, clip_file, fade_duration, trans_dir, idx,
+                        )
+                        if trans_path:
+                            final_list.append(trans_path)
+                            job.transition_clips.append(trans_path)
+                            self._log(
+                                job, "transition",
+                                f"Fade transition inserted after {seg_id} (gap={gap:.1f}s)",
+                                segment_id=seg_id,
+                            )
+
+                else:
+                    # Unknown policy — safe default: compress (no insertion).
+                    pass
 
             pct = 65 + ((idx + 1) / total) * 15  # transitions are 65-80%
             job.progress_pct = pct
@@ -996,6 +1251,60 @@ class CompositionService:
 
         return trans_path
 
+    def _generate_black_clip(
+        self,
+        ffmpeg_path: str,
+        ffprobe_path: str | None,
+        preceding_clip: str,
+        duration: float,
+        trans_dir: Path,
+        index: int,
+    ) -> str | None:
+        """Generate a silent black clip of a given duration.
+
+        Resolution and framerate are matched to the preceding clip so the
+        FFmpeg concat demuxer does not complain about stream mismatches.
+
+        Returns:
+            Path to the generated clip, or ``None`` on failure.
+        """
+        width, height, fps = 1920, 1080, 60
+        if ffprobe_path:
+            info = self._probe_video_info(ffprobe_path, preceding_clip)
+            width = info.get("width", 1920)
+            height = info.get("height", 1080)
+            fps = info.get("fps", 60)
+
+        duration = max(0.1, float(duration))
+        black_path = str(trans_dir / f"black_{index:03d}.mp4")
+
+        cmd = [
+            ffmpeg_path, "-hide_banner", "-loglevel", "warning", "-y",
+            "-f", "lavfi",
+            "-i", f"color=c=black:s={width}x{height}:r={fps}:d={duration:.3f}",
+            "-f", "lavfi",
+            "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-t", f"{duration:.3f}",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k",
+            "-shortest",
+            black_path,
+        ]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)  # noqa: S603
+            if result.returncode != 0:
+                logger.warning(
+                    "[Composition] Black clip generation failed (rc=%d): %s",
+                    result.returncode, result.stderr[:300],
+                )
+                return None
+        except subprocess.TimeoutExpired:
+            logger.warning("[Composition] Black clip generation timed out")
+            return None
+
+        return black_path
+
     @staticmethod
     def _probe_video_info(ffprobe_path: str, clip_path: str) -> dict[str, Any]:
         """Probe a video for resolution and framerate.
@@ -1051,7 +1360,7 @@ class CompositionService:
             self._fail(job, "No clips to stitch")
             return None
 
-        # If only one clip, just copy it
+        # Single clip output can stay stream-copied to preserve source quality.
         if len(clip_list) == 1:
             output_file = str(Path(job.output_dir) / f"composed_{job.job_id}.mp4")
             try:
@@ -1071,7 +1380,7 @@ class CompositionService:
                 self._fail(job, f"Stitch (single) error: {exc}")
                 return None
 
-            self._log(job, "stitch", f"Single clip copied → {output_file}")
+            self._log(job, "stitch", f"Single clip copied (native quality) -> {output_file}")
             job.progress_pct = 95.0
             self._emit_progress(job, "stitching", 0, 1)
             return output_file
@@ -1097,7 +1406,7 @@ class CompositionService:
             self._fail(job, f"Invalid output path: {exc}")
             return None
 
-        # Try concat demuxer first (stream copy — fast)
+        # Prefer stream-copy stitching so composition keeps source dimensions/quality.
         cmd = [
             ffmpeg_path, "-hide_banner", "-loglevel", "warning", "-y",
             "-f", "concat", "-safe", "0",
@@ -1106,16 +1415,16 @@ class CompositionService:
             safe_output,
         ]
 
-        self._log(job, "stitch", f"Stitching {len(clip_list)} files via concat demuxer")
+        self._log(job, "stitch", f"Stitching {len(clip_list)} files (native quality/source size)")
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)  # noqa: S603
             if result.returncode != 0:
                 logger.warning(
-                    "[Composition] Concat demuxer failed (rc=%d), falling back to re-encode: %s",
+                    "[Composition] Concat demuxer copy failed (rc=%d), falling back to concat filter re-encode: %s",
                     result.returncode, result.stderr[:300],
                 )
-                # Fallback: re-encode via concat filter
+                # Fallback: concat filter re-encode while preserving source geometry.
                 output_file = self._stitch_reencode(job, clip_list, ffmpeg_path, safe_output)
                 if not output_file:
                     return None
@@ -1156,7 +1465,7 @@ class CompositionService:
 
         Used when the concat demuxer fails due to stream incompatibility.
         """
-        self._log(job, "stitch", "Re-encoding via concat filter (slower)")
+        self._log(job, "stitch", "Re-encoding via concat filter (high quality, native size)")
 
         # Build input args
         input_args: list[str] = []
@@ -1168,16 +1477,13 @@ class CompositionService:
         filter_inputs = "".join(f"[{i}:v:0][{i}:a:0]" for i in range(n))
         filter_str = f"{filter_inputs}concat=n={n}:v=1:a=1[outv][outa]"
 
-        encoder = get_best_encoder("h264")
-        codec = encoder.get("ffmpeg_codec", "libx264")
-
         cmd = [
             ffmpeg_path, "-hide_banner", "-loglevel", "warning", "-y",
             *input_args,
             "-filter_complex", filter_str,
             "-map", "[outv]", "-map", "[outa]",
-            "-c:v", codec, "-preset", "fast", "-crf", "18",
-            "-c:a", "aac", "-b:a", "192k",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "16",
+            "-c:a", "aac", "-b:a", "256k",
             "-movflags", "+faststart",
             output_path,
         ]

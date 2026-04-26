@@ -1,6 +1,12 @@
-import { useMemo, useState, useRef, useEffect } from 'react'
+import { useMemo, useState, useRef, useEffect, useCallback } from 'react'
 import { useCapture } from '../../context/CaptureContext'
 import { useScriptState, CAPTURE_STATES } from '../../context/ScriptStateContext'
+import { useTimelineViewport } from '../../hooks/useTimelineViewport'
+import CollapsiblePanelHeader from '../ui/CollapsiblePanelHeader'
+import ConfigurableTimelineTracks from '../ui/ConfigurableTimelineTracks'
+import RangeSlider from '../ui/RangeSlider'
+import UnifiedLogList from '../ui/UnifiedLogList'
+import { normalizeCaptureLogEntries } from '../../utils/logEntries'
 import {
   Film, Loader2, CheckCircle2, XCircle,
   Clapperboard, Trophy, Flag, Star, FileVideo,
@@ -43,202 +49,331 @@ function formatDuration(seconds) {
   return m > 0 ? `${m}:${String(rem).padStart(2, '0')}` : `${rem}s`
 }
 
-function formatTimestamp(ts) {
-  if (!ts) return ''
-  const d = new Date(ts * 1000)
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-}
+function getFailureHint(latestFailure, scriptCaptureError) {
+  const detail = String(latestFailure?.detail || '').toLowerCase()
+  const error = String(scriptCaptureError || '').toLowerCase()
+  const combined = `${detail} ${error}`
 
-const LOG_ACTION_ICONS = {
-  seek: '🎯',
-  camera: '📷',
-  driver: '🏎️',
-  camera_schedule: '🔄',
-  record_start: '⏺️',
-  record_stop: '⏹️',
-  validate: '✅',
-  retry: '🔁',
-  error: '❌',
-  info: 'ℹ️',
+  if (combined.includes('seek validation') || combined.includes('drift=')) {
+    return 'Replay seek validation is failing. Click the iRacing replay timeline once, ensure replay mode is active, and retry capture.'
+  }
+  if (combined.includes('not connected') || combined.includes('telemetry')) {
+    return 'iRacing connection/telemetry is unavailable. Reconnect iRacing and confirm live status before starting capture.'
+  }
+  if (combined.includes('timed out') || combined.includes('clip file not found') || combined.includes('watch folder')) {
+    return 'Recorder output was not detected. Verify start/stop hotkeys and confirm the capture output folder in Settings → Capture matches your recorder.'
+  }
+  if (combined.includes('no start hotkey') || combined.includes('hotkey')) {
+    return 'Hotkey setup is invalid. Reconfigure start/stop hotkeys in Settings → Capture, then run Hotkey Validation.'
+  }
+  return 'Open Capture Log for the exact failing command and retry after correcting recorder/iRacing replay setup.'
 }
 
 // ── Script Timeline (read-only, progress bars) ────────────────────────────
 
-function ScriptTimeline({ strategies, currentSegmentId, completedIndex, totalSegments, segmentStates }) {
+function ScriptTimeline({ strategies, currentSegmentId, completedIndex, totalSegments, segmentStates, replaySessionTime }) {
   if (!strategies?.length) return null
 
-  const totalDuration = strategies.reduce((sum, s) => sum + (s.duration || 0), 0)
+  const visibleStrategies = useMemo(
+    () => (Array.isArray(strategies)
+      ? strategies.filter((strat) => String(strat?.type || '').toLowerCase() !== 'bridge')
+      : []),
+    [strategies],
+  )
+
+  if (!visibleStrategies.length) return null
+
+  const totalDuration = visibleStrategies.reduce((sum, s) => sum + (s.duration || 0), 0)
   if (totalDuration <= 0) return null
 
+  const {
+    containerRef,
+    scrollRef,
+    rangeStart,
+    rangeEnd,
+    setRange,
+    contentWidth,
+    toX,
+    handleTimelineScroll,
+  } = useTimelineViewport({
+    totalDuration,
+    fallbackWidth: 800,
+  })
+
+  const SECTION_ROW_H = 18
+  const SEGMENT_ROW_H = 46
+  const TICK_ROW_H = 24
+  const TIMELINE_CANVAS_H = SECTION_ROW_H + SEGMENT_ROW_H + TICK_ROW_H
+
+  const timelineEntries = useMemo(() => {
+    let cursor = 0
+    return visibleStrategies.map((strat, idx) => {
+      const duration = Math.max(0, Number(strat.duration || 0))
+      const start = cursor
+      const end = start + duration
+      cursor = end
+      return { strat, idx, start, end, duration }
+    })
+  }, [visibleStrategies])
+
+  const sectionSpans = useMemo(() => {
+    const spans = new Map()
+    for (const entry of timelineEntries) {
+      const key = entry.strat.section || 'race'
+      if (!spans.has(key)) {
+        spans.set(key, { start: entry.start, end: entry.end })
+      } else {
+        const current = spans.get(key)
+        current.start = Math.min(current.start, entry.start)
+        current.end = Math.max(current.end, entry.end)
+      }
+    }
+    return Array.from(spans.entries())
+  }, [timelineEntries])
+
+  const playheadRatio = useMemo(() => {
+    if (typeof replaySessionTime !== 'number' || Number.isNaN(replaySessionTime)) {
+      return null
+    }
+
+    let cumulative = 0
+    for (const strat of visibleStrategies) {
+      const segStart = Number(strat.start_time || 0)
+      const segEnd = Number(strat.end_time || segStart + (strat.duration || 0))
+      const segDuration = Math.max(0, segEnd - segStart)
+
+      if (replaySessionTime < segStart) {
+        return cumulative / totalDuration
+      }
+      if (replaySessionTime <= segEnd) {
+        const inSeg = Math.max(0, replaySessionTime - segStart)
+        return Math.min(1, (cumulative + inSeg) / totalDuration)
+      }
+
+      cumulative += segDuration
+    }
+
+    return 1
+  }, [replaySessionTime, totalDuration, visibleStrategies])
+
+  const playheadX = playheadRatio == null ? null : playheadRatio * contentWidth
+
+  const tickMarks = useMemo(() => {
+    const tickCount = Math.min(8, Math.max(4, Math.round(totalDuration / 30)))
+    const step = totalDuration / tickCount
+    return Array.from({ length: tickCount + 1 }, (_, index) => {
+      const value = Math.min(totalDuration, index * step)
+      return { value, left: toX(value) }
+    })
+  }, [contentWidth, totalDuration])
+
+  const rangeSliderEvents = useMemo(() => (
+    timelineEntries.map(({ strat, start, end }) => ({
+      start_time_seconds: start,
+      end_time_seconds: end,
+      event_type: strat.section || 'race',
+      inclusion: strat.section === 'race' ? 'highlight' : null,
+    }))
+  ), [timelineEntries])
+
   return (
-    <div className="space-y-1.5">
-      <div className="flex items-center gap-1.5">
-        <Film className="w-3 h-3 text-text-tertiary" />
-        <span className="text-xxs font-semibold text-text-tertiary uppercase tracking-wider">
-          Script Timeline
-        </span>
-        <span className="text-xxs text-text-disabled ml-auto tabular-nums">
-          {formatDuration(totalDuration)} total
-        </span>
-      </div>
+    <div className="flex-1 min-h-0 flex flex-col overflow-hidden" ref={containerRef}>
+      <ConfigurableTimelineTracks
+        gutterWidth={52}
+        canvasHeight={TIMELINE_CANVAS_H}
+        contentWidth={contentWidth}
+        containerClassName="flex-1 h-full min-h-0 flex overflow-hidden bg-bg-primary"
+        scrollClassName="flex-1 min-h-0 overflow-x-hidden overflow-y-hidden"
+        scrollRef={scrollRef}
+        onScroll={handleTimelineScroll}
+        playheadX={playheadX}
+        playheadClassName="bg-accent"
+        playheadDraggingClassName="bg-accent"
+        rows={[
+          {
+            key: 'section',
+            label: 'Sect',
+            height: SECTION_ROW_H,
+            render: ({ top, height }) => (
+              <div className="absolute left-0 right-0 border-b border-border-subtle" style={{ top, height }}>
+                {sectionSpans.map(([sectionName, span]) => {
+                  const meta = SECTION_META[sectionName] || SECTION_META.race
+                  const left = toX(span.start)
+                  const width = Math.max(4, toX(span.end - span.start))
+                  return (
+                    <div key={sectionName} className="absolute top-0 h-full flex items-center overflow-hidden" style={{ left, width }}>
+                      <div className={`absolute inset-0 ${meta.barColor}/18 border-r border-white/10`} />
+                      <span className="relative truncate pl-1 text-[10px] font-semibold uppercase tracking-wider text-text-secondary">
+                        {meta.label}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+            ),
+          },
+          {
+            key: 'segments',
+            label: 'Evt',
+            height: SEGMENT_ROW_H,
+            render: ({ top, height }) => (
+              <div className="absolute left-0 right-0 border-b border-border-subtle" style={{ top, height }}>
+                {timelineEntries.map(({ strat, idx, start, duration }) => {
+                  const left = toX(start)
+                  const width = Math.max(4, toX(duration))
+                  const meta = SECTION_META[strat.section] || SECTION_META.race
+                  const isCurrent = strat.segment_id === currentSegmentId
+                  const isCompleted = idx < (completedIndex ?? -1)
+                  const captState = segmentStates?.[strat.segment_id]?.capture_state
+                  let segmentClass = 'bg-bg-tertiary/35 border-border-subtle'
+                  if (captState === 'captured') segmentClass = `${meta.barColor}/55 border-success/30`
+                  else if (captState === 'invalidated') segmentClass = 'bg-amber-500/30 border-amber-500/40'
+                  else if (isCompleted) segmentClass = `${meta.barColor}/42 border-white/10`
+                  else if (isCurrent) segmentClass = `${meta.barColor}/65 border-accent/40`
 
-      {/* Timeline bar */}
-      <div className="flex gap-px h-6 rounded overflow-hidden bg-bg-primary border border-border">
-        {strategies.map((strat, idx) => {
-          const widthPct = Math.max(0.5, (strat.duration / totalDuration) * 100)
-          const meta = SECTION_META[strat.section] || SECTION_META.race
-          const isCurrent = strat.segment_id === currentSegmentId
-          const isCompleted = idx < (completedIndex ?? -1)
-          const isPending = idx > (completedIndex ?? -1) && !isCurrent
-          // Capture state from persistent tracking
-          const captState = segmentStates?.[strat.segment_id]?.capture_state
+                  return (
+                    <div
+                      key={strat.segment_id || idx}
+                      className={`absolute top-1 bottom-1 rounded-sm border transition-all duration-300 ${segmentClass}`}
+                      style={{ left, width }}
+                      title={`${strat.segment_id}\n${strat.section} / ${strat.event_type || strat.type}\n${formatDuration(strat.duration)}\n${strat.strategy === 'continue' ? '↔ Contiguous' : '⏺ New recording'}${captState ? `\n● ${captState}` : ''}${strat.is_pip || strat.type === 'pip' ? '\n🖼 PiP segment' : ''}`}
+                    >
+                      {strat.contiguous_with_prev && (
+                        <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-accent/50" />
+                      )}
+                      {isCurrent && (
+                        <div className="absolute inset-0 ring-1 ring-accent/60 ring-inset rounded-sm animate-pulse" />
+                      )}
+                      {captState === 'captured' && (
+                        <div className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-green-400" />
+                      )}
+                      {captState === 'invalidated' && (
+                        <div className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-amber-400" />
+                      )}
+                      {(strat.is_pip || strat.type === 'pip') && (
+                        <div className="absolute bottom-0 left-0 right-0 h-1 bg-blue-500/60 rounded-b-sm" />
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            ),
+          },
+          {
+            key: 'ticks',
+            label: 'Tick',
+            height: TICK_ROW_H,
+            render: ({ top, height }) => (
+              <div className="absolute left-0 right-0" style={{ top, height }}>
+                {tickMarks.map((tick, index) => (
+                  <div key={index} className="absolute top-0 bottom-0" style={{ left: tick.left }}>
+                    <div className="w-px h-2 bg-border" />
+                    <span className="absolute top-2 left-1 text-[10px] text-text-disabled whitespace-nowrap tabular-nums">
+                      {formatDuration(tick.value)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ),
+          },
+        ]}
+      />
 
-          let bgClass = 'bg-bg-tertiary/50'
-          if (captState === 'captured') bgClass = meta.barColor + '/70'
-          else if (captState === 'invalidated') bgClass = 'bg-amber-500/40'
-          else if (isCompleted) bgClass = meta.barColor + '/60'
-          else if (isCurrent) bgClass = meta.barColor + ' animate-pulse'
-          else if (isPending) bgClass = 'bg-bg-tertiary/30'
-
-          const isContiguous = strat.contiguous_with_prev
-          const isPip = strat.is_pip || strat.type === 'pip'
-
-          return (
-            <div
-              key={strat.segment_id || idx}
-              className={`relative ${bgClass} transition-all duration-300`}
-              style={{ width: `${widthPct}%`, minWidth: '3px' }}
-              title={`${strat.segment_id}\n${strat.section} / ${strat.event_type || strat.type}\n${formatDuration(strat.duration)}\n${strat.strategy === 'continue' ? '↔ Contiguous' : '⏺ New recording'}${captState ? `\n● ${captState}` : ''}${isPip ? '\n🖼 PiP segment' : ''}`}
-            >
-              {/* Contiguous indicator — thin line connecting to previous */}
-              {isContiguous && (
-                <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-accent/50" />
-              )}
-
-              {/* Current indicator glow */}
-              {isCurrent && (
-                <div className="absolute inset-0 ring-1 ring-accent ring-inset rounded-sm" />
-              )}
-
-              {/* Capture state dot */}
-              {captState === 'captured' && (
-                <div className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-green-400" />
-              )}
-              {captState === 'invalidated' && (
-                <div className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-amber-400" />
-              )}
-
-              {/* PiP indicator */}
-              {isPip && (
-                <div className="absolute bottom-0 left-0 right-0 h-1 bg-blue-500/60" />
-              )}
-            </div>
-          )
-        })}
-      </div>
-
-      {/* Legend */}
-      <div className="flex items-center gap-3 flex-wrap">
-        {Object.entries(SECTION_META).map(([key, meta]) => {
-          const count = strategies.filter(s => s.section === key).length
-          if (count === 0) return null
-          return (
-            <span key={key} className="flex items-center gap-1 text-xxs text-text-disabled">
-              <span className={`w-2 h-2 rounded-sm ${meta.barColor}/60`} />
-              {meta.label} ({count})
-            </span>
-          )
-        })}
-        <span className="flex items-center gap-1 text-xxs text-text-disabled">
-          <ArrowRight className="w-2.5 h-2.5" />
-          = contiguous
-        </span>
-        {Object.values(segmentStates || {}).some(s => s.capture_state === 'captured') && (
-          <span className="flex items-center gap-1 text-xxs text-success">
-            <CheckCircle2 className="w-2.5 h-2.5" />
-            = captured
-          </span>
-        )}
-        {Object.values(segmentStates || {}).some(s => s.capture_state === 'invalidated') && (
-          <span className="flex items-center gap-1 text-xxs text-warning">
-            <AlertTriangle className="w-2.5 h-2.5" />
-            = invalidated
-          </span>
-        )}
-      </div>
+      <RangeSlider
+        rangeStart={rangeStart}
+        rangeEnd={rangeEnd}
+        onChange={setRange}
+        totalDuration={totalDuration}
+        events={rangeSliderEvents}
+        playheadTime={playheadRatio != null ? playheadRatio * totalDuration : null}
+      />
     </div>
   )
 }
 
 // ── Capture Action Log ────────────────────────────────────────────────────
 
-function CaptureActionLog({ log, maxVisible = 50 }) {
-  const [expanded, setExpanded] = useState(false)
+function CaptureActionLog({ log, maxVisible = 50, expandedByDefault = false, maxHeightClass = 'max-h-48', variant = 'card' }) {
+  const [expanded, setExpanded] = useState(expandedByDefault)
   const scrollRef = useRef(null)
   const prevCountRef = useRef(0)
+  const isSidebar = variant === 'sidebar'
+  const entries = normalizeCaptureLogEntries(log)
 
-  // Auto-scroll to bottom on new entries
+  // Keep most recent entries anchored at the top on updates.
   useEffect(() => {
-    if (log.length > prevCountRef.current && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    if (expanded && entries.length > prevCountRef.current && scrollRef.current) {
+      scrollRef.current.scrollTop = 0
     }
-    prevCountRef.current = log.length
-  }, [log.length])
+    prevCountRef.current = entries.length
+  }, [expanded, entries.length])
 
-  if (!log?.length) return null
+  if (!entries.length) return null
 
-  const displayLog = expanded ? log : log.slice(-maxVisible)
+  const displayLog = expanded ? entries : entries.slice(-maxVisible)
 
   return (
-    <div className="space-y-1">
+    <div className={`h-full min-h-0 flex flex-col ${isSidebar ? 'gap-0' : 'gap-1'}`}>
       <button
         onClick={() => setExpanded(prev => !prev)}
         aria-label={expanded ? 'Collapse capture log' : 'Expand capture log'}
-        className="flex items-center gap-1.5 text-xxs font-semibold text-text-tertiary uppercase
-                   tracking-wider hover:text-text-secondary transition-colors"
+        className={`flex items-center gap-1.5 text-xxs font-semibold uppercase tracking-wider hover:text-text-secondary transition-colors ${isSidebar ? 'px-3 py-2 border-b border-border text-text-secondary' : 'text-text-tertiary'}`}
       >
         {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
         <Radio className="w-3 h-3" />
-        Capture Log ({log.length} entries)
+        Capture Log ({entries.length} entries)
       </button>
 
       {expanded && (
         <div
           ref={scrollRef}
-          className="max-h-48 overflow-y-auto bg-bg-primary border border-border rounded-md
-                     font-mono text-xxs divide-y divide-border-subtle"
+          className={`${maxHeightClass} flex-1 min-h-0 overflow-y-auto ${isSidebar ? 'bg-transparent' : 'bg-bg-primary border border-border rounded-md'}`}
         >
-          {displayLog.map((entry, idx) => (
-            <div
-              key={idx}
-              className={`flex items-start gap-2 px-2 py-1 ${
-                !entry.success ? 'bg-danger/5' : ''
-              }`}
-            >
-              <span className="shrink-0 w-4 text-center">
-                {LOG_ACTION_ICONS[entry.action] || '•'}
-              </span>
-              <span className="shrink-0 text-text-disabled w-14 tabular-nums">
-                {formatTimestamp(entry.timestamp)}
-              </span>
-              {entry.segment_id && (
-                <span className="shrink-0 text-accent/70 w-16 truncate" title={entry.segment_id}>
-                  {entry.segment_id}
-                </span>
-              )}
-              <span className={`flex-1 truncate ${entry.success ? 'text-text-secondary' : 'text-danger'}`}
-                    title={entry.detail}>
-                {entry.detail}
-              </span>
-              {entry.attempt > 1 && (
-                <span className="shrink-0 text-warning tabular-nums">
-                  ×{entry.attempt}
-                </span>
-              )}
-            </div>
-          ))}
+          <UnifiedLogList
+            entries={displayLog}
+            emptyMessage="No capture log entries yet"
+            maxHeightClass="max-h-none"
+            className="h-full"
+          />
         </div>
       )}
+    </div>
+  )
+}
+
+function ScriptSegmentLog({ strategies, currentSegmentId, completedIndex, maxHeightClass = 'max-h-[520px]' }) {
+  if (!strategies?.length) return null
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center gap-1.5 text-xxs font-semibold text-text-tertiary uppercase tracking-wider">
+        <Clock className="w-3 h-3" />
+        Script Log ({strategies.length} segments)
+      </div>
+      <div className={`${maxHeightClass} overflow-y-auto rounded-md border border-border bg-bg-primary p-1.5 space-y-1`}>
+        {strategies.map((strat, idx) => (
+          <SegmentStrategyCard
+            key={strat.segment_id || idx}
+            strategy={strat}
+            isCurrent={strat.segment_id === currentSegmentId}
+            isCompleted={idx < completedIndex}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function IdlePanelPlaceholder({ icon: Icon, title, subtitle }) {
+  return (
+    <div className="h-full min-h-[140px] flex items-center justify-center px-4 py-6">
+      <div className="flex flex-col items-center text-center gap-1.5 max-w-xs">
+        <div className="w-9 h-9 rounded-full border border-border bg-bg-primary/70 flex items-center justify-center">
+          <Icon className="w-4 h-4 text-text-disabled" />
+        </div>
+        <p className="text-xs font-medium text-text-secondary">{title}</p>
+        <p className="text-xxs text-text-disabled">{subtitle}</p>
+      </div>
     </div>
   )
 }
@@ -316,7 +451,19 @@ function SegmentStrategyCard({ strategy, isCurrent, isCompleted }) {
  * - Captured clips list with section badges and metadata
  * - Compiled video status
  */
-export default function ClipsPanel({ projectId }) {
+export default function ClipsPanel({
+  projectId,
+  replaySessionTime = null,
+  fullHeight = false,
+  showTimeline = true,
+  showSegmentLog = true,
+  showActionLog = true,
+  showClips = true,
+  showCompiled = true,
+  showProgress = true,
+  showScriptError = true,
+  showLatestFailure = true,
+}) {
   const {
     scriptCaptureRunning,
     scriptCaptureProgress,
@@ -326,11 +473,12 @@ export default function ClipsPanel({ projectId }) {
     scriptCaptureLog,
     scriptCaptureStrategies,
     scriptCurrentSegment,
+    scriptCaptureCancelling,
     cancelScriptCapture,
   } = useCapture()
   const { segments: segmentStates } = useScriptState()
 
-  const [showStrategies, setShowStrategies] = useState(false)
+  const [showTimelinePanel, setShowTimelinePanel] = useState(true)
 
   // Group clips by section for the summary row
   const sectionCounts = useMemo(() => {
@@ -353,29 +501,190 @@ export default function ClipsPanel({ projectId }) {
     return { errors, retries }
   }, [scriptCaptureLog])
 
+  const latestFailure = useMemo(() => {
+    for (let i = scriptCaptureLog.length - 1; i >= 0; i -= 1) {
+      const entry = scriptCaptureLog[i]
+      if (entry && entry.success === false) return entry
+    }
+    return null
+  }, [scriptCaptureLog])
+
+  const latestFailureHint = useMemo(
+    () => getFailureHint(latestFailure, scriptCaptureError),
+    [latestFailure, scriptCaptureError],
+  )
+
   const completedIndex = scriptCaptureProgress?.segment_index ?? -1
   const currentSegmentId = scriptCurrentSegment?.segment_id
+  const activeCurrentSegmentId = scriptCaptureRunning ? currentSegmentId : null
+  const timelineTotalDuration = useMemo(
+    () => scriptCaptureStrategies.reduce((sum, strategy) => sum + (strategy.duration || 0), 0),
+    [scriptCaptureStrategies],
+  )
+  const timelineSubtitle = useMemo(() => {
+    if (!scriptCaptureStrategies.length) return null
+    const countLabel = `${scriptCaptureStrategies.length} segment${scriptCaptureStrategies.length === 1 ? '' : 's'}`
+    const totalLabel = timelineTotalDuration > 0 ? ` · ${formatDuration(timelineTotalDuration)} total` : ''
+    return `${countLabel}${totalLabel}`
+  }, [scriptCaptureStrategies.length, timelineTotalDuration])
 
-  const hasContent = scriptCaptureRunning || scriptCaptureClips.length > 0 ||
-    scriptCaptureError || scriptCaptureStrategies.length > 0
+  const showIdleTimelinePlaceholder = showTimeline && !scriptCaptureRunning && scriptCaptureStrategies.length === 0
+  const showIdleActionLogPlaceholder = showActionLog && !scriptCaptureRunning && scriptCaptureLog.length === 0
+
+  const hasContent =
+    showIdleTimelinePlaceholder ||
+    showIdleActionLogPlaceholder ||
+    (showProgress && scriptCaptureRunning) ||
+    (showClips && scriptCaptureClips.length > 0) ||
+    (showScriptError && !!scriptCaptureError) ||
+    (showLatestFailure && !!latestFailure) ||
+    (showTimeline && scriptCaptureStrategies.length > 0) ||
+    (showSegmentLog && scriptCaptureStrategies.length > 0) ||
+    (showActionLog && scriptCaptureLog.length > 0) ||
+    (showCompiled && !!scriptCompiledPath)
 
   if (!hasContent) return null
 
+  if (fullHeight) {
+    return (
+      <div className="h-full min-h-0 flex min-w-0 overflow-hidden bg-bg-primary">
+        <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
+        {showLatestFailure && latestFailure && (
+          <div className="flex items-start gap-2 px-3 py-2.5 bg-danger/5 border-b border-danger/30">
+            <AlertTriangle className="w-4 h-4 text-danger shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <p className="text-xs text-danger font-medium">Latest iRacing Command Failure</p>
+              <p className="text-xxs text-danger/80 mt-0.5 break-words">{latestFailure.detail || 'Command failed'}</p>
+              <p className="mt-1 text-xxs text-warning">{latestFailureHint}</p>
+            </div>
+          </div>
+        )}
+
+        {(showTimeline || showActionLog) && (
+          <div className={`grid flex-1 min-h-0 min-w-0 ${showTimeline && showActionLog ? 'xl:grid-cols-[minmax(0,1fr)_360px]' : 'grid-cols-1'}`}>
+            {showTimeline && (
+              <div className="min-h-0 h-full bg-bg-primary overflow-hidden flex flex-col border-r border-border">
+                <div className="flex items-center border-b border-border bg-bg-secondary shrink-0">
+                  <CollapsiblePanelHeader
+                    open={showTimelinePanel}
+                    onToggle={() => setShowTimelinePanel(prev => !prev)}
+                    icon={Film}
+                    title="Capture Timeline"
+                    subtitle={showTimelinePanel ? timelineSubtitle : null}
+                    className="flex-1"
+                  />
+                </div>
+                {showTimelinePanel && (
+                  <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+                    {showIdleTimelinePlaceholder ? (
+                      <IdlePanelPlaceholder
+                        icon={Film}
+                        title="Capture timeline appears during capture"
+                        subtitle="Start scripted capture to see segment progress and playhead movement."
+                      />
+                    ) : (
+                      <>
+                        <ScriptTimeline
+                          strategies={scriptCaptureStrategies}
+                          currentSegmentId={activeCurrentSegmentId}
+                          completedIndex={completedIndex}
+                          totalSegments={scriptCaptureProgress?.segment_total || scriptCaptureStrategies.length}
+                          segmentStates={segmentStates}
+                          replaySessionTime={replaySessionTime}
+                        />
+                        {showSegmentLog && (
+                          <ScriptSegmentLog
+                            strategies={scriptCaptureStrategies}
+                            currentSegmentId={activeCurrentSegmentId}
+                            completedIndex={completedIndex}
+                            maxHeightClass="flex-1 min-h-0"
+                          />
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {showActionLog && (
+              <div className="min-h-0 bg-bg-secondary/60 overflow-hidden flex flex-col">
+                {showIdleActionLogPlaceholder ? (
+                  <IdlePanelPlaceholder
+                    icon={Radio}
+                    title="Capture logs appear during capture"
+                    subtitle="Run capture to view replay commands, retries, and validation events."
+                  />
+                ) : (
+                  <CaptureActionLog
+                    log={scriptCaptureLog}
+                    maxVisible={5000}
+                    expandedByDefault
+                    maxHeightClass="flex-1"
+                    variant="sidebar"
+                  />
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {showCompiled && scriptCompiledPath && (
+          <div className="flex items-center gap-2 px-3 py-2 bg-success/5 border-t border-success/30">
+            <CheckCircle2 className="w-4 h-4 text-success shrink-0" />
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium text-success">Compiled Video Ready</p>
+              <p className="text-xxs text-text-tertiary font-mono truncate" title={scriptCompiledPath}>
+                {scriptCompiledPath.split(/[/\\]/).pop()}
+              </p>
+            </div>
+          </div>
+        )}
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <div className="space-y-3">
+    <div className="h-full min-h-0 flex flex-col gap-3">
       {/* ── Script Timeline Visualization ──────────────────────────────── */}
-      {scriptCaptureStrategies.length > 0 && (
-        <ScriptTimeline
-          strategies={scriptCaptureStrategies}
-          currentSegmentId={currentSegmentId}
-          completedIndex={completedIndex}
-          totalSegments={scriptCaptureProgress?.segment_total || scriptCaptureStrategies.length}
-          segmentStates={segmentStates}
-        />
+      {showTimeline && (
+        <div className="flex-1 min-h-0 overflow-hidden bg-bg-primary flex flex-col">
+          <div className="flex items-center border-b border-border bg-bg-secondary shrink-0">
+            <CollapsiblePanelHeader
+              open={showTimelinePanel}
+              onToggle={() => setShowTimelinePanel(prev => !prev)}
+              icon={Film}
+                title="Capture Timeline"
+              subtitle={showTimelinePanel ? timelineSubtitle : null}
+              className="flex-1"
+            />
+          </div>
+          {showTimelinePanel && (
+            <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+              {showIdleTimelinePlaceholder ? (
+                <IdlePanelPlaceholder
+                  icon={Film}
+                  title="Capture timeline appears during capture"
+                  subtitle="Start scripted capture to see segment progress and playhead movement."
+                />
+              ) : (
+                <ScriptTimeline
+                  strategies={scriptCaptureStrategies}
+                  currentSegmentId={activeCurrentSegmentId}
+                  completedIndex={completedIndex}
+                  totalSegments={scriptCaptureProgress?.segment_total || scriptCaptureStrategies.length}
+                  segmentStates={segmentStates}
+                  replaySessionTime={replaySessionTime}
+                />
+              )}
+            </div>
+          )}
+        </div>
       )}
 
       {/* ── Progress bar (while running) ──────────────────────────────── */}
-      {scriptCaptureRunning && (
+      {showProgress && scriptCaptureRunning && (
         <div className="bg-bg-secondary border border-border rounded-lg p-3 space-y-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -393,9 +702,10 @@ export default function ClipsPanel({ projectId }) {
               )}
               <button
                 onClick={cancelScriptCapture}
-                className="text-xxs text-danger hover:text-danger/80 transition-colors"
+                disabled={scriptCaptureCancelling}
+                className="text-xxs text-danger hover:text-danger/80 disabled:opacity-70 disabled:cursor-wait transition-colors"
               >
-                Cancel
+                {scriptCaptureCancelling ? 'Cancelling…' : 'Cancel'}
               </button>
             </div>
           </div>
@@ -452,7 +762,7 @@ export default function ClipsPanel({ projectId }) {
       )}
 
       {/* ── Error ─────────────────────────────────────────────────────── */}
-      {scriptCaptureError && !scriptCaptureRunning && (
+      {showScriptError && scriptCaptureError && !scriptCaptureRunning && (
         <div className="flex items-start gap-2 px-3 py-2.5 bg-danger/5 border border-danger/30 rounded-md">
           <XCircle className="w-4 h-4 text-danger shrink-0 mt-0.5" />
           <div>
@@ -462,40 +772,65 @@ export default function ClipsPanel({ projectId }) {
         </div>
       )}
 
-      {/* ── Capture Action Log ─────────────────────────────────────────── */}
-      <CaptureActionLog log={scriptCaptureLog} />
-
-      {/* ── Segment Strategies (collapsible) ───────────────────────────── */}
-      {scriptCaptureStrategies.length > 0 && (
-        <div className="space-y-1">
-          <button
-            onClick={() => setShowStrategies(prev => !prev)}
-            aria-label={showStrategies ? 'Collapse segment strategies' : 'Expand segment strategies'}
-            className="flex items-center gap-1.5 text-xxs font-semibold text-text-tertiary uppercase
-                       tracking-wider hover:text-text-secondary transition-colors"
-          >
-            {showStrategies ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-            <Clock className="w-3 h-3" />
-            Segment Strategies ({scriptCaptureStrategies.length})
-          </button>
-
-          {showStrategies && (
-            <div className="space-y-1 max-h-64 overflow-y-auto">
-              {scriptCaptureStrategies.map((strat, idx) => (
-                <SegmentStrategyCard
-                  key={strat.segment_id || idx}
-                  strategy={strat}
-                  isCurrent={strat.segment_id === currentSegmentId}
-                  isCompleted={idx < completedIndex}
-                />
-              ))}
+      {/* ── Latest iRacing command failure (always visible) ───────────── */}
+      {showLatestFailure && latestFailure && (
+        <div className="flex items-start gap-2 px-3 py-2.5 bg-danger/5 border border-danger/30 rounded-md">
+          <AlertTriangle className="w-4 h-4 text-danger shrink-0 mt-0.5" />
+          <div className="min-w-0">
+            <p className="text-xs text-danger font-medium">Latest iRacing Command Failure</p>
+            <p className="text-xxs text-danger/80 mt-0.5 break-words">
+              {latestFailure.detail || 'Command failed'}
+            </p>
+            <div className="mt-1 text-xxs text-danger/70">
+              {latestFailure.action ? `Action: ${latestFailure.action}` : ''}
+              {latestFailure.segment_id ? ` • Segment: ${latestFailure.segment_id}` : ''}
+              {latestFailure.attempt > 1 ? ` • Attempt: ${latestFailure.attempt}` : ''}
             </div>
-          )}
+            <p className="mt-1 text-xxs text-warning">
+              {latestFailureHint}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Capture Action Log ─────────────────────────────────────────── */}
+      {showActionLog && (
+        showIdleActionLogPlaceholder ? (
+          <div className="overflow-hidden bg-bg-secondary">
+            <IdlePanelPlaceholder
+              icon={Radio}
+              title="Capture logs appear during capture"
+              subtitle="Run capture to view replay commands, retries, and validation events."
+            />
+          </div>
+        ) : (
+          <CaptureActionLog log={scriptCaptureLog} />
+        )
+      )}
+
+      {/* ── Script Segments ─────────────────────────────────────────────── */}
+      {showSegmentLog && scriptCaptureStrategies.length > 0 && (
+        <div className="space-y-1">
+          <div className="flex items-center gap-1.5 text-xxs font-semibold text-text-tertiary uppercase tracking-wider">
+            <Clock className="w-3 h-3" />
+            Script Segments ({scriptCaptureStrategies.length})
+          </div>
+
+          <div className="space-y-1 max-h-64 overflow-y-auto">
+            {scriptCaptureStrategies.map((strat, idx) => (
+              <SegmentStrategyCard
+                key={strat.segment_id || idx}
+                strategy={strat}
+                isCurrent={strat.segment_id === activeCurrentSegmentId}
+                isCompleted={idx < completedIndex}
+              />
+            ))}
+          </div>
         </div>
       )}
 
       {/* ── Compiled video ────────────────────────────────────────────── */}
-      {scriptCompiledPath && (
+      {showCompiled && scriptCompiledPath && (
         <div className="flex items-center gap-2 px-3 py-2 bg-success/5 border border-success/30 rounded-md">
           <CheckCircle2 className="w-4 h-4 text-success shrink-0" />
           <div className="flex-1 min-w-0">
@@ -508,7 +843,7 @@ export default function ClipsPanel({ projectId }) {
       )}
 
       {/* ── Clips list ────────────────────────────────────────────────── */}
-      {scriptCaptureClips.length > 0 && (
+      {showClips && scriptCaptureClips.length > 0 && (
         <div className="space-y-1">
           {/* Summary row */}
           <div className="flex items-center gap-2 flex-wrap">

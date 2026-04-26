@@ -6,9 +6,12 @@ import {
   Upload,
   Layers,
   Clapperboard,
+  Rocket,
   Check,
   Circle,
   Lock,
+  Loader2,
+  AlertTriangle,
 } from 'lucide-react'
 import { WORKFLOW_STEPS } from '../../utils/constants'
 
@@ -16,6 +19,7 @@ import { WORKFLOW_STEPS } from '../../utils/constants'
  * Step icons mapping by step ID.
  */
 const STEP_ICONS = {
+  pipeline: Rocket,
   capture: Film,
   analysis: BarChart3,
   editing: Scissors,
@@ -37,7 +41,15 @@ const STEP_ICONS = {
  * @param {Object} [props.stepReadiness] - Map of step ID → boolean indicating data readiness
  * @param {boolean} [props.compact=false] - Whether to render a compact version
  */
-function StepIndicator({ currentStep, onStepClick, stepReadiness = {}, compact = false, progress = null }) {
+function StepIndicator({
+  currentStep,
+  onStepClick,
+  stepReadiness = {},
+  executionStates = {},
+  runningStep = null,
+  compact = false,
+  progress = null,
+}) {
   const currentIdx = WORKFLOW_STEPS.findIndex(s => s.id === currentStep)
 
   return (
@@ -47,16 +59,28 @@ function StepIndicator({ currentStep, onStepClick, stepReadiness = {}, compact =
         const isReady = stepReadiness[step.id] ?? false
         const isCurrent = idx === currentIdx
         const isLast = idx === WORKFLOW_STEPS.length - 1
+        const execState = executionStates?.[step.id]?.state
+        const execProgressRaw = executionStates?.[step.id]?.progress
+        const isRunningStep = runningStep === step.id || execState === 'running'
+        const isBackgroundRunning = isRunningStep && !isCurrent
 
         // A step is "completed" only if it's before current AND its data is ready
         let status
-        if (isCurrent) status = 'active'
+        if (execState === 'failed') status = 'failed'
+        else if (isBackgroundRunning) status = 'background-running'
+        else if (execState === 'completed' || execState === 'skipped') status = 'completed'
+        else if (isCurrent) status = 'active'
         else if (idx < currentIdx && isReady) status = 'completed'
         else if (isReady) status = 'ready'
         else status = 'pending'
 
-        // Show progress bar on the active step when progress data exists
-        const showProgress = isCurrent && progress != null && progress.percent != null && progress.percent < 100
+        const fallbackProgress = step.id === 'analysis' ? progress?.percent : null
+        const stepProgress = Number(execProgressRaw ?? fallbackProgress ?? 0)
+        const normalizedProgress = Math.max(0, Math.min(100, stepProgress))
+        const showProgressFill = normalizedProgress > 0 && status !== 'failed'
+
+        // Show progress bar on any running step that has partial progress (0 < x < 100)
+        const showProgress = normalizedProgress > 0 && normalizedProgress < 100
 
         return (
           <div key={step.id} className="flex items-center">
@@ -65,40 +89,62 @@ function StepIndicator({ currentStep, onStepClick, stepReadiness = {}, compact =
                 onClick={() => onStepClick?.(step.id)}
                 title={`${step.label}${status === 'completed' ? ' ✓' : status === 'active' ? ' (current)' : ''}`}
                 className={`
-                  flex items-center gap-1.5 rounded-lg transition-all duration-150 cursor-pointer
+                  relative overflow-hidden flex items-center gap-1.5 rounded-lg font-medium transition-all duration-150 cursor-pointer
                   ${compact ? 'px-1.5 py-1' : 'px-3 py-1.5'}
-                  ${status === 'completed'
-                    ? 'text-success hover:bg-success/10'
-                    : status === 'active'
-                      ? 'bg-gradient-to-r from-gradient-from/20 via-gradient-via/15 to-gradient-to/20 text-accent font-semibold ring-1 ring-accent/20'
-                      : 'text-text-secondary hover:bg-bg-hover'
+                  ${step.id === 'pipeline'
+                    ? status === 'active'
+                      ? 'bg-accent/20 text-accent ring-1 ring-accent/30'
+                      : 'text-accent/70 hover:bg-accent/10 hover:text-accent'
+                    : status === 'background-running'
+                      ? 'bg-violet-500/8 text-violet-300 ring-1 ring-violet-400/20'
+                    : status === 'failed'
+                      ? 'bg-danger/10 text-danger ring-1 ring-danger/30'
+                    : status === 'completed'
+                      ? 'text-success hover:bg-success/10'
+                      : status === 'active'
+                        ? 'bg-gradient-to-r from-gradient-from/20 via-gradient-via/15 to-gradient-to/20 text-accent ring-1 ring-accent/20'
+                        : 'text-text-secondary hover:bg-bg-hover'
                   }
                 `}
               >
-                {status === 'completed' ? (
-                  <Check className={`${compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} shrink-0`} />
+                {showProgressFill && (
+                  <div
+                    className={`absolute inset-y-0 left-0 pointer-events-none ${status === 'active' ? 'bg-accent/24' : 'bg-accent/12'}`}
+                    style={{ width: `${normalizedProgress}%` }}
+                    aria-hidden="true"
+                  />
+                )}
+                {status === 'failed' ? (
+                  <AlertTriangle className={`${compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} shrink-0 relative z-[1]`} />
+                ) : isRunningStep ? (
+                  <Loader2 className={`${compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} shrink-0 animate-spin relative z-[1]`} />
+                ) : status === 'completed' && step.id !== 'pipeline' ? (
+                  <Check className={`${compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} shrink-0 relative z-[1]`} />
                 ) : (
-                  <Icon className={`${compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} shrink-0`} />
+                  <Icon className={`${compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} shrink-0 relative z-[1]`} />
                 )}
                 {!compact && (
-                  <span className="text-xs whitespace-nowrap">{step.label}</span>
+                  <span className="text-xs whitespace-nowrap relative z-[1]">{step.label}</span>
                 )}
               </button>
               {showProgress && (
                 <div className="h-0.5 mx-1 -mt-0.5 rounded-full overflow-hidden bg-white/10">
                   <div
                     className="h-full bg-accent rounded-full transition-all duration-500"
-                    style={{ width: `${progress.percent}%` }}
+                    style={{ width: `${normalizedProgress}%` }}
                   />
                 </div>
               )}
             </div>
-            {!isLast && (
+            {/* Divider after pipeline step to separate it from the linear workflow */}
+            {step.id === 'pipeline' ? (
+              <div className={`${compact ? 'w-px h-4' : 'w-px h-5'} mx-2 bg-border`} />
+            ) : !isLast ? (
               <div className={`
                 ${compact ? 'w-2' : 'w-4'} h-px mx-0.5
                 ${status === 'completed' ? 'bg-success' : 'bg-border'}
               `} />
-            )}
+            ) : null}
           </div>
         )
       })}

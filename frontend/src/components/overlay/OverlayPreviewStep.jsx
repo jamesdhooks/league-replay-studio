@@ -1,11 +1,14 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import { usePreset } from '../../context/PresetContext'
+import { useProject } from '../../context/ProjectContext'
 import { useScriptState } from '../../context/ScriptStateContext'
+import { useOverlaySettings } from '../../context/OverlaySettingsContext'
 import { useToast } from '../../context/ToastContext'
 import { useIRacing } from '../../context/IRacingContext'
 import { EVENT_TYPE_LABELS } from '../../context/HighlightContext'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { useAuthoritativeReplayPlayhead } from '../../hooks/useAuthoritativeReplayPlayhead'
+import { useLivePreview } from '../../context/LivePreviewContext'
 import { formatTime } from '../../utils/time'
 import { apiGet, apiPost } from '../../services/api'
 import { wsClient } from '../../services/websocket'
@@ -13,15 +16,16 @@ import ResizableRowPane from '../ui/ResizableRowPane'
 import IsolatedHtmlPreview from '../ui/IsolatedHtmlPreview'
 import {
   Play, Pause, SkipBack, SkipForward, Layers, Eye, EyeOff,
-  Monitor, Film, Award, Flag,
-  RefreshCw, Loader2, Bug,
+  Monitor, Film, Award, Flag, ZoomIn, ZoomOut, Maximize2,
+  RefreshCw, Loader2, Bug, Copy, Terminal, AlertTriangle,
 } from 'lucide-react'
 import PlaybackControls from '../ui/PlaybackControls'
-import SectionCollapseHeader from '../ui/SectionCollapseHeader'
+import CollapsiblePanelHeader from '../ui/CollapsiblePanelHeader'
 import ConfigurableTimelineTracks from '../ui/ConfigurableTimelineTracks'
 import RangeSlider from '../ui/RangeSlider'
 import PreviewPlayer from '../analysis/PreviewPlayer'
 import IracingCommandLog from '../highlights/IracingCommandLog'
+import OverlayWorkspaceTopbar from './OverlayWorkspaceTopbar'
 
 /**
  * Section metadata for the overlay preview.
@@ -33,11 +37,11 @@ const SECTIONS = [
   { id: 'race_results', label: 'Results', icon: Monitor, color: 'text-purple-400' },
 ]
 
-const OVERLAY_TIMELINE_SECTION_H = 20
-const OVERLAY_TIMELINE_EVENT_H = 30
-const OVERLAY_TIMELINE_TEMPLATE_H = 24
+const OVERLAY_TIMELINE_SECTION_H = 18
+const OVERLAY_TIMELINE_EVENT_H = 46
+const OVERLAY_TIMELINE_TEMPLATE_H = 34
 const OVERLAY_TIMELINE_ACTIONS_H = 18
-const OVERLAY_TIMELINE_TICK_H = 20
+const OVERLAY_TIMELINE_TICK_H = 24
 const OVERLAY_TIMELINE_TOTAL_H = OVERLAY_TIMELINE_SECTION_H + OVERLAY_TIMELINE_TEMPLATE_H + OVERLAY_TIMELINE_ACTIONS_H + OVERLAY_TIMELINE_EVENT_H + OVERLAY_TIMELINE_TICK_H
 
 const SECTION_TRACK_STYLE = {
@@ -99,77 +103,46 @@ function sanitizePreviewHtmlForInlineRender(html, renderWidth = 1920, renderHeig
     const parser = new DOMParser()
     const doc = parser.parseFromString(html, 'text/html')
 
-    // Drop executable or embedding tags we do not want in inline preview mode.
-    doc.querySelectorAll('script,iframe,object,embed,frame,frameset,base,meta[http-equiv="refresh"]').forEach((node) => {
-      node.remove()
+    // Strip dangerous embedding/navigation tags.
+    doc.querySelectorAll('iframe,object,embed,frame,frameset,base,meta[http-equiv="refresh"]').forEach((n) => n.remove())
+
+    // Keep the local Tailwind runtime and CDN fallback; strip everything else.
+    const allowedScriptSources = new Set([
+      'https://cdn.tailwindcss.com',
+      'http://cdn.tailwindcss.com',
+      '//cdn.tailwindcss.com',
+    ])
+    doc.querySelectorAll('script').forEach((scriptEl) => {
+      const src = (scriptEl.getAttribute('src') || '').trim()
+      const id = (scriptEl.getAttribute('id') || '').trim()
+      const isAllowedInlineRuntime = !src && id === 'lrs-tailwind-runtime'
+      if (!isAllowedInlineRuntime && (!src || !allowedScriptSources.has(src))) {
+        scriptEl.remove()
+      }
     })
 
-    const allElements = doc.body ? Array.from(doc.body.querySelectorAll('*')) : []
-    allElements.forEach((el) => {
+    // Strip event handlers and javascript: URLs.
+    doc.querySelectorAll('*').forEach((el) => {
       Array.from(el.attributes).forEach((attr) => {
         const name = attr.name.toLowerCase()
-        const value = String(attr.value || '')
-
-        if (name.startsWith('on')) {
-          el.removeAttribute(attr.name)
-          return
-        }
-
-        if ((name === 'src' || name === 'href' || name === 'xlink:href') && /^\s*javascript:/i.test(value)) {
+        if (name.startsWith('on')) { el.removeAttribute(attr.name); return }
+        if ((name === 'src' || name === 'href' || name === 'xlink:href') && /^\s*javascript:/i.test(attr.value)) {
           el.removeAttribute(attr.name)
         }
       })
     })
 
-    // Inline mode has no document html/body viewport, so map root selectors
-    // to our controlled overlay root to preserve layout sizing rules.
-    const rewriteRootSelectors = (css) => {
-      if (!css) return ''
-      return css
-        .replace(/(^|[^\w-])html(?=[^\w-]|$)/g, '$1.lrs-inline-overlay-root')
-        .replace(/(^|[^\w-])body(?=[^\w-]|$)/g, '$1.lrs-inline-overlay-root')
-    }
+    // Inject base sizing so html/body fill the iframe at the render resolution.
+    const safeW = Math.max(1, Number(renderWidth) || 1920)
+    const safeH = Math.max(1, Number(renderHeight) || 1080)
+    const baseStyle = doc.createElement('style')
+    baseStyle.id = 'lrs-iframe-base'
+    baseStyle.textContent = `:root,html,body{margin:0;padding:0;width:${safeW}px;height:${safeH}px;background:transparent!important;background-color:transparent!important;overflow:hidden;}`
+    doc.head.prepend(baseStyle)
 
-    const styleText = Array.from(doc.querySelectorAll('style'))
-      .map((style) => rewriteRootSelectors(style.textContent || ''))
-      .join('\n')
-    const bodyHtml = doc.body ? doc.body.innerHTML : ''
-
-    return `
-      <style id="lrs-inline-overlay-style">
-        .lrs-inline-overlay-root, .lrs-inline-overlay-root * { box-sizing: border-box; }
-        .lrs-inline-overlay-root {
-          position: relative;
-          width: ${Math.max(1, Number(renderWidth) || 1920)}px;
-          height: ${Math.max(1, Number(renderHeight) || 1080)}px;
-          min-width: ${Math.max(1, Number(renderWidth) || 1920)}px;
-          min-height: ${Math.max(1, Number(renderHeight) || 1080)}px;
-          max-width: ${Math.max(1, Number(renderWidth) || 1920)}px;
-          max-height: ${Math.max(1, Number(renderHeight) || 1080)}px;
-          overflow: hidden;
-          background: transparent !important;
-          background-color: transparent !important;
-        }
-        .lrs-inline-overlay-root .overlay-container,
-        .lrs-inline-overlay-root #overlay-root,
-        .lrs-inline-overlay-root #root {
-          width: 100% !important;
-          height: 100% !important;
-          background: transparent !important;
-          background-color: transparent !important;
-        }
-        ${styleText}
-        /* Final transparency guard: must come AFTER injected template styles. */
-        .lrs-inline-overlay-root,
-        .lrs-inline-overlay-root .overlay-container,
-        .lrs-inline-overlay-root #overlay-root,
-        .lrs-inline-overlay-root #root {
-          background: transparent !important;
-          background-color: transparent !important;
-        }
-      </style>
-      <div class="lrs-inline-overlay-root">${bodyHtml}</div>
-    `
+    // Return a complete document — the iframe has a real html/body context so
+    // Tailwind's runtime can inject styles into its own <head> as intended.
+    return '<!DOCTYPE html>' + doc.documentElement.outerHTML
   } catch {
     return ''
   }
@@ -197,28 +170,40 @@ export default function OverlayPreviewStep({
   scriptGeneratedAt = null,
   onScriptChange = null,
 }) {
-  const { presets, selectedPreset, renderPreview } = usePreset()
+  const { presets, selectedPreset, renderPreview, activeSection, setActiveSection } = usePreset()
+  const { activeProject } = useProject()
   const { overlayUiConfig, fetchOverlayUiConfig, updateOverlayUiConfig } = useScriptState()
   const { showSuccess, showError } = useToast()
   const { isConnected, sessionData } = useIRacing()
+  const { streamAspectRatio, streamUrl } = useLivePreview()
+  const {
+    previewRenderMode,
+    setPreviewRenderMode,
+    overlayVisible,
+    setOverlayVisible,
+    showLiveStreamUnderlay,
+    setShowLiveStreamUnderlay,
+    previewZoom,
+    setPreviewZoom,
+    showEventOverlay,
+    setShowEventOverlay,
+    debugEnabled,
+    setDebugEnabled,
+  } = useOverlaySettings()
 
-  const [activeSection, setActiveSection] = useState('race')
-  const [overlayVisible, setOverlayVisible] = useState(true)
   const [playing, setPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewFrame, setPreviewFrame] = useState(null)
   const [previewDiagnostics, setPreviewDiagnostics] = useState(null)
-  const [previewRenderMode, setPreviewRenderMode] = useLocalStorage('lrs:overlay:preview:renderMode', 'png')
-  const [overlayUiZoomDraft, setOverlayUiZoomDraft] = useState(1)
   const [previewRenderSize, setPreviewRenderSize] = useState({ width: 1920, height: 1080 })
   const [visualPreviewImage, setVisualPreviewImage] = useState(null)
   const [visualPreviewHtml, setVisualPreviewHtml] = useState(null)
   const [visualPreviewError, setVisualPreviewError] = useState(null)
-  const [showEventOverlay, setShowEventOverlay] = useLocalStorage('lrs:overlay:preview:events', true)
+  const [previewFullscreen, setPreviewFullscreen] = useState(false)
+  const [overlayUiZoomDraft, setOverlayUiZoomDraft] = useState(1)
   const [commandFeedCount, setCommandFeedCount] = useState(0)
   const [lastCommandLabel, setLastCommandLabel] = useState(null)
-  const [debugEnabled, setDebugEnabled] = useLocalStorage('lrs:overlay:preview:debug', false)
   const [debugInfo, setDebugInfo] = useState({
     renderSeq: 0,
     lastRunAt: null,
@@ -229,6 +214,14 @@ export default function OverlayPreviewStep({
     renderStatus: 'idle',
     renderMs: null,
     renderError: null,
+    requestedPresetId: null,
+    requestedPreferHtml: true,
+    renderSource: null,
+    renderHtmlLength: null,
+    backendHasHtmlContent: null,
+    backendSectionElementCount: null,
+    backendUsedElementFilter: null,
+    backendPreferHtmlContent: null,
     animationMode: 'idle',
     animationSummary: null,
     focusedCarIdx: null,
@@ -237,7 +230,7 @@ export default function OverlayPreviewStep({
     cameraError: null,
   })
   const [timelineCollapsed, setTimelineCollapsed] = useLocalStorage('lrs:overlay:timeline:collapsed', false)
-  const [raceSessionNum, setRaceSessionNum] = useState(0)
+  const [raceSessionNum, setRaceSessionNum] = useState(null)
   const timelineRef = useRef(null)
   const previewViewportRef = useRef(null)
   const didInitSectionSeekRef = useRef(false)
@@ -313,17 +306,17 @@ export default function OverlayPreviewStep({
     if (!projectId) return
     apiGet(`/projects/${projectId}/analysis/race-duration`)
       .then((data) => {
-        setRaceSessionNum(data?.race_session_num ?? 0)
+        setRaceSessionNum(data?.race_session_num ?? null)
       })
       .catch(() => {
-        setRaceSessionNum(0)
+        setRaceSessionNum(null)
       })
   }, [projectId])
 
   // ── Script analysis ─────────────────────────────────────────────────────
   const segments = useMemo(() => {
     if (!script || !Array.isArray(script)) return []
-    return script.filter(s => s.type !== 'transition' && (s.end_time_seconds - s.start_time_seconds) > 0)
+    return script.filter(s => s.type !== 'transition' && s.type !== 'bridge' && (s.end_time_seconds - s.start_time_seconds) > 0)
   }, [script])
 
   const sectionSegments = useMemo(() => {
@@ -337,15 +330,72 @@ export default function OverlayPreviewStep({
 
   const totalDuration = useMemo(() => {
     if (sectionSegments.length === 0) return 0
-    const maxEnd = Math.max(...sectionSegments.map(s => s.end_time_seconds || 0))
-    const minStart = Math.min(...sectionSegments.map(s => s.start_time_seconds || 0))
-    return maxEnd - minStart
+    return sectionSegments.reduce((sum, seg) => {
+      const start = Number(seg.start_time_seconds || 0)
+      const end = Number(seg.end_time_seconds || start)
+      return sum + Math.max(0, end - start)
+    }, 0)
   }, [sectionSegments])
 
   const sectionStart = useMemo(() => {
     if (sectionSegments.length === 0) return 0
     return Math.min(...sectionSegments.map(s => s.start_time_seconds || 0))
   }, [sectionSegments])
+
+  const timelineSegments = useMemo(() => {
+    let cursor = 0
+    return sectionSegments.map((seg) => {
+      const start = Number(seg.start_time_seconds || 0)
+      const end = Number(seg.end_time_seconds || start)
+      const duration = Math.max(0, end - start)
+      const timelineStart = cursor
+      const timelineEnd = timelineStart + duration
+      cursor = timelineEnd
+      return {
+        seg,
+        timelineStart,
+        timelineEnd,
+        duration,
+        absoluteStart: start,
+        absoluteEnd: end,
+      }
+    })
+  }, [sectionSegments])
+
+  const mapLocalTimeToAbsoluteTime = useCallback((localTime) => {
+    if (!timelineSegments.length) return sectionStart
+    const clamped = Math.max(0, Math.min(totalDuration, Number(localTime) || 0))
+    const entry = timelineSegments.find((item) => clamped >= item.timelineStart && clamped <= item.timelineEnd)
+      || timelineSegments[timelineSegments.length - 1]
+    if (!entry) return sectionStart
+    const offset = Math.max(0, Math.min(entry.duration, clamped - entry.timelineStart))
+    return entry.absoluteStart + offset
+  }, [sectionStart, timelineSegments, totalDuration])
+
+  const mapAbsoluteToLocalTime = useCallback((absoluteTime) => {
+    if (!timelineSegments.length) return 0
+    const abs = Number(absoluteTime) || 0
+    let cumulative = 0
+    for (const entry of timelineSegments) {
+      if (abs < entry.absoluteStart) return cumulative
+      if (abs <= entry.absoluteEnd) {
+        return cumulative + (abs - entry.absoluteStart)
+      }
+      cumulative += entry.duration
+    }
+    return totalDuration
+  }, [timelineSegments, totalDuration])
+
+  const getSessionNumForLocalTime = useCallback((localTime) => {
+    const absoluteTime = mapLocalTimeToAbsoluteTime(localTime)
+    const seg = sectionSegments.find((s) => (
+      absoluteTime >= (s.start_time_seconds || 0)
+      && absoluteTime <= (s.end_time_seconds || 0)
+    ))
+    const segSession = Number(seg?.session_num)
+    if (Number.isFinite(segSession) && segSession >= 0) return Math.trunc(segSession)
+    return raceSessionNum
+  }, [mapLocalTimeToAbsoluteTime, raceSessionNum, sectionSegments])
 
   const {
     replaySpeed: playbackSpeed,
@@ -368,23 +418,26 @@ export default function OverlayPreviewStep({
   } = useAuthoritativeReplayPlayhead({
     isConnected,
     raceSessionNum,
+    getSessionNumForLocalTime,
     localDuration: totalDuration,
     storageKey: 'lrs:overlay:timeline:speed',
     defaultSpeed: 1,
-    getSessionTimeForLocalTime: (localTime) => sectionStart + localTime,
-    getLocalTimeForSessionTime: (sessionTime) => Math.max(0, sessionTime - sectionStart),
+    getSessionTimeForLocalTime: mapLocalTimeToAbsoluteTime,
+    getLocalTimeForSessionTime: mapAbsoluteToLocalTime,
     fallbackLocalTime: currentTime,
   })
 
   const currentSegment = useMemo(() => {
-    const absTime = sectionStart + playheadTime
+    const absTime = mapLocalTimeToAbsoluteTime(playheadTime)
     return sectionSegments.find(s =>
       absTime >= s.start_time_seconds && absTime <= s.end_time_seconds
     ) || null
-  }, [sectionSegments, sectionStart, playheadTime])
+  }, [mapLocalTimeToAbsoluteTime, playheadTime, sectionSegments])
 
   const effectiveSelectedPresetId = useMemo(() => {
-    return getSegmentOverlayDesignId(currentSegment, selectedPresetId)
+    // In studio preview, explicit design selection should win over per-segment overrides
+    // so switching designs immediately updates the rendered overlay.
+    return selectedPresetId || getSegmentOverlayDesignId(currentSegment, null)
   }, [currentSegment, selectedPresetId])
 
   const hasSelectedDesign = Boolean(effectiveSelectedPresetId)
@@ -604,18 +657,18 @@ export default function OverlayPreviewStep({
   const dynamicEventH = Math.max(
     OVERLAY_TIMELINE_EVENT_H,
     containerH > 0
-      ? containerH - OVERLAY_TIMELINE_SECTION_H - OVERLAY_TIMELINE_TEMPLATE_H - OVERLAY_TIMELINE_ACTIONS_H - OVERLAY_TIMELINE_TICK_H
+      ? Math.floor(containerH - OVERLAY_TIMELINE_SECTION_H - OVERLAY_TIMELINE_TEMPLATE_H - OVERLAY_TIMELINE_ACTIONS_H - OVERLAY_TIMELINE_TICK_H)
       : OVERLAY_TIMELINE_EVENT_H
   )
   const totalTrackH = OVERLAY_TIMELINE_SECTION_H + OVERLAY_TIMELINE_TEMPLATE_H + OVERLAY_TIMELINE_ACTIONS_H + dynamicEventH + OVERLAY_TIMELINE_TICK_H
   
   // Map section-time events to range slider structure
-  const rangeSliderEvents = useMemo(() => sectionSegments.map(s => ({
-    start_time_seconds: s.start_time_seconds - sectionStart,
-    end_time_seconds: s.end_time_seconds - sectionStart,
-    event_type: s.event_type || s.type || 'event',
-    inclusion: s.section === 'race' ? 'highlight' : null,
-  })), [sectionSegments, sectionStart])
+  const rangeSliderEvents = useMemo(() => timelineSegments.map(({ seg, timelineStart, timelineEnd }) => ({
+    start_time_seconds: timelineStart,
+    end_time_seconds: timelineEnd,
+    event_type: seg.event_type || seg.type || 'event',
+    inclusion: seg.section === 'race' ? 'highlight' : null,
+  })), [timelineSegments])
 
   const previewOverlayScale = useMemo(() => {
     const sourceW = Number(previewRenderSize?.width) || 1920
@@ -624,6 +677,11 @@ export default function OverlayPreviewStep({
     const boxH = Number(previewBoxSize?.height) || sourceH
     return Math.min(1, boxW / sourceW, boxH / sourceH)
   }, [previewBoxSize?.height, previewBoxSize?.width, previewRenderSize?.height, previewRenderSize?.width])
+
+  const displayedPreviewSize = useMemo(() => ({
+    width: Math.max(0, Number(previewBoxSize?.width) || 0),
+    height: Math.max(0, Number(previewBoxSize?.height) || 0),
+  }), [previewBoxSize?.height, previewBoxSize?.width])
 
   // Sync: range slider → scroll position
   useEffect(() => {
@@ -658,12 +716,12 @@ export default function OverlayPreviewStep({
     startClock({
       startLocalTime: playheadTime,
       speed: playbackSpeed || 1,
-      getExpectedSessionTime: ({ localTime }) => sectionStart + localTime,
+      getExpectedSessionTime: ({ localTime }) => mapLocalTimeToAbsoluteTime(localTime),
       getExpectedState: ({ clock }) => ({ speed: clock.speed }),
     })
     if (currentSegment) {
       try {
-        await applyScriptCameraTarget(currentSegment, sectionStart + playheadTime)
+        await applyScriptCameraTarget(currentSegment, mapLocalTimeToAbsoluteTime(playheadTime))
       } catch {
         // Non-fatal: replay play should still proceed if camera change fails.
       }
@@ -671,7 +729,7 @@ export default function OverlayPreviewStep({
     await syncReplaySpeed(playbackSpeed || 1)
     await playReplay()
     setPlaying(true)
-  }, [applyScriptCameraTarget, currentSegment, pauseClock, pauseReplay, playReplay, playbackSpeed, playheadTime, playing, sectionStart, startClock, syncReplaySpeed])
+  }, [applyScriptCameraTarget, currentSegment, mapLocalTimeToAbsoluteTime, pauseClock, pauseReplay, playReplay, playbackSpeed, playheadTime, playing, startClock, syncReplaySpeed])
 
   const handlePlaybackSpeedChange = useCallback(async (speed) => {
     setReplaySpeed(speed)
@@ -681,8 +739,8 @@ export default function OverlayPreviewStep({
   }, [clockRef, playing, setReplaySpeed, syncReplaySpeed])
 
   const seekReplayToAbsoluteTime = useCallback((absoluteTime) => {
-    return seekToSessionTime(absoluteTime)
-  }, [seekToSessionTime])
+    return seekToSessionTime(absoluteTime, mapAbsoluteToLocalTime(absoluteTime))
+  }, [mapAbsoluteToLocalTime, seekToSessionTime])
 
   const seekTimelineAndReplay = useCallback((relativeTime) => {
     const clampedTime = Math.max(0, Math.min(totalDuration, relativeTime))
@@ -695,25 +753,26 @@ export default function OverlayPreviewStep({
     }
     pauseClock()
     setPlaying(false)
-    seekReplayToAbsoluteTime(sectionStart + clampedTime)
-  }, [clockRef, pauseClock, reanchorClock, sectionStart, seekReplayToAbsoluteTime, setClockUserScrubbing, setOptimisticLocalTime, totalDuration])
+    seekReplayToAbsoluteTime(mapLocalTimeToAbsoluteTime(clampedTime))
+  }, [clockRef, mapLocalTimeToAbsoluteTime, pauseClock, reanchorClock, seekReplayToAbsoluteTime, setClockUserScrubbing, setOptimisticLocalTime, totalDuration])
 
-  // Keep the preview at 16:9 while fitting both width and height of the top pane.
+  // Fit preview viewport to source aspect ratio when available; fallback to 16:9.
   useEffect(() => {
     const node = previewViewportRef.current
     if (!node) return undefined
 
     const compute = () => {
       const rect = node.getBoundingClientRect()
-      const availW = Math.max(0, rect.width - 16)
-      const availH = Math.max(0, rect.height - 16)
+      const availW = Math.max(0, rect.width)
+      const availH = Math.max(0, rect.height)
       if (availW <= 0 || availH <= 0) return
+      const targetAspect = Math.max(0.2, Number(streamAspectRatio) || (16 / 9))
 
       let width = availW
-      let height = width * 9 / 16
+      let height = width / targetAspect
       if (height > availH) {
         height = availH
-        width = height * 16 / 9
+        width = height * targetAspect
       }
 
       setPreviewBoxSize({ width, height })
@@ -724,7 +783,7 @@ export default function OverlayPreviewStep({
     compute()
 
     return () => observer.disconnect()
-  }, [])
+  }, [streamAspectRatio])
 
   const scrubToClientX = useCallback((clientX) => {
     const node = timelineRef.current
@@ -743,40 +802,40 @@ export default function OverlayPreviewStep({
     const initialTime = scrubToClientX(e.clientX)
     setPlaying(false)
     lastAppliedCameraTargetRef.current = null
-    seekReplayToAbsoluteTime(sectionStart + initialTime)
+    seekReplayToAbsoluteTime(mapLocalTimeToAbsoluteTime(initialTime))
     let lastSeek = Date.now()
     const onMove = (ev) => {
       const nextTime = scrubToClientX(ev.clientX)
       if (Date.now() - lastSeek < 150) return
       lastSeek = Date.now()
-      seekReplayToAbsoluteTime(sectionStart + nextTime)
+      seekReplayToAbsoluteTime(mapLocalTimeToAbsoluteTime(nextTime))
     }
     const onUp = (ev) => {
       const finalTime = scrubToClientX(ev.clientX)
       if (clockRef.current) reanchorClock(finalTime)
       setClockUserScrubbing(false)
       setIsDraggingPlayhead(false)
-      seekReplayToAbsoluteTime(sectionStart + finalTime)
+      seekReplayToAbsoluteTime(mapLocalTimeToAbsoluteTime(finalTime))
       setTimeout(() => setOptimisticLocalTime(null), 1200)
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
     }
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
-  }, [clockRef, reanchorClock, scrubToClientX, sectionStart, seekReplayToAbsoluteTime, setClockUserScrubbing, setIsDraggingPlayhead, setOptimisticLocalTime])
+  }, [clockRef, mapLocalTimeToAbsoluteTime, reanchorClock, scrubToClientX, seekReplayToAbsoluteTime, setClockUserScrubbing, setIsDraggingPlayhead, setOptimisticLocalTime])
 
   const seekToSegment = useCallback((idx) => {
-    if (idx < 0 || idx >= sectionSegments.length) return
-    const seg = sectionSegments[idx]
-    seekTimelineAndReplay(seg.start_time_seconds - sectionStart)
-  }, [sectionSegments, sectionStart, seekTimelineAndReplay])
+    if (idx < 0 || idx >= timelineSegments.length) return
+    const timelineSeg = timelineSegments[idx]
+    seekTimelineAndReplay(timelineSeg.timelineStart)
+  }, [timelineSegments, seekTimelineAndReplay])
 
   useEffect(() => {
     if (!currentSegment || isDraggingPlayhead) return
 
-    const sessionTime = sectionStart + playheadTime
+    const sessionTime = mapLocalTimeToAbsoluteTime(playheadTime)
     applyScriptCameraTarget(currentSegment, sessionTime).catch(() => {})
-  }, [applyScriptCameraTarget, currentSegment, isDraggingPlayhead, playheadTime, sectionStart])
+  }, [applyScriptCameraTarget, currentSegment, isDraggingPlayhead, mapLocalTimeToAbsoluteTime, playheadTime])
 
   useEffect(() => {
     if (!sectionSegments.length) {
@@ -786,9 +845,9 @@ export default function OverlayPreviewStep({
     if (!didInitSectionSeekRef.current) {
       didInitSectionSeekRef.current = true
       lastAppliedCameraTargetRef.current = null
-      seekReplayToAbsoluteTime(sectionStart)
+      seekReplayToAbsoluteTime(mapLocalTimeToAbsoluteTime(0))
     }
-  }, [activeSection, sectionSegments.length, sectionStart, seekReplayToAbsoluteTime])
+  }, [activeSection, mapLocalTimeToAbsoluteTime, sectionSegments.length, seekReplayToAbsoluteTime])
 
   const buildFallbackFrameData = useCallback((absSessionTime) => ({
     section: activeSection,
@@ -819,7 +878,7 @@ export default function OverlayPreviewStep({
       return undefined
     }
 
-    const absSessionTime = sectionStart + renderPlayheadTime
+    const absSessionTime = mapLocalTimeToAbsoluteTime(renderPlayheadTime)
 
     timer = setTimeout(async () => {
       const runSeq = ++renderSeqRef.current
@@ -835,6 +894,8 @@ export default function OverlayPreviewStep({
         telemetryError: null,
         renderStatus: 'pending',
         renderError: null,
+        requestedPresetId: effectiveSelectedPresetId,
+        requestedPreferHtml: true,
       })
       try {
         let frameData = buildFallbackFrameData(absSessionTime)
@@ -871,6 +932,7 @@ export default function OverlayPreviewStep({
 
             if (telemetryResponse?.frame_data) {
               frameData = {
+                ...frameData,
                 ...telemetryResponse.frame_data,
                 // Keep script context fields available for template logic.
                 event_type: currentSegment?.event_type || currentSegment?.type || telemetryResponse.frame_data.event_type || 'event',
@@ -924,13 +986,17 @@ export default function OverlayPreviewStep({
 
         const useHtmlMode = previewRenderMode === 'html'
         const result = await renderPreview(effectiveSelectedPresetId, activeSection, {
+          projectId,
           frameData,
-          includeRenderedHtml: useHtmlMode,
+          includeRenderedHtml: true,
           renderScreenshot: !useHtmlMode,
+          includeDebug: debugEnabled,
+          preferHtmlContent: true,
         })
         if (cancelled) return
 
         const animationProfile = result?.animation_profile || null
+        const renderDebug = result?.debug_render || null
         const renderWidth = Number(result?.width) || 1920
         const renderHeight = Number(result?.height) || 1080
         setPreviewRenderSize({ width: renderWidth, height: renderHeight })
@@ -956,17 +1022,34 @@ export default function OverlayPreviewStep({
               renderStatus: 'ok',
               renderError: null,
               renderMs: Math.round(performance.now() - startedAt),
+              requestedPresetId: effectiveSelectedPresetId,
+              requestedPreferHtml: true,
+              renderSource: renderDebug?.render_source || null,
+              renderHtmlLength: renderDebug?.html_length ?? null,
+              backendHasHtmlContent: renderDebug?.has_html_content ?? null,
+              backendSectionElementCount: renderDebug?.section_element_count ?? null,
+              backendUsedElementFilter: renderDebug?.used_element_filter ?? null,
+              backendPreferHtmlContent: renderDebug?.prefer_html_content ?? null,
               animationMode: animationSummary?.hasKeyframes && animationSummary?.supportsSeek ? 'timeline-capable' : animationSummary?.hasAnimations ? 'static-only' : 'none',
               animationSummary,
             })
           } else {
             setVisualPreviewImage(null)
             setVisualPreviewHtml(null)
-            setVisualPreviewError('HTML preview was blocked by sanitization safeguards')
+            const htmlLen = result.rendered_html?.length || 0
+            setVisualPreviewError(`HTML blocked by sanitization (${htmlLen} bytes returned)`)
             updateDebug({
               renderStatus: 'error',
               renderError: 'HTML preview sanitized to empty content',
               renderMs: Math.round(performance.now() - startedAt),
+              requestedPresetId: effectiveSelectedPresetId,
+              requestedPreferHtml: true,
+              renderSource: renderDebug?.render_source || null,
+              renderHtmlLength: renderDebug?.html_length ?? null,
+              backendHasHtmlContent: renderDebug?.has_html_content ?? null,
+              backendSectionElementCount: renderDebug?.section_element_count ?? null,
+              backendUsedElementFilter: renderDebug?.used_element_filter ?? null,
+              backendPreferHtmlContent: renderDebug?.prefer_html_content ?? null,
               animationMode: animationSummary?.hasKeyframes && animationSummary?.supportsSeek ? 'timeline-capable' : animationSummary?.hasAnimations ? 'static-only' : 'none',
               animationSummary,
             })
@@ -979,6 +1062,14 @@ export default function OverlayPreviewStep({
             renderStatus: 'ok',
             renderError: null,
             renderMs: Math.round(performance.now() - startedAt),
+            requestedPresetId: effectiveSelectedPresetId,
+            requestedPreferHtml: true,
+            renderSource: renderDebug?.render_source || null,
+            renderHtmlLength: renderDebug?.html_length ?? null,
+            backendHasHtmlContent: renderDebug?.has_html_content ?? null,
+            backendSectionElementCount: renderDebug?.section_element_count ?? null,
+            backendUsedElementFilter: renderDebug?.used_element_filter ?? null,
+            backendPreferHtmlContent: renderDebug?.prefer_html_content ?? null,
             animationMode: animationSummary?.hasKeyframes && animationSummary?.supportsSeek ? 'timeline-capable' : animationSummary?.hasAnimations ? 'static-only' : 'none',
             animationSummary,
           })
@@ -986,6 +1077,7 @@ export default function OverlayPreviewStep({
             console.debug('[OverlayPreview][render] success', {
               runSeq,
               renderMs: Math.round(performance.now() - startedAt),
+              renderDebug,
             })
           }
         } else {
@@ -996,6 +1088,14 @@ export default function OverlayPreviewStep({
             renderStatus: 'error',
             renderError: result?.error || 'Render returned no preview payload',
             renderMs: Math.round(performance.now() - startedAt),
+            requestedPresetId: effectiveSelectedPresetId,
+            requestedPreferHtml: true,
+            renderSource: renderDebug?.render_source || null,
+            renderHtmlLength: renderDebug?.html_length ?? null,
+            backendHasHtmlContent: renderDebug?.has_html_content ?? null,
+            backendSectionElementCount: renderDebug?.section_element_count ?? null,
+            backendUsedElementFilter: renderDebug?.used_element_filter ?? null,
+            backendPreferHtmlContent: renderDebug?.prefer_html_content ?? null,
             animationMode: animationSummary?.hasKeyframes && animationSummary?.supportsSeek ? 'timeline-capable' : animationSummary?.hasAnimations ? 'static-only' : 'none',
             animationSummary,
           })
@@ -1037,7 +1137,7 @@ export default function OverlayPreviewStep({
     overlayVisible,
     currentSegment,
     renderPlayheadTime,
-    sectionStart,
+    mapLocalTimeToAbsoluteTime,
     totalDuration,
     debugEnabled,
     buildFallbackFrameData,
@@ -1060,6 +1160,54 @@ export default function OverlayPreviewStep({
       session_time: previewFrame.session_time ?? null,
     }
   }, [previewFrame])
+
+  const handleCopyDebugPanel = useCallback(async () => {
+    const payload = {
+      panel: 'overlay-debug',
+      run: debugInfo.renderSeq,
+      frameSource: debugInfo.frameSource,
+      telemetry: {
+        status: debugInfo.telemetryStatus,
+        error: debugInfo.telemetryError,
+      },
+      render: {
+        status: debugInfo.renderStatus,
+        ms: debugInfo.renderMs,
+        error: debugInfo.renderError,
+      },
+      requested: {
+        presetId: debugInfo.requestedPresetId,
+        preferHtml: debugInfo.requestedPreferHtml,
+      },
+      backend: {
+        renderSource: debugInfo.renderSource,
+        renderHtmlLength: debugInfo.renderHtmlLength,
+        hasHtmlContent: debugInfo.backendHasHtmlContent,
+        sectionElementCount: debugInfo.backendSectionElementCount,
+        preferHtmlContent: debugInfo.backendPreferHtmlContent,
+        usedElementFilter: debugInfo.backendUsedElementFilter,
+      },
+      animation: {
+        mode: debugInfo.animationMode,
+        summary: debugInfo.animationSummary,
+      },
+      camera: {
+        status: debugInfo.cameraStatus,
+        targetKey: debugInfo.cameraTargetKey,
+        error: debugInfo.cameraError,
+      },
+      sessionTime: debugInfo.sessionTime,
+      focusedCarIdx: debugInfo.focusedCarIdx,
+      frameSummary: debugSummary,
+    }
+
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
+      showSuccess('Overlay debug copied')
+    } catch {
+      showError('Failed to copy overlay debug')
+    }
+  }, [debugInfo, debugSummary, showError, showSuccess])
 
   const persistedTimeLabel = useMemo(() => {
     if (!scriptGeneratedAt) return null
@@ -1088,176 +1236,149 @@ export default function OverlayPreviewStep({
     }
   }, [previewDiagnostics])
 
+  const sectionTabs = useMemo(() => SECTIONS.map((sec) => ({
+    id: sec.id,
+    label: sec.label,
+    icon: sec.icon,
+    activeIconClass: sec.color,
+    count: sectionCounts[sec.id] || 0,
+  })), [sectionCounts])
+
+  const topbarContextControls = (
+    <>
+      {persistedTimeLabel && (
+        <span className="rounded-full border border-success/30 bg-success/10 px-2 py-1 text-xxs font-medium text-success">
+          Persisted {persistedTimeLabel}
+        </span>
+      )}
+      {previewAnimationBadge && (
+        <span className={`rounded-full border px-2 py-1 text-xxs font-medium ${previewAnimationBadge.className}`}>
+          {previewAnimationBadge.label}
+        </span>
+      )}
+      <span
+        className="rounded-full border border-border bg-bg-primary/50 px-2 py-1 text-xxs font-mono text-text-tertiary"
+        title="Live iRacing command events received in this preview"
+      >
+        {commandFeedCount} cmds{lastCommandLabel ? ` (${lastCommandLabel})` : ''}
+      </span>
+    </>
+  )
+
+  const topbarCommonControls = (
+    <>
+      <div className="flex items-center gap-1 rounded-md border border-border bg-bg-primary/50 px-1 py-0.5">
+        <button
+          onClick={() => setPreviewRenderMode('png')}
+          className={`px-2 py-0.5 rounded text-xxs font-medium transition-colors ${
+            previewRenderMode === 'png'
+              ? 'bg-accent/20 text-accent border border-accent/40'
+              : 'text-text-tertiary hover:text-text-primary'
+          }`}
+          title="Render as PNG snapshot"
+        >
+          PNG
+        </button>
+        <button
+          onClick={() => setPreviewRenderMode('html')}
+          className={`px-2 py-0.5 rounded text-xxs font-medium transition-colors ${
+            previewRenderMode === 'html'
+              ? 'bg-accent/20 text-accent border border-accent/40'
+              : 'text-text-tertiary hover:text-text-primary'
+          }`}
+          title="Render native HTML/CSS overlay"
+        >
+          HTML
+        </button>
+      </div>
+
+      <div className="flex items-center gap-1 rounded-md border border-border bg-bg-primary/50 px-2 py-1">
+        <button onClick={() => setPreviewZoom(z => Math.max(z - 0.1, 0.25))} className="p-0.5 rounded hover:bg-bg-secondary" title="Zoom out">
+          <ZoomOut className="w-3 h-3 text-text-tertiary" />
+        </button>
+        <span className="w-8 text-center text-[10px] tabular-nums text-text-tertiary">
+          {Math.round(previewZoom * 100)}%
+        </span>
+        <button onClick={() => setPreviewZoom(z => Math.min(z + 0.1, 3))} className="p-0.5 rounded hover:bg-bg-secondary" title="Zoom in">
+          <ZoomIn className="w-3 h-3 text-text-tertiary" />
+        </button>
+        <button onClick={() => setPreviewFullscreen(v => !v)} className="ml-1 p-0.5 rounded hover:bg-bg-secondary" title={previewFullscreen ? 'Exit fullscreen' : 'Fullscreen preview'}>
+          <Maximize2 className="w-3 h-3 text-text-tertiary" />
+        </button>
+      </div>
+
+      <div className="flex items-center gap-0.5 rounded-md border border-border bg-bg-primary/50 px-1 py-0.5">
+        <button
+          onClick={() => setOverlayVisible(v => !v)}
+          className={`rounded p-1 transition-colors ${
+            overlayVisible
+              ? 'bg-accent/15 text-accent hover:bg-accent/20'
+              : 'text-text-tertiary hover:bg-bg-secondary hover:text-text-primary'
+          }`}
+          title={overlayVisible ? 'Hide overlay' : 'Show overlay'}
+          aria-label={overlayVisible ? 'Hide overlay' : 'Show overlay'}
+        >
+          {overlayVisible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+        </button>
+
+        <button
+          onClick={() => setShowLiveStreamUnderlay(v => !v)}
+          className={`rounded p-1 transition-colors ${
+            showLiveStreamUnderlay
+              ? 'bg-accent/15 text-accent hover:bg-accent/20'
+              : 'text-text-tertiary hover:bg-bg-secondary hover:text-text-primary'
+          }`}
+          title={showLiveStreamUnderlay ? 'Hide live stream underlay' : 'Show live stream underlay'}
+          aria-label={showLiveStreamUnderlay ? 'Hide live stream underlay' : 'Show live stream underlay'}
+        >
+          <Monitor className="w-3.5 h-3.5" />
+        </button>
+
+        <button
+          onClick={() => setShowEventOverlay(v => !v)}
+          className={`rounded p-1 transition-colors ${
+            showEventOverlay
+              ? 'bg-accent/15 text-accent hover:bg-accent/20'
+              : 'text-text-tertiary hover:bg-bg-secondary hover:text-text-primary'
+          }`}
+          title={showEventOverlay ? 'Hide iRacing command events' : 'Show iRacing command events'}
+          aria-label={showEventOverlay ? 'Hide iRacing command events' : 'Show iRacing command events'}
+        >
+          <Terminal className="w-3.5 h-3.5" />
+        </button>
+
+        <button
+          onClick={() => setDebugEnabled(v => !v)}
+          className={`rounded p-1 transition-colors ${
+            debugEnabled
+              ? 'bg-accent/15 text-accent hover:bg-accent/20'
+              : 'text-text-tertiary hover:bg-bg-secondary hover:text-text-primary'
+          }`}
+          title="Toggle overlay preview debugging"
+          aria-label={debugEnabled ? 'Disable overlay preview debugging' : 'Enable overlay preview debugging'}
+        >
+          <Bug className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </>
+  )
+
   return (
     <div className="flex flex-col h-full overflow-hidden bg-bg-primary">
-      {/* Header */}
-      <div className="flex items-center gap-2 px-4 py-3 border-b border-border bg-bg-secondary shrink-0">
-        <Eye className="w-5 h-5 text-accent" />
-        <h2 className="text-sm font-semibold text-text-primary">Overlay Preview</h2>
-        <div className="flex-1" />
-        <div className="flex items-center gap-2 flex-wrap justify-end">
-          <button
-            onClick={() => setOverlayVisible(v => !v)}
-            className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xxs font-medium border transition-colors ${
-              overlayVisible
-                ? 'border-accent/40 text-accent bg-accent/10 hover:bg-accent/20'
-                : 'border-border text-text-tertiary hover:text-text-primary hover:bg-bg-hover'
-            }`}
-            title={overlayVisible ? 'Hide overlay' : 'Show overlay'}
-          >
-            {overlayVisible
-              ? <Eye className="w-3 h-3" />
-              : <EyeOff className="w-3 h-3" />
-            }
-            {overlayVisible ? 'Overlay On' : 'Overlay Off'}
-          </button>
-
-          <button
-            onClick={() => setShowEventOverlay(v => !v)}
-            className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xxs font-medium border transition-colors ${
-              showEventOverlay
-                ? 'border-blue-500/40 text-blue-300 bg-blue-900/20 hover:bg-blue-900/30'
-                : 'border-border text-text-tertiary hover:text-text-primary hover:bg-bg-hover'
-            }`}
-            title="Toggle iRacing command events"
-          >
-            <RefreshCw className={`w-3 h-3 ${showEventOverlay ? 'text-blue-300' : ''}`} />
-            {showEventOverlay ? 'Events On' : 'Events Off'}
-          </button>
-
-          <button
-            onClick={() => setDebugEnabled(v => !v)}
-            className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xxs font-medium border transition-colors ${
-              debugEnabled
-                ? 'border-amber-500/50 text-amber-300 bg-amber-900/20 hover:bg-amber-900/30'
-                : 'border-border text-text-tertiary hover:text-text-primary hover:bg-bg-hover'
-            }`}
-            title="Toggle overlay preview debugging"
-          >
-            <Bug className="w-3 h-3" />
-            {debugEnabled ? 'Debug On' : 'Debug Off'}
-          </button>
-
-          <div className="flex items-center gap-1 rounded-md border border-border bg-bg-primary/50 px-1 py-0.5">
-            <button
-              onClick={() => setPreviewRenderMode('png')}
-              className={`px-2 py-0.5 rounded text-xxs font-medium transition-colors ${
-                previewRenderMode === 'png'
-                  ? 'bg-accent/20 text-accent border border-accent/40'
-                  : 'text-text-tertiary hover:text-text-primary'
-              }`}
-              title="Render as PNG snapshot"
-            >
-              PNG
-            </button>
-            <button
-              onClick={() => setPreviewRenderMode('html')}
-              className={`px-2 py-0.5 rounded text-xxs font-medium transition-colors ${
-                previewRenderMode === 'html'
-                  ? 'bg-accent/20 text-accent border border-accent/40'
-                  : 'text-text-tertiary hover:text-text-primary'
-              }`}
-              title="Render native HTML/CSS overlay"
-            >
-              HTML
-            </button>
-          </div>
-
-          <div className="flex items-center gap-2 rounded-md border border-border bg-bg-primary/50 px-2 py-1">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-text-disabled">UI Zoom</span>
-            <input
-              type="range"
-              min="0.5"
-              max="2"
-              step="0.1"
-              list="overlay-ui-zoom-ticks"
-              value={overlayUiZoomDraft}
-              onChange={(e) => setOverlayUiZoomDraft(Number(e.target.value))}
-              onMouseUp={(e) => commitOverlayUiZoom(Number(e.currentTarget.value))}
-              onTouchEnd={(e) => commitOverlayUiZoom(Number(e.currentTarget.value))}
-              onKeyUp={(e) => commitOverlayUiZoom(Number(e.currentTarget.value))}
-              onBlur={(e) => commitOverlayUiZoom(Number(e.currentTarget.value))}
-              className="w-24 h-1.5 bg-bg-secondary rounded-full appearance-none cursor-pointer
-                [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3
-                [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-accent [&::-webkit-slider-thumb]:cursor-pointer"
-              title="Scale overlay UI layer"
-            />
-            <span className="text-xxs font-mono text-text-secondary tabular-nums w-10 text-right">
-              {overlayUiZoomDraft.toFixed(1)}x
-            </span>
-          </div>
-          <datalist id="overlay-ui-zoom-ticks">
-            <option value="0.5" label="0.5" />
-            <option value="1" label="1.0" />
-            <option value="1.5" label="1.5" />
-            <option value="2" label="2.0" />
-          </datalist>
-
-          <div className="flex items-center gap-1.5 px-2 py-1 rounded-md border border-border bg-bg-primary/20">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-text-disabled">Status</span>
-
-            {selectedPreset && (
-              <span className="px-2 py-0.5 rounded-full text-xxs font-medium border border-purple-500/30 text-purple-300 bg-purple-900/20">
-                Design: {selectedPreset.name || selectedPreset.id}
-              </span>
-            )}
-            {!selectedPreset && (
-              <span className="px-2 py-0.5 rounded-full text-xxs font-medium border border-yellow-600/30 text-yellow-300 bg-yellow-900/20">
-                No design selected
-              </span>
-            )}
-
-            {persistedTimeLabel && (
-              <span className="px-2 py-0.5 rounded-full text-xxs font-medium border border-success/30 text-success bg-success/10">
-                Script persisted at {persistedTimeLabel}
-              </span>
-            )}
-
-            {previewAnimationBadge && (
-              <span className={`px-2 py-0.5 rounded-full text-xxs font-medium border ${previewAnimationBadge.className}`}>
-                {previewAnimationBadge.label}
-              </span>
-            )}
-
-            <span
-              className="px-2 py-0.5 rounded-full text-xxs font-mono border border-border text-text-tertiary bg-bg-primary/50"
-              title="Live iRacing command events received in this preview"
-            >
-              {commandFeedCount} cmds{lastCommandLabel ? ` (${lastCommandLabel})` : ''}
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* Section tabs */}
-      <div className="flex border-b border-border bg-bg-secondary shrink-0">
-        {SECTIONS.map(sec => (
-          <button
-            key={sec.id}
-            onClick={() => {
-              didInitSectionSeekRef.current = false
-              setActiveSection(sec.id)
-              setCurrentTime(0)
-              setOptimisticLocalTime(null)
-              stopClock()
-              setPlaying(false)
-            }}
-            className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors
-              border-b-2 ${activeSection === sec.id
-                ? `border-accent text-accent bg-accent/5`
-                : 'border-transparent text-text-tertiary hover:text-text-secondary hover:bg-bg-hover'
-              }`}
-          >
-            <sec.icon className={`w-3.5 h-3.5 ${activeSection === sec.id ? sec.color : ''}`} />
-            {sec.label}
-            {sectionCounts[sec.id] > 0 && (
-              <span className="ml-1 px-1.5 py-0 rounded-full text-xxs bg-bg-primary border border-border">
-                {sectionCounts[sec.id]}
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
+      <OverlayWorkspaceTopbar
+        tabs={sectionTabs}
+        activeTab={activeSection}
+        onTabChange={(sectionId) => {
+          didInitSectionSeekRef.current = false
+          setActiveSection(sectionId)
+          setCurrentTime(0)
+          setOptimisticLocalTime(null)
+          stopClock()
+          setPlaying(false)
+        }}
+        contextControls={topbarContextControls}
+        commonControls={topbarCommonControls}
+      />
 
       {/* Content area */}
       {sectionSegments.length === 0 ? (
@@ -1276,24 +1397,35 @@ export default function OverlayPreviewStep({
           maxBottom={500}
           collapsed={timelineCollapsed}
           collapsedBottomHeight={68}
-          containerClassName="flex flex-col flex-1 min-h-0 overflow-hidden"
+          containerClassName="flex flex-col flex-1 h-full min-h-0 overflow-hidden"
           bottomClassName="flex flex-col overflow-hidden"
           top={
             /* Preview viewport */
-            <div ref={previewViewportRef} className="h-full w-full relative bg-black/50 flex items-center justify-center overflow-hidden p-2">
-              <div className="relative w-full aspect-video bg-bg-primary/20 rounded-lg overflow-hidden
+            <div ref={previewViewportRef} className="h-full w-full relative bg-black/50 flex items-center justify-center overflow-hidden">
+              {activeProject && !activeProject.subsession_id && (
+                <div className="absolute top-2 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-900/70 border border-amber-600/40 text-amber-300 text-[10px] pointer-events-none">
+                  <AlertTriangle className="w-3 h-3 shrink-0" />
+                  No iRacing session linked — showing sample data
+                </div>
+              )}
+              <div className="relative w-full bg-bg-primary/20 rounded-lg overflow-hidden
                 border border-border/30"
                 style={{
-                  width: previewBoxSize.width > 0 ? `${previewBoxSize.width}px` : undefined,
-                  height: previewBoxSize.height > 0 ? `${previewBoxSize.height}px` : undefined,
+                  width: displayedPreviewSize.width > 0 ? `${displayedPreviewSize.width}px` : undefined,
+                  height: displayedPreviewSize.height > 0 ? `${displayedPreviewSize.height}px` : undefined,
                 }}>
                 <div className="absolute inset-0 bg-black">
-                  <PreviewPlayer
-                    isAnalyzing={false}
-                    isPlaying={playing}
-                    onPlayPause={togglePlay}
-                    isPortrait={false}
-                  />
+                  {showLiveStreamUnderlay ? (
+                    <PreviewPlayer
+                      isAnalyzing={false}
+                      isPlaying={playing}
+                      onPlayPause={togglePlay}
+                      isPortrait={false}
+                      aspectRatio={streamAspectRatio}
+                    />
+                  ) : (
+                    <div className="absolute inset-0 bg-black/90" />
+                  )}
                 </div>
 
                 {!isConnected && (
@@ -1308,44 +1440,63 @@ export default function OverlayPreviewStep({
                 {overlayVisible && hasSelectedDesign && previewRenderMode === 'png' && visualPreviewImage && (
                   <div
                     className="absolute inset-0 pointer-events-none"
-                    style={{
-                      zoom: overlayUiZoom,
-                    }}
                   >
                     <img
                       src={visualPreviewImage}
                       alt="Visual preset preview"
                       className="absolute inset-0 w-full h-full object-contain"
+                      style={{ zoom: previewZoom }}
                     />
                   </div>
                 )}
                 {overlayVisible && hasSelectedDesign && previewRenderMode === 'html' && visualPreviewHtml && (
                   <div
-                    className="absolute inset-0 pointer-events-none overflow-hidden"
-                    style={{
-                      zoom: overlayUiZoom,
-                    }}
+                    className={`pointer-events-none overflow-hidden ${
+                      previewFullscreen
+                        ? 'fixed inset-0 z-50 bg-black'
+                        : 'absolute inset-0'
+                    }`}
                   >
-                    <IsolatedHtmlPreview
-                      html={visualPreviewHtml}
-                      className="absolute left-1/2 top-1/2 border-0 bg-transparent pointer-events-none"
+                    <div
+                      className="w-full h-full flex items-center justify-center"
                       style={{
-                        width: `${previewRenderSize.width}px`,
-                        height: `${previewRenderSize.height}px`,
-                        marginLeft: `-${previewRenderSize.width / 2}px`,
-                        marginTop: `-${previewRenderSize.height / 2}px`,
-                        transformOrigin: 'center center',
-                        transform: `scale(${previewOverlayScale})`,
-                        background: 'transparent',
+                        background: previewFullscreen ? '#000' : 'transparent',
                       }}
-                    />
+                    >
+                      {previewFullscreen && (
+                        <button
+                          onClick={() => setPreviewFullscreen(false)}
+                          className="absolute top-4 right-4 z-50 p-2 rounded bg-bg-primary/80 hover:bg-bg-secondary text-text-primary pointer-events-auto"
+                          title="Exit fullscreen (Esc)"
+                        >
+                          ✕
+                        </button>
+                      )}
+                      <IsolatedHtmlPreview
+                        html={visualPreviewHtml}
+                        underlaySrc={showLiveStreamUnderlay ? streamUrl : null}
+                        className={previewFullscreen ? 'w-full h-full border-0 bg-transparent' : 'absolute left-1/2 top-1/2 border-0 bg-transparent pointer-events-none'}
+                        style={previewFullscreen ? {
+                          background: 'transparent',
+                        } : {
+                          width: `${previewRenderSize.width}px`,
+                          height: `${previewRenderSize.height}px`,
+                          marginLeft: `-${previewRenderSize.width / 2}px`,
+                          marginTop: `-${previewRenderSize.height / 2}px`,
+                          transformOrigin: 'center center',
+                          transform: `scale(${previewOverlayScale})`,
+                          background: 'transparent',
+                        }}
+                        zoom={previewZoom}
+                      />
+                    </div>
                   </div>
                 )}
                 {overlayVisible && hasSelectedDesign && previewLoading && (
-                  <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-                    <div className="px-2 py-1 rounded bg-black/60 text-white/80 text-xxs flex items-center gap-1.5">
-                      <Loader2 className="w-3 h-3 animate-spin" />
-                      Rendering visual preview...
+                  <div className="absolute left-1/2 bottom-4 -translate-x-1/2 z-20 pointer-events-none">
+                    <div className="px-4 py-2 rounded-md bg-black/75 border border-white/20 text-white/90 text-xs flex items-center gap-2 shadow-lg">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Rendering overlay...
                     </div>
                   </div>
                 )}
@@ -1364,21 +1515,22 @@ export default function OverlayPreviewStep({
                   </div>
                 )}
 
-                {/* Top-left badges */}
-                <div className="absolute top-3 left-3 flex items-center gap-2">
-                  <div className="px-2 py-1 bg-black/60 rounded text-xxs font-medium text-white/80 capitalize">
-                    {activeSection.replace('_', ' ')}
-                  </div>
-                  <div className="px-2 py-1 bg-black/60 rounded text-xxs font-mono text-white/80">
-                    {formatTime(playheadTime)} / {formatTime(totalDuration)}
-                  </div>
-                </div>
-
                 {debugEnabled && (
                   <div className="absolute left-3 bottom-3 z-20 w-80 max-w-[calc(100%-1.5rem)] rounded-lg border border-amber-500/30 bg-black/75 text-[10px] font-mono text-amber-100 shadow-xl backdrop-blur-sm">
                     <div className="px-2 py-1 border-b border-amber-500/20 flex items-center justify-between">
                       <span className="font-semibold">Overlay Debug</span>
-                      <span className="text-amber-300/80">run #{debugInfo.renderSeq}</span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={handleCopyDebugPanel}
+                          className="inline-flex items-center gap-1 rounded border border-amber-500/20 px-1.5 py-0.5 text-[9px] text-amber-200 transition-colors hover:bg-amber-500/10"
+                          title="Copy formatted debug details"
+                          aria-label="Copy formatted debug details"
+                        >
+                          <Copy className="w-3 h-3" />
+                          Copy
+                        </button>
+                        <span className="text-amber-300/80">run #{debugInfo.renderSeq}</span>
+                      </div>
                     </div>
                     <div className="px-2 py-1.5 space-y-1.5 leading-4">
                       <div className="grid grid-cols-[110px_1fr] gap-1">
@@ -1388,6 +1540,20 @@ export default function OverlayPreviewStep({
                         <span>{debugInfo.telemetryStatus}{debugInfo.telemetryError ? ` (${debugInfo.telemetryError})` : ''}</span>
                         <span className="text-amber-300/80">Render</span>
                         <span>{debugInfo.renderStatus}{debugInfo.renderMs != null ? ` (${debugInfo.renderMs}ms)` : ''}{debugInfo.renderError ? ` (${debugInfo.renderError})` : ''}</span>
+                        <span className="text-amber-300/80">Requested preset</span>
+                        <span>{debugInfo.requestedPresetId || 'n/a'}</span>
+                        <span className="text-amber-300/80">Requested prefer html</span>
+                        <span>{String(debugInfo.requestedPreferHtml)}</span>
+                        <span className="text-amber-300/80">Render source</span>
+                        <span>{debugInfo.renderSource || 'n/a'}{debugInfo.renderHtmlLength != null ? ` (len ${debugInfo.renderHtmlLength})` : ''}</span>
+                        <span className="text-amber-300/80">Backend has html</span>
+                        <span>{debugInfo.backendHasHtmlContent == null ? 'n/a' : String(debugInfo.backendHasHtmlContent)}</span>
+                        <span className="text-amber-300/80">Backend section elems</span>
+                        <span>{debugInfo.backendSectionElementCount == null ? 'n/a' : String(debugInfo.backendSectionElementCount)}</span>
+                        <span className="text-amber-300/80">Backend prefer html</span>
+                        <span>{debugInfo.backendPreferHtmlContent == null ? 'n/a' : String(debugInfo.backendPreferHtmlContent)}</span>
+                        <span className="text-amber-300/80">Backend element filter</span>
+                        <span>{debugInfo.backendUsedElementFilter == null ? 'n/a' : String(debugInfo.backendUsedElementFilter)}</span>
                         <span className="text-amber-300/80">Animation</span>
                         <span>
                           {debugInfo.animationMode}
@@ -1419,19 +1585,14 @@ export default function OverlayPreviewStep({
           bottom={
             <>
               {/* Timeline region bar */}
-              <div className="shrink-0 border-t border-border bg-bg-secondary">
-                <SectionCollapseHeader
+              <div className="flex items-center border-b border-border bg-bg-secondary shrink-0">
+                <CollapsiblePanelHeader
                   open={!timelineCollapsed}
                   onToggle={() => setTimelineCollapsed(v => !v)}
                   icon={Film}
                   title="Overlay Timeline"
-                  subtitle={`(${sectionSegments.length} segments)`}
-                  right={
-                    <span className="text-xxs font-mono text-text-disabled">
-                      {timelineCollapsed ? 'Hidden' : 'Visible'}
-                    </span>
-                  }
-                  buttonClassName="py-1.5"
+                  subtitle={`${sectionSegments.length} segments`}
+                  className="flex-1"
                 />
               </div>
 
@@ -1442,28 +1603,27 @@ export default function OverlayPreviewStep({
                 prevDisabled={currentSegIndex <= 0}
                 prevTitle="Previous segment"
                 onNext={() => seekToSegment(currentSegIndex + 1)}
-                nextDisabled={currentSegIndex >= sectionSegments.length - 1}
+                nextDisabled={currentSegIndex >= timelineSegments.length - 1}
                 nextTitle="Next segment"
                 isPlaying={playing}
                 onPlayPause={togglePlay}
                 position={currentSegIndex >= 0
-                  ? `${currentSegIndex + 1} / ${sectionSegments.length}`
-                  : `– / ${sectionSegments.length}`}
+                  ? `${currentSegIndex + 1} / ${timelineSegments.length}`
+                  : `– / ${timelineSegments.length}`}
                 progress={totalDuration > 0 ? playheadTime / totalDuration : 0}
                 timeDisplay={formatTime(playheadTime)}
                 driftSeconds={driftSeconds}
                 speeds={[0.25, 0.5, 1, 2, 4]}
                 activeSpeed={playbackSpeed}
                 onSpeedChange={handlePlaybackSpeedChange}
-                className="border-t border-b-0"
               />
               )}
 
               {/* Timeline scrubber */}
               {!timelineCollapsed && (
-              <div className="flex-1 min-h-0 flex flex-col border-t border-border bg-bg-primary">
+              <div className="flex-1 min-h-0 flex flex-col overflow-hidden bg-bg-primary">
                 <ConfigurableTimelineTracks
-                  gutterWidth={56}
+                  gutterWidth={52}
                   rows={[
                     {
                       key: 'section',
@@ -1476,9 +1636,9 @@ export default function OverlayPreviewStep({
                           style={{ top, height }}
                           onMouseDown={handleTimelinePointerDown}
                         >
-                          {sectionSegments.map((seg, idx) => {
-                            const relStart = seg.start_time_seconds - sectionStart
-                            const segDur = seg.end_time_seconds - seg.start_time_seconds
+                          {timelineSegments.map(({ seg, timelineStart, duration }, idx) => {
+                            const relStart = timelineStart
+                            const segDur = duration
                             const left = totalDuration > 0 ? (relStart / totalDuration) * 100 : 0
                             const width = totalDuration > 0 ? (segDur / totalDuration) * 100 : 0
                             const secKey = seg.section || activeSection
@@ -1511,9 +1671,9 @@ export default function OverlayPreviewStep({
                           style={{ top, height }}
                           onMouseDown={handleTimelinePointerDown}
                         >
-                          {sectionSegments.map((seg, idx) => {
-                            const relStart = seg.start_time_seconds - sectionStart
-                            const segDur = seg.end_time_seconds - seg.start_time_seconds
+                          {timelineSegments.map(({ seg, timelineStart, duration }, idx) => {
+                            const relStart = timelineStart
+                            const segDur = duration
                             const left = totalDuration > 0 ? (relStart / totalDuration) * 100 : 0
                             const width = totalDuration > 0 ? (segDur / totalDuration) * 100 : 0
                             const segDesign = getSegmentOverlayDesignId(seg, selectedPresetId)
@@ -1559,9 +1719,9 @@ export default function OverlayPreviewStep({
                           style={{ top, height }}
                           onMouseDown={handleTimelinePointerDown}
                         >
-                          {sectionSegments.map((seg, idx) => {
-                            const relStart = seg.start_time_seconds - sectionStart
-                            const segDur = seg.end_time_seconds - seg.start_time_seconds
+                          {timelineSegments.map(({ seg, timelineStart, duration }, idx) => {
+                            const relStart = timelineStart
+                            const segDur = duration
                             const left = totalDuration > 0 ? (relStart / totalDuration) * 100 : 0
                             const width = totalDuration > 0 ? (segDur / totalDuration) * 100 : 0
                             const isActive = currentSegment?.id === seg.id
@@ -1655,8 +1815,8 @@ export default function OverlayPreviewStep({
                   canvasRef={timelineRef}
                   scrollRef={scrollRef}
                   onScroll={handleTimelineScroll}
-                  containerClassName="flex-1 flex min-h-0 overflow-hidden bg-bg-primary"
-                  scrollClassName="flex-1 overflow-hidden"
+                  containerClassName="flex-1 h-full min-h-0 flex overflow-hidden bg-bg-primary"
+                  scrollClassName="flex-1 min-h-0 overflow-x-auto overflow-y-hidden [scrollbar-gutter:stable]"
                   playheadX={`${totalDuration > 0 ? (playheadTime / totalDuration) * 100 : 0}%`}
                   onPlayheadMouseDown={handleTimelinePointerDown}
                   playheadTitle="Drag to scrub section timeline"

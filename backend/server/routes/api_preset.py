@@ -31,9 +31,12 @@ Endpoints:
 from __future__ import annotations
 
 import logging
+import re
+import hashlib
+import base64
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -51,17 +54,19 @@ router = APIRouter(prefix="/api/presets", tags=["presets"])
 class CreatePresetRequest(BaseModel):
     name: str = "Custom Preset"
     description: str = ""
+    style: str = "custom"
     sections: dict[str, Any] | None = None
     variables: dict[str, Any] | None = None
-    template_id: str | None = None
+    html_content: str | None = None
 
 class UpdatePresetRequest(BaseModel):
     name: str | None = None
     description: str | None = None
+    style: str | None = None
     sections: dict[str, Any] | None = None
     variables: dict[str, Any] | None = None
     intro_video_path: str | None = None
-    template_id: str | None = None
+    html_content: str | None = None
 
 class ElementRequest(BaseModel):
     id: str | None = None
@@ -84,11 +89,227 @@ class ImportPresetRequest(BaseModel):
 class RenderPreviewRequest(BaseModel):
     element_id: str | None = None
     section: str = "race"
+    project_id: int | None = None
     frame_data: dict[str, Any] | None = None
     variables: dict[str, Any] | None = None
     analyze_animations: bool = True
     include_rendered_html: bool = False
     render_screenshot: bool = True
+    include_debug: bool = False
+    prefer_html_content: bool = False
+
+
+class AssetScopeUpdateRequest(BaseModel):
+    target_scope: str
+    source_scope: str | None = None
+    project_id: int | None = None
+
+
+class AssetVariableRequest(BaseModel):
+    filename: str | None = None
+    scope: str = "global"
+    project_id: int | None = None
+    clear: bool = False
+
+
+def _should_keep_existing_preview_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    if isinstance(value, (list, tuple, set, dict)) and len(value) == 0:
+        return True
+    return False
+
+
+def _merge_preview_frame_data(defaults: dict[str, Any], overrides: dict[str, Any] | None) -> dict[str, Any]:
+    merged = dict(defaults)
+    if not overrides:
+        return merged
+
+    for key, val in overrides.items():
+        if _should_keep_existing_preview_value(val):
+            continue
+        merged[key] = val
+    return merged
+
+
+def _apply_section_preview_overrides(frame_data: dict[str, Any], section: str) -> None:
+    """Inject section-specific preview values so tile renders are visually distinct."""
+    section_labels = {
+        "intro": "Intro",
+        "qualifying_results": "Qualifying",
+        "race": "Race",
+        "race_results": "Results",
+    }
+
+    # Keep canonical section id and provide legacy aliases some templates may use.
+    section_alias = {
+        "qualifying_results": "qualifying",
+        "race_results": "results",
+    }.get(section, section)
+
+    frame_data["section_canonical"] = section
+    frame_data["section"] = section_alias
+    frame_data["overlay_preview_section"] = section
+    frame_data["overlay_preview_section_label"] = section_labels.get(section, section)
+
+    if section == "intro":
+        frame_data["session_time"] = frame_data.get("session_time") or "00:00:15"
+        frame_data["current_lap"] = 0
+        frame_data["flag"] = "none"
+
+    elif section == "qualifying_results":
+        qualifying = frame_data.get("qualifying_results")
+        if isinstance(qualifying, list) and qualifying:
+            frame_data["standings"] = qualifying
+        frame_data["current_lap"] = frame_data.get("current_lap", 0)
+        frame_data["flag"] = "none"
+
+    elif section == "race_results":
+        results = frame_data.get("race_results")
+        if isinstance(results, list) and results:
+            frame_data["standings"] = results
+        frame_data["flag"] = "checkered"
+
+
+_TAILWIND_CDN_SCRIPT_RE = re.compile(
+    r'<script[^>]+src=["\'](?:https?:)?//cdn\.tailwindcss\.com["\'][^>]*>\s*</script>',
+    flags=re.IGNORECASE,
+)
+
+_PRESET_VAR_STYLE_RE = re.compile(
+    r'<style[^>]+id=["\']lrs-preset-vars-runtime["\'][^>]*>.*?</style>',
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
+def _ensure_local_tailwind_runtime(html_content: str) -> str:
+    if not html_content:
+        return html_content
+
+    normalized = _TAILWIND_CDN_SCRIPT_RE.sub("", html_content)
+    has_runtime = (
+        'id="lrs-tailwind-runtime"' in normalized
+        or "id='lrs-tailwind-runtime'" in normalized
+    )
+    if has_runtime:
+        return normalized
+
+    runtime_script = "<script id=\"lrs-tailwind-runtime\">{% include '_shared/tailwind.runtime.js' %}</script>"
+
+    if "</head>" in normalized:
+        return normalized.replace("</head>", f"  {runtime_script}\n</head>", 1)
+    if "<head>" in normalized:
+        return normalized.replace("<head>", f"<head>\n  {runtime_script}", 1)
+    return f"{runtime_script}\n{normalized}"
+
+
+def _inject_preset_css_variables(html_content: str, preset: dict[str, Any]) -> str:
+    if not html_content:
+        return html_content
+
+    variables = preset.get("variables") if isinstance(preset, dict) else None
+    if not isinstance(variables, dict) or not variables:
+        return html_content
+
+    declarations: list[str] = []
+    for name, meta in variables.items():
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if isinstance(meta, dict):
+            value = meta.get("value", "")
+        else:
+            value = meta
+        declarations.append(f"  {name}: {value};")
+
+    if not declarations:
+        return html_content
+
+    style_block = "\n".join([
+        '<style id="lrs-preset-vars-runtime">',
+        '  :root {',
+        *declarations,
+        '  }',
+        '</style>',
+    ])
+
+    normalized = _PRESET_VAR_STYLE_RE.sub("", html_content)
+    if "</head>" in normalized:
+        return normalized.replace("</head>", f"  {style_block}\n</head>", 1)
+    if "<head>" in normalized:
+        return normalized.replace("<head>", f"<head>\n  {style_block}", 1)
+    return f"{style_block}\n{normalized}"
+
+
+def _normalize_asset_scope(scope: str | None) -> str:
+    normalized = (scope or "global").strip().lower()
+    if normalized not in {"global", "project"}:
+        raise HTTPException(status_code=400, detail="scope must be 'global' or 'project'")
+    return normalized
+
+
+def _asset_url(preset_id: str, filename: str, scope: str, project_id: int | None = None) -> str:
+    if scope == "project":
+        if project_id is None:
+            return f"/api/presets/{preset_id}/assets/{filename}?scope=project"
+        return f"/api/presets/{preset_id}/assets/{filename}?scope=project&project_id={int(project_id)}"
+    return f"/api/presets/{preset_id}/assets/{filename}?scope=global"
+
+
+def _decorate_variable_bindings(
+    preset_id: str,
+    bindings: dict[str, dict[str, dict[str, str]]],
+    project_id: int | None,
+) -> dict[str, dict[str, dict[str, str]]]:
+    decorated: dict[str, dict[str, dict[str, str]]] = {}
+    for group_name in ("defaults", "overrides", "effective"):
+        group = bindings.get(group_name) or {}
+        group_out: dict[str, dict[str, str]] = {}
+        for variable_name, binding in group.items():
+            if not isinstance(binding, dict):
+                continue
+            filename = binding.get("filename")
+            scope = binding.get("scope")
+            if not isinstance(filename, str) or not isinstance(scope, str):
+                continue
+            group_out[variable_name] = {
+                "filename": filename,
+                "scope": scope,
+                "url": _asset_url(preset_id, filename, scope, project_id),
+            }
+        decorated[group_name] = group_out
+    return decorated
+
+
+def _inject_asset_variables(frame_data: dict[str, Any], preset_id: str, project_id: int | None) -> None:
+    frame_data["assets"] = preset_service.get_asset_variable_urls(preset_id, project_id)
+
+
+async def _enrich_with_plugin_data(frame_data: dict[str, Any], project_id: int | None = None) -> dict[str, Any]:
+    """Best-effort plugin enrichment for preview rendering.
+
+    Uses subsession_id from frame_data when available, otherwise falls back to
+    the project's stored subsession_id (if project_id is provided).
+    """
+    subsession_id = int(frame_data.get("subsession_id", 0) or 0)
+
+    if subsession_id <= 0 and project_id is not None:
+        from server.services.project_service import project_service
+
+        project = project_service.get_project(project_id)
+        if project:
+            subsession_id = int(project.get("subsession_id", 0) or 0)
+
+    if subsession_id <= 0:
+        return frame_data
+
+    try:
+        from server.services.data_plugin_service import data_plugin_service
+        return await data_plugin_service.enrich_frame_data(frame_data, subsession_id)
+    except Exception as exc:
+        logger.warning("[Preset] Plugin enrichment failed: %s", exc)
+        return frame_data
 
 
 # ── Preset CRUD ─────────────────────────────────────────────────────────────
@@ -121,7 +342,7 @@ async def update_preset(preset_id: str, body: UpdatePresetRequest):
     """Update a custom preset."""
     result = preset_service.update_preset(preset_id, body.model_dump(exclude_none=True))
     if not result:
-        raise HTTPException(status_code=404, detail="Preset not found or is built-in")
+        raise HTTPException(status_code=404, detail="Preset not found")
     return {"success": True, "preset": result}
 
 
@@ -129,7 +350,7 @@ async def update_preset(preset_id: str, body: UpdatePresetRequest):
 async def delete_preset(preset_id: str):
     """Delete a custom preset."""
     if not preset_service.delete_preset(preset_id):
-        raise HTTPException(status_code=404, detail="Preset not found or is built-in")
+        raise HTTPException(status_code=404, detail="Preset not found")
     return {"success": True}
 
 
@@ -167,7 +388,7 @@ async def add_element(preset_id: str, section: str, body: ElementRequest):
         raise HTTPException(status_code=400, detail=f"Invalid section. Must be one of: {VIDEO_SECTIONS}")
     result = preset_service.add_element(preset_id, section, body.model_dump(exclude_none=True))
     if not result:
-        raise HTTPException(status_code=404, detail="Preset not found or is built-in")
+        raise HTTPException(status_code=404, detail="Preset not found")
     return {"success": True, "element": result}
 
 
@@ -191,36 +412,154 @@ async def remove_element(preset_id: str, section: str, element_id: str):
 # ── Asset management ────────────────────────────────────────────────────────
 
 @router.get("/{preset_id}/assets")
-async def list_assets(preset_id: str):
+async def list_assets(preset_id: str, project_id: int | None = Query(default=None)):
     """List uploaded assets for a preset."""
-    assets = preset_service.list_assets(preset_id)
-    return {"assets": assets, "count": len(assets)}
+    payload = preset_service.list_assets(preset_id, project_id=project_id)
+    assets = payload.get("assets", [])
+
+    for asset in assets:
+        filename = asset.get("filename")
+        scope = asset.get("scope", "global")
+        if isinstance(filename, str) and isinstance(scope, str):
+            asset["url"] = _asset_url(preset_id, filename, scope, project_id)
+
+    bindings = preset_service.get_asset_variable_bindings(preset_id, project_id)
+    decorated_bindings = _decorate_variable_bindings(preset_id, bindings, project_id)
+
+    return {
+        "assets": assets,
+        "count": len(assets),
+        "bindings": decorated_bindings,
+    }
 
 
 @router.post("/{preset_id}/assets")
-async def upload_asset(preset_id: str, file: UploadFile = File(...)):
+async def upload_asset(
+    preset_id: str,
+    file: UploadFile = File(...),
+    scope: str = Form("global"),
+    project_id: int | None = Form(default=None),
+    variable_name: str | None = Form(default=None),
+):
     """Upload an image asset for a preset."""
+    normalized_scope = _normalize_asset_scope(scope)
     if file.size is not None and file.size > MAX_ASSET_SIZE_BYTES:
         raise HTTPException(status_code=413, detail="File too large (max 10 MB)")
     content = await file.read()
     if len(content) > MAX_ASSET_SIZE_BYTES:
         raise HTTPException(status_code=413, detail="File too large (max 10 MB)")
-    result = preset_service.upload_asset(preset_id, file.filename or "asset.png", content)
+    try:
+        result = preset_service.upload_asset(
+            preset_id,
+            file.filename or "asset.png",
+            content,
+            scope=normalized_scope,
+            project_id=project_id,
+            variable_name=variable_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    filename = result.get("filename")
+    if isinstance(filename, str):
+        result["url"] = _asset_url(preset_id, filename, normalized_scope, project_id)
     return {"success": True, **result}
 
 
+@router.put("/{preset_id}/assets/{filename}/scope")
+async def update_asset_scope(preset_id: str, filename: str, body: AssetScopeUpdateRequest):
+    """Move an asset between global and project stores."""
+    normalized_target = _normalize_asset_scope(body.target_scope)
+    normalized_source = _normalize_asset_scope(body.source_scope) if body.source_scope else None
+    try:
+        result = preset_service.move_asset_scope(
+            preset_id=preset_id,
+            filename=filename,
+            target_scope=normalized_target,
+            project_id=body.project_id,
+            source_scope=normalized_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    result["url"] = _asset_url(
+        preset_id,
+        result.get("filename") or filename,
+        result.get("target_scope", normalized_target),
+        body.project_id,
+    )
+    return {"success": True, **result}
+
+
+@router.put("/{preset_id}/asset-variables/{variable_name}")
+async def set_asset_variable(preset_id: str, variable_name: str, body: AssetVariableRequest):
+    """Assign or clear an asset variable mapping for defaults or project overrides."""
+    normalized_scope = _normalize_asset_scope(body.scope)
+    try:
+        result = preset_service.set_asset_variable(
+            preset_id=preset_id,
+            variable_name=variable_name,
+            filename=body.filename,
+            scope=normalized_scope,
+            project_id=body.project_id,
+            clear=body.clear,
+        )
+        bindings = preset_service.get_asset_variable_bindings(preset_id, body.project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return {
+        "success": True,
+        "mapping": result,
+        "bindings": _decorate_variable_bindings(preset_id, bindings, body.project_id),
+    }
+
+
 @router.delete("/{preset_id}/assets/{filename}")
-async def delete_asset(preset_id: str, filename: str):
+async def delete_asset(
+    preset_id: str,
+    filename: str,
+    scope: str = Query(default="global"),
+    project_id: int | None = Query(default=None),
+):
     """Delete an asset."""
-    if not preset_service.delete_asset(preset_id, filename):
+    normalized_scope = _normalize_asset_scope(scope)
+    try:
+        deleted = preset_service.delete_asset(
+            preset_id,
+            filename,
+            scope=normalized_scope,
+            project_id=project_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not deleted:
         raise HTTPException(status_code=404, detail="Asset not found")
     return {"success": True}
 
 
 @router.get("/{preset_id}/assets/{filename}")
-async def serve_asset(preset_id: str, filename: str):
+async def serve_asset(
+    preset_id: str,
+    filename: str,
+    scope: str = Query(default="global"),
+    project_id: int | None = Query(default=None),
+):
     """Serve an asset file."""
-    path = preset_service.get_asset_path(preset_id, filename)
+    normalized_scope = _normalize_asset_scope(scope)
+    path = preset_service.get_asset_path(
+        preset_id,
+        filename,
+        scope=normalized_scope,
+        project_id=project_id,
+    )
     if not path:
         raise HTTPException(status_code=404, detail="Asset not found")
     return FileResponse(path)
@@ -247,6 +586,93 @@ async def delete_intro_video(preset_id: str):
     return {"success": True}
 
 
+# ── HTML content management ─────────────────────────────────────────────────
+
+@router.get("/{preset_id}/html")
+async def get_html_content(preset_id: str):
+    """Get overlay HTML content for a design."""
+    html = preset_service.get_html_content(preset_id)
+    if html is None:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    return {"html_content": html, "preset_id": preset_id}
+
+
+@router.put("/{preset_id}/html")
+async def update_html_content(preset_id: str, body: dict[str, Any]):
+    """Update overlay HTML content for a custom design."""
+    html_content = body.get("html_content")
+    if html_content is None:
+        raise HTTPException(status_code=400, detail="html_content is required")
+    if not preset_service.update_html_content(preset_id, html_content):
+        raise HTTPException(status_code=404, detail="Preset not found")
+    return {"success": True, "preset_id": preset_id}
+
+
+class EditorPreviewRequest(BaseModel):
+    html_content: str
+    project_id: int | None = None
+    frame_data: dict[str, Any] = {}
+    analyze_animations: bool = False
+    include_rendered_html: bool = False
+    render_screenshot: bool = True
+
+
+@router.post("/{preset_id}/editor-preview")
+async def editor_preview(preset_id: str, body: EditorPreviewRequest):
+    """Render a live preview of raw HTML content for the Build editor."""
+    from server.services.overlay_service import overlay_service, SAMPLE_FRAME_DATA
+    from server.utils.overlay_engine import overlay_engine
+
+    preset = preset_service.get_preset(preset_id)
+    if not preset:
+        raise HTTPException(status_code=404, detail="Preset not found")
+
+    # Smart merge: use SAMPLE_FRAME_DATA as defaults, overlay caller values.
+    frame_data = _merge_preview_frame_data(SAMPLE_FRAME_DATA, body.frame_data)
+    frame_data = await _enrich_with_plugin_data(frame_data, body.project_id)
+    _inject_asset_variables(frame_data, preset_id, body.project_id)
+
+    try:
+        if not overlay_engine.initialized:
+            init_result = await overlay_service.initialize()
+            if not init_result.get("success"):
+                return init_result
+
+        runtime_html = _inject_preset_css_variables(body.html_content, preset)
+        result = await overlay_engine.render_raw_html(
+            runtime_html,
+            frame_data,
+            analyze_animations=body.analyze_animations,
+            include_rendered_html=body.include_rendered_html,
+            render_screenshot=body.render_screenshot,
+        )
+        return result
+    except Exception:
+        logger.exception("[Preset] Editor preview failed for %s", preset_id)
+        raise HTTPException(status_code=500, detail="Editor preview rendering failed")
+
+
+@router.get("/{preset_id}/editor-context")
+async def get_editor_context(preset_id: str, project_id: int | None = None):
+    """Get available Jinja2 template variables with sample values for the editor."""
+    from server.services.overlay_service import SAMPLE_FRAME_DATA, VARIABLE_DOCS, VARIABLE_SOURCES
+
+    preset = preset_service.get_preset(preset_id)
+    if not preset:
+        raise HTTPException(status_code=404, detail="Preset not found")
+
+    variables = dict(SAMPLE_FRAME_DATA)
+    variables = await _enrich_with_plugin_data(variables, project_id)
+    _inject_asset_variables(variables, preset_id, project_id)
+
+    return {
+        "preset_id": preset_id,
+        "variables": variables,
+        "variable_docs": VARIABLE_DOCS,
+        "variable_sources": VARIABLE_SOURCES,
+    }
+
+
 # ── Render preview ──────────────────────────────────────────────────────────
 
 @router.post("/{preset_id}/render-preview")
@@ -268,20 +694,44 @@ async def render_preset_preview(preset_id: str, body: RenderPreviewRequest):
         raise HTTPException(status_code=404, detail="Preset not found")
 
     section = body.section
-    frame_data = body.frame_data or dict(SAMPLE_FRAME_DATA)
-    frame_data["section"] = section
+
+    # Start with rich SAMPLE_FRAME_DATA defaults, then overlay any
+    # non-null / non-empty values the caller provided.  This ensures
+    # overlay templates always have displayable content even when the
+    # frontend sends sparse telemetry or a minimal fallback dict.
+    frame_data = _merge_preview_frame_data(SAMPLE_FRAME_DATA, body.frame_data)
+    _apply_section_preview_overrides(frame_data, section)
+    frame_data = await _enrich_with_plugin_data(frame_data, body.project_id)
+    _inject_asset_variables(frame_data, preset_id, body.project_id)
     if body.variables:
         preset = copy.deepcopy(preset)
         preset["variables"] = body.variables
 
     resolution = overlay_engine.resolution
-    html_content = compose_preset_html(
-        preset=preset,
-        section=section,
-        frame_data=frame_data,
-        resolution=resolution,
-        element_filter=body.element_id,
-    )
+
+    section_elements = preset.get("sections", {}).get(section, [])
+    has_section_elements = bool(section_elements)
+
+    # Load the design HTML from disk (built-in templates or custom overlay.html)
+    # rather than relying on the in-memory preset dict which doesn't carry it.
+    design_html = _ensure_local_tailwind_runtime(preset_service.get_html_content(preset_id) or "")
+    has_html_content = bool(design_html.strip())
+
+    # For html-based designs (common in Build), callers can explicitly force
+    # html_content rendering so Preview/Design match Build output.
+    # Keep element-filter behavior on the composition path.
+    render_source = "composed_sections"
+    if has_html_content and not body.element_id and (body.prefer_html_content or not has_section_elements):
+        html_content = _inject_preset_css_variables(design_html, preset)
+        render_source = "preset_html_content"
+    else:
+        html_content = compose_preset_html(
+            preset=preset,
+            section=section,
+            frame_data=frame_data,
+            resolution=resolution,
+            element_filter=body.element_id,
+        )
 
     # Render via overlay engine
     try:
@@ -294,10 +744,67 @@ async def render_preset_preview(preset_id: str, body: RenderPreviewRequest):
             html_content,
             frame_data,
             analyze_animations=body.analyze_animations,
-            include_rendered_html=body.include_rendered_html,
+            include_rendered_html=True,
             render_screenshot=body.render_screenshot,
         )
     except Exception:
         logger.exception("[Preset] Render preview failed for %s", preset_id)
         raise HTTPException(status_code=500, detail="Failed to render preview")
+
+    if body.include_debug and isinstance(result, dict):
+        rendered_html = result.get("rendered_html") if isinstance(result.get("rendered_html"), str) else ""
+        png_base64 = result.get("png_base64") if isinstance(result.get("png_base64"), str) else ""
+
+        rendered_html_sha1 = hashlib.sha1(rendered_html.encode("utf-8")).hexdigest() if rendered_html else None
+        png_base64_sha1 = hashlib.sha1(png_base64.encode("ascii", errors="ignore")).hexdigest() if png_base64 else None
+
+        png_bytes_sha1 = None
+        if png_base64:
+            try:
+                png_bytes = base64.b64decode(png_base64)
+                png_bytes_sha1 = hashlib.sha1(png_bytes).hexdigest()
+            except Exception:
+                png_bytes_sha1 = None
+
+        result["debug_render"] = {
+            "preset_id": preset_id,
+            "section": section,
+            "frame_section": frame_data.get("section"),
+            "frame_section_canonical": frame_data.get("section_canonical"),
+            "render_source": render_source,
+            "has_html_content": has_html_content,
+            "section_element_count": len(section_elements),
+            "used_element_filter": bool(body.element_id),
+            "prefer_html_content": bool(body.prefer_html_content),
+            "include_rendered_html": bool(body.include_rendered_html),
+            "render_screenshot": bool(body.render_screenshot),
+            "html_length": len(html_content),
+            "rendered_html_length": len(rendered_html),
+            "rendered_html_sha1": rendered_html_sha1,
+            "rendered_html_head": rendered_html[:500],
+            "png_base64_length": len(png_base64),
+            "png_base64_sha1": png_base64_sha1,
+            "png_bytes_sha1": png_bytes_sha1,
+            "frame_summary": {
+                "driver_name": frame_data.get("driver_name"),
+                "position": frame_data.get("position"),
+                "current_lap": frame_data.get("current_lap", 0),
+                "flag": frame_data.get("flag", ""),
+                "standings_count": len(frame_data.get("standings", [])),
+                "session_time": frame_data.get("session_time", ""),
+            },
+        }
+
+        logger.info(
+            "[Preset][render-preview] preset=%s section=%s source=%s elements=%s has_html=%s prefer_html=%s html_len=%s include_html=%s screenshot=%s",
+            preset_id,
+            section,
+            render_source,
+            len(section_elements),
+            has_html_content,
+            body.prefer_html_content,
+            len(html_content),
+            body.include_rendered_html,
+            body.render_screenshot,
+        )
     return result

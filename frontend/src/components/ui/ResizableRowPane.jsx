@@ -27,7 +27,7 @@ export default function ResizableRowPane({
   maxBottom = 600,
   collapsed = false,
   collapsedBottomHeight = 64,
-  containerClassName = 'flex flex-col flex-1 min-h-0 overflow-hidden',
+  containerClassName = 'flex flex-col flex-1 h-full min-h-0 overflow-hidden',
   topClassName = '',
   bottomClassName = 'overflow-hidden',
 }) {

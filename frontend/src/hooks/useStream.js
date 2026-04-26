@@ -35,7 +35,7 @@ export function useStream() {
   }, [streamKey])
 
   // ── Window capture target ───────────────────────────────────────────────
-  const [captureTarget,   setCaptureTarget]   = useState({ mode: 'auto', hwnd: null })
+  const [captureTarget,   setCaptureTarget]   = useState({ mode: 'auto', hwnd: null, width: null, height: null })
   const [windowList,      setWindowList]      = useState([])
   const [loadingWindows,  setLoadingWindows]  = useState(false)
 
@@ -47,7 +47,12 @@ export function useStream() {
         apiGet('/iracing/capture-target'),
       ])
       setWindowList(windows)
-      setCaptureTarget(target)
+      setCaptureTarget({
+        mode: target?.mode || 'auto',
+        hwnd: target?.hwnd ?? null,
+        width: Number(target?.width) > 0 ? Number(target.width) : null,
+        height: Number(target?.height) > 0 ? Number(target.height) : null,
+      })
     } catch {} finally {
       setLoadingWindows(false)
     }
@@ -55,19 +60,38 @@ export function useStream() {
 
   const selectWindow = useCallback(async (hwnd, onDone) => {
     try {
-      await apiPost('/iracing/capture-target', { hwnd })
-      setCaptureTarget({ mode: 'manual', hwnd })
+      const result = await apiPost('/iracing/capture-target', { hwnd })
+      setCaptureTarget({
+        mode: result?.mode || 'manual',
+        hwnd: result?.hwnd ?? hwnd,
+        width: Number(result?.width) > 0 ? Number(result.width) : null,
+        height: Number(result?.height) > 0 ? Number(result.height) : null,
+      })
       onDone?.()
     } catch {}
   }, [])
 
   const resetToAuto = useCallback(async (onDone) => {
     try {
-      await apiDelete('/iracing/capture-target')
-      setCaptureTarget({ mode: 'auto', hwnd: null })
+      const result = await apiDelete('/iracing/capture-target')
+      setCaptureTarget({
+        mode: result?.mode || 'auto',
+        hwnd: null,
+        width: Number(result?.width) > 0 ? Number(result.width) : null,
+        height: Number(result?.height) > 0 ? Number(result.height) : null,
+      })
       onDone?.()
     } catch {}
   }, [])
+
+  const streamAspectRatio = (() => {
+    const w = Number(captureTarget?.width)
+    const h = Number(captureTarget?.height)
+    if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+      return w / h
+    }
+    return 16 / 9
+  })()
 
   // ── Stream reset ────────────────────────────────────────────────────────
   const handleStreamReset = useCallback(async () => {
@@ -114,6 +138,7 @@ export function useStream() {
     streamUrl, h264Url, hlsUrl, activeStreamUrl,
     // window picker
     captureTarget,
+    streamAspectRatio,
     windowList,
     loadingWindows,
     fetchWindows,

@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, forwardRef, useImperativeHandle } from 'react'
+import { useState, useRef, useCallback, useEffect, forwardRef, useImperativeHandle } from 'react'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 
@@ -25,17 +25,43 @@ export default forwardRef(function ResizableSidebar({
   const [width, setWidth] = useLocalStorage(`${storageKey}:width`, defaultWidth)
   const [collapsed, setCollapsed] = useLocalStorage(`${storageKey}:collapsed`, false)
   const [overlay, setOverlay] = useState(false)
+  const [overlayAnchor, setOverlayAnchor] = useState(null)
   const isDragging = useRef(false)
   const [dragging, setDragging] = useState(false)
+  const collapsedRailRef = useRef(null)
+
+  const updateOverlayAnchor = useCallback(() => {
+    const rail = collapsedRailRef.current
+    if (!rail) return
+    const rect = rail.getBoundingClientRect()
+    setOverlayAnchor({
+      left: rect.right,
+      top: rect.top,
+      height: rect.height,
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!overlay) return undefined
+    const refresh = () => updateOverlayAnchor()
+    window.addEventListener('resize', refresh)
+    window.addEventListener('scroll', refresh, true)
+    refresh()
+    return () => {
+      window.removeEventListener('resize', refresh)
+      window.removeEventListener('scroll', refresh, true)
+    }
+  }, [overlay, updateOverlayAnchor])
 
   useImperativeHandle(ref, () => ({
     switchTab: (tabId) => {
       setActiveTab(tabId)
       if (collapsed) {
+        updateOverlayAnchor()
         setOverlay(true)
       }
     },
-  }), [collapsed, setActiveTab])
+  }), [collapsed, setActiveTab, updateOverlayAnchor])
 
   const handleDragStart = useCallback((e) => {
     isDragging.current = true
@@ -70,6 +96,7 @@ export default forwardRef(function ResizableSidebar({
 
   const openOverlayTab = (tabId) => {
     setActiveTab(tabId)
+    updateOverlayAnchor()
     setOverlay(true)
   }
 
@@ -79,13 +106,13 @@ export default forwardRef(function ResizableSidebar({
   if (collapsed) {
     return (
       <>
-        <div className="w-10 flex flex-col items-center py-2 gap-2 border-r border-border bg-bg-secondary shrink-0 select-none">
+        <div ref={collapsedRailRef} className="w-10 flex flex-col items-center py-2 gap-2 border-r border-border bg-bg-secondary shrink-0 select-none">
           {tabs.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               onClick={() => openOverlayTab(id)}
               title={label}
-              className="p-1.5 rounded-md hover:bg-surface-hover text-text-tertiary hover:text-text-secondary transition-colors"
+              className="p-1.5 rounded-md hover:bg-surface-hover text-accent/80 hover:text-accent transition-colors"
             >
               <Icon size={16} />
             </button>
@@ -93,7 +120,7 @@ export default forwardRef(function ResizableSidebar({
           <button
             onClick={() => setCollapsed(false)}
             title="Expand sidebar"
-            className="mt-auto p-1.5 rounded-md hover:bg-surface-hover text-text-tertiary hover:text-text-secondary transition-colors"
+            className="p-1.5 rounded-md hover:bg-surface-hover text-accent/80 hover:text-accent transition-colors"
           >
             <ChevronRight size={16} />
           </button>
@@ -103,7 +130,14 @@ export default forwardRef(function ResizableSidebar({
         {overlay && (
           <>
             <div className="fixed inset-0 z-30" onClick={() => setOverlay(false)} />
-            <div className="absolute left-10 top-0 bottom-0 z-40 w-96 bg-bg-secondary border-r border-border shadow-xl flex flex-col overflow-hidden">
+            <div
+              className="fixed z-40 w-96 bg-bg-secondary border-r border-border shadow-xl flex flex-col overflow-hidden"
+              style={{
+                left: overlayAnchor?.left ?? 40,
+                top: overlayAnchor?.top ?? 0,
+                height: overlayAnchor?.height ?? window.innerHeight,
+              }}
+            >
               {/* Overlay tab bar */}
               <div className="flex shrink-0 border-b border-border">
                 {tabs.map(({ id, label, icon: Icon, count }) => (
@@ -117,12 +151,12 @@ export default forwardRef(function ResizableSidebar({
                                  : 'border-transparent text-text-tertiary hover:text-text-secondary'
                                }`}
                   >
-                    <Icon size={13} />
+                            <Icon size={13} className={activeTab === id ? 'text-accent' : 'text-accent/70'} />
                     {label}{count != null ? ` (${count})` : ''}
                   </button>
                 ))}
               </div>
-              <div className="flex-1 overflow-y-auto">
+              <div className="flex-1 min-h-0 overflow-hidden">
                 {activeContent}
               </div>
             </div>
@@ -154,7 +188,7 @@ export default forwardRef(function ResizableSidebar({
                          : 'border-transparent text-text-tertiary hover:text-text-secondary'
                        }`}
           >
-            <Icon size={13} />
+            <Icon size={13} className={activeTab === id ? 'text-accent' : 'text-accent/70'} />
             {label}{count != null ? ` (${count})` : ''}
           </button>
         ))}
@@ -168,18 +202,19 @@ export default forwardRef(function ResizableSidebar({
       </div>
 
       {/* Tab content */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 min-h-0 overflow-hidden">
         {activeContent}
       </div>
 
       {/* Drag handle */}
       <div
         onMouseDown={handleDragStart}
-        className="absolute top-0 bottom-0 right-0 cursor-col-resize group/divider z-10"
+        className="absolute top-0 bottom-0 right-0 cursor-col-resize group/divider z-30"
         style={{ width: 1, marginRight: -1 }}
       >
         <div className="absolute inset-y-0 -left-2 -right-2" />
         <div className="absolute inset-y-0 right-0 w-px bg-border transition-colors group-hover/divider:bg-accent group-active/divider:bg-accent" />
+        <div className="absolute inset-y-0 right-0 w-[2px] bg-violet-400/90 opacity-0 transition-opacity group-hover/divider:opacity-100 group-active/divider:opacity-100" />
       </div>
     </div>
   )

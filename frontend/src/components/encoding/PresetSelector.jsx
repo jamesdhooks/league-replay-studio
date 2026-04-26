@@ -8,14 +8,15 @@ import { ChevronDown, Plus, Copy, Edit3 } from 'lucide-react'
  * @param {string}   props.selectedPresetId - currently selected preset id
  * @param {Object|null} props.selectedPreset - resolved preset object
  * @param {Function} props.onSelect         - (presetId) => void
- * @param {Function} props.onDuplicate      - (presetId) => void  — quick-duplicate
  * @param {Function} props.onEdit           - (mode, preset) => void  — open editor
  * @param {Function} props.onCreate         - () => void  — open editor in create mode
  */
 export default function PresetSelector({
   presets, selectedPresetId, selectedPreset,
-  onSelect, onDuplicate, onEdit, onCreate,
+  onSelect, onEdit, onCreate,
 }) {
+  const visiblePresets = (Array.isArray(presets) ? presets : []).filter((p) => p?.id !== 'custom')
+
   return (
     <div className="space-y-2">
       <div className="relative">
@@ -26,7 +27,7 @@ export default function PresetSelector({
                      px-3 py-2 pr-8 text-xs text-text-primary cursor-pointer
                      focus:outline-none focus:ring-1 focus:ring-accent"
         >
-          {presets.map(p => (
+          {visiblePresets.map(p => (
             <option key={p.id} value={p.id}>{p.name}{p.is_builtin === false ? ' ✦' : ''}</option>
           ))}
         </select>
@@ -85,18 +86,6 @@ export default function PresetSelector({
                 <><Edit3 className="w-3 h-3" />Edit</>
               )}
             </button>
-            {selectedPreset.is_builtin !== false && (
-              <button
-                onClick={() => onDuplicate(selectedPreset.id)}
-                className="flex items-center gap-1 px-2 py-1 rounded text-xxs font-medium
-                           text-text-secondary hover:text-text-primary hover:bg-bg-hover
-                           border border-border transition-colors"
-                title="Quick duplicate"
-              >
-                <Copy className="w-3 h-3" />
-                Duplicate
-              </button>
-            )}
           </>
         )}
       </div>

@@ -52,12 +52,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from server.utils.command_log import command_log
+
 logger = logging.getLogger(__name__)
 
 # ── Configuration defaults ──────────────────────────────────────────────────
 
 DEFAULT_CLIP_PADDING = 2.0          # seconds before each clip
-DEFAULT_CLIP_PADDING_AFTER = 5.0    # seconds after each clip
+DEFAULT_CLIP_PADDING_AFTER = 1.0    # seconds after each clip
 MAX_SEEK_RETRIES = 5                # attempts to validate a seek command
 MAX_CAMERA_RETRIES = 3              # attempts to validate camera/driver switch
 SEEK_COOLDOWN = 0.8                 # seconds between seek retry attempts
@@ -106,6 +108,16 @@ class CaptureLogEntry:
         if self.extra:
             d["extra"] = self.extra
         return d
+
+class CaptureAbortError(RuntimeError):
+    """Raised when script capture aborts due to an unrecoverable validation failure."""
+
+    def __init__(self, segment_id: str, action: str, reason: str, extra: Optional[dict] = None):
+        super().__init__(reason)
+        self.segment_id = segment_id
+        self.action = action
+        self.reason = reason
+        self.extra = extra or {}
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -196,6 +208,7 @@ class HotkeyRecorderAdapter:
         stop_hotkey: str,
         poll_timeout: float = 30.0,
         stable_checks: int = OBS_STABLE_CHECKS,
+        cancelled_fn: Optional[Callable[[], bool]] = None,
         _sleep: Callable[[float], None] = time.sleep,
         _wall_time: Callable[[], float] = time.time,
     ) -> None:
@@ -204,6 +217,7 @@ class HotkeyRecorderAdapter:
         self._stop_hotkey = stop_hotkey
         self._poll_timeout = poll_timeout
         self._stable_checks = stable_checks
+        self._cancelled_fn = cancelled_fn or (lambda: False)
         self._sleep = _sleep
         self._wall_time = _wall_time
         self._target_path: Optional[str] = None
@@ -245,10 +259,13 @@ class HotkeyRecorderAdapter:
         if self._target_path:
             ok = self._poll_and_move(self._target_path)
             if not ok:
-                logger.error(
-                    "[HotkeyRecorder] Timed out — clip may not have been saved to %s",
-                    self._target_path,
-                )
+                if self._cancelled_fn():
+                    logger.info("[HotkeyRecorder] Poll cancelled by user")
+                else:
+                    logger.error(
+                        "[HotkeyRecorder] Timed out — clip may not have been saved to %s",
+                        self._target_path,
+                    )
 
     # -- Internal polling logic ---------------------------------------------
 
@@ -275,7 +292,18 @@ class HotkeyRecorderAdapter:
         )
 
         while self._wall_time() < deadline:
-            self._sleep(OBS_POLL_INTERVAL)
+            if self._cancelled_fn():
+                logger.info("[HotkeyRecorder] Poll cancelled before file detection")
+                return False
+
+            slept = 0.0
+            while slept < OBS_POLL_INTERVAL:
+                if self._cancelled_fn():
+                    logger.info("[HotkeyRecorder] Poll cancelled while waiting")
+                    return False
+                slice_s = min(0.25, OBS_POLL_INTERVAL - slept)
+                self._sleep(slice_s)
+                slept += slice_s
 
             new_files = get_recent_video_files(self._watch_folder, since)
             for f in new_files:
@@ -390,9 +418,12 @@ class ScriptCaptureEngine:
         self._now: Callable[[], float] = _now or time.monotonic
         self._sleep: Callable[[float], None] = _sleep or time.sleep
         self._clips: list[dict] = []
+        self._composition_manifest: list[dict] = []
         self._capture_log: list[CaptureLogEntry] = []
         self._cancelled = False
         self._segment_strategies: list[dict] = []
+        self._segment_lookup: dict[str, dict] = {}
+        self._segment_order_lookup: dict[str, int] = {}
 
     # -- Public API ---------------------------------------------------------
 
@@ -409,6 +440,11 @@ class ScriptCaptureEngine:
     def capture_log(self) -> list[dict]:
         """Return the structured capture log as a list of dicts."""
         return [entry.to_dict() for entry in self._capture_log]
+
+    @property
+    def composition_manifest(self) -> list[dict]:
+        """Return a per-segment manifest with source offsets for Compose."""
+        return list(self._composition_manifest)
 
     @property
     def segment_strategies(self) -> list[dict]:
@@ -432,15 +468,26 @@ class ScriptCaptureEngine:
         """
         self._cancelled = False
         self._clips = []
+        self._composition_manifest = []
         self._capture_log = []
         self._segment_strategies = []
 
-        # Filter out transitions and zero-duration segments
+        # Filter out non-capturable markers (transition/bridge) and zero-duration segments.
         active_segments = [
             s for s in script
-            if s.get("type") != "transition"
+            if s.get("type") not in {"transition", "bridge"}
             and (s.get("end_time_seconds", 0) - s.get("start_time_seconds", 0)) > 0
         ]
+        self._segment_lookup = {
+            str(s.get("id", s.get("segment_id", ""))): s
+            for s in active_segments
+            if str(s.get("id", s.get("segment_id", "")))
+        }
+        self._segment_order_lookup = {
+            str(s.get("id", s.get("segment_id", ""))): idx
+            for idx, s in enumerate(active_segments)
+            if str(s.get("id", s.get("segment_id", "")))
+        }
         total = len(active_segments)
         if total == 0:
             return []
@@ -474,7 +521,9 @@ class ScriptCaptureEngine:
         recording = False
         current_clip_path: Optional[str] = None
         current_clip_segments: list[str] = []
+        current_clip_segment_defs: list[dict] = []
         clip_start_time: float = 0
+        clip_capture_start_time: float = 0
 
         for idx, segment in enumerate(active_segments):
             if self._cancelled:
@@ -513,6 +562,7 @@ class ScriptCaptureEngine:
                     segment, iracing_bridge, cam_name_to_num, available_cameras
                 )
                 current_clip_segments.append(seg_id)
+                current_clip_segment_defs.append(segment)
 
                 # Wait for segment duration, firing any schedule at their offsets.
                 # pre_roll=0 because replay is already at this segment's start.
@@ -529,37 +579,55 @@ class ScriptCaptureEngine:
                 if recording:
                     recording = self._stop_and_save_clip(
                         capture_engine, iracing_bridge, current_clip_path,
-                        current_clip_segments, clip_start_time, idx - 1,
+                        current_clip_segments, current_clip_segment_defs,
+                        clip_start_time, clip_capture_start_time, idx - 1,
                         section
                     )
 
-                # 1. Pause replay
-                self._log_entry(seg_id, "seek", "Pausing replay")
-                iracing_bridge.set_replay_speed(0)
-                self._sleep(0.2)
+                # 1. Prime replay motion before session-time seek.
+                # iRacing can ignore replay_search_session_time when replay is paused
+                # or parked at an ended frame; seek while moving is more reliable.
+                self._log_entry(seg_id, "seek", "Priming replay at 1× for seek")
+                iracing_bridge.set_replay_speed(1)
+                self._sleep(0.35)
 
                 # 2. Seek to start time minus padding buffer
                 padding = segment.get("clip_padding", self._clip_padding)
                 seek_target_s = max(0, start - padding)
                 seek_ok = self._validated_seek(
-                    seg_id, iracing_bridge, seek_target_s
+                    seg_id, iracing_bridge, seek_target_s, segment
                 )
                 if not seek_ok:
-                    self._log_entry(seg_id, "error",
-                        "Seek validation failed after all retries — proceeding anyway")
+                    self._fail_capture(
+                        seg_id,
+                        "seek",
+                        f"Seek validation failed for segment '{seg_id}' after {MAX_SEEK_RETRIES} retries",
+                        {
+                            "max_seek_retries": MAX_SEEK_RETRIES,
+                            "seek_target_s": seek_target_s,
+                        },
+                    )
 
-                # 3. Switch camera and driver focus with validation
+                # 3. Pause replay after seek so camera setup and recorder start
+                # happen from a stable frame before playback resumes.
+                self._log_entry(seg_id, "seek", "Pausing replay after seek")
+                iracing_bridge.set_replay_speed(0)
+                self._sleep(0.2)
+
+                # 4. Switch camera and driver focus with validation
                 self._apply_camera_and_driver(
                     segment, iracing_bridge, cam_name_to_num, available_cameras
                 )
 
-                # 4. Build clip filename
+                # 5. Build clip filename
                 clip_name = self._build_clip_name(seg_id, section, seg_type, segment, idx)
                 current_clip_path = str(self._output_dir / f"{clip_name}.mp4")
                 current_clip_segments = [seg_id]
+                current_clip_segment_defs = [segment]
                 clip_start_time = start
+                clip_capture_start_time = seek_target_s
 
-                # 5. Start recording
+                # 6. Start recording
                 try:
                     capture_engine.start_recording(current_clip_path, mode="auto")
                     self._log_entry(seg_id, "record_start",
@@ -571,13 +639,16 @@ class ScriptCaptureEngine:
                         f"Recording start failed: {exc}", success=False)
                     continue
 
-                # 6. Resume replay at 1×
+                # 7. Resume replay at 1×
                 iracing_bridge.set_replay_speed(1)
                 self._log_entry(seg_id, "info", "Replay resumed at 1×")
 
-                # 7. Wait for (pre-roll padding + segment duration), firing any
+                # 8. Wait for (pre-roll padding + segment duration), firing any
                 #    scheduled camera switches at their exact offsets.
                 #    pre_roll=padding so offset_seconds is relative to segment start.
+                #    Recording padding is intentionally uniform across all segments;
+                #    compose later trims to exact segment boundaries.
+                padding = self._clip_padding
                 wait_seconds = duration + padding
                 self._log_entry(seg_id, "info",
                     f"Waiting {wait_seconds:.1f}s "
@@ -590,7 +661,7 @@ class ScriptCaptureEngine:
             if not is_contiguous_with_next or idx == total - 1:
                 if recording:
                     # Wait for post-padding
-                    post_padding = segment.get("clip_padding_after", self._clip_padding_after)
+                    post_padding = self._clip_padding_after
                     if post_padding > 0:
                         self._log_entry(seg_id, "info",
                             f"Waiting {post_padding:.1f}s post-padding")
@@ -601,7 +672,8 @@ class ScriptCaptureEngine:
 
                     recording = self._stop_and_save_clip(
                         capture_engine, iracing_bridge, current_clip_path,
-                        current_clip_segments, clip_start_time, idx, section
+                        current_clip_segments, current_clip_segment_defs,
+                        clip_start_time, clip_capture_start_time, idx, section
                     )
 
         # Final progress
@@ -613,6 +685,24 @@ class ScriptCaptureEngine:
         })
 
         return list(self._clips)
+
+    def _fail_capture(
+        self,
+        seg_id: str,
+        action: str,
+        reason: str,
+        extra: Optional[dict] = None,
+    ) -> None:
+        """Log and raise a structured capture-abort error with comms-log entry."""
+        payload = {
+            "segment_id": seg_id,
+            "action": action,
+            "reason": reason,
+            **(extra or {}),
+        }
+        self._log_entry(seg_id, "error", f"{action} abort: {reason}", success=False, extra=payload)
+        command_log.record("capture-abort", payload, result="error", source="script_capture")
+        raise CaptureAbortError(seg_id, action, reason, extra)
 
     def compile_clips(self, output_path: str) -> Optional[str]:
         """Concatenate all captured clips into a single video file.
@@ -736,38 +826,153 @@ class ScriptCaptureEngine:
 
     # -- Validation/retry helpers -------------------------------------------
 
+    def _find_best_session_for_target(
+        self,
+        seg_id: str,
+        iracing_bridge: Any,
+        target_time_s: float,
+    ) -> int:
+        """Probe available sessions to find which one contains the target time.
+        
+        Returns the session number with the smallest drift, or 0 if none valid.
+        """
+        target_ms = max(0, int(target_time_s * 1000))
+        session_data = iracing_bridge.session_data
+        available_sessions = session_data.get("sessions", [])
+        
+        if not available_sessions:
+            self._log_entry(seg_id, "seek",
+                "No available sessions in replay — defaulting to session 0")
+            return 0
+        
+        best_session = 0
+        best_drift = float('inf')
+        
+        # Probe each available session
+        for session_info in available_sessions:
+            session_idx = session_info.get("index", 0)
+            session_type = session_info.get("type", "")
+            
+            # Try seeking to this session + target time
+            if not iracing_bridge.replay_search_session_time(session_idx, target_ms):
+                continue
+            
+            # Wait for seek to settle
+            _interruptible_sleep(
+                0.3, lambda: self._cancelled,
+                _now=self._now, _sleep=self._sleep,
+            )
+            
+            # Check actual position
+            snapshot = iracing_bridge.capture_snapshot()
+            if snapshot:
+                actual_time = snapshot.get("session_time", 0.0)
+                actual_ms = int(actual_time * 1000)
+                drift_ms = abs(actual_ms - target_ms)
+                
+                command_log.record(
+                    "session-probe",
+                    {
+                        "segment_id": seg_id,
+                        "session_num": session_idx,
+                        "session_type": session_type,
+                        "target_ms": target_ms,
+                        "actual_ms": actual_ms,
+                        "drift_ms": drift_ms,
+                    },
+                    source="script_capture",
+                )
+                
+                self._log_entry(seg_id, "seek",
+                    f"Session probe: session={session_idx} ({session_type}) "
+                    f"drift={drift_ms}ms",
+                    extra={"session_idx": session_idx, "drift_ms": drift_ms})
+                
+                if drift_ms < best_drift:
+                    best_drift = drift_ms
+                    best_session = session_idx
+        
+        if best_drift == float('inf'):
+            self._log_entry(seg_id, "seek",
+                "Session probe failed for all sessions — defaulting to 0")
+            return 0
+        
+        self._log_entry(seg_id, "seek",
+            f"Selected session {best_session} (drift={best_drift}ms)",
+            extra={"selected_session": best_session, "best_drift": best_drift})
+        
+        # Seek to the best session one more time to land on it
+        iracing_bridge.replay_search_session_time(best_session, target_ms)
+        _interruptible_sleep(
+            0.3, lambda: self._cancelled,
+            _now=self._now, _sleep=self._sleep,
+        )
+        
+        return best_session
+
     def _validated_seek(
         self,
         seg_id: str,
         iracing_bridge: Any,
         target_time_s: float,
+        segment: Optional[dict] = None,
     ) -> bool:
         """Seek to target_time_s and validate via telemetry readback.
 
         Returns True if seek was validated within tolerance.
+        
+        If segment dict is provided and has session_num, uses it directly.
+        Otherwise falls back to current replay session or probing.
         """
         target_ms = max(0, int(target_time_s * 1000))
-        session_num = iracing_bridge.get_replay_session_num()
-        if session_num < 0:
+        
+        # First: check if segment has explicit session_num from script metadata
+        session_num = segment.get("session_num", -1) if segment else -1
+        if session_num >= 0:
             self._log_entry(seg_id, "seek",
-                "Replay session num unavailable, defaulting to 0")
-            session_num = 0
+                f"Using segment session_num={session_num} from script metadata")
+        else:
+            # Fall back to current replay session
+            session_num = iracing_bridge.get_replay_session_num()
+            if session_num < 0:
+                self._log_entry(seg_id, "seek",
+                    "Replay session num unavailable — probing available sessions...")
+                session_num = self._find_best_session_for_target(seg_id, iracing_bridge, target_time_s)
 
         for attempt in range(1, MAX_SEEK_RETRIES + 1):
+            if self._cancelled:
+                return False
             self._log_entry(seg_id, "seek",
                 f"Seeking to {_format_race_time(target_time_s)} "
                 f"(session={session_num}, ms={target_ms})",
                 extra={"attempt": attempt, "target_ms": target_ms})
 
             result = iracing_bridge.replay_search_session_time(session_num, target_ms)
+            command_log.record(
+                "seek-session-time-attempt",
+                {
+                    "segment_id": seg_id,
+                    "attempt": attempt,
+                    "session_num": session_num,
+                    "target_ms": target_ms,
+                    "command_result": bool(result),
+                },
+                source="script_capture",
+            )
             if not result:
                 self._log_entry(seg_id, "seek",
                     "Seek command returned False",
                     success=False, attempt=attempt)
-                self._sleep(SEEK_COOLDOWN)
+                _interruptible_sleep(
+                    SEEK_COOLDOWN, lambda: self._cancelled,
+                    _now=self._now, _sleep=self._sleep,
+                )
                 continue
 
-            self._sleep(0.5)  # allow seek to settle
+            _interruptible_sleep(
+                0.5, lambda: self._cancelled,
+                _now=self._now, _sleep=self._sleep,
+            )  # allow seek to settle
 
             # Validate: read back current session time
             snapshot = iracing_bridge.capture_snapshot()
@@ -775,6 +980,21 @@ class ScriptCaptureEngine:
                 actual_time = snapshot.get("session_time", 0.0)
                 actual_ms = int(actual_time * 1000)
                 drift_ms = abs(actual_ms - target_ms)
+                command_log.record(
+                    "seek-session-time-validate",
+                    {
+                        "segment_id": seg_id,
+                        "attempt": attempt,
+                        "target_ms": target_ms,
+                        "actual_ms": actual_ms,
+                        "drift_ms": drift_ms,
+                        "replay_speed": snapshot.get("replay_speed"),
+                        "replay_frame": snapshot.get("replay_frame"),
+                        "replay_session_num": snapshot.get("replay_session_num"),
+                    },
+                    result="ok" if drift_ms <= SEEK_TOLERANCE_MS else "drift",
+                    source="script_capture",
+                )
 
                 self._log_entry(seg_id, "validate",
                     f"Seek validation: target={target_ms}ms actual={actual_ms}ms "
@@ -787,6 +1007,17 @@ class ScriptCaptureEngine:
                 if drift_ms <= SEEK_TOLERANCE_MS:
                     return True
             else:
+                command_log.record(
+                    "seek-session-time-validate",
+                    {
+                        "segment_id": seg_id,
+                        "attempt": attempt,
+                        "target_ms": target_ms,
+                        "error": "snapshot_unavailable",
+                    },
+                    result="error",
+                    source="script_capture",
+                )
                 self._log_entry(seg_id, "validate",
                     "Could not read telemetry for seek validation",
                     success=False, attempt=attempt)
@@ -795,7 +1026,10 @@ class ScriptCaptureEngine:
                 self._log_entry(seg_id, "retry",
                     f"Retrying seek ({attempt}/{MAX_SEEK_RETRIES}), "
                     f"cooldown {SEEK_COOLDOWN}s")
-                self._sleep(SEEK_COOLDOWN)
+                _interruptible_sleep(
+                    SEEK_COOLDOWN, lambda: self._cancelled,
+                    _now=self._now, _sleep=self._sleep,
+                )
 
         return False
 
@@ -811,6 +1045,8 @@ class ScriptCaptureEngine:
         Returns True if camera group was set correctly.
         """
         for attempt in range(1, MAX_CAMERA_RETRIES + 1):
+            if self._cancelled:
+                return False
             if target_car_idx is not None:
                 self._log_entry(seg_id, "camera",
                     f"Switching camera: group={target_group_num} car_idx={target_car_idx}",
@@ -824,7 +1060,10 @@ class ScriptCaptureEngine:
                     extra={"group_num": target_group_num})
                 iracing_bridge.cam_switch_position(0, target_group_num)
 
-            self._sleep(0.3)
+            _interruptible_sleep(
+                0.3, lambda: self._cancelled,
+                _now=self._now, _sleep=self._sleep,
+            )
 
             # Validate via snapshot
             snapshot = iracing_bridge.capture_snapshot()
@@ -832,17 +1071,21 @@ class ScriptCaptureEngine:
                 actual_group = snapshot.get("cam_group_num", -1)
                 actual_car = snapshot.get("cam_car_idx", -1)
                 group_ok = actual_group == target_group_num
+                driver_ok = (
+                    target_car_idx is None
+                    or actual_car == target_car_idx
+                )
 
                 self._log_entry(seg_id, "validate",
                     f"Camera validation: "
                     f"group expected={target_group_num} actual={actual_group} "
-                    f"car_idx actual={actual_car}",
-                    success=group_ok,
+                    f"car_idx expected={target_car_idx} actual={actual_car}",
+                    success=group_ok and driver_ok,
                     attempt=attempt,
                     expected={"group": target_group_num, "car_idx": target_car_idx},
                     actual={"group": actual_group, "car_idx": actual_car})
 
-                if group_ok:
+                if group_ok and driver_ok:
                     return True
             else:
                 self._log_entry(seg_id, "validate",
@@ -853,7 +1096,81 @@ class ScriptCaptureEngine:
                 self._log_entry(seg_id, "retry",
                     f"Retrying camera switch ({attempt}/{MAX_CAMERA_RETRIES}), "
                     f"cooldown {CAMERA_COOLDOWN}s")
-                self._sleep(CAMERA_COOLDOWN)
+                _interruptible_sleep(
+                    CAMERA_COOLDOWN, lambda: self._cancelled,
+                    _now=self._now, _sleep=self._sleep,
+                )
+
+        return False
+
+    def _validated_driver_focus(
+        self,
+        seg_id: str,
+        iracing_bridge: Any,
+        target_car_idx: int,
+    ) -> bool:
+        """Switch driver focus and validate via telemetry readback."""
+        snapshot = iracing_bridge.capture_snapshot() or {}
+        try:
+            current_group = int(snapshot.get("cam_group_num", 0))
+        except (TypeError, ValueError):
+            current_group = 0
+
+        for attempt in range(1, MAX_CAMERA_RETRIES + 1):
+            if self._cancelled:
+                return False
+
+            self._log_entry(
+                seg_id,
+                "driver",
+                f"Setting driver focus: car_idx={target_car_idx}",
+                attempt=attempt,
+                extra={"car_idx": target_car_idx},
+            )
+            iracing_bridge.cam_switch_car(target_car_idx, current_group)
+
+            _interruptible_sleep(
+                0.3, lambda: self._cancelled,
+                _now=self._now, _sleep=self._sleep,
+            )
+
+            snapshot = iracing_bridge.capture_snapshot()
+            if snapshot:
+                actual_car = snapshot.get("cam_car_idx", -1)
+                driver_ok = actual_car == target_car_idx
+
+                self._log_entry(
+                    seg_id,
+                    "validate",
+                    f"Driver validation: expected={target_car_idx} actual={actual_car}",
+                    success=driver_ok,
+                    attempt=attempt,
+                    expected={"car_idx": target_car_idx},
+                    actual={"car_idx": actual_car},
+                )
+
+                if driver_ok:
+                    return True
+            else:
+                self._log_entry(
+                    seg_id,
+                    "validate",
+                    "Could not read telemetry for driver validation",
+                    success=False,
+                    attempt=attempt,
+                )
+
+            if attempt < MAX_CAMERA_RETRIES:
+                self._log_entry(
+                    seg_id,
+                    "retry",
+                    f"Retrying driver focus ({attempt}/{MAX_CAMERA_RETRIES}), "
+                    f"cooldown {CAMERA_COOLDOWN}s",
+                )
+                _interruptible_sleep(
+                    CAMERA_COOLDOWN, lambda: self._cancelled,
+                    _now=self._now, _sleep=self._sleep,
+                )
 
         return False
 
@@ -872,19 +1189,46 @@ class ScriptCaptureEngine:
         target_group_num = self._resolve_camera_group(segment, cam_name_to_num)
         target_car_idx = self._resolve_driver_focus(segment)
 
+        if target_group_num is None and target_car_idx is None:
+            self._fail_capture(
+                seg_id,
+                "camera",
+                f"No camera/driver target could be resolved for segment '{seg_id}'",
+                {
+                    "camera_preferences": segment.get("camera_preferences", []),
+                    "involved_drivers": segment.get("involved_drivers", []),
+                },
+            )
+
         if target_group_num is not None:
             ok = self._validated_camera_switch(
                 seg_id, iracing_bridge, target_group_num, target_car_idx
             )
             if not ok:
-                self._log_entry(seg_id, "error",
-                    "Camera validation failed after all retries — proceeding",
-                    success=False)
+                self._fail_capture(
+                    seg_id,
+                    "camera",
+                    f"Camera validation failed for segment '{seg_id}' after {MAX_CAMERA_RETRIES} retries",
+                    {
+                        "target_group_num": target_group_num,
+                        "target_car_idx": target_car_idx,
+                        "max_camera_retries": MAX_CAMERA_RETRIES,
+                    },
+                )
         elif target_car_idx is not None:
-            self._log_entry(seg_id, "driver",
-                f"Setting driver focus: car_idx={target_car_idx}")
-            iracing_bridge.cam_switch_car(target_car_idx, 0)
-            self._sleep(0.2)
+            # Keep the current camera group when camera resolution is unavailable,
+            # instead of forcing group 0 (which can lock capture into a wrong view).
+            ok = self._validated_driver_focus(seg_id, iracing_bridge, target_car_idx)
+            if not ok:
+                self._fail_capture(
+                    seg_id,
+                    "driver",
+                    f"Driver validation failed for segment '{seg_id}' after {MAX_CAMERA_RETRIES} retries",
+                    {
+                        "target_car_idx": target_car_idx,
+                        "max_camera_retries": MAX_CAMERA_RETRIES,
+                    },
+                )
 
     def _resolve_camera_group(
         self, segment: dict, cam_name_to_num: dict[str, int]
@@ -1012,12 +1356,26 @@ class ScriptCaptureEngine:
             extra={"offset": offset})
 
         if target_group is not None:
-            self._validated_camera_switch(
+            ok = self._validated_camera_switch(
                 seg_id, iracing_bridge, target_group,
                 car_idx if isinstance(car_idx, int) else None,
             )
+            if not ok:
+                self._fail_capture(
+                    seg_id,
+                    "camera_schedule",
+                    f"Scheduled camera validation failed for segment '{seg_id}'",
+                    {"offset_seconds": offset, "camera_group": target_group, "car_idx": car_idx},
+                )
         elif car_idx is not None:
-            iracing_bridge.cam_switch_car(int(car_idx), 0)
+            ok = self._validated_driver_focus(seg_id, iracing_bridge, int(car_idx))
+            if not ok:
+                self._fail_capture(
+                    seg_id,
+                    "camera_schedule",
+                    f"Scheduled driver validation failed for segment '{seg_id}'",
+                    {"offset_seconds": offset, "car_idx": car_idx},
+                )
 
     # -- Recording management -----------------------------------------------
 
@@ -1027,7 +1385,9 @@ class ScriptCaptureEngine:
         iracing_bridge: Any,
         clip_path: Optional[str],
         segment_ids: list[str],
+        segment_defs: list[dict],
         clip_start_time: float,
+        clip_capture_start_time: float,
         order_idx: int,
         section: str,
     ) -> bool:
@@ -1048,17 +1408,40 @@ class ScriptCaptureEngine:
 
         self._log_entry(segment_ids[-1] if segment_ids else "", "record_stop",
             f"Recording stopped: {Path(clip_path).name} "
-            f"covering segments: {seg_label}")
+            f"covering segments: {seg_label}",
+            extra={
+                "clip_path": clip_path,
+                "segment_ids": list(segment_ids),
+            })
 
         # Validate the clip file exists
+        clip_verified = False
+        file_size = 0
         if Path(clip_path).exists():
             file_size = Path(clip_path).stat().st_size
+            clip_verified = True
             self._log_entry("", "validate",
                 f"Clip file verified: {Path(clip_path).name} ({file_size:,} bytes)",
-                extra={"file_size": file_size})
+                extra={
+                    "file_size": file_size,
+                    "clip_path": clip_path,
+                    "segment_ids": list(segment_ids),
+                })
         else:
             self._log_entry("", "error",
-                f"Clip file not found: {clip_path}", success=False)
+                f"Clip file not found: {clip_path}", success=False,
+                extra={
+                    "clip_path": clip_path,
+                    "segment_ids": list(segment_ids),
+                })
+
+        self._emit_progress({
+            "step": "clip_saved",
+            "clip_path": clip_path,
+            "segment_ids": list(segment_ids),
+            "verified": clip_verified,
+            "file_size": file_size,
+        })
 
         self._clips.append({
             "id": segment_ids[0] if segment_ids else f"clip_{order_idx:03d}",
@@ -1068,7 +1451,35 @@ class ScriptCaptureEngine:
             "duration": 0,  # populated by downstream compilation/validation
             "segments": segment_ids,
             "clip_start_time": clip_start_time,
+            "clip_capture_start_time": clip_capture_start_time,
         })
+
+        for seg in segment_defs:
+            seg_id = str(seg.get("id", seg.get("segment_id", ""))).strip()
+            if not seg_id:
+                continue
+
+            seg_start = float(seg.get("start_time_seconds", 0))
+            seg_end = float(seg.get("end_time_seconds", seg_start))
+            source_offset_start = max(0.0, seg_start - clip_capture_start_time)
+            source_offset_end = max(source_offset_start, seg_end - clip_capture_start_time)
+
+            self._composition_manifest.append({
+                "id": seg_id,
+                "path": clip_path,
+                "section": seg.get("section", section),
+                "order": self._segment_order_lookup.get(seg_id, order_idx),
+                "event_type": seg.get("event_type", seg.get("type", "")),
+                "start_time_seconds": seg_start,
+                "end_time_seconds": seg_end,
+                "duration_seconds": max(0.0, seg_end - seg_start),
+                "clip_padding": float(self._clip_padding),
+                "clip_padding_after": float(self._clip_padding_after),
+                "source_offset_start_seconds": source_offset_start,
+                "source_offset_end_seconds": source_offset_end,
+                "source_clip_id": segment_ids[0] if segment_ids else f"clip_{order_idx:03d}",
+                "source_segment_ids": list(segment_ids),
+            })
 
         logger.info(
             "[ScriptCapture] Saved clip %s → %s [%d segments]",

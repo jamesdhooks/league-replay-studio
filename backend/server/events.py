@@ -65,6 +65,8 @@ class EventType:
     # Encoding (future)
     ENCODING_STARTED       = "encoding:started"
     ENCODING_PROGRESS      = "encoding:progress"
+    ENCODING_LOG           = "encoding:log"
+    ENCODING_GPU_TELEMETRY = "encoding:gpu_telemetry"
     ENCODING_COMPLETED     = "encoding:completed"
     ENCODING_ERROR         = "encoding:error"
 
@@ -93,6 +95,9 @@ class EventType:
     OVERLAY_RENDER_STARTED    = "overlay:render_started"
     OVERLAY_RENDER_PROGRESS   = "overlay:render_progress"
     OVERLAY_RENDER_COMPLETED  = "overlay:render_completed"
+    OVERLAY_AI_STATUS         = "overlay:ai_status"
+    OVERLAY_AI_COMPLETED      = "overlay:ai_completed"
+    OVERLAY_AI_ERROR          = "overlay:ai_error"
     OVERLAY_ERROR             = "overlay:error"
 
     # Composition (trim → overlay → transition → stitch)
@@ -113,6 +118,7 @@ class EventType:
     # Project
     PROJECT_UPDATED        = "project:updated"
     PROJECT_STEP_CHANGED   = "project:step_changed"
+    PROJECT_FILES_CHANGED  = "project:files_changed"
 
     # Automation Pipeline (one-click)
     AUTOMATION_STARTED           = "automation:started"

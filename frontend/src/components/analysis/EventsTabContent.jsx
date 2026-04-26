@@ -81,7 +81,7 @@ export default function EventsTabContent({
                   <div
                     className="h-full bg-gradient-to-r from-gradient-from to-gradient-to
                                rounded-full transition-all duration-500"
-                    style={{ width: `${Math.max(0, Math.min(100, ((progress.percent ?? 85) - 85) / 12 * 100))}%` }}
+                    style={{ width: `${Math.max(0, Math.min(100, ((progress.percent ?? 80) - 80) / 20 * 100))}%` }}
                   />
                 </div>
                 {progress.message && (

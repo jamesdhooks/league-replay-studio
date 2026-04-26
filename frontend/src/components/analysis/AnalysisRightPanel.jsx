@@ -94,7 +94,7 @@ export default memo(function AnalysisRightPanel({
           {/* Cameras section */}
           <div className="border-b border-border overflow-hidden flex flex-col"
                  style={{ maxHeight: camerasOpen ? '40%' : 'auto' }}>
-            <div className="shrink-0 px-3 py-2 border-b border-border">
+            <div className="shrink-0 border-b border-border">
               <CollapsibleSection
                 icon={Eye}
                 label="Cameras"
@@ -127,7 +127,7 @@ export default memo(function AnalysisRightPanel({
 
           {/* Drivers section */}
           <div className="flex-1 overflow-hidden flex flex-col min-h-0">
-            <div className="shrink-0 px-3 py-2 border-b border-border">
+            <div className="shrink-0 border-b border-border">
               <CollapsibleSection
                 icon={Users}
                 label="Drivers"

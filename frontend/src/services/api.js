@@ -12,6 +12,7 @@ const API_BASE = '/api'
 const DEFAULT_TIMEOUT_MS = 15_000
 const MAX_RETRIES = 2
 const RETRY_BASE_DELAY_MS = 500
+const IDEMPOTENT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 
 // Status codes that are safe to retry on
 const RETRYABLE_STATUS = new Set([408, 429, 502, 503, 504])
@@ -32,13 +33,22 @@ export class ApiError extends Error {
  * Internal fetch wrapper with timeout + retry.
  */
 async function fetchWithRetry(url, options = {}, retries = MAX_RETRIES) {
-  for (let attempt = 0; attempt <= retries; attempt++) {
+  const timeoutMs = Number(options?.timeoutMs) > 0 ? Number(options.timeoutMs) : DEFAULT_TIMEOUT_MS
+  const fetchOptions = { ...options }
+  const method = String(fetchOptions.method || 'GET').toUpperCase()
+  const retriesOverride = Number.isInteger(options?.retries)
+    ? Math.max(0, options.retries)
+    : (IDEMPOTENT_METHODS.has(method) ? retries : 0)
+  delete fetchOptions.timeoutMs
+  delete fetchOptions.retries
+
+  for (let attempt = 0; attempt <= retriesOverride; attempt++) {
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+    const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
     try {
       const response = await fetch(url, {
-        ...options,
+        ...fetchOptions,
         signal: controller.signal,
       })
       clearTimeout(timeout)
@@ -55,14 +65,14 @@ async function fetchWithRetry(url, options = {}, retries = MAX_RETRIES) {
       }))
 
       // Retry on transient errors if attempts remain
-      if (attempt < retries && RETRYABLE_STATUS.has(response.status)) {
+      if (attempt < retriesOverride && RETRYABLE_STATUS.has(response.status)) {
         const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt)
         await new Promise((r) => setTimeout(r, delay))
         continue
       }
 
       throw new ApiError(
-        error.message || error.detail || `${options.method || 'GET'} ${url} failed: ${response.status}`,
+        error.message || error.detail || `${method} ${url} failed: ${response.status}`,
         response.status,
         error,
       )
@@ -73,7 +83,7 @@ async function fetchWithRetry(url, options = {}, retries = MAX_RETRIES) {
 
       // AbortController timeout
       if (err.name === 'AbortError') {
-        if (attempt < retries) {
+        if (attempt < retriesOverride) {
           const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt)
           await new Promise((r) => setTimeout(r, delay))
           continue
@@ -82,7 +92,7 @@ async function fetchWithRetry(url, options = {}, retries = MAX_RETRIES) {
       }
 
       // Network error — retry
-      if (attempt < retries) {
+      if (attempt < retriesOverride) {
         const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt)
         await new Promise((r) => setTimeout(r, delay))
         continue
@@ -112,11 +122,12 @@ export async function apiGet(path) {
  * @param {any} [body]
  * @returns {Promise<any>}
  */
-export async function apiPost(path, body) {
+export async function apiPost(path, body, requestOptions = {}) {
   return fetchWithRetry(`${API_BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: body != null ? JSON.stringify(body) : undefined,
+    ...requestOptions,
   })
 }
 

@@ -1,0 +1,139 @@
+{
+  "id": "broadcast_preset",
+  "name": "Broadcast",
+  "description": "Full broadcast-style overlay with timing tower, driver card, and lap counter",
+  "style": "broadcast",
+  "is_builtin": false,
+  "version": "1.0.0",
+  "sections": {
+    "intro": [
+      {
+        "id": "title_card",
+        "name": "Title Card",
+        "template": "<div style=\"position:absolute; left:{{pos.x}}%; top:{{pos.y}}%; width:{{pos.w}}%; height:{{pos.h}}%;\n  display:flex; flex-direction:column; align-items:center; justify-content:center;\n  font-family: var(--font-primary, 'Inter', sans-serif); color: var(--color-primary, #ffffff);\">\n  <div style=\"font-size: clamp(1.5rem, 3vw, 4rem); font-weight: 800; text-transform: uppercase;\n    text-shadow: 0 4px 24px rgba(0,0,0,0.9); letter-spacing: 0.1em;\">\n    {{ frame.series_name | default('Race Series') }}\n  </div>\n  <div style=\"font-size: clamp(0.8rem, 1.5vw, 2rem); font-weight: 400; margin-top: 0.5em;\n    text-shadow: 0 2px 12px rgba(0,0,0,0.7); color: var(--color-secondary, #cccccc);\">\n    {{ frame.track_name | default('Circuit') }}\n  </div>\n</div>",
+        "position": {
+          "x": 15,
+          "y": 30,
+          "w": 70,
+          "h": 40
+        },
+        "z_index": 10,
+        "visible": true
+      }
+    ],
+    "qualifying_results": [
+      {
+        "id": "grid_standings",
+        "name": "Starting Grid",
+        "template": "<div style=\"position:absolute; left:{{pos.x}}%; top:{{pos.y}}%; width:{{pos.w}}%; height:{{pos.h}}%;\n  font-family: var(--font-primary, 'Inter', sans-serif); color: var(--color-primary, #ffffff);\">\n  <div style=\"font-size: clamp(0.7rem, 1.2vw, 1.2rem); font-weight: 700; text-transform: uppercase;\n    letter-spacing: 0.15em; margin-bottom: 0.5em; text-shadow: 0 2px 8px rgba(0,0,0,0.8);\n    color: var(--color-accent, #3B82F6);\">\n    Starting Grid\n  </div>\n    {% for entry in frame.standings[page_start:page_end] %}\n  <div style=\"display:flex; align-items:center; gap: 0.5em; padding: 0.25em 0.5em;\n    margin-bottom: 2px; border-radius: 4px;\n    background: {% if entry.is_player %}rgba(59,130,246,0.6){% else %}rgba(0,0,0,0.65){% endif %};\n        font-size: clamp(0.5rem, 0.9vw, 0.9rem);\"\n        id=\"grid-row-{{ page_key }}-{{ entry.position | default(loop.index + page_start) }}\"\n        data-page-key=\"{{ page_key }}\">\n    <span style=\"font-weight:700; min-width:1.5em; text-align:right;\">{{ entry.position }}</span>\n    <span style=\"flex:1; font-weight:{% if entry.is_player %}700{% else %}400{% endif %};\">{{ entry.driver_name }}</span>\n    <span style=\"opacity:0.7; font-variant-numeric:tabular-nums;\">{{ entry.car_number }}</span>\n  </div>\n  {% endfor %}\n</div>",
+        "position": {
+          "x": 5,
+          "y": 10,
+          "w": 25,
+          "h": 80
+        },
+        "pagination": {
+          "enabled": true,
+          "items_per_page": 10,
+          "cycle_duration_seconds": 0
+        },
+        "z_index": 10,
+        "visible": true
+      }
+    ],
+    "race": [
+      {
+        "id": "timing_tower",
+        "name": "Timing Tower",
+        "template": "<div style=\"position:absolute; left:{{pos.x}}%; top:{{pos.y}}%; width:{{pos.w}}%; height:{{pos.h}}%;\n  font-family: var(--font-primary, 'Inter', sans-serif); color: var(--color-primary, #ffffff);\">\n  {% for entry in frame.standings[:8] %}\n  <div style=\"display:flex; align-items:center; gap:0.4em; padding:0.2em 0.5em;\n    margin-bottom:1px; font-size: clamp(0.45rem, 0.8vw, 0.85rem);\n    background: {% if entry.is_player %}rgba(59,130,246,0.85){% else %}rgba(0,0,0,0.75){% endif %};\n    {% if loop.first %}border-radius: 4px 4px 0 0;{% endif %}\n    {% if loop.last %}border-radius: 0 0 4px 4px;{% endif %}\">\n    <span style=\"font-weight:700; min-width:1.2em; text-align:right; font-size:0.85em;\">{{ entry.position }}</span>\n    <span style=\"flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;\">{{ entry.driver_name }}</span>\n    <span style=\"opacity:0.6; font-variant-numeric:tabular-nums; font-size:0.85em;\">{{ entry.gap }}</span>\n  </div>\n  {% endfor %}\n</div>",
+        "position": {
+          "x": 1,
+          "y": 8,
+          "w": 18,
+          "h": 50
+        },
+        "z_index": 10,
+        "visible": true
+      },
+      {
+        "id": "focused_driver",
+        "name": "Focused Driver",
+        "template": "<div style=\"position:absolute; left:{{pos.x}}%; top:{{pos.y}}%; width:{{pos.w}}%; height:{{pos.h}}%;\n  display:flex; align-items:flex-end; gap:0.8em;\n  font-family: var(--font-primary, 'Inter', sans-serif); color: var(--color-primary, #ffffff);\">\n    <div style=\"width:4px; height:70%; border-radius:2px; background: {{ frame.team_color | default('#3B82F6') }};\"></div>\n  <div>\n    <div style=\"font-size: clamp(1.2rem, 2.5vw, 3rem); font-weight:900;\n      text-shadow: 0 2px 16px rgba(0,0,0,0.8);\">\n      P{{ frame.position | default(1) }}\n    </div>\n    <div style=\"font-size: clamp(0.7rem, 1.2vw, 1.5rem); font-weight:600;\n      text-shadow: 0 1px 8px rgba(0,0,0,0.6);\">\n      {{ frame.driver_name | default('Driver') }}\n    </div>\n    <div style=\"font-size: clamp(0.5rem, 0.8vw, 0.9rem); opacity:0.7;\n      text-shadow: 0 1px 4px rgba(0,0,0,0.5);\">\n      {{ frame.car_name | default('Car') }}{% if frame.irating is defined %} \u00b7 {{ frame.irating }} iR{% endif %}\n    </div>\n  </div>\n</div>",
+        "position": {
+          "x": 3,
+          "y": 78,
+          "w": 30,
+          "h": 18
+        },
+        "z_index": 10,
+        "visible": true
+      },
+      {
+        "id": "lap_counter",
+        "name": "Lap Counter",
+        "template": "<div style=\"position:absolute; left:{{pos.x}}%; top:{{pos.y}}%; width:{{pos.w}}%; height:{{pos.h}}%;\n  display:flex; flex-direction:column; align-items:flex-end; justify-content:center;\n  font-family: var(--font-primary, 'Inter', sans-serif); color: var(--color-primary, #ffffff);\">\n  <div style=\"font-size: clamp(0.4rem, 0.6vw, 0.65rem); text-transform:uppercase;\n    letter-spacing:0.15em; opacity:0.6; text-shadow: 0 1px 4px rgba(0,0,0,0.8);\">\n    Lap\n  </div>\n  <div style=\"font-size: clamp(0.9rem, 1.5vw, 1.8rem); font-weight:700;\n    font-variant-numeric:tabular-nums; text-shadow: 0 2px 8px rgba(0,0,0,0.7);\">\n    {{ frame.current_lap | default(1) }}<span style=\"opacity:0.4; font-size:0.6em;\">/{{ frame.total_laps | default(20) }}</span>\n  </div>\n  {% if frame.last_lap_time is defined %}\n  <div style=\"font-size: clamp(0.4rem, 0.7vw, 0.75rem); font-variant-numeric:tabular-nums;\n    opacity:0.7; text-shadow: 0 1px 4px rgba(0,0,0,0.6);\">\n    {{ frame.last_lap_time }}\n  </div>\n  {% endif %}\n</div>",
+        "position": {
+          "x": 85,
+          "y": 2,
+          "w": 13,
+          "h": 10
+        },
+        "z_index": 10,
+        "visible": true
+      }
+    ],
+    "race_results": [
+      {
+        "id": "final_standings",
+        "name": "Final Standings",
+        "template": "<div style=\"position:absolute; left:{{pos.x}}%; top:{{pos.y}}%; width:{{pos.w}}%; height:{{pos.h}}%;\n  font-family: var(--font-primary, 'Inter', sans-serif); color: var(--color-primary, #ffffff);\">\n  <div style=\"font-size: clamp(0.8rem, 1.4vw, 1.4rem); font-weight:700; text-transform:uppercase;\n    letter-spacing:0.15em; margin-bottom:0.5em; text-shadow: 0 2px 8px rgba(0,0,0,0.8);\n    color: var(--color-accent, #F59E0B);\">\n    Race Results\n  </div>\n    {% for entry in frame.standings[page_start:page_end] %}\n  <div style=\"display:flex; align-items:center; gap:0.5em; padding:0.3em 0.6em;\n    margin-bottom:2px; border-radius:4px;\n    background: {% if entry.position == 1 %}rgba(245,158,11,0.5){% elif entry.is_player %}rgba(59,130,246,0.6){% else %}rgba(0,0,0,0.65){% endif %};\n        font-size: clamp(0.5rem, 0.9vw, 0.9rem);\"\n        id=\"results-row-{{ page_key }}-{{ entry.position | default(loop.index + page_start) }}\"\n        data-page-key=\"{{ page_key }}\">\n    <span style=\"font-weight:700; min-width:1.5em; text-align:right;\">{{ entry.position }}</span>\n    <span style=\"flex:1; font-weight:{% if entry.is_player or entry.position == 1 %}700{% else %}400{% endif %};\">{{ entry.driver_name }}</span>\n    <span style=\"opacity:0.7; font-variant-numeric:tabular-nums;\">{{ entry.gap }}</span>\n  </div>\n  {% endfor %}\n</div>",
+        "position": {
+          "x": 25,
+          "y": 10,
+          "w": 50,
+          "h": 80
+        },
+        "pagination": {
+          "enabled": true,
+          "items_per_page": 10,
+          "cycle_duration_seconds": 0
+        },
+        "z_index": 10,
+        "visible": true
+      }
+    ]
+  },
+  "variables": {
+    "--color-primary": {
+      "value": "#ffffff",
+      "type": "color",
+      "label": "Primary Color"
+    },
+    "--color-secondary": {
+      "value": "#cccccc",
+      "type": "color",
+      "label": "Secondary Color"
+    },
+    "--color-accent": {
+      "value": "#3B82F6",
+      "type": "color",
+      "label": "Accent Color"
+    },
+    "--color-background": {
+      "value": "rgba(0,0,0,0.75)",
+      "type": "color",
+      "label": "Background Color"
+    },
+    "--font-primary": {
+      "value": "'Inter', sans-serif",
+      "type": "font",
+      "label": "Primary Font"
+    },
+    "--font-mono": {
+      "value": "'JetBrains Mono', monospace",
+      "type": "font",
+      "label": "Monospace Font"
+    }
+  },
+  "intro_video_path": null
+}

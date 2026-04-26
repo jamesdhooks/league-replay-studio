@@ -239,6 +239,7 @@ def compose_preset_html(
         '<head>',
         '  <meta charset="UTF-8">',
         f'  <meta name="viewport" content="width={resolution["width"]}, height={resolution["height"]}">',
+        '  <script src="https://cdn.tailwindcss.com"></script>',
         '  <style>',
         '    * { margin: 0; padding: 0; box-sizing: border-box; }',
         f'    html, body {{ width: {resolution["width"]}px; height: {resolution["height"]}px; background: transparent; overflow: hidden; }}',

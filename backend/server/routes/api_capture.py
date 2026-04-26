@@ -17,9 +17,11 @@ REST endpoints for video capture (OBS / ShadowPlay / ReLive).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -28,10 +30,13 @@ from pydantic import BaseModel
 
 from server.services.capture_service import capture_service
 from server.events import EventType, make_event
+from server.utils.command_log import command_log
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/capture", tags=["capture"])
+
+_SEEK_PREFLIGHT_DRIFT_TOLERANCE_MS = 5000
 
 # ── Script capture state (singleton, one at a time) ─────────────────────────
 
@@ -47,10 +52,37 @@ _script_capture_state: dict = {
     "started_at": None,
     "strategies": [],
     "capture_log": [],
+    "log_file_path": None,
     "current_segment": None,
+    "abort_segment_id": None,
+    "abort_action": None,
+    "abort_reason": None,
 }
 _script_capture_lock = threading.Lock()
 _script_capture_engine: Optional[object] = None
+
+
+def _persist_script_capture_log(project_dir: str, payload: dict[str, Any]) -> Optional[str]:
+    """Write script capture audit log to project-local JSON files.
+
+    Stores a timestamped immutable record and updates a stable "latest" file
+    for quick troubleshooting.
+    """
+    try:
+        logs_dir = Path(project_dir) / "capture_logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        run_path = logs_dir / f"script_capture_{stamp}.json"
+        latest_path = logs_dir / "latest_script_capture.json"
+
+        serialized = json.dumps(payload, indent=2, ensure_ascii=True)
+        run_path.write_text(serialized, encoding="utf-8")
+        latest_path.write_text(serialized, encoding="utf-8")
+        return str(run_path)
+    except Exception as exc:
+        logger.error("[Capture API] Failed to persist script capture log: %s", exc)
+        return None
 
 
 # ── Software detection ──────────────────────────────────────────────────────
@@ -157,7 +189,7 @@ class ScriptCaptureRequest(BaseModel):
     project_id: int
     script: list[dict]
     clip_padding: float = 2.0
-    clip_padding_after: float = 5.0
+    clip_padding_after: float = 1.0
     output_filename: str = "highlight_compiled.mp4"
     contiguous_gap_threshold: float = 1.0
     # ── Partial capture support ──────────────────────────────────────────
@@ -203,6 +235,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
     from server.services.iracing_bridge import bridge as iracing_bridge
     from server.services.project_service import project_service
     from server.services.script_state_service import script_state_service
+    from server.services.settings_service import settings_service
 
     project = project_service.get_project(body.project_id)
     if not project:
@@ -221,6 +254,115 @@ async def start_script_capture(body: ScriptCaptureRequest):
             _script_capture_state["running"] = False
         raise HTTPException(status_code=400, detail="Project directory not set")
 
+    # ── Preflight checks (fail fast before background worker starts) ──────
+    software = settings_service.get("capture_software") or "native"
+
+    # Manual mode cannot run automated scripted capture.
+    if software == "manual":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Manual capture mode does not support scripted automation. "
+                "Select OBS, ShadowPlay, ReLive, or LRS Native in Settings → Capture."
+            ),
+        )
+
+    if software != "native":
+        hotkeys = capture_service.get_hotkeys()
+        watch_dir = capture_service.get_watch_directory()
+
+        if not hotkeys.get("start"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"No start hotkey configured for '{software}' mode",
+            )
+
+        if not watch_dir:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"No video output folder found for '{software}'. "
+                    "Configure the output path in Settings → Capture."
+                ),
+            )
+
+        watch_path = Path(watch_dir)
+        if not watch_path.exists() or not watch_path.is_dir():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Capture output folder is invalid or missing: '{watch_dir}'. "
+                    "Fix the output folder in Settings → Capture."
+                ),
+            )
+
+        # Verify the process can write/delete files in watch folder before running.
+        probe_file = watch_path / ".lrs_write_probe.tmp"
+        try:
+            probe_file.write_text("ok", encoding="utf-8")
+            probe_file.unlink(missing_ok=True)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Cannot write to capture output folder '{watch_dir}': {exc}. "
+                    "Grant folder permissions or choose a different output folder."
+                ),
+            ) from exc
+
+    # Probe replay commandability so we fail fast instead of segment-loop churn.
+    preflight_snapshot = iracing_bridge.capture_snapshot()
+    if not preflight_snapshot:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unable to read iRacing telemetry snapshot for preflight. "
+                "Ensure iRacing replay is loaded and telemetry is updating."
+            ),
+        )
+
+    preflight_session_num = iracing_bridge.get_replay_session_num()
+    if preflight_session_num < 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Replay session is unavailable. Open the iRacing replay timeline "
+                "before starting scripted capture."
+            ),
+        )
+
+    baseline_ms = int((preflight_snapshot.get("session_time") or 0.0) * 1000)
+    probe_target_ms = max(0, baseline_ms - 2000) if baseline_ms > 3000 else baseline_ms + 2000
+
+    if not iracing_bridge.replay_search_session_time(preflight_session_num, probe_target_ms):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Replay seek command failed in preflight. Make sure iRacing is in Replay mode "
+                "and not blocked by modal dialogs."
+            ),
+        )
+
+    time.sleep(0.35)
+    probe_snapshot = iracing_bridge.capture_snapshot()
+    if not probe_snapshot:
+        raise HTTPException(
+            status_code=400,
+            detail="Unable to validate replay seek preflight (no telemetry after seek).",
+        )
+
+    actual_ms = int((probe_snapshot.get("session_time") or 0.0) * 1000)
+    drift_ms = abs(actual_ms - probe_target_ms)
+    if drift_ms > _SEEK_PREFLIGHT_DRIFT_TOLERANCE_MS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Replay seek preflight failed: iRacing did not move to requested time "
+                f"(target={probe_target_ms}ms, actual={actual_ms}ms, drift={drift_ms}ms). "
+                "Click the replay timeline in iRacing and verify replay controls respond, then retry."
+            ),
+        )
+
     # Grab loop and broadcast function from capture_service (already wired in app.py)
     loop = capture_service.get_event_loop()
     broadcast_fn = capture_service.get_broadcast_fn()
@@ -234,7 +376,29 @@ async def start_script_capture(body: ScriptCaptureRequest):
             )
 
     clips_dir = str(Path(project_dir) / "clips")
-    cameras = getattr(iracing_bridge, "cameras", []) or []
+    cameras = (
+        getattr(iracing_bridge, "cameras", None)
+        or (getattr(iracing_bridge, "session_data", {}) or {}).get("cameras", [])
+        or []
+    )
+
+    requested_clip_padding = body.clip_padding
+    clip_padding = requested_clip_padding if requested_clip_padding > 0 else 2.0
+    if abs(requested_clip_padding - clip_padding) > 1e-9:
+        logger.info(
+            "[Capture API] Overriding requested clip_padding %.3fs -> %.3fs",
+            requested_clip_padding,
+            clip_padding,
+        )
+
+    requested_clip_padding_after = body.clip_padding_after
+    clip_padding_after = 1.0
+    if abs(requested_clip_padding_after - clip_padding_after) > 1e-9:
+        logger.info(
+            "[Capture API] Overriding requested clip_padding_after %.3fs -> %.3fs",
+            requested_clip_padding_after,
+            clip_padding_after,
+        )
 
     # ── Apply capture mode filter ─────────────────────────────────────────
     filtered_script = script_state_service.filter_segments_by_mode(
@@ -244,18 +408,30 @@ async def start_script_capture(body: ScriptCaptureRequest):
         segment_ids=body.segment_ids,
         time_range=body.time_range,
     )
-    # Preserve transition segments between captured segments
+    filtered_script = [
+        {
+            **segment,
+            "clip_padding": clip_padding,
+            "clip_padding_after": clip_padding_after,
+        }
+        for segment in filtered_script
+    ]
+    # Preserve transition segments between captured segments, but ensure
+    # selected capture segments use the normalized runtime padding values.
     script = []
-    filtered_ids = {s.get("id", s.get("segment_id", "")) for s in filtered_script}
+    filtered_by_id = {
+        s.get("id", s.get("segment_id", "")): s
+        for s in filtered_script
+    }
     for seg in body.script:
         if seg.get("type") == "transition":
             script.append(seg)
-        elif seg.get("id", seg.get("segment_id", "")) in filtered_ids:
-            script.append(seg)
+            continue
 
-    clip_padding = body.clip_padding
-    clip_padding_after = body.clip_padding_after
-    output_filename = body.output_filename
+        seg_id = seg.get("id", seg.get("segment_id", ""))
+        if seg_id in filtered_by_id:
+            script.append(filtered_by_id[seg_id])
+
     contiguous_gap = body.contiguous_gap_threshold
     capture_mode = body.capture_mode
 
@@ -273,7 +449,11 @@ async def start_script_capture(body: ScriptCaptureRequest):
             "started_at": time.time(),
             "strategies": [],
             "capture_log": [],
+            "log_file_path": None,
             "current_segment": None,
+            "abort_segment_id": None,
+            "abort_action": None,
+            "abort_reason": None,
             "capture_mode": capture_mode,
         })
 
@@ -313,6 +493,20 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 "log_entry": log_entry,
                 "project_id": body.project_id,
             })
+        elif step == "clip_saved":
+            clip_path = str(data.get("clip_path") or "")
+            segment_ids = data.get("segment_ids") or []
+            verified = bool(data.get("verified"))
+
+            if verified and clip_path and project_dir:
+                for seg_id_in_clip in segment_ids:
+                    if seg_id_in_clip:
+                        script_state_service.mark_captured(project_dir, seg_id_in_clip, clip_path)
+
+            _do_broadcast(EventType.CAPTURE_SCRIPT_PROGRESS, {
+                **data,
+                "project_id": body.project_id,
+            })
         elif step == "capture_complete":
             with _script_capture_lock:
                 _script_capture_state["completed_segments"] = data.get("clips_captured", 0)
@@ -342,7 +536,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
         # • anything else — Hotkey-based capture (OBS / ShadowPlay / ReLive /
         #               manual).  HotkeyRecorderAdapter sends hotkeys and polls
         #               the capture software's output folder for the new file.
-        from server.utils.script_capture import ScriptCaptureEngine, HotkeyRecorderAdapter
+        from server.utils.script_capture import CaptureAbortError, ScriptCaptureEngine, HotkeyRecorderAdapter
 
         native_engine = None
         started_native = False
@@ -401,6 +595,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 watch_folder=watch_dir,
                 start_hotkey=hotkeys["start"],
                 stop_hotkey=hotkeys.get("stop") or hotkeys["start"],
+                cancelled_fn=lambda: _script_capture_state.get("cancelled", False),
             )
 
         try:
@@ -423,6 +618,45 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 available_cameras=cameras,
             )
 
+            with _script_capture_lock:
+                cancelled = bool(_script_capture_state.get("cancelled"))
+
+            if cancelled:
+                with _script_capture_lock:
+                    _script_capture_state["clips"] = clips
+                    _script_capture_state["capture_log"] = engine.capture_log
+                    _script_capture_state["running"] = False
+                    _script_capture_state["error"] = "Script capture cancelled by user"
+
+                cancelled_at = time.time()
+                log_file_path = _persist_script_capture_log(project_dir, {
+                    "project_id": body.project_id,
+                    "capture_software": software,
+                    "capture_mode": capture_mode,
+                    "success": False,
+                    "cancelled": True,
+                    "error": "Script capture cancelled by user",
+                    "started_at": _script_capture_state.get("started_at"),
+                    "failed_at": cancelled_at,
+                    "total_segments": _script_capture_state.get("total_segments", 0),
+                    "completed_segments": _script_capture_state.get("completed_segments", 0),
+                    "compiled_path": None,
+                    "clips": clips,
+                    "strategies": engine.segment_strategies,
+                    "capture_log": engine.capture_log,
+                })
+
+                with _script_capture_lock:
+                    _script_capture_state["log_file_path"] = log_file_path
+
+                _do_broadcast(EventType.CAPTURE_SCRIPT_ERROR, {
+                    "project_id": body.project_id,
+                    "error": "Script capture cancelled by user",
+                    "cancelled": True,
+                    "log_file_path": log_file_path,
+                })
+                return
+
             # Mark each captured segment in persistent state
             for clip in clips:
                 clip_path = clip.get("path", "")
@@ -434,30 +668,106 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 _script_capture_state["clips"] = clips
                 _script_capture_state["capture_log"] = engine.capture_log
 
-            output_path = str(Path(project_dir) / output_filename)
-            compiled = engine.compile_clips(output_path)
+            # Persist captured clip manifest for the Compose step.
+            project_service.save_project_metadata(body.project_id, {
+                "clips_manifest": engine.composition_manifest,
+                "capture_manifest": engine.composition_manifest,
+            })
 
             with _script_capture_lock:
-                _script_capture_state["compiled_path"] = compiled
+                _script_capture_state["compiled_path"] = None
                 _script_capture_state["running"] = False
+
+            completed_at = time.time()
+            log_file_path = _persist_script_capture_log(project_dir, {
+                "project_id": body.project_id,
+                "capture_software": software,
+                "capture_mode": capture_mode,
+                "success": True,
+                "error": None,
+                "started_at": _script_capture_state.get("started_at"),
+                "completed_at": completed_at,
+                "total_segments": _script_capture_state.get("total_segments", 0),
+                "completed_segments": _script_capture_state.get("completed_segments", 0),
+                "compiled_path": None,
+                "clips": clips,
+                "strategies": engine.segment_strategies,
+                "capture_log": engine.capture_log,
+            })
+
+            with _script_capture_lock:
+                _script_capture_state["log_file_path"] = log_file_path
 
             _do_broadcast(EventType.CAPTURE_SCRIPT_COMPLETED, {
                 "project_id": body.project_id,
                 "clips": clips,
-                "compiled_path": compiled,
+                "compiled_path": None,
                 "total_clips": len(clips),
                 "capture_log": engine.capture_log,
                 "strategies": engine.segment_strategies,
+                "log_file_path": log_file_path,
             })
 
         except Exception as exc:
             logger.error("[Capture API] Script capture worker error: %s", exc)
+            abort_segment_id = None
+            abort_action = None
+            abort_reason = str(exc)
+            if isinstance(exc, CaptureAbortError):
+                abort_segment_id = exc.segment_id
+                abort_action = exc.action
+                abort_reason = exc.reason
+
+            command_log.record(
+                "capture-worker-error",
+                {
+                    "project_id": body.project_id,
+                    "segment_id": abort_segment_id,
+                    "action": abort_action,
+                    "reason": abort_reason,
+                    "error": str(exc),
+                },
+                result="error",
+                source="api_capture",
+            )
+
             with _script_capture_lock:
                 _script_capture_state["error"] = str(exc)
+                _script_capture_state["abort_segment_id"] = abort_segment_id
+                _script_capture_state["abort_action"] = abort_action
+                _script_capture_state["abort_reason"] = abort_reason
                 _script_capture_state["running"] = False
+
+            failed_at = time.time()
+            log_file_path = _persist_script_capture_log(project_dir, {
+                "project_id": body.project_id,
+                "capture_software": software,
+                "capture_mode": capture_mode,
+                "success": False,
+                "error": str(exc),
+                "abort_segment_id": abort_segment_id,
+                "abort_action": abort_action,
+                "abort_reason": abort_reason,
+                "started_at": _script_capture_state.get("started_at"),
+                "failed_at": failed_at,
+                "total_segments": _script_capture_state.get("total_segments", 0),
+                "completed_segments": _script_capture_state.get("completed_segments", 0),
+                "compiled_path": _script_capture_state.get("compiled_path"),
+                "clips": _script_capture_state.get("clips", []),
+                "strategies": _script_capture_state.get("strategies", []),
+                "capture_log": _script_capture_state.get("capture_log", []),
+            })
+
+            with _script_capture_lock:
+                _script_capture_state["log_file_path"] = log_file_path
+
             _do_broadcast(EventType.CAPTURE_SCRIPT_ERROR, {
                 "project_id": body.project_id,
                 "error": str(exc),
+                "abort_segment_id": abort_segment_id,
+                "abort_action": abort_action,
+                "abort_reason": abort_reason,
+                "log_file_path": log_file_path,
             })
         finally:
             if started_native and native_engine is not None:
@@ -480,14 +790,28 @@ async def start_script_capture(body: ScriptCaptureRequest):
 async def cancel_script_capture():
     """Cancel an in-progress script capture."""
     global _script_capture_engine
+    loop = capture_service.get_event_loop()
+    broadcast_fn = capture_service.get_broadcast_fn()
+
     with _script_capture_lock:
         if not _script_capture_state["running"]:
             return {"cancelled": False, "message": "No capture running"}
         _script_capture_state["cancelled"] = True
         engine = _script_capture_engine
+        project_id = _script_capture_state.get("project_id")
 
     if engine is not None:
         engine.cancel()
+
+    if broadcast_fn and loop and loop.is_running():
+        asyncio.run_coroutine_threadsafe(
+            broadcast_fn(make_event(EventType.CAPTURE_SCRIPT_PROGRESS, {
+                "step": "cancelling",
+                "message": "Cancellation requested — stopping current capture step...",
+                "project_id": project_id,
+            })),
+            loop,
+        )
 
     return {"cancelled": True, "message": "Cancellation requested"}
 
@@ -513,4 +837,5 @@ async def get_script_capture_log():
             "capture_log": _script_capture_state.get("capture_log", []),
             "strategies": _script_capture_state.get("strategies", []),
             "current_segment": _script_capture_state.get("current_segment"),
+            "log_file_path": _script_capture_state.get("log_file_path"),
         }

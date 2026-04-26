@@ -295,16 +295,17 @@ export default function TimelineCanvas() {
         const isSelected = evt.id === selectedEventId
         const radius = 3
 
+        // Full effective clip bounds (lead-in + core + lead-out).
+        const fullX = Math.max(TRACK_HEADER_WIDTH, padStartX)
+        const fullW = Math.min(padEndX, canvasWidth) - fullX
+
         // ── Padding extension (translucent region before/after core block) ──
-        if (pb > 0 || pa > 0) {
-          const clipPadX = Math.max(TRACK_HEADER_WIDTH, padStartX)
-          const clipPadW = Math.min(padEndX, canvasWidth) - clipPadX
-          if (clipPadW > 0) {
-            ctx.fillStyle = color
-            ctx.globalAlpha = isSelected ? 0.3 : 0.18
-            roundRect(ctx, clipPadX, blockY, clipPadW, blockH, radius)
-            ctx.fill()
-          }
+        // Keep this subtle so the core segment remains visually dominant.
+        if ((pb > 0 || pa > 0) && fullW > 0) {
+          ctx.fillStyle = color
+          ctx.globalAlpha = isSelected ? 0.2 : 0.1
+          roundRect(ctx, fullX, blockY, fullW, blockH, radius)
+          ctx.fill()
         }
 
         // Skip core block if entirely off-screen
@@ -332,20 +333,22 @@ export default function TimelineCanvas() {
 
         ctx.globalAlpha = 1.0
 
-        // Event label (if wide enough)
-        if (clipW > 40) {
+        // Event label (if full effective clip is wide enough)
+        // Anchor to the top-left of the full clip so lead-in/out and core read
+        // as one element.
+        if (fullW > 40) {
           const EVENT_LABELS = {
             incident: 'INC', battle: 'BTL', overtake: 'OVT', pit_stop: 'PIT',
             fastest_lap: 'FL', leader_change: 'LC', first_lap: '1st', last_lap: 'Last',
           }
           ctx.font = 'bold 9px Inter, system-ui, sans-serif'
           ctx.textAlign = 'left'
-          ctx.textBaseline = 'middle'
+          ctx.textBaseline = 'top'
           ctx.fillStyle = '#fff'
           ctx.fillText(
             EVENT_LABELS[evt.event_type] || evt.event_type.substring(0, 3).toUpperCase(),
-            clipX + 4,
-            blockY + blockH / 2
+            fullX + 4,
+            blockY + 3
           )
         }
       }

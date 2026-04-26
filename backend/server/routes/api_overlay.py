@@ -1,7 +1,7 @@
 """
 api_overlay.py
 --------------
-REST endpoints for the overlay template engine.
+REST endpoints for the overlay rendering engine.
 
 Prefix: ``/api/overlay``
 
@@ -9,23 +9,17 @@ Endpoints:
   GET    /status               — Engine + template status
   POST   /init                 — Initialize Playwright engine
   POST   /shutdown             — Shut down engine
-  GET    /templates             — List all templates (built-in + custom)
-  GET    /templates/{id}        — Get template details
-  POST   /templates             — Import / create custom template
-  PUT    /templates/{id}        — Update custom template
-  DELETE /templates/{id}        — Delete custom template
-  POST   /templates/{id}/duplicate — Duplicate template
-  POST   /templates/{id}/export — Export template data
   POST   /render                — Render a single overlay frame
   POST   /batch                 — Start batch render
   GET    /batch/status          — Batch render progress
   POST   /resolution            — Change rendering resolution
-  POST   /overrides/{project_id}/{template_id}  — Save per-project override
-  GET    /overrides/{project_id}/{template_id}   — Get per-project override
-  DELETE /overrides/{project_id}/{template_id}  — Delete per-project override
+  POST   /editor/preview        — Live editor preview (legacy compat)
+  GET    /editor/context/{id}   — Template variable documentation (legacy compat)
   POST   /frame-data/{project_id} — Build frame_data from project telemetry
-  POST   /editor/preview        — Live editor preview
-  GET    /editor/context/{id}   — Template variable documentation
+  POST   /composite/{project_id}  — Composite overlay over clip
+  POST   /composite/batch/{project_id} — Batch composite
+  POST   /preset/render-preview  — Render preset elements preview
+  POST   /intro-video/composite/{project_id} — Composite intro video
 """
 
 from __future__ import annotations
@@ -64,34 +58,15 @@ class BatchRenderRequest(BaseModel):
     project_id: Optional[int] = None
 
 
-class TemplateRequest(BaseModel):
-    name: str
-    description: str = ""
-    style: str = "custom"
-    html_content: str = ""
-    resolutions: list[str] = ["1080p", "1440p", "4k"]
-
-
-class TemplateUpdateRequest(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    style: Optional[str] = None
-    html_content: Optional[str] = None
-    resolutions: Optional[list[str]] = None
-
-
 class ResolutionRequest(BaseModel):
     resolution: str
-
-
-class OverrideRequest(BaseModel):
-    html_content: str
 
 
 class EditorPreviewRequest(BaseModel):
     template_id: str
     html_content: str
     frame_data: dict[str, Any] = {}
+    project_id: Optional[int] = None
     analyze_animations: bool = False
 
 
@@ -176,86 +151,34 @@ async def shutdown_engine():
         raise HTTPException(status_code=500, detail="Overlay engine shutdown failed")
 
 
-# ── Template CRUD ───────────────────────────────────────────────────────────
-
-@router.get("/templates")
-async def list_templates():
-    """List all available overlay templates."""
-    return {"templates": overlay_service.get_templates()}
-
-
-@router.get("/templates/{template_id}")
-async def get_template(template_id: str):
-    """Get details for a specific template."""
-    template = overlay_service.get_template(template_id)
-    if not template:
-        raise HTTPException(status_code=404, detail="Template not found")
-    return template
-
-
-@router.post("/templates")
-async def create_template(body: TemplateRequest):
-    """Import / create a custom template."""
-    try:
-        result = overlay_service.import_template({
-            "name": body.name,
-            "description": body.description,
-            "style": body.style,
-            "html_content": body.html_content,
-            "resolutions": body.resolutions,
-        })
-        return {"success": True, "template": result}
-    except Exception as exc:
-        logger.error("[Overlay API] Create template failed: %s", exc)
-        raise HTTPException(status_code=500, detail="Failed to create template")
-
-
-@router.put("/templates/{template_id}")
-async def update_template(template_id: str, body: TemplateUpdateRequest):
-    """Update a custom template."""
-    updates = body.model_dump(exclude_none=True)
-    result = overlay_service.update_template(template_id, updates)
-    if not result:
-        raise HTTPException(status_code=404, detail="Template not found or is built-in")
-    return {"success": True, "template": result}
-
-
-@router.delete("/templates/{template_id}")
-async def delete_template(template_id: str):
-    """Delete a custom template."""
-    deleted = overlay_service.delete_template(template_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Template not found or is built-in")
-    return {"success": True}
-
-
-@router.post("/templates/{template_id}/duplicate")
-async def duplicate_template(template_id: str):
-    """Duplicate a template as a new custom template."""
-    result = overlay_service.duplicate_template(template_id)
-    if not result:
-        raise HTTPException(status_code=404, detail="Template not found")
-    return {"success": True, "template": result}
-
-
-@router.post("/templates/{template_id}/export")
-async def export_template(template_id: str):
-    """Export a template (metadata + HTML content)."""
-    result = overlay_service.export_template(template_id)
-    if not result:
-        raise HTTPException(status_code=404, detail="Template not found")
-    return {"success": True, "template": result}
-
-
 # ── Rendering ───────────────────────────────────────────────────────────────
 
 @router.post("/render")
 async def render_frame(body: RenderRequest):
     """Render a single overlay frame as transparent PNG."""
     try:
+        frame_data = dict(body.frame_data or {})
+        if body.project_id is not None:
+            try:
+                from server.services.project_service import project_service
+                from server.services.data_plugin_service import data_plugin_service
+
+                project = project_service.get_project(body.project_id)
+                subsession_id = int((project or {}).get("subsession_id", 0) or 0)
+                if subsession_id > 0:
+                    frame_data = await data_plugin_service.enrich_frame_data(frame_data, subsession_id)
+                    logger.debug("[Overlay API] Enriched render frame with subsession_id=%d", subsession_id)
+                else:
+                    logger.info(
+                        "[Overlay API] No subsession_id on project %d — rendering with sample/telemetry data only",
+                        body.project_id,
+                    )
+            except Exception as exc:
+                logger.warning("[Overlay API] Render plugin enrichment failed: %s", exc)
+
         result = await overlay_service.render_frame(
             body.template_id,
-            body.frame_data,
+            frame_data,
             project_id=body.project_id,
             analyze_animations=body.analyze_animations,
         )
@@ -303,35 +226,6 @@ async def set_resolution(body: ResolutionRequest):
     return result
 
 
-# ── Per-project overrides ───────────────────────────────────────────────────
-
-@router.post("/overrides/{project_id}/{template_id}")
-async def save_override(project_id: int, template_id: str, body: OverrideRequest):
-    """Save a per-project template override."""
-    result = overlay_service.save_project_override(
-        project_id, template_id, body.html_content
-    )
-    return {"success": True, **result}
-
-
-@router.get("/overrides/{project_id}/{template_id}")
-async def get_override(project_id: int, template_id: str):
-    """Get a per-project template override."""
-    content = overlay_service.get_project_override(project_id, template_id)
-    if content is None:
-        raise HTTPException(status_code=404, detail="No override found")
-    return {"html_content": content, "project_id": project_id, "template_id": template_id}
-
-
-@router.delete("/overrides/{project_id}/{template_id}")
-async def delete_override(project_id: int, template_id: str):
-    """Delete a per-project template override."""
-    deleted = overlay_service.delete_project_override(project_id, template_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="No override found")
-    return {"success": True}
-
-
 # ── Editor endpoints ────────────────────────────────────────────────────────
 
 @router.post("/editor/preview")
@@ -342,10 +236,23 @@ async def editor_preview(body: EditorPreviewRequest):
     without persisting the template first.
     """
     try:
+        frame_data = dict(body.frame_data or {})
+        if body.project_id is not None:
+            try:
+                from server.services.project_service import project_service
+                from server.services.data_plugin_service import data_plugin_service
+
+                project = project_service.get_project(body.project_id)
+                subsession_id = int((project or {}).get("subsession_id", 0) or 0)
+                if subsession_id > 0:
+                    frame_data = await data_plugin_service.enrich_frame_data(frame_data, subsession_id)
+            except Exception as exc:
+                logger.warning("[Overlay API] Editor preview plugin enrichment failed: %s", exc)
+
         result = await overlay_service.render_preview(
             body.template_id,
             body.html_content,
-            body.frame_data,
+            frame_data,
             analyze_animations=body.analyze_animations,
         )
         return result
@@ -355,7 +262,7 @@ async def editor_preview(body: EditorPreviewRequest):
 
 
 @router.get("/editor/context/{template_id}")
-async def get_template_context(template_id: str):
+async def get_template_context(template_id: str, project_id: Optional[int] = None):
     """Get available Jinja2 template variables with sample values.
 
     Returns the full data context that a template can use, with realistic
@@ -364,6 +271,23 @@ async def get_template_context(template_id: str):
     context = overlay_service.get_template_context(template_id)
     if context is None:
         raise HTTPException(status_code=404, detail="Template not found")
+
+    if project_id is not None and isinstance(context.get("variables"), dict):
+        try:
+            from server.services.project_service import project_service
+            from server.services.data_plugin_service import data_plugin_service
+
+            project = project_service.get_project(project_id)
+            subsession_id = int((project or {}).get("subsession_id", 0) or 0)
+            if subsession_id > 0:
+                context = dict(context)
+                context["variables"] = await data_plugin_service.enrich_frame_data(
+                    dict(context.get("variables") or {}),
+                    subsession_id,
+                )
+        except Exception as exc:
+            logger.warning("[Overlay API] Editor context plugin enrichment failed: %s", exc)
+
     return context
 
 
@@ -403,9 +327,12 @@ async def build_frame_data_endpoint(project_id: int, body: FrameDataRequest):
     if not project_dir:
         raise HTTPException(status_code=400, detail="Project has no directory configured")
 
+    subsession_id = int(project.get("subsession_id", 0) or 0)
+
     # Allow caller to override series/track; fall back to project metadata
     series_name = body.series_name or ""
     track_name = body.track_name or project.get("track_name", "")
+    subsession_id = int(project.get("subsession_id", 0) or 0)
 
     try:
         frame_data = build_frame_data(
@@ -499,6 +426,7 @@ async def composite_overlay(project_id: int, body: CompositeRequest):
             focused_car_idx=body.focused_car_idx,
             series_name=body.series_name,
             track_name=track_name,
+            subsession_id=subsession_id,
             clip_duration_seconds=body.clip_duration_seconds,
             animation_orchestration=body.animation_orchestration,
             trigger_sensitivity=body.trigger_sensitivity,
@@ -553,6 +481,7 @@ async def composite_batch(project_id: int, body: BatchCompositeRequest):
         raise HTTPException(status_code=400, detail="Project has no directory configured")
 
     track_name = body.track_name or project.get("track_name", "")
+    subsession_id = int(project.get("subsession_id", 0) or 0)
 
     # Reconstruct paths from project_dir + sanitised clip IDs (server-controlled)
     captures_dir = _Path(project_dir) / "captures"
@@ -585,6 +514,7 @@ async def composite_batch(project_id: int, body: BatchCompositeRequest):
             project_dir=project_dir,
             series_name=body.series_name,
             track_name=track_name,
+            subsession_id=subsession_id,
             focused_car_idx=body.focused_car_idx,
             animation_orchestration=body.animation_orchestration,
             trigger_sensitivity=body.trigger_sensitivity,
@@ -636,6 +566,23 @@ async def render_preset_preview(body: dict[str, Any]):
     frame_data = body.get("frame_data") or dict(SAMPLE_FRAME_DATA)
     frame_data["section"] = section
     element_id = body.get("element_id")
+
+    # Prefer live plugin enrichment when we have a subsession context.
+    try:
+        from server.services.data_plugin_service import data_plugin_service
+        from server.services.project_service import project_service
+
+        subsession_id = int(frame_data.get("subsession_id", 0) or 0)
+        project_id = body.get("project_id")
+        if subsession_id <= 0 and project_id is not None:
+            project = project_service.get_project(int(project_id))
+            if project:
+                subsession_id = int(project.get("subsession_id", 0) or 0)
+
+        if subsession_id > 0:
+            frame_data = await data_plugin_service.enrich_frame_data(frame_data, subsession_id)
+    except Exception as exc:
+        logger.warning("[Overlay API] Preset preview plugin enrichment failed: %s", exc)
 
     # Allow variable overrides
     if body.get("variables"):

@@ -14,9 +14,11 @@ import {
  * Each export shows: file name, preset, size, elapsed time.
  * Actions: play (open), reveal in folder, copy path.
  */
-export default function CompletedExports() {
+export default function CompletedExports({ projectId, selectedOutputFile, onPlay, onReveal }) {
   const { completedExports, fetchExports } = useEncoding()
   const { showSuccess } = useToast()
+
+  const projectExports = (completedExports || []).filter(exp => (projectId == null || exp.project_id === projectId))
 
   useEffect(() => {
     fetchExports()
@@ -37,7 +39,7 @@ export default function CompletedExports() {
     })
   }, [showSuccess])
 
-  if (!completedExports || completedExports.length === 0) {
+  if (!projectExports.length) {
     return (
       <div className="text-center py-6">
         <FileVideo className="w-8 h-8 text-text-disabled mx-auto mb-2" />
@@ -54,7 +56,7 @@ export default function CompletedExports() {
       {/* Header with refresh */}
       <div className="flex items-center justify-between mb-1">
         <span className="text-xxs text-text-tertiary">
-          {completedExports.length} export{completedExports.length !== 1 ? 's' : ''}
+          {projectExports.length} export{projectExports.length !== 1 ? 's' : ''}
         </span>
         <button
           onClick={fetchExports}
@@ -67,10 +69,10 @@ export default function CompletedExports() {
       </div>
 
       {/* Export list */}
-      {completedExports.map(exp => (
+      {projectExports.map(exp => (
         <div
           key={exp.job_id}
-          className="bg-bg-primary border border-border rounded-md p-3 space-y-2"
+          className={`bg-bg-primary border rounded-md p-3 space-y-2 ${selectedOutputFile === exp.output_file ? 'border-accent/50 ring-1 ring-accent/30' : 'border-border'}`}
         >
           {/* File info */}
           <div className="flex items-start gap-2">
@@ -118,12 +120,12 @@ export default function CompletedExports() {
               <ExportAction
                 icon={Play}
                 label="Play"
-                onClick={() => window.open(`file://${exp.output_file}`, '_blank')}
+                onClick={() => onPlay?.(exp)}
               />
               <ExportAction
                 icon={FolderOpen}
                 label="Reveal"
-                onClick={() => window.open(`file://${exp.output_dir}`, '_blank')}
+                onClick={() => onReveal?.(exp)}
               />
               <ExportAction
                 icon={Copy}

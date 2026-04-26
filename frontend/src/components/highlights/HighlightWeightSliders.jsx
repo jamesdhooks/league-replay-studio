@@ -4,7 +4,8 @@ import { EVENT_COLORS } from '../../context/TimelineContext'
 import { useAnalysis } from '../../context/AnalysisContext'
 import { useIRacing } from '../../context/IRacingContext'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
-import { Wand2, SlidersHorizontal, Info, ListOrdered, Target, Clock, Sliders, Film, X, Camera, ChevronDown } from 'lucide-react'
+import { Wand2, SlidersHorizontal, Info, ListOrdered, Target, Sliders, Film, X, Camera, ChevronDown, Shuffle, HelpCircle, Save, Trash2, BookMarked } from 'lucide-react'
+import HighlightControlsHelp from './HighlightControlsHelp'
 import Tooltip from '../ui/Tooltip'
 import CollapsibleSection from '../ui/CollapsibleSection'
 import LabeledSlider from '../ui/LabeledSlider'
@@ -20,9 +21,10 @@ export default function HighlightWeightSliders() {
   const {
     weights, setWeight, autoBalance,
     minSeverity, setMinSeverity,
-    targetDuration, setTargetDuration,
     params, setParams,
     sectionConfig, updateSectionConfig,
+    presets, currentPresetId, hasUnsavedChanges,
+    loadPreset, savePreset, deletePreset,
   } = useHighlight()
 
   const { events } = useAnalysis()
@@ -38,17 +40,153 @@ export default function HighlightWeightSliders() {
   const [collapsed, setCollapsed] = useLocalStorage('lrs:editing:controls:collapsed', {})
   const toggle = (key) => setCollapsed(p => ({ ...p, [key]: !p[key] }))
 
+  const [showHelp, setShowHelp] = useState(false)
+  const [saveMode, setSaveMode] = useState(false)   // inline save-as input visible
+  const [saveName, setSaveName] = useState('')
+  const [saving, setSaving] = useState(false)
+  const saveInputRef = useRef(null)
+
+  useEffect(() => {
+    if (saveMode) {
+      setSaveName(currentPresetId || '')
+      setTimeout(() => saveInputRef.current?.focus(), 0)
+    }
+  }, [saveMode, currentPresetId])
+
+  const handleLoadPreset = (id) => {
+    const p = presets.find(x => x.id === id || x.name === id)
+    if (p) loadPreset(p)
+  }
+
+  const handleSaveAs = async () => {
+    const name = saveName.trim()
+    if (!name) return
+    setSaving(true)
+    try {
+      await savePreset(name)
+      setSaveMode(false)
+    } catch (_e) {
+      // error is already logged in context
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleDelete = async () => {
+    if (!currentPresetId) return
+    if (!window.confirm(`Delete preset "${currentPresetId}"?`)) return
+    try { await deletePreset(currentPresetId) } catch (_e) { /* logged */ }
+  }
+
+  const currentPreset = presets.find(p => p.id === currentPresetId || p.name === currentPresetId)
+
   return (
-    <div className="p-3 space-y-3">
-      {/* Event type weights */}
-      <div className="space-y-2">
-        <CollapsibleSection
-          icon={ListOrdered}
-          label="Event Priorities"
-          open={!collapsed.priorities}
-          onToggle={() => toggle('priorities')}
+    <div className="space-y-0">
+
+      {/* Preset selector bar */}
+      <div className="mx-2 mb-2 space-y-1.5">
+        {/* Row 1: select + action buttons */}
+        <div className="flex items-center gap-1.5">
+          <BookMarked className="w-3.5 h-3.5 text-text-tertiary shrink-0" />
+          <select
+            value={currentPresetId || ''}
+            onChange={e => handleLoadPreset(e.target.value)}
+            className="flex-1 h-7 px-2 rounded-md border border-border bg-bg-primary text-xxs
+                       text-text-secondary focus:outline-none focus:border-accent min-w-0"
+            title="Load a highlight preset"
+          >
+            <option value="">{hasUnsavedChanges || !currentPresetId ? '— custom —' : 'Select preset'}</option>
+            {presets.map(p => (
+              <option key={p.id ?? p.name} value={p.id ?? p.name}>{p.name}</option>
+            ))}
+          </select>
+
+          {/* Overwrite / Save-as toggle */}
+          <button
+            onClick={() => setSaveMode(v => !v)}
+            className="h-7 px-2 inline-flex items-center gap-1 rounded-md border border-border
+                       text-xxs text-text-secondary hover:text-text-primary hover:bg-bg-hover
+                       transition-colors shrink-0"
+            title={currentPreset && hasUnsavedChanges ? 'Overwrite or save as new preset' : 'Save as preset'}
+          >
+            <Save className="w-3 h-3" />
+            {currentPreset && hasUnsavedChanges ? 'Save*' : 'Save'}
+          </button>
+
+          {/* Delete */}
+          {currentPreset && (
+            <button
+              onClick={handleDelete}
+              className="h-7 w-7 inline-flex items-center justify-center rounded-md border border-border
+                         text-text-tertiary hover:text-red-400 hover:border-red-400/40 hover:bg-red-400/10
+                         transition-colors shrink-0"
+              title={`Delete "${currentPreset.name}"`}
+            >
+              <Trash2 className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+
+        {/* Row 2: inline save-as input (conditional) */}
+        {saveMode && (
+          <div className="flex items-center gap-1.5">
+            <input
+              ref={saveInputRef}
+              type="text"
+              value={saveName}
+              onChange={e => setSaveName(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleSaveAs(); if (e.key === 'Escape') setSaveMode(false) }}
+              placeholder="Preset name…"
+              className="flex-1 h-7 px-2 rounded-md border border-accent/40 bg-bg-primary text-xxs
+                         text-text-primary placeholder-text-tertiary focus:outline-none focus:border-accent"
+            />
+            <button
+              onClick={handleSaveAs}
+              disabled={saving || !saveName.trim()}
+              className="h-7 px-2.5 rounded-md bg-accent text-white text-xxs font-medium
+                         hover:bg-accent/80 disabled:opacity-50 transition-colors shrink-0"
+            >
+              {saving ? '…' : 'Save'}
+            </button>
+            <button
+              onClick={() => setSaveMode(false)}
+              className="h-7 w-7 inline-flex items-center justify-center rounded-md border border-border
+                         text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-colors"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        )}
+
+        {/* Unsaved changes badge */}
+        {currentPreset && hasUnsavedChanges && !saveMode && (
+          <p className="text-[10px] text-warning/80 leading-none px-0.5">
+            Unsaved changes to &ldquo;{currentPreset.name}&rdquo;
+          </p>
+        )}
+      </div>
+
+      {/* Help button */}
+      <div className="pb-2 mx-2">
+        <button
+          onClick={() => setShowHelp(true)}
+          className="flex items-center gap-2 w-full px-3 py-2 text-xs font-medium
+                     text-accent bg-accent/10 hover:bg-accent/20 border border-accent/20
+                     rounded-lg transition-colors"
         >
-          <div className="mt-2 space-y-2">
+          <HelpCircle className="w-3.5 h-3.5 shrink-0" />
+          <span>What do these controls do?</span>
+        </button>
+      </div>
+
+      {/* Event type weights */}
+      <CollapsibleSection
+        icon={ListOrdered}
+        label="Event Priorities"
+        open={!collapsed.priorities}
+        onToggle={() => toggle('priorities')}
+      >
+        <div className="mt-2 space-y-2">
             {eventTypes.map(type => {
           const color = EVENT_COLORS[type] || '#666'
           const label = EVENT_TYPE_LABELS[type]
@@ -84,17 +222,16 @@ export default function HighlightWeightSliders() {
         })}
 
         {/* Auto-balance button */}
-        <button
-          onClick={autoBalance}
-          className="flex items-center gap-1.5 w-full px-2 py-1.5 text-xxs font-medium
-                     text-accent bg-accent/10 hover:bg-accent/20 rounded transition-colors"
-        >
-          <Wand2 className="w-3 h-3" />
-          Auto-balance weights
-        </button>
-          </div>
-        </CollapsibleSection>
-      </div>
+          <button
+            onClick={autoBalance}
+            className="flex items-center gap-1.5 w-full px-2 py-1.5 text-xxs font-medium
+                       text-accent bg-accent/10 hover:bg-accent/20 rounded transition-colors"
+          >
+            <Wand2 className="w-3 h-3" />
+            Auto-balance weights
+          </button>
+        </div>
+      </CollapsibleSection>
 
       {/* Minimum score threshold */}
       <div className="pt-2 border-t border-border-subtle space-y-1.5">
@@ -120,24 +257,145 @@ export default function HighlightWeightSliders() {
         </CollapsibleSection>
       </div>
 
-      {/* Target duration */}
-      <div className="pt-2 border-t border-border-subtle space-y-1.5">
+      {/* Mix & Diversity — Balanced Selection v3 */}
+      <div className="pt-2 border-t border-border-subtle space-y-2">
         <CollapsibleSection
-          icon={Clock}
-          label="Target Duration"
-          open={!collapsed.duration}
-          onToggle={() => toggle('duration')}
+          icon={Shuffle}
+          label="Mix & Diversity"
+          open={!collapsed.mixDiversity}
+          onToggle={() => toggle('mixDiversity')}
         >
-          <div className="mt-2">
+          <div className="mt-2 space-y-3">
+            {/* Master diversity slider */}
             <LabeledSlider
-              label="Highlight Length"
-              tooltip="Target duration of the final highlight video — shorter means stricter event selection (0 = no limit)"
-              value={targetDuration ? Math.round(targetDuration / 60) : 0}
-              min={0} max={30} step={1}
-              format={v => v === 0 ? 'No limit' : `${v} min`}
-              onChange={v => setTargetDuration(v === 0 ? null : v * 60)}
-              labelWidth="7rem"
+              label="Diversity Strength"
+              tooltip="0 = pure score-greedy (highest score wins). 100 = strict mix targets enforced. The selector applies type decay, bucket-spread, mix floors, and mix caps in proportion to this knob."
+              min={0}
+              max={100}
+              step={5}
+              value={params.diversityStrength ?? 50}
+              onChange={v => setParams(p => ({ ...p, diversityStrength: v }))}
+              valueDisplay={`${params.diversityStrength ?? 50}`}
             />
+
+            {/* Normalization mode */}
+            <div className="flex items-center justify-between gap-2">
+              <Tooltip content="Cross-type: stretches all positive raw scores onto one 0.5–10 scale so weights act honestly across types. Per-type (legacy): each type normalized independently — every type spans the full range regardless of its base importance.">
+                <span className="text-xxs text-text-secondary cursor-help">Score Normalization</span>
+              </Tooltip>
+              <select
+                value={params.normalizationMode ?? 'cross_type'}
+                onChange={e => setParams(p => ({ ...p, normalizationMode: e.target.value }))}
+                className="text-xxs bg-surface-2 border border-border-subtle rounded px-1.5 py-0.5"
+              >
+                <option value="cross_type">Cross-type (recommended)</option>
+                <option value="per_type">Per-type (legacy)</option>
+              </select>
+            </div>
+
+            {/* Per-type mix targets */}
+            <div className="pt-2 border-t border-border-subtle/50">
+              <div className="flex items-center gap-1.5 mb-2">
+                <span className="text-xxs font-medium text-text-secondary">Mix Targets</span>
+                <Tooltip content="Approximate share of total script time per event type. Diversity Strength determines how strictly these are enforced. Floors push types up; caps stop selection of a type once hit.">
+                  <Info className="w-3 h-3 text-text-tertiary" />
+                </Tooltip>
+              </div>
+              <div className="space-y-1.5">
+                {eventTypes.map(type => {
+                  const label = EVENT_TYPE_LABELS[type]
+                  const mn = (params.mixMin && params.mixMin[type] != null) ? Math.round(params.mixMin[type] * 100) : 0
+                  const mx = (params.mixMax && params.mixMax[type] != null) ? Math.round(params.mixMax[type] * 100) : 100
+                  const tgt = (params.mixTargets && params.mixTargets[type] != null) ? Math.round(params.mixTargets[type] * 100) : null
+                  return (
+                    <div key={type} className="flex items-center gap-2">
+                      <span className="text-xxs w-16 truncate text-text-secondary" title={label}>{label}</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={5}
+                        placeholder="min"
+                        value={mn || ''}
+                        onChange={e => {
+                          const v = parseInt(e.target.value, 10)
+                          const next = { ...(params.mixMin || {}) }
+                          if (Number.isFinite(v) && v > 0) next[type] = v / 100
+                          else delete next[type]
+                          setParams(p => ({ ...p, mixMin: next }))
+                        }}
+                        className="w-12 text-xxs bg-surface-2 border border-border-subtle rounded px-1 py-0.5 font-mono"
+                        title="Soft floor (% of script time)"
+                      />
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={5}
+                        placeholder="tgt"
+                        value={tgt || ''}
+                        onChange={e => {
+                          const v = parseInt(e.target.value, 10)
+                          const next = { ...(params.mixTargets || {}) }
+                          if (Number.isFinite(v) && v > 0) next[type] = v / 100
+                          else delete next[type]
+                          setParams(p => ({ ...p, mixTargets: next }))
+                        }}
+                        className="w-12 text-xxs bg-surface-2 border border-accent/30 rounded px-1 py-0.5 font-mono"
+                        title="Target share (% of script time)"
+                      />
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={5}
+                        placeholder="max"
+                        value={(params.mixMax && params.mixMax[type] != null) ? mx : ''}
+                        onChange={e => {
+                          const v = parseInt(e.target.value, 10)
+                          const next = { ...(params.mixMax || {}) }
+                          if (Number.isFinite(v) && v >= 0 && v < 100) next[type] = v / 100
+                          else delete next[type]
+                          setParams(p => ({ ...p, mixMax: next }))
+                        }}
+                        className="w-12 text-xxs bg-surface-2 border border-border-subtle rounded px-1 py-0.5 font-mono"
+                        title="Hard cap (% of script time)"
+                      />
+                    </div>
+                  )
+                })}
+              </div>
+              <div className="text-xxs text-text-tertiary mt-1.5 italic">
+                min · target · max (all % of script time, blank = unset)
+              </div>
+            </div>
+
+            {/* Advanced diminishing-returns knobs */}
+            <details className="pt-2 border-t border-border-subtle/50">
+              <summary className="text-xxs text-text-secondary cursor-pointer select-none">Advanced</summary>
+              <div className="mt-2 space-y-2.5">
+                <LabeledSlider
+                  label="Type Decay Base"
+                  tooltip="Geometric falloff applied to each successive event of the same type. Lower = faster diminishing returns. 1.0 = no decay."
+                  min={0.5}
+                  max={1.0}
+                  step={0.01}
+                  value={params.typeDecayBase ?? 0.85}
+                  onChange={v => setParams(p => ({ ...p, typeDecayBase: v }))}
+                  valueDisplay={(params.typeDecayBase ?? 0.85).toFixed(2)}
+                />
+                <LabeledSlider
+                  label="Bucket Repeat Penalty"
+                  tooltip="Penalty for stacking same-type events into the same temporal bucket (early/mid/late race). Higher = better temporal spread."
+                  min={0}
+                  max={1.0}
+                  step={0.05}
+                  value={params.bucketRepeatPenalty ?? 0.25}
+                  onChange={v => setParams(p => ({ ...p, bucketRepeatPenalty: v }))}
+                  valueDisplay={(params.bucketRepeatPenalty ?? 0.25).toFixed(2)}
+                />
+              </div>
+            </details>
           </div>
         </CollapsibleSection>
       </div>
@@ -170,6 +428,17 @@ export default function HighlightWeightSliders() {
           min={1.0} max={2.5} step={0.1}
           format={v => `${v.toFixed(1)}×`}
           onChange={v => setParams(p => ({ ...p, battleFrontBias: v }))}
+          labelWidth="7rem"
+        />
+
+        {/* Battle gap intensity */}
+        <LabeledSlider
+          label="Gap Intensity"
+          tooltip="How much tighter average gap boosts a battle segment's score. Higher values prefer wheel-to-wheel moments over distant following. 0 = off."
+          value={params.battleGapBonus ?? 0.5}
+          min={0} max={2.0} step={0.1}
+          format={v => v === 0 ? 'Off' : `${v.toFixed(1)}×`}
+          onChange={v => setParams(p => ({ ...p, battleGapBonus: v }))}
           labelWidth="7rem"
         />
 
@@ -616,6 +885,9 @@ export default function HighlightWeightSliders() {
           </div>
         </CollapsibleSection>
       </div>
+
+      {/* Help button */}
+      {showHelp && <HighlightControlsHelp onClose={() => setShowHelp(false)} />}
 
     </div>
   )

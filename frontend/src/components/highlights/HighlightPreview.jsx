@@ -5,7 +5,7 @@ import { useHighlight, EVENT_TYPE_LABELS } from '../../context/HighlightContext'
 import { EVENT_COLORS } from '../../context/TimelineContext'
 import PreviewPlayer from '../analysis/PreviewPlayer'
 import { formatTime } from '../../utils/time'
-import SectionCollapseHeader from '../ui/SectionCollapseHeader'
+import CollapsiblePanelHeader from '../ui/CollapsiblePanelHeader'
 
 // Section accent colours — mirrors SECTION_STYLES in HighlightTimeline
 const SECTION_TEXT_COLORS = {
@@ -16,17 +16,35 @@ const SECTION_TEXT_COLORS = {
 }
 
 function getEntryColor(action) {
-  if (action.eventType === 'seek') return '#64748b'
+  if (action.eventType === 'seek') {
+    if (action.seekOk === true) return '#22c55e'
+    if (action.seekOk === false) return '#ef4444'
+    return '#64748b'
+  }
   if (action.eventType && EVENT_COLORS[action.eventType]) return EVENT_COLORS[action.eventType]
   if (action.section && SECTION_TEXT_COLORS[action.section]) return SECTION_TEXT_COLORS[action.section]
   return '#94a3b8'
 }
 
 function getEntryLabel(action) {
-  if (action.eventType === 'seek') return 'Seek'
+  if (action.eventType === 'seek') {
+    if (action.seekOk === true) return 'Seek OK'
+    if (action.seekOk === false) return 'Seek FAIL'
+    return 'Seek'
+  }
   if (action.eventType) return EVENT_TYPE_LABELS[action.eventType] || action.eventType.replace(/_/g, ' ')
   if (action.section) return action.section.replace(/_/g, ' ')
   return 'Bridge'
+}
+
+function formatEventFeedTimestamp(ts) {
+  if (!Number.isFinite(ts)) return '--:--:--'
+  const date = new Date(ts)
+  if (Number.isNaN(date.getTime())) return '--:--:--'
+  const hh = String(date.getHours()).padStart(2, '0')
+  const mm = String(date.getMinutes()).padStart(2, '0')
+  const ss = String(date.getSeconds()).padStart(2, '0')
+  return `${hh}:${mm}:${ss}`
 }
 
 function getCameraTextColor(action) {
@@ -97,7 +115,7 @@ export default memo(function HighlightPreview({ collapsed, onToggle }) {
 
       <div className="h-full flex flex-col overflow-hidden border-b border-border bg-bg-secondary">
         {/* ── Preview header ───────────────────────────────────────────── */}
-          <SectionCollapseHeader
+          <CollapsiblePanelHeader
             open={!collapsed}
             onToggle={onToggle}
             icon={Eye}
@@ -116,9 +134,9 @@ export default memo(function HighlightPreview({ collapsed, onToggle }) {
             <PreviewPlayer />
 
             {/* ── Event feed overlay (bottom-right) ───────────────────── */}
-            <div className="absolute right-3 bottom-3 w-[320px] max-w-[calc(100%-1.5rem)] border border-border rounded-lg bg-bg-primary shadow-xl">
+            <div className="absolute right-3 bottom-3 w-[380px] max-w-[calc(100%-1.5rem)] border border-border rounded-lg bg-bg-primary shadow-xl">
               <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-border-subtle/70 shrink-0">
-                <SectionCollapseHeader
+                <CollapsiblePanelHeader
                   open={!feedCollapsed}
                   onToggle={() => setFeedCollapsed(v => !v)}
                   icon={Zap}
@@ -177,7 +195,10 @@ export default memo(function HighlightPreview({ collapsed, onToggle }) {
                           }}
                         >
                           <span className="text-[10px] text-text-disabled font-mono tabular-nums text-right">
-                            {formatTime(action.raceTime)}
+                            {formatEventFeedTimestamp(action.ts)}
+                            <span className="block text-[9px] text-text-disabled/70">
+                              {Number.isFinite(action.raceTime) ? formatTime(action.raceTime) : '--:--'}
+                            </span>
                           </span>
                           <span className="text-[11px] font-semibold truncate" style={{ color }}>
                             {label}
@@ -185,8 +206,9 @@ export default memo(function HighlightPreview({ collapsed, onToggle }) {
                           <span
                             className="text-[10px] font-mono truncate"
                             style={{ color: action.cameraLabel ? getCameraTextColor(action) : 'rgba(148,163,184,0.7)' }}
+                            title={action.eventType === 'seek' ? (action.seekFeedback || undefined) : undefined}
                           >
-                            {action.cameraLabel || '—'}
+                            {action.cameraLabel || (action.eventType === 'seek' ? (action.seekFeedback || '—') : '—')}
                           </span>
                           <span className={`text-[10px] font-semibold truncate ${action.driverName ? 'text-emerald-300' : 'text-text-disabled'}`}>
                             {action.driverName || '—'}

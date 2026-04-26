@@ -39,7 +39,7 @@ import logging
 import re
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Optional, Callable
 
 import httpx
 
@@ -283,6 +283,7 @@ class LLMService:
         skill_id: str,
         user_prompt: str,
         context: Optional[dict] = None,
+        progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
     ) -> dict:
         """Execute a registered skill and return the validated output.
 
@@ -319,7 +320,17 @@ class LLMService:
         if skill is None:
             raise LLMSkillError(f"Unknown skill: '{skill_id}'")
 
+        def emit(stage: str, message: str, **extra: Any) -> None:
+            if progress_callback is None:
+                return
+            payload = {"stage": stage, "message": message, **extra}
+            try:
+                progress_callback(payload)
+            except Exception:
+                logger.debug("[LLM] Suppressed progress callback failure", exc_info=True)
+
         ctx = context or {}
+        emit("building_prompt", "Preparing skill context", skill_id=skill_id)
         system_prompt = skill.build_system_prompt(ctx)
         response_schema = skill.get_response_schema()
 
@@ -328,15 +339,18 @@ class LLMService:
             skill_id,
             settings_service.get("llm_model", ""),
         )
+        emit("calling_provider", "Sending request to LLM provider", skill_id=skill_id)
 
         raw = await self._call_provider(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             response_format=response_schema,
+            progress_callback=emit,
         )
 
         # Parse and validate
         try:
+            emit("parsing_response", "Parsing model response", skill_id=skill_id)
             output = skill.parse_response(raw)
         except LLMSkillError:
             raise
@@ -345,6 +359,7 @@ class LLMService:
                 f"Skill '{skill_id}': failed to parse LLM response — {exc}"
             ) from exc
 
+        emit("validating_response", "Validating model output", skill_id=skill_id)
         valid, error_msg = skill.validate_output(output)
         if not valid:
             raise LLMSkillError(
@@ -352,6 +367,7 @@ class LLMService:
             )
 
         logger.info("[LLM] Skill '%s' completed successfully", skill_id)
+        emit("completed", "Skill completed successfully", skill_id=skill_id)
         return output
 
     # ── Provider dispatch ───────────────────────────────────────────────────
@@ -361,6 +377,7 @@ class LLMService:
         system_prompt: str,
         user_prompt: str,
         response_format: Optional[dict] = None,
+        progress_callback: Optional[Callable[[str, str], None]] = None,
     ) -> str:
         """Send a prompt to the configured provider and return raw text.
 
@@ -386,11 +403,26 @@ class LLMService:
         if dispatch_fn is None:
             raise LLMConfigError(f"Unsupported LLM provider: '{provider_name}'")
 
+        if progress_callback is not None:
+            progress_callback(
+                "provider_selected",
+                f"Using provider {provider_name}",
+                provider=provider_name,
+            )
+
         last_exc: Optional[Exception] = None
 
         for attempt in range(1, _MAX_RETRIES + 1):
             t0 = time.monotonic()
             try:
+                if progress_callback is not None:
+                    progress_callback(
+                        "provider_attempt_started",
+                        f"Provider request attempt {attempt} started",
+                        provider=provider_name,
+                        attempt=attempt,
+                        max_attempts=_MAX_RETRIES,
+                    )
                 result = await dispatch_fn(
                     cfg=cfg,
                     system_prompt=system_prompt,
@@ -404,6 +436,14 @@ class LLMService:
                     elapsed,
                     attempt,
                 )
+                if progress_callback is not None:
+                    progress_callback(
+                        "provider_attempt_succeeded",
+                        f"Provider request succeeded on attempt {attempt}",
+                        provider=provider_name,
+                        attempt=attempt,
+                        elapsed_ms=round(elapsed * 1000, 1),
+                    )
                 return result
             except LLMProviderError as exc:
                 elapsed = time.monotonic() - t0
@@ -416,8 +456,27 @@ class LLMService:
                     _MAX_RETRIES,
                     exc,
                 )
+                if progress_callback is not None:
+                    progress_callback(
+                        "provider_attempt_failed",
+                        f"Provider request attempt {attempt} failed",
+                        provider=provider_name,
+                        attempt=attempt,
+                        max_attempts=_MAX_RETRIES,
+                        elapsed_ms=round(elapsed * 1000, 1),
+                        detail=str(exc),
+                    )
                 if attempt < _MAX_RETRIES:
                     backoff = _INITIAL_BACKOFF * (2 ** (attempt - 1))
+                    if progress_callback is not None:
+                        progress_callback(
+                            "provider_retrying",
+                            f"Retrying provider request after {backoff:.1f}s backoff",
+                            provider=provider_name,
+                            attempt=attempt,
+                            next_attempt=attempt + 1,
+                            backoff_seconds=backoff,
+                        )
                     await asyncio.sleep(backoff)
 
         raise last_exc  # type: ignore[misc]

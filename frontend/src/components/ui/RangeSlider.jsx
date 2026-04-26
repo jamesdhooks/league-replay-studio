@@ -8,7 +8,7 @@ import { formatTime } from '../../utils/time'
  * Narrower range = zoomed in, histogram scrolls to show the selected window.
  * The center region is draggable to pan without changing zoom level.
  */
-export default function RangeSlider({ rangeStart, rangeEnd, onChange, totalDuration, events, playheadTime = null }) {
+export default function RangeSlider({ rangeStart, rangeEnd, onChange, totalDuration, events, playheadTime = null, sectionBands = [] }) {
   const trackRef = useRef(null)
 
   const pctToFraction = useCallback((clientX) => {
@@ -51,7 +51,7 @@ export default function RangeSlider({ rangeStart, rangeEnd, onChange, totalDurat
     return events.map(e => ({
       pct: (e.start_time_seconds / totalDuration) * 100,
       endPct: ((e.end_time_seconds || e.start_time_seconds) / totalDuration) * 100,
-      color: EVENT_COLORS[e.event_type] || '#6b7280',
+      color: e.color || EVENT_COLORS[e.event_type] || '#6b7280',
       highlight: e.inclusion === 'highlight',
     }))
   }, [events, totalDuration])
@@ -95,6 +95,16 @@ export default function RangeSlider({ rangeStart, rangeEnd, onChange, totalDurat
               <div className="absolute -top-1 -left-1 w-2 h-2 rounded-full bg-red-500" />
             </div>
           )}
+
+          {/* Section band strip at bottom of track */}
+          {sectionBands.map((band) => (
+            <div
+              key={band.section}
+              className="absolute bottom-0 h-[5px] pointer-events-none z-[5]"
+              style={{ left: `${band.startPct}%`, width: `${band.widthPct}%`, backgroundColor: band.color }}
+              title={`${band.label}: ${formatTime(band.start)} – ${formatTime(band.end)}`}
+            />
+          ))}
 
           {/* Dimmed regions outside range */}
           <div className="absolute inset-y-0 left-0 bg-black/55 rounded-l pointer-events-none" style={{ width: `${leftPct}%` }} />

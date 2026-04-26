@@ -6,11 +6,11 @@
  * When unlocked: shows an amber "SCRIPT UNLOCKED" banner with lock button.
  */
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useScriptState, CAPTURE_STATES } from '../../context/ScriptStateContext'
 import {
   Lock, Unlock, AlertTriangle, CheckCircle2, Circle, Loader2,
-  Trash2, RotateCcw, ChevronDown, ChevronUp,
+  Trash2, RotateCcw, Clock, Camera, Repeat, ArrowRight,
 } from 'lucide-react'
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -51,7 +51,174 @@ function ProgressBar({ captured, total }) {
 
 // ── Main Component ──────────────────────────────────────────────────────────
 
-export default function ScriptLockBanner({ projectId, script, onLock, onUnlock }) {
+const SECTION_META = {
+  intro: { label: 'Intro', pill: 'bg-purple-500/20 text-purple-300 border-purple-500/30', fill: 'bg-purple-500/18' },
+  qualifying_results: { label: 'Qualifying', pill: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30', fill: 'bg-cyan-500/18' },
+  race: { label: 'Race', pill: 'bg-green-500/20 text-green-300 border-green-500/30', fill: 'bg-green-500/18' },
+  race_results: { label: 'Results', pill: 'bg-amber-500/20 text-amber-300 border-amber-500/30', fill: 'bg-amber-500/18' },
+}
+
+function SegmentLogFeed({ entries, isExecuting, isCurrent, isCaptured }) {
+  if (!entries?.length) {
+    if (!isExecuting) {
+      return <div className="text-[10px] text-text-disabled">No capture activity</div>
+    }
+
+    if (isCurrent) {
+      return <div className="text-[10px] text-text-disabled">Capture activity will appear here</div>
+    }
+
+    if (isCaptured) {
+      return <div className="text-[10px] text-text-disabled">Capture complete</div>
+    }
+
+    return <div className="text-[10px] text-text-disabled">Awaiting segment turn</div>
+  }
+
+  return (
+    <div className="space-y-1">
+      {entries.slice(-4).reverse().map((entry, index) => (
+        <div key={`${entry.timestamp || index}-${entry.action || 'entry'}`} className="text-[10px] leading-4 text-text-secondary">
+          <span className="text-text-disabled mr-1">{entry.action || 'info'}:</span>
+          <span>{entry.detail}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function SegmentCard({ segment, currentSegmentId, captureLog, isExecuting }) {
+  const segId = segment.segment_id || segment.id
+  const state = segment.capture_state
+  const logs = useMemo(
+    () => (captureLog || []).filter((entry) => entry.segment_id === segId),
+    [captureLog, segId],
+  )
+  const isCurrent = isExecuting && (segId === currentSegmentId || state === CAPTURE_STATES.CAPTURING)
+  const isCaptured = state === CAPTURE_STATES.CAPTURED
+  const isInvalidated = state === CAPTURE_STATES.INVALIDATED
+  const meta = SECTION_META[segment.section] || SECTION_META.race
+
+  const progressPct = useMemo(() => {
+    if (isCaptured) return 100
+    if (isInvalidated) return 100
+    let pct = isCurrent ? 4 : 0
+
+    const phases = [
+      {
+        match: (entry) => entry.action === 'seek' && String(entry.detail || '').includes('Priming replay'),
+        pct: 8,
+      },
+      {
+        match: (entry) => entry.action === 'seek' && String(entry.detail || '').includes('validated'),
+        pct: 22,
+      },
+      {
+        match: (entry) => entry.action === 'seek' && String(entry.detail || '').includes('Pausing replay after seek'),
+        pct: 28,
+      },
+      {
+        match: (entry) => entry.action === 'camera',
+        pct: 40,
+      },
+      {
+        match: (entry) => entry.action === 'record_start',
+        pct: 56,
+      },
+      {
+        match: (entry) => entry.action === 'info' && String(entry.detail || '').includes('Replay resumed at 1×'),
+        pct: 62,
+      },
+      {
+        match: (entry) => entry.action === 'info' && String(entry.detail || '').includes('duration'),
+        pct: 72,
+      },
+      {
+        match: (entry) => entry.action === 'camera_schedule',
+        pct: 80,
+      },
+      {
+        match: (entry) => entry.action === 'info' && String(entry.detail || '').includes('post-padding'),
+        pct: 86,
+      },
+      {
+        match: (entry) => entry.action === 'record_stop',
+        pct: 92,
+      },
+      {
+        match: (entry) => entry.action === 'validate' && String(entry.detail || '').toLowerCase().includes('verified'),
+        pct: 100,
+      },
+      {
+        match: (entry) => entry.action === 'validate',
+        pct: 96,
+      },
+    ]
+
+    for (const entry of logs) {
+      for (const phase of phases) {
+        if (phase.match(entry)) {
+          pct = Math.max(pct, phase.pct)
+          break
+        }
+      }
+      if (entry.success === false) pct = Math.max(pct, 100)
+    }
+    return pct
+  }, [isCaptured, isCurrent, isInvalidated, logs])
+
+  const borderClass = isCaptured
+    ? 'border-border bg-bg-secondary/50'
+    : isInvalidated
+      ? 'border-warning/30 bg-warning/5'
+      : isCurrent
+        ? 'border-accent/40 bg-accent/5 ring-1 ring-accent/20'
+        : 'border-border bg-bg-secondary/40'
+
+  const metaTextClass = isCaptured ? 'text-text-secondary' : 'text-text-disabled'
+  const fillClass = isCaptured ? 'bg-success/5' : isInvalidated ? 'bg-warning/15' : meta.fill
+
+  return (
+    <div className={`relative overflow-hidden rounded-lg border ${borderClass}`}>
+      <div className={`absolute inset-y-0 left-0 ${fillClass}`} style={{ width: `${Math.max(0, Math.min(100, progressPct))}%` }} />
+      <div className="relative grid grid-cols-[minmax(0,1fr)_150px] gap-3 px-3 py-2.5 min-w-0">
+        <div className="min-w-0 space-y-1.5">
+          <div className="flex items-center gap-2 min-w-0">
+            {isCurrent ? (
+              <Loader2 className="w-3.5 h-3.5 text-accent animate-spin shrink-0" />
+            ) : isCaptured ? (
+              <CheckCircle2 className="w-3.5 h-3.5 text-success shrink-0" />
+            ) : isInvalidated ? (
+              <AlertTriangle className="w-3.5 h-3.5 text-warning shrink-0" />
+            ) : (
+              <Circle className="w-3.5 h-3.5 text-text-disabled shrink-0" />
+            )}
+            <span className="text-xs font-medium text-text-primary truncate">{segId}</span>
+            <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium border shrink-0 ${meta.pill}`}>{meta.label}</span>
+          </div>
+          <div className={`flex items-center gap-2 flex-wrap text-[10px] ${metaTextClass}`}>
+            <span>{segment.event_type || segment.type || 'segment'}</span>
+            <span>·</span>
+            <span>{Math.round(segment.duration || 0)}s</span>
+            {segment.strategy === 'continue' ? (
+              <span className="inline-flex items-center gap-0.5 text-accent/70"><ArrowRight className="w-2.5 h-2.5" /> cont.</span>
+            ) : (
+              <span className="inline-flex items-center gap-0.5"><Camera className="w-2.5 h-2.5" /> new rec.</span>
+            )}
+            {segment.has_camera_schedule && (
+              <span className="inline-flex items-center gap-0.5"><Repeat className="w-2.5 h-2.5" /> sched.</span>
+            )}
+          </div>
+        </div>
+        <div className="min-w-0 border-l border-border/60 pl-3">
+          <SegmentLogFeed entries={logs} isExecuting={isExecuting} isCurrent={isCurrent} isCaptured={isCaptured} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export default function ScriptLockBanner({ projectId, script, onLock, onUnlock, strategies = [], currentSegmentId = null, captureLog = [], isExecuting = false }) {
   const {
     scriptLocked, segments, summary, trash,
     lockScript, unlockScript, compareScript,
@@ -60,8 +227,32 @@ export default function ScriptLockBanner({ projectId, script, onLock, onUnlock }
 
   const [showUnlockConfirm, setShowUnlockConfirm] = useState(false)
   const [compareResult, setCompareResult] = useState(null)
-  const [showSegments, setShowSegments] = useState(false)
+  const activeCurrentSegmentId = isExecuting ? currentSegmentId : null
 
+  const segmentCards = useMemo(() => {
+    if (Array.isArray(strategies) && strategies.length > 0) {
+      return strategies
+        .filter((strategy) => {
+          const type = String(strategy?.type || '').toLowerCase()
+          return type !== 'transition' && type !== 'bridge'
+        })
+        .map((strategy) => ({
+        ...strategy,
+        id: strategy.segment_id,
+        capture_state: segments?.[strategy.segment_id]?.capture_state ?? CAPTURE_STATES.UNCAPTURED,
+        }))
+    }
+
+    return Object.entries(segments || {}).map(([segId, info]) => ({
+      id: segId,
+      segment_id: segId,
+      section: info.section,
+      event_type: info.event_type,
+      type: info.segment_type,
+      duration: info.duration_seconds,
+      capture_state: info.capture_state,
+    }))
+  }, [segments, strategies])
   const handleLock = async () => {
     if (!script?.length) return
     try {
@@ -101,55 +292,49 @@ export default function ScriptLockBanner({ projectId, script, onLock, onUnlock }
     }
   }
 
+  const handleToggleLockState = () => {
+    if (loading) return
+    if (scriptLocked) {
+      if (isExecuting) return
+      setShowUnlockConfirm(true)
+      return
+    }
+    handleLock()
+  }
+
   // ── Locked State ────────────────────────────────────────────────────────
   if (scriptLocked) {
     return (
-      <div className="rounded-lg border border-success/30 bg-success/5 p-4 space-y-3">
-        {/* Header */}
+      <div className="space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Lock className="w-4 h-4 text-success" />
-            <span className="text-xs font-semibold text-success uppercase tracking-wider">Script Locked</span>
-            <span className="text-xxs text-text-tertiary">
-              Only camera/driver switches can be edited
-            </span>
+            <span className="text-xs font-semibold text-text-primary uppercase tracking-wider">Script</span>
+            <span className="text-xxs text-text-tertiary">Only camera and driver switches can be edited</span>
           </div>
           <button
-            onClick={() => setShowUnlockConfirm(true)}
-            disabled={loading}
-            className="px-3 py-1 text-xxs font-medium rounded bg-warning/10 text-warning border border-warning/30
-                       hover:bg-warning/20 transition-colors"
+            type="button"
+            onClick={handleToggleLockState}
+            disabled={loading || isExecuting}
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xxs font-medium bg-success/10 text-success border border-success/30 hover:bg-success/15 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+            title={isExecuting ? 'Cannot unlock while capture is running' : 'Toggle script lock'}
           >
-            <Unlock className="w-3 h-3 inline mr-1" />
-            Unlock
+            <Lock className="w-3 h-3" /> Locked
           </button>
         </div>
 
-        {/* Capture Progress */}
         <ProgressBar captured={summary.captured} total={summary.total} />
 
-        {/* Segment details toggle */}
-        <button
-          onClick={() => setShowSegments(!showSegments)}
-          className="flex items-center gap-1 text-xxs text-text-tertiary hover:text-text-secondary transition-colors"
-        >
-          {showSegments ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-          {showSegments ? 'Hide' : 'Show'} segment details ({summary.total} segments)
-        </button>
-
-        {showSegments && (
-          <div className="space-y-1 max-h-40 overflow-y-auto">
-            {Object.entries(segments).map(([segId, info]) => (
-              <div key={segId} className="flex items-center justify-between text-xxs px-2 py-1 rounded bg-bg-secondary/50">
-                <span className="font-mono text-text-tertiary truncate max-w-[200px]">{segId}</span>
-                <div className="flex items-center gap-2">
-                  <span className="text-text-disabled">{info.section}</span>
-                  <SegmentStateBadge state={info.capture_state} />
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+        <div className="space-y-2 mt-2 mb-2">
+          {segmentCards.map((segment) => (
+            <SegmentCard
+              key={segment.segment_id || segment.id}
+              segment={segment}
+              currentSegmentId={activeCurrentSegmentId}
+              captureLog={captureLog}
+              isExecuting={isExecuting}
+            />
+          ))}
+        </div>
 
         {/* Trash bin indicator */}
         {trash.length > 0 && (
@@ -230,23 +415,20 @@ export default function ScriptLockBanner({ projectId, script, onLock, onUnlock }
 
   // ── Unlocked State ──────────────────────────────────────────────────────
   return (
-    <div className="rounded-lg border border-warning/30 bg-warning/5 p-4 space-y-3">
+    <div className="space-y-3">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Unlock className="w-4 h-4 text-warning" />
-          <span className="text-xs font-semibold text-warning uppercase tracking-wider">Script Unlocked</span>
-          <span className="text-xxs text-text-tertiary">
-            Lock the script to begin capture
-          </span>
+          <span className="text-xs font-semibold text-text-primary uppercase tracking-wider">Script</span>
+          <span className="text-xxs text-text-tertiary">Lock the script to begin capture</span>
         </div>
         <button
-          onClick={handleLock}
+          type="button"
+          onClick={handleToggleLockState}
           disabled={loading || !script?.length}
-          className="px-3 py-1 text-xxs font-medium rounded bg-success/10 text-success border border-success/30
-                     hover:bg-success/20 transition-colors disabled:opacity-50"
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xxs font-medium bg-warning/10 text-warning border border-warning/30 hover:bg-warning/15 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          title={script?.length ? 'Toggle script lock' : 'Generate a script first'}
         >
-          <Lock className="w-3 h-3 inline mr-1" />
-          Lock Script
+          <Unlock className="w-3 h-3" /> Unlocked
         </button>
       </div>
       {!script?.length && (

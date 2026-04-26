@@ -1,0 +1,44 @@
+[
+  {
+    "id": "751c5dfe",
+    "name": "Race Details",
+    "plugin_type": "race_details",
+    "enabled": true,
+    "endpoint_url": "https://blueflagsanddads.com/api/v1/replay/race-details",
+    "auth_method": "api_key",
+    "auth_config": {
+      "api_key": "bfad_svc_G0Ldl5KYrMV-cfwxiE7YCXVrbd9IGecOweB8kYqwc_o"
+    },
+    "last_test": 1777047956.4296088,
+    "last_test_ok": false,
+    "request_style": "path_param"
+  },
+  {
+    "id": "5c3f21dd",
+    "name": "Driver Details",
+    "plugin_type": "driver_details",
+    "enabled": true,
+    "endpoint_url": "https://blueflagsanddads.com/api/v1/replay/driver-details",
+    "auth_method": "api_key",
+    "auth_config": {
+      "api_key": "bfad_svc_G0Ldl5KYrMV-cfwxiE7YCXVrbd9IGecOweB8kYqwc_o"
+    },
+    "last_test": 1777047931.7772667,
+    "last_test_ok": false,
+    "request_style": "post_body"
+  },
+  {
+    "id": "7974c2ee",
+    "name": "Championship Standings",
+    "plugin_type": "championship_standings",
+    "enabled": true,
+    "endpoint_url": "https://blueflagsanddads.com/api/v1/replay/standings",
+    "auth_method": "api_key",
+    "auth_config": {
+      "api_key": "bfad_svc_G0Ldl5KYrMV-cfwxiE7YCXVrbd9IGecOweB8kYqwc_o"
+    },
+    "last_test": 1777048312.6679928,
+    "last_test_ok": false,
+    "request_style": "path_param"
+  }
+]

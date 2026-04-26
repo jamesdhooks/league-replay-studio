@@ -57,7 +57,13 @@ def get_capture_target() -> Optional[int]:
 def list_visible_windows() -> list[dict]:
     """Return a list of visible windows with titles and handles.
 
-    Each entry: { hwnd: int, title: str, is_iracing: bool }
+        Each entry: {
+            hwnd: int,
+            title: str,
+            is_iracing: bool,
+            width: int,
+            height: int,
+        }
     Filters out windows with empty titles and tiny windows.
     """
     if not _IS_WINDOWS:
@@ -89,6 +95,8 @@ def list_visible_windows() -> list[dict]:
                 "hwnd": hwnd,
                 "title": title,
                 "is_iracing": "iracing" in title.lower(),
+                "width": w,
+                "height": h,
             })
             return True
 

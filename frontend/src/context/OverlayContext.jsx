@@ -5,15 +5,13 @@ import { wsClient } from '../services/websocket'
 const OverlayContext = createContext(null)
 
 /**
- * OverlayProvider — manages overlay template state.
+ * OverlayProvider — manages overlay rendering engine state.
  *
- * Tracks template library, engine status, batch rendering progress,
- * and per-project overrides. Subscribes to overlay:* WebSocket events.
+ * Tracks engine status, batch rendering progress, and WebSocket events.
+ * Template CRUD has been removed — designs own their HTML content directly.
  */
 export function OverlayProvider({ children }) {
   // ── State ────────────────────────────────────────────────────────────────
-  const [templates, setTemplates] = useState([])
-  const [selectedTemplateId, setSelectedTemplateId] = useState(null)
   const [engineStatus, setEngineStatus] = useState({ state: 'idle', engine_initialized: false })
   const [batchProgress, setBatchProgress] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -55,83 +53,6 @@ export function OverlayProvider({ children }) {
     } catch (err) {
       console.error('[Overlay] Status fetch failed:', err)
       return null
-    }
-  }, [])
-
-  // ── Template CRUD ────────────────────────────────────────────────────────
-  const fetchTemplates = useCallback(async () => {
-    try {
-      const data = await apiGet('/overlay/templates')
-      setTemplates(data.templates || [])
-      return data.templates
-    } catch (err) {
-      console.error('[Overlay] Fetch templates failed:', err)
-      return []
-    }
-  }, [])
-
-  const getTemplate = useCallback(async (templateId) => {
-    try {
-      return await apiGet(`/overlay/templates/${templateId}`)
-    } catch (err) {
-      return null
-    }
-  }, [])
-
-  const createTemplate = useCallback(async (templateData) => {
-    try {
-      const result = await apiPost('/overlay/templates', templateData)
-      if (result.success) {
-        await fetchTemplates()
-      }
-      return result
-    } catch (err) {
-      return { success: false, error: err.message }
-    }
-  }, [fetchTemplates])
-
-  const updateTemplate = useCallback(async (templateId, updates) => {
-    try {
-      const result = await apiPut(`/overlay/templates/${templateId}`, updates)
-      if (result.success) {
-        await fetchTemplates()
-      }
-      return result
-    } catch (err) {
-      return { success: false, error: err.message }
-    }
-  }, [fetchTemplates])
-
-  const deleteTemplate = useCallback(async (templateId) => {
-    try {
-      await apiDelete(`/overlay/templates/${templateId}`)
-      await fetchTemplates()
-      if (selectedTemplateId === templateId) {
-        setSelectedTemplateId(null)
-      }
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: err.message }
-    }
-  }, [fetchTemplates, selectedTemplateId])
-
-  const duplicateTemplate = useCallback(async (templateId) => {
-    try {
-      const result = await apiPost(`/overlay/templates/${templateId}/duplicate`)
-      if (result.success) {
-        await fetchTemplates()
-      }
-      return result
-    } catch (err) {
-      return { success: false, error: err.message }
-    }
-  }, [fetchTemplates])
-
-  const exportTemplate = useCallback(async (templateId) => {
-    try {
-      return await apiPost(`/overlay/templates/${templateId}/export`)
-    } catch (err) {
-      return { success: false, error: err.message }
     }
   }, [])
 
@@ -180,49 +101,24 @@ export function OverlayProvider({ children }) {
     }
   }, [])
 
-  // ── Per-project overrides ────────────────────────────────────────────────
-  const saveOverride = useCallback(async (projectId, templateId, htmlContent) => {
-    try {
-      return await apiPost(`/overlay/overrides/${projectId}/${templateId}`, {
-        html_content: htmlContent,
-      })
-    } catch (err) {
-      return { success: false, error: err.message }
-    }
-  }, [])
-
-  const getOverride = useCallback(async (projectId, templateId) => {
-    try {
-      return await apiGet(`/overlay/overrides/${projectId}/${templateId}`)
-    } catch {
-      return null
-    }
-  }, [])
-
-  const deleteOverride = useCallback(async (projectId, templateId) => {
-    try {
-      return await apiDelete(`/overlay/overrides/${projectId}/${templateId}`)
-    } catch (err) {
-      return { success: false, error: err.message }
-    }
-  }, [])
-
-  // ── Editor methods ──────────────────────────────────────────────────────
-  const renderEditorPreview = useCallback(async (templateId, htmlContent, frameData) => {
+  // ── Editor methods (legacy compat — prefer PresetContext equivalents) ──
+  const renderEditorPreview = useCallback(async (templateId, htmlContent, frameData, projectId = null) => {
     try {
       return await apiPost('/overlay/editor/preview', {
         template_id: templateId,
         html_content: htmlContent,
         frame_data: frameData,
+        project_id: projectId,
       })
     } catch (err) {
       return { success: false, error: err.message }
     }
   }, [])
 
-  const getDataContext = useCallback(async (templateId) => {
+  const getDataContext = useCallback(async (templateId, projectId = null) => {
     try {
-      return await apiGet(`/overlay/editor/context/${templateId}`)
+      const query = projectId != null ? `?project_id=${encodeURIComponent(projectId)}` : ''
+      return await apiGet(`/overlay/editor/context/${templateId}${query}`)
     } catch {
       return null
     }
@@ -283,38 +179,23 @@ export function OverlayProvider({ children }) {
 
   // ── Context value ────────────────────────────────────────────────────────
   const value = useMemo(() => ({
-    templates,
-    selectedTemplateId,
     engineStatus,
     batchProgress,
     loading,
     error,
 
-    setSelectedTemplateId,
     initEngine,
     shutdownEngine,
     fetchStatus,
-    fetchTemplates,
-    getTemplate,
-    createTemplate,
-    updateTemplate,
-    deleteTemplate,
-    duplicateTemplate,
-    exportTemplate,
     renderFrame,
     startBatchRender,
     setResolution,
-    saveOverride,
-    getOverride,
-    deleteOverride,
     renderEditorPreview,
     getDataContext,
   }), [
-    templates, selectedTemplateId, engineStatus, batchProgress, loading, error,
-    initEngine, shutdownEngine, fetchStatus, fetchTemplates, getTemplate,
-    createTemplate, updateTemplate, deleteTemplate, duplicateTemplate,
-    exportTemplate, renderFrame, startBatchRender, setResolution,
-    saveOverride, getOverride, deleteOverride,
+    engineStatus, batchProgress, loading, error,
+    initEngine, shutdownEngine, fetchStatus,
+    renderFrame, startBatchRender, setResolution,
     renderEditorPreview, getDataContext,
   ])
 

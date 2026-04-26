@@ -17,6 +17,7 @@ function computeClockLocalTime(clock, wallNow = performance.now()) {
 export function useAuthoritativeReplayPlayhead({
   isConnected,
   raceSessionNum,
+  getSessionNumForLocalTime,
   localDuration,
   storageKey = 'lrs:replay:timeline:speed',
   defaultSpeed = 1,
@@ -33,10 +34,12 @@ export function useAuthoritativeReplayPlayhead({
   const [driftSeconds, setDriftSeconds] = useState(null)
   const [optimisticLocalTime, setOptimisticLocalTime] = useState(null)
   const [clockLocalTime, setClockLocalTime] = useState(null)
+  const [interpolatedLocalTime, setInterpolatedLocalTime] = useState(null)
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false)
   const [clockVersion, setClockVersion] = useState(0)
 
   const replayStateRef = useRef(null)
+  const replayAnchorRef = useRef(null)
   const clockRef = useRef(null)
   const getSessionTimeRef = useRef(getSessionTimeForLocalTime)
   const getLocalTimeRef = useRef(getLocalTimeForSessionTime)
@@ -48,6 +51,12 @@ export function useAuthoritativeReplayPlayhead({
   useEffect(() => {
     getLocalTimeRef.current = getLocalTimeForSessionTime
   }, [getLocalTimeForSessionTime])
+
+  const getSessionNumForLocalTimeRef = useRef(getSessionNumForLocalTime)
+
+  useEffect(() => {
+    getSessionNumForLocalTimeRef.current = getSessionNumForLocalTime
+  }, [getSessionNumForLocalTime])
 
   useEffect(() => {
     if (!isConnected) {
@@ -71,18 +80,71 @@ export function useAuthoritativeReplayPlayhead({
     return () => clearInterval(interval)
   }, [isConnected, pollIntervalMs])
 
-  const seekToSessionTime = useCallback((sessionTime) => {
-    if (!isConnected || raceSessionNum == null || !Number.isFinite(sessionTime)) return Promise.resolve(null)
+  useEffect(() => {
+    if (!replayState) {
+      replayAnchorRef.current = null
+      setInterpolatedLocalTime(null)
+      return
+    }
+
+    const mappedLocal = getLocalTimeRef.current?.(replayState.session_time, replayState)
+    if (!Number.isFinite(mappedLocal)) {
+      replayAnchorRef.current = null
+      setInterpolatedLocalTime(null)
+      return
+    }
+
+    const speed = Number(replayState.replay_speed)
+    replayAnchorRef.current = {
+      localTime: clampTime(mappedLocal, localDuration),
+      wallMs: performance.now(),
+      speed: Number.isFinite(speed) ? speed : 0,
+    }
+    setInterpolatedLocalTime(clampTime(mappedLocal, localDuration))
+  }, [localDuration, replayState])
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (optimisticLocalTime != null || clockLocalTime != null) return
+      const anchor = replayAnchorRef.current
+      if (!anchor) return
+
+      if (!Number.isFinite(anchor.speed) || anchor.speed === 0) {
+        setInterpolatedLocalTime(anchor.localTime)
+        return
+      }
+
+      const elapsedSeconds = (performance.now() - anchor.wallMs) / 1000
+      const next = clampTime(anchor.localTime + (elapsedSeconds * anchor.speed), localDuration)
+      setInterpolatedLocalTime(next)
+    }, tickIntervalMs)
+
+    return () => clearInterval(interval)
+  }, [clockLocalTime, localDuration, optimisticLocalTime, tickIntervalMs])
+
+  const resolveSessionNum = useCallback((sessionTime, localTimeHint = null) => {
+    if (Number.isFinite(localTimeHint) && typeof getSessionNumForLocalTimeRef.current === 'function') {
+      const dynamicSession = getSessionNumForLocalTimeRef.current(localTimeHint, sessionTime)
+      if (Number.isFinite(dynamicSession) && dynamicSession >= 0) return Math.trunc(dynamicSession)
+    }
+    if (raceSessionNum == null) return null
+    return raceSessionNum
+  }, [raceSessionNum])
+
+  const seekToSessionTime = useCallback((sessionTime, localTimeHint = null) => {
+    const sessionNum = resolveSessionNum(sessionTime, localTimeHint)
+    if (!isConnected || sessionNum == null || !Number.isFinite(sessionTime)) return Promise.resolve(null)
     return apiPost('/iracing/replay/seek-time', {
-      session_num: raceSessionNum,
+      session_num: sessionNum,
       session_time_ms: Math.round(Math.max(0, sessionTime) * 1000),
+      resolve_session: false,
     }).catch(() => null)
-  }, [isConnected, raceSessionNum])
+  }, [isConnected, resolveSessionNum])
 
   const seekToLocalTime = useCallback((localTime) => {
     const sessionTime = getSessionTimeRef.current?.(localTime)
     if (!Number.isFinite(sessionTime)) return Promise.resolve(null)
-    return seekToSessionTime(sessionTime)
+    return seekToSessionTime(sessionTime, localTime)
   }, [seekToSessionTime])
 
   const playReplay = useCallback(async () => {
@@ -127,6 +189,7 @@ export function useAuthoritativeReplayPlayhead({
       userScrubbing: false,
       lastSeekMs: 0,
       lastPlayMs: 0,
+      lastPauseMs: 0,
       lastSpeedMs: 0,
       lastCamMs: 0,
       getExpectedSessionTime,
@@ -196,7 +259,18 @@ export function useAuthoritativeReplayPlayhead({
         setClockLocalTime(nextLocalTime)
       }
 
-      if (currentClock.paused) return
+      if (currentClock.paused) {
+        // Keep iRacing aligned with the paused local timeline; if transport drifts
+        // into play, force it back to pause instead of allowing silent desync.
+        if (
+          replayStateRef.current?.replay_speed !== 0
+          && wallNow - (currentClock.lastPauseMs || 0) > 600
+        ) {
+          currentClock.lastPauseMs = wallNow
+          pauseReplay()
+        }
+        return
+      }
 
       const expectedSessionTime = typeof currentClock.getExpectedSessionTime === 'function'
         ? currentClock.getExpectedSessionTime({
@@ -216,7 +290,7 @@ export function useAuthoritativeReplayPlayhead({
           && wallNow - (currentClock.lastSeekMs || 0) > driftCooldownMs
         ) {
           currentClock.lastSeekMs = wallNow
-          seekToSessionTime(expectedSessionTime)
+          seekToSessionTime(expectedSessionTime, nextLocalTime)
         }
       } else {
         setDriftSeconds(null)
@@ -235,9 +309,9 @@ export function useAuthoritativeReplayPlayhead({
 
       if (expectedState.speed != null) {
         const desiredSpeed = Math.max(1, Math.round(expectedState.speed))
-        if (replayStateRef.current.replay_speed === 0 && wallNow - (currentClock.lastPlayMs || 0) > 2000) {
-          currentClock.lastPlayMs = wallNow
-          playReplay()
+        if (replayStateRef.current.replay_speed === 0 && wallNow - (currentClock.lastSpeedMs || 0) > 2000) {
+          currentClock.lastSpeedMs = wallNow
+          apiPost('/iracing/replay/speed', { speed: desiredSpeed }).catch(() => {})
         }
         if (
           replayStateRef.current.replay_speed !== 0
@@ -245,9 +319,7 @@ export function useAuthoritativeReplayPlayhead({
           && wallNow - (currentClock.lastSpeedMs || 0) > 2000
         ) {
           currentClock.lastSpeedMs = wallNow
-          apiPost('/iracing/replay/speed', { speed: desiredSpeed })
-            .then(() => playReplay())
-            .catch(() => {})
+          apiPost('/iracing/replay/speed', { speed: desiredSpeed }).catch(() => {})
         }
       }
 
@@ -270,7 +342,7 @@ export function useAuthoritativeReplayPlayhead({
     driftCooldownMs,
     driftThresholdSeconds,
     localDuration,
-    playReplay,
+    pauseReplay,
     seekToSessionTime,
     tickIntervalMs,
   ])
@@ -280,12 +352,13 @@ export function useAuthoritativeReplayPlayhead({
   const displayLocalTime = useMemo(() => {
     if (optimisticLocalTime != null) return clampTime(optimisticLocalTime, localDuration)
     if (clockLocalTime != null) return clampTime(clockLocalTime, localDuration)
+    if (interpolatedLocalTime != null) return clampTime(interpolatedLocalTime, localDuration)
     if (replayState?.session_time != null) {
       const mapped = getLocalTimeRef.current?.(replayState.session_time, replayState)
       if (mapped != null) return clampTime(mapped, localDuration)
     }
     return clampTime(fallbackValue, localDuration)
-  }, [clockLocalTime, fallbackValue, localDuration, optimisticLocalTime, replayState])
+  }, [clockLocalTime, fallbackValue, interpolatedLocalTime, localDuration, optimisticLocalTime, replayState])
 
   return {
     replaySpeed,

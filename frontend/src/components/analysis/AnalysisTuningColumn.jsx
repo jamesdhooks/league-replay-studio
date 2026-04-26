@@ -8,6 +8,7 @@ import { useProject } from '../../context/ProjectContext'
 import TuningPanel from './TuningPanel'
 import Tooltip from '../ui/Tooltip'
 import CollapsibleSection from '../ui/CollapsibleSection'
+import CollapsibleControlsHeader from '../ui/CollapsibleControlsHeader'
 
 /**
  * AnalysisTuningColumn â€” resizable/collapsible column for detection tuning
@@ -52,14 +53,13 @@ export default memo(function AnalysisTuningColumn({
   /* ---- collapsed = full-height icon bar ---- */
   if (collapsed) {
     return (
-      <button
-        onClick={() => setCollapsed(false)}
-        className="shrink-0 w-9 border-r border-border bg-bg-secondary flex flex-col items-center py-2 gap-3
-                   hover:bg-bg-primary/50 transition-colors cursor-pointer"
-        title="Expand Analysis Controls"
-      >
-        <SlidersHorizontal className="w-4 h-4 text-accent" />
-      </button>
+      <CollapsibleControlsHeader
+        collapsed
+        icon={SlidersHorizontal}
+        title="Analysis Controls"
+        onExpand={() => setCollapsed(false)}
+        expandTitle="Expand Analysis Controls"
+      />
     )
   }
 
@@ -70,20 +70,15 @@ export default memo(function AnalysisTuningColumn({
         className="shrink-0 border-r border-border bg-bg-secondary flex flex-col min-h-0 overflow-hidden"
         style={{ width }}
       >
-        {/* Header â€” click to collapse */}
-        <button
-          onClick={() => setCollapsed(true)}
-          className="flex items-center gap-2 px-3 py-2 border-b border-border shrink-0 w-full text-left hover:bg-bg-primary/50 transition-colors"
-        >
-          <SlidersHorizontal className="w-4 h-4 text-accent" />
-          <h3 className="text-xs font-semibold text-text-primary uppercase tracking-wider flex-1">
-            Analysis Controls
-          </h3>
-          <ChevronRight className="w-3 h-3 text-text-tertiary" />
-        </button>
+        <CollapsibleControlsHeader
+          collapsed={false}
+          icon={SlidersHorizontal}
+          title="Analysis Controls"
+          onCollapse={() => setCollapsed(true)}
+        />
 
         {/* Analysis phases */}
-        <div className="p-3 border-b border-border-subtle shrink-0">
+          <div className="border-b border-border-subtle shrink-0">
           <CollapsibleSection
             icon={Activity}
             label="Phases"
@@ -120,13 +115,13 @@ export default memo(function AnalysisTuningColumn({
                   }
                   subPhase={
                     isScanning
-                      ? (progress?.stage === 'analysis_scan' && (progress?.percent ?? 0) >= 50
+                      ? (progress?.stage === 'analysis_scan' && (progress?.percent ?? 0) >= 72
                           ? 'Incident scan'
                           : 'Telemetry scan')
                       : null
                   }
                   progressMsg={isScanning ? (progress?.message || null) : null}
-                  progressPct={isScanning ? Math.min(100, (progress?.percent || 0) / 50 * 100) : null}
+                  progressPct={isScanning ? Math.min(100, Math.max(0, (progress?.percent || 0) / 80 * 100)) : null}
                   primaryLabel={hasTelemetry || hasEventsLocal ? 'Re-collect' : 'Collect'}
                   primaryIcon={isAnalyzing && isScanning ? null : <RefreshCw size={11} />}
                   onPrimary={isAnalyzing && isScanning ? handleCancel : handleRescan}
@@ -148,7 +143,7 @@ export default memo(function AnalysisTuningColumn({
                   }
                   subPhase={isAnalyzing && !isScanning ? 'Event detection' : null}
                   progressMsg={!isScanning && isAnalyzing ? (progress?.message || null) : null}
-                  progressPct={!isScanning && isAnalyzing ? Math.min(100, Math.max(0, ((progress?.percent || 55) - 55) / 40 * 100)) : null}
+                  progressPct={!isScanning && isAnalyzing ? Math.min(100, Math.max(0, ((progress?.percent || 80) - 80) / 20 * 100)) : null}
                   primaryLabel={hasEventsLocal ? 'Re-analyze' : 'Analyze'}
                   primaryIcon={isAnalyzing && !isScanning ? null : isRedetecting ? <Loader2 size={11} className="animate-spin" /> : <SlidersHorizontal size={11} />}
                   onPrimary={isAnalyzing && !isScanning ? handleCancel : handleReanalyze}
@@ -183,14 +178,13 @@ export default memo(function AnalysisTuningColumn({
         </div>
 
         {/* Detection tuning */}
-        <div className={`flex-1 overflow-y-auto px-3 py-2 relative transition-opacity duration-300 ${isAnalyzing ? 'opacity-40 pointer-events-none select-none' : ''}`}>
+          <div className={`flex-1 overflow-y-auto relative transition-opacity duration-300 ${isAnalyzing ? 'opacity-40 pointer-events-none select-none' : ''}`}>
           <CollapsibleSection
             icon={Sliders}
             label="Detection Tuning"
             iconColor="text-accent"
             open={tuningOpen}
             onToggle={() => setTuningOpen(v => !v)}
-            className="mb-2"
           >
             <div className="mt-2">
               <TuningPanel params={tuningParams} onChange={updateTuning} />
@@ -207,6 +201,7 @@ export default memo(function AnalysisTuningColumn({
       >
         <div className="absolute inset-y-0 -left-2 -right-2 z-20" />
         <div className="absolute inset-y-0 left-0 w-px bg-border transition-colors group-hover/divider:bg-accent group-active/divider:bg-accent" />
+          <div className="absolute inset-y-0 right-0 w-[2px] bg-violet-400/90 opacity-0 transition-opacity group-hover/divider:opacity-100 group-active/divider:opacity-100" />
       </div>
     </>
   )

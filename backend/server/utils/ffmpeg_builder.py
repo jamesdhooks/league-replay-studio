@@ -6,7 +6,7 @@ FFmpeg command builder for encoding.
 Builds FFmpeg command lines from:
 - Input video file
 - Encoder selection (NVENC/AMF/QSV/CPU)
-- Export presets (YouTube, Discord, Archive, Custom)
+- Export presets (720p/1080p/1440p/4K + custom)
 - EDL (Edit Decision List) to complex filtergraph
 - Progress output parsing
 """
@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
@@ -26,9 +27,22 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PRESETS: list[dict[str, Any]] = [
     {
-        "id": "youtube_1080p60",
-        "name": "YouTube 1080p60",
-        "description": "Optimized for YouTube — 1080p at 60fps, high bitrate",
+        "id": "720p",
+        "name": "720p",
+        "description": "Balanced quality and file size at 1280x720",
+        "resolution_width": 1280,
+        "resolution_height": 720,
+        "fps": 60,
+        "codec_family": "h264",
+        "video_bitrate_mbps": 8,
+        "audio_bitrate_kbps": 160,
+        "quality_preset": "medium",
+        "is_builtin": True,
+    },
+    {
+        "id": "1080p",
+        "name": "1080p",
+        "description": "Standard Full HD export at 1920x1080",
         "resolution_width": 1920,
         "resolution_height": 1080,
         "fps": 60,
@@ -39,22 +53,22 @@ DEFAULT_PRESETS: list[dict[str, Any]] = [
         "is_builtin": True,
     },
     {
-        "id": "discord_720p30",
-        "name": "Discord 720p30",
-        "description": "Compact for Discord — 720p at 30fps, lower bitrate",
-        "resolution_width": 1280,
-        "resolution_height": 720,
-        "fps": 30,
+        "id": "1440p",
+        "name": "1440p",
+        "description": "High-quality QHD export at 2560x1440",
+        "resolution_width": 2560,
+        "resolution_height": 1440,
+        "fps": 60,
         "codec_family": "h264",
-        "video_bitrate_mbps": 5,
-        "audio_bitrate_kbps": 128,
-        "quality_preset": "fast",
+        "video_bitrate_mbps": 20,
+        "audio_bitrate_kbps": 256,
+        "quality_preset": "medium",
         "is_builtin": True,
     },
     {
-        "id": "archive_4k",
-        "name": "Archive 4K",
-        "description": "Maximum quality — 4K at native fps, H.265",
+        "id": "4k",
+        "name": "4K",
+        "description": "Ultra HD export at 3840x2160",
         "resolution_width": 3840,
         "resolution_height": 2160,
         "fps": 60,

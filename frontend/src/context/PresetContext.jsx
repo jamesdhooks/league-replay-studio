@@ -71,7 +71,8 @@ export function PresetProvider({ children }) {
   }, [fetchPresets])
 
   const linkTemplateToPreset = useCallback(async (presetId, templateId) => {
-    return updatePreset(presetId, { template_id: templateId })
+    // Legacy compat — style is now set directly on the design
+    return updatePreset(presetId, { style: templateId })
   }, [updatePreset])
 
   const deletePreset = useCallback(async (presetId) => {
@@ -145,18 +146,24 @@ export function PresetProvider({ children }) {
   }, [fetchPresets])
 
   // ── Asset management ──────────────────────────────────────────────────
-  const listAssets = useCallback(async (presetId) => {
+  const listAssets = useCallback(async (presetId, opts = {}) => {
     try {
-      return await apiGet(`/presets/${presetId}/assets`)
+      const query = new URLSearchParams()
+      if (opts.projectId != null) query.set('project_id', String(opts.projectId))
+      const qs = query.toString()
+      return await apiGet(`/presets/${presetId}/assets${qs ? `?${qs}` : ''}`)
     } catch {
-      return { assets: [] }
+      return { assets: [], count: 0, bindings: { defaults: {}, overrides: {}, effective: {} } }
     }
   }, [])
 
-  const uploadAsset = useCallback(async (presetId, file) => {
+  const uploadAsset = useCallback(async (presetId, file, opts = {}) => {
     try {
-      const formData = new FormData()
+      const formData = new globalThis.FormData()
       formData.append('file', file)
+      formData.append('scope', opts.scope || 'global')
+      if (opts.projectId != null) formData.append('project_id', String(opts.projectId))
+      if (opts.variableName) formData.append('variable_name', opts.variableName)
       const response = await fetch(`/api/presets/${presetId}/assets`, {
         method: 'POST',
         body: formData,
@@ -168,10 +175,38 @@ export function PresetProvider({ children }) {
     }
   }, [])
 
-  const deleteAsset = useCallback(async (presetId, filename) => {
+  const deleteAsset = useCallback(async (presetId, filename, opts = {}) => {
     try {
-      await apiDelete(`/presets/${presetId}/assets/${filename}`)
+      const query = new URLSearchParams()
+      query.set('scope', opts.scope || 'global')
+      if (opts.projectId != null) query.set('project_id', String(opts.projectId))
+      await apiDelete(`/presets/${presetId}/assets/${encodeURIComponent(filename)}?${query.toString()}`)
       return { success: true }
+    } catch (err) {
+      return { success: false, error: err.message }
+    }
+  }, [])
+
+  const moveAssetScope = useCallback(async (presetId, filename, opts = {}) => {
+    try {
+      return await apiPut(`/presets/${presetId}/assets/${encodeURIComponent(filename)}/scope`, {
+        source_scope: opts.sourceScope || null,
+        target_scope: opts.targetScope,
+        project_id: opts.projectId ?? null,
+      })
+    } catch (err) {
+      return { success: false, error: err.message }
+    }
+  }, [])
+
+  const setAssetVariable = useCallback(async (presetId, variableName, opts = {}) => {
+    try {
+      return await apiPut(`/presets/${presetId}/asset-variables/${encodeURIComponent(variableName)}`, {
+        filename: opts.filename || null,
+        scope: opts.scope || 'global',
+        project_id: opts.projectId ?? null,
+        clear: opts.clear === true,
+      })
     } catch (err) {
       return { success: false, error: err.message }
     }
@@ -180,7 +215,7 @@ export function PresetProvider({ children }) {
   // ── Intro video ───────────────────────────────────────────────────────
   const uploadIntroVideo = useCallback(async (presetId, file) => {
     try {
-      const formData = new FormData()
+      const formData = new globalThis.FormData()
       formData.append('file', file)
       const response = await fetch(`/api/presets/${presetId}/intro-video`, {
         method: 'POST',
@@ -210,17 +245,61 @@ export function PresetProvider({ children }) {
     try {
       const result = await apiPost(`/presets/${presetId}/render-preview`, {
         section,
+        project_id: opts.projectId ?? null,
         element_id: opts.elementId || null,
         frame_data: opts.frameData || null,
         variables: opts.variables || null,
         analyze_animations: opts.analyzeAnimations ?? true,
         include_rendered_html: opts.includeRenderedHtml ?? false,
         render_screenshot: opts.renderScreenshot ?? true,
+        include_debug: opts.includeDebug ?? false,
+        prefer_html_content: opts.preferHtmlContent ?? false,
       })
       setPreviewData(result)
       return result
     } catch (err) {
       return { success: false, error: err.message }
+    }
+  }, [])
+
+  // ── HTML content management ───────────────────────────────────────────
+  const getHtmlContent = useCallback(async (presetId) => {
+    try {
+      const result = await apiGet(`/presets/${presetId}/html`)
+      return result.html_content
+    } catch {
+      return null
+    }
+  }, [])
+
+  const updateHtmlContent = useCallback(async (presetId, htmlContent) => {
+    try {
+      return await apiPut(`/presets/${presetId}/html`, { html_content: htmlContent })
+    } catch (err) {
+      return { success: false, error: err.message }
+    }
+  }, [])
+
+  const renderEditorPreview = useCallback(async (presetId, htmlContent, frameData, opts = {}) => {
+    try {
+      return await apiPost(`/presets/${presetId}/editor-preview`, {
+        html_content: htmlContent,
+        project_id: opts.projectId ?? null,
+        frame_data: frameData,
+        include_rendered_html: opts.includeRenderedHtml ?? false,
+        render_screenshot: opts.renderScreenshot ?? true,
+      })
+    } catch (err) {
+      return { success: false, error: err.message }
+    }
+  }, [])
+
+  const getDataContext = useCallback(async (presetId, opts = {}) => {
+    try {
+      const query = opts.projectId != null ? `?project_id=${encodeURIComponent(opts.projectId)}` : ''
+      return await apiGet(`/presets/${presetId}/editor-context${query}`)
+    } catch {
+      return null
     }
   }, [])
 
@@ -263,9 +342,15 @@ export function PresetProvider({ children }) {
     listAssets,
     uploadAsset,
     deleteAsset,
+    moveAssetScope,
+    setAssetVariable,
     uploadIntroVideo,
     deleteIntroVideo,
     renderPreview,
+    getHtmlContent,
+    updateHtmlContent,
+    renderEditorPreview,
+    getDataContext,
   }), [
     presets, selectedPresetId, selectedPreset, activeSection, sectionElements,
     previewData, loading, error,
@@ -273,8 +358,9 @@ export function PresetProvider({ children }) {
     linkTemplateToPreset,
     duplicatePreset, exportPreset, importPreset,
     addElement, updateElement, removeElement,
-    listAssets, uploadAsset, deleteAsset,
+    listAssets, uploadAsset, deleteAsset, moveAssetScope, setAssetVariable,
     uploadIntroVideo, deleteIntroVideo, renderPreview,
+    getHtmlContent, updateHtmlContent, renderEditorPreview, getDataContext,
   ])
 
   return (

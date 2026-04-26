@@ -125,6 +125,7 @@ export default memo(function HighlightMetrics() {
               </div>
             </div>
           )}
+          <div className="border-t border-border-subtle" />
         </div>
       </CollapsibleSection>
     )

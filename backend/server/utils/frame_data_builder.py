@@ -25,6 +25,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional
 
 from server.services.analysis_db import get_project_db
@@ -60,6 +61,29 @@ def _format_session_time(session_time: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+def _make_driver_short_name(name: Optional[str]) -> str:
+    """Build a deterministic motorsport-style short name.
+
+    Prefers the surname and returns an uppercase 3-letter token.
+    Falls back to the first available alpha characters from the full name.
+    """
+    if not name:
+        return "DRV"
+
+    parts = [part for part in re.split(r"\s+", name.strip()) if part]
+    candidate = parts[-1] if parts else name.strip()
+    letters = re.sub(r"[^A-Za-z]", "", candidate).upper()
+    if len(letters) >= 3:
+        return letters[:3]
+
+    fallback = re.sub(r"[^A-Za-z]", "", "".join(parts)).upper()
+    if len(fallback) >= 3:
+        return fallback[:3]
+    if fallback:
+        return fallback.ljust(3, fallback[-1])[:3]
+    return "DRV"
+
+
 def _empty_frame_data(section: str) -> dict[str, Any]:
     """Return a minimal frame_data dict when telemetry is unavailable.
 
@@ -80,6 +104,7 @@ def _empty_frame_data(section: str) -> dict[str, Any]:
         "flag": "green",
         # Focused driver
         "driver_name": None,
+        "driver_short_name": None,
         "car_name": None,
         "car_number": "",
         "position": None,
@@ -104,13 +129,15 @@ def _empty_frame_data(section: str) -> dict[str, Any]:
         "pit_window_end": None,
         # Standings
         "standings": [],
+        "qualifying_standings": [],
+        "final_standings": [],
         # Championship (from 3rd party data plugin)
         "championship_standings": [],
         # 3rd party enrichment
         "race_season": None,
         "race_week": None,
         "race_date": None,
-        "venue_display_name": None,
+        "track_name": None,
         "driver_nickname": None,
         "driver_avatar": None,
     }
@@ -181,15 +208,24 @@ def build_frame_data(
                 if state.get("position") == 1:
                     leader_est_local = state.get("est_time")
                 drv = drivers.get(state.get("car_idx", -1), {})
+                driver_name = drv.get("user_name") or f"Car #{drv.get('car_number') or state.get('car_idx', '?')}"
                 entries.append({
                     "position": state.get("position", 0),
-                    "driver_name": drv.get("user_name") or f"Car #{drv.get('car_number') or state.get('car_idx', '?')}",
+                    "driver_name": driver_name,
+                    "driver_short_name": _make_driver_short_name(driver_name),
                     "car_number": drv.get("car_number", ""),
                     "is_player": state.get("car_idx") == focused_car_idx,
                     "iracing_cust_id": drv.get("iracing_cust_id", 0),
                     "gap": "Leader",
+                    "gap_to_leader": "Leader",
                     "relative": None,
                     "best_lap_time": _format_lap_time(state.get("best_lap_time", -1.0) or -1.0),
+                    "fastest_lap_time": _format_lap_time(state.get("best_lap_time", -1.0) or -1.0),
+                    "qualifying_time": None,
+                    "average_lap_time": None,
+                    "incidents": None,
+                    "laps_completed": state.get("lap", 0),
+                    "reason_out": "",
                     "nickname": None,
                     "avatar": None,
                 })
@@ -199,15 +235,19 @@ def build_frame_data(
                 est = state.get("est_time")
                 if state.get("position") == 1:
                     entry["gap"] = "Leader"
+                    entry["gap_to_leader"] = "Leader"
                 elif leader_est_local is not None and est is not None and est >= leader_est_local:
                     gap_secs = est - leader_est_local
-                    entry["gap"] = (
+                    formatted_gap = (
                         f"+{gap_secs:.3f}"
                         if gap_secs < _GAP_PRECISION_THRESHOLD
                         else f"+{gap_secs:.1f}"
                     )
+                    entry["gap"] = formatted_gap
+                    entry["gap_to_leader"] = formatted_gap
                 else:
                     entry["gap"] = "---"
+                    entry["gap_to_leader"] = "---"
 
                 if idx > 0 and est is not None:
                     prev_est = est_times[idx - 1]
@@ -257,6 +297,62 @@ def build_frame_data(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_results'"
         ).fetchone() is not None
 
+        has_incident_log = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='incident_log'"
+        ).fetchone() is not None
+
+        has_lap_completions = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='lap_completions'"
+        ).fetchone() is not None
+
+        # ── Fetch total_laps from analysis_meta ──────────────────────────────
+        total_laps_meta: int = 0
+        meta_row = conn.execute(
+            "SELECT value FROM analysis_meta WHERE key = 'total_laps' LIMIT 1"
+        ).fetchone()
+        if meta_row:
+            try:
+                total_laps_meta = int(meta_row["value"])
+            except (ValueError, TypeError):
+                pass
+
+        def _resolve_session_num(type_tokens_priority: list[str], pick: str) -> Optional[int]:
+            """Deterministically select a session_num for a given session category.
+
+            Checks exact UPPER() match first (e.g. 'QUALIFY', 'RACE'), then falls
+            back to a LIKE substring match so mixed-case or extended names still work.
+            ``pick='first'`` selects the earliest session; ``'last'`` selects the latest.
+            """
+            if not has_session_results:
+                return None
+            order = "ASC" if pick == "first" else "DESC"
+            # Phase 1: exact upper-case match on any of the priority tokens
+            for token in type_tokens_priority:
+                row = conn.execute(
+                    f"""
+                    SELECT session_num FROM session_results
+                    WHERE UPPER(session_type) = ?
+                    GROUP BY session_num
+                    ORDER BY session_num {order}
+                    LIMIT 1
+                    """,
+                    (token.upper(),),
+                ).fetchone()
+                if row:
+                    return int(row["session_num"])
+            # Phase 2: fallback substring LIKE match on the first (most specific) token
+            row = conn.execute(
+                f"""
+                SELECT session_num FROM session_results
+                WHERE LOWER(session_type) LIKE ?
+                GROUP BY session_num
+                ORDER BY session_num {order}
+                LIMIT 1
+                """,
+                (f"%{type_tokens_priority[0].lower()}%",),
+            ).fetchone()
+            return int(row["session_num"]) if row else None
+
         def load_session_results_standings(
             session_type_token: str,
             pick: str,
@@ -265,20 +361,15 @@ def build_frame_data(
             if not has_session_results:
                 return []
 
-            where_like = f"%{session_type_token.lower()}%"
-            order = "ASC" if pick == "first" else "DESC"
-            session_row = conn.execute(
-                """
-                SELECT session_num
-                FROM session_results
-                WHERE LOWER(session_type) LIKE ?
-                GROUP BY session_num
-                ORDER BY session_num """ + order + """
-                LIMIT 1
-                """,
-                (where_like,),
-            ).fetchone()
-            if not session_row:
+            # Canonical iRacing session type strings, most specific first
+            _TYPE_MAP: dict[str, list[str]] = {
+                "qual": ["QUALIFY", "QUALIFYING", "QUAL"],
+                "race": ["RACE"],
+                "practice": ["PRACTICE"],
+            }
+            priority_tokens = _TYPE_MAP.get(session_type_token.lower(), [session_type_token])
+            session_num = _resolve_session_num(priority_tokens, pick)
+            if session_num is None:
                 return []
 
             rows = conn.execute(
@@ -289,7 +380,7 @@ def build_frame_data(
                 WHERE sr.session_num = ?
                 ORDER BY sr.position ASC
                 """,
-                (int(session_row["session_num"]),),
+                (session_num,),
             ).fetchall()
             results = [dict(r) for r in rows if (r["position"] or 0) > 0]
             if not results:
@@ -316,12 +407,28 @@ def build_frame_data(
                         or drv.get("user_name")
                         or f"Car #{row.get('car_idx', '?')}"
                     ),
+                    "driver_short_name": _make_driver_short_name(
+                        row.get("user_name")
+                        or drv.get("user_name")
+                        or f"Car #{row.get('car_idx', '?')}"
+                    ),
                     "car_number": row.get("car_number") or drv.get("car_number", ""),
                     "is_player": row.get("car_idx") == focused_car_idx,
                     "iracing_cust_id": row.get("iracing_cust_id") or drv.get("iracing_cust_id", 0),
                     "gap": "Leader",
+                    "gap_to_leader": "Leader",
                     "relative": None,
                     "best_lap_time": _format_lap_time(row.get("fastest_time", -1.0) or -1.0),
+                    "fastest_lap_time": _format_lap_time(row.get("fastest_time", -1.0) or -1.0),
+                    "qualifying_time": _format_lap_time(row.get("fastest_time", -1.0) or -1.0),
+                    "average_lap_time": _format_lap_time(
+                        (row.get("total_time") / row.get("lap"))
+                        if (row.get("lap") or 0) > 0 and (row.get("total_time") or -1) > 0
+                        else -1.0
+                    ),
+                    "incidents": row.get("incidents", 0),
+                    "laps_completed": row.get("lap", 0),
+                    "reason_out": row.get("reason_out", ""),
                     "nickname": None,
                     "avatar": None,
                 })
@@ -330,24 +437,30 @@ def build_frame_data(
                 metric = metric_vals[idx]
                 if idx == 0:
                     entry["gap"] = "Leader"
+                    entry["gap_to_leader"] = "Leader"
                 elif metric is not None and leader_metric is not None and metric >= leader_metric:
                     gap_secs = metric - leader_metric
-                    entry["gap"] = (
+                    formatted_gap = (
                         f"+{gap_secs:.3f}"
                         if gap_secs < _GAP_PRECISION_THRESHOLD
                         else f"+{gap_secs:.1f}"
                     )
+                    entry["gap"] = formatted_gap
+                    entry["gap_to_leader"] = formatted_gap
                 else:
                     # Fallback to iRacing YAML gap/interval fields if present.
                     raw_gap = row.get("gap")
                     if raw_gap is not None and raw_gap >= 0:
-                        entry["gap"] = (
+                        formatted_gap = (
                             f"+{raw_gap:.3f}"
                             if raw_gap < _GAP_PRECISION_THRESHOLD
                             else f"+{raw_gap:.1f}"
                         )
+                        entry["gap"] = formatted_gap
+                        entry["gap_to_leader"] = formatted_gap
                     else:
                         entry["gap"] = "---"
+                        entry["gap_to_leader"] = "---"
 
                 if idx > 0:
                     prev_metric = metric_vals[idx - 1]
@@ -406,11 +519,20 @@ def build_frame_data(
             standings.append({
                 "position": cs["position"],
                 "driver_name": driver_name,
+                "driver_short_name": _make_driver_short_name(driver_name),
                 "car_number": drv.get("car_number", ""),
                 "is_player": cs["car_idx"] == focused_car_idx,
                 "iracing_cust_id": drv.get("iracing_cust_id", 0),
                 "gap": "Leader",
+                "gap_to_leader": "Leader",
                 "relative": None,
+                "best_lap_time": _format_lap_time(cs.get("best_lap_time", -1.0) or -1.0),
+                "fastest_lap_time": _format_lap_time(cs.get("best_lap_time", -1.0) or -1.0),
+                "qualifying_time": None,
+                "average_lap_time": None,
+                "incidents": None,
+                "laps_completed": cs.get("lap", 0),
+                "reason_out": "",
                 # Placeholders for 3rd party enrichment
                 "nickname": None,
                 "avatar": None,
@@ -423,15 +545,19 @@ def build_frame_data(
             # Gap to leader
             if cs["position"] == 1:
                 entry["gap"] = "Leader"
+                entry["gap_to_leader"] = "Leader"
             elif leader_est is not None and est is not None and est >= leader_est:
                 gap_secs = est - leader_est
-                entry["gap"] = (
+                formatted_gap = (
                     f"+{gap_secs:.3f}"
                     if gap_secs < _GAP_PRECISION_THRESHOLD
                     else f"+{gap_secs:.1f}"
                 )
+                entry["gap"] = formatted_gap
+                entry["gap_to_leader"] = formatted_gap
             else:
                 entry["gap"] = "---"
+                entry["gap_to_leader"] = "---"
 
             # Relative to car directly ahead (position-based ordering)
             if i > 0 and est is not None:
@@ -514,6 +640,48 @@ def build_frame_data(
             raw_best = focused_state.get("best_lap_time", -1.0) or -1.0
             best_lap_time = _format_lap_time(raw_best)
 
+        # ── 7b. last_lap_time — derive from lap_completions ──────────────────
+        last_lap_time: Optional[str] = None
+        if focused_car_idx is not None and has_lap_completions:
+            lc_rows = conn.execute(
+                """
+                SELECT rt.session_time AS completion_time
+                FROM lap_completions lc
+                JOIN race_ticks rt ON rt.id = lc.tick_id
+                WHERE lc.car_idx = ? AND rt.session_time <= ?
+                ORDER BY rt.session_time DESC
+                LIMIT 2
+                """,
+                (focused_car_idx, session_time),
+            ).fetchall()
+            if len(lc_rows) == 2:
+                t_latest = lc_rows[0]["completion_time"]
+                t_prev = lc_rows[1]["completion_time"]
+                lap_dur = float(t_latest) - float(t_prev)
+                if 20.0 < lap_dur < 600.0:
+                    last_lap_time = _format_lap_time(lap_dur)
+
+        # ── 7c. incident_count — from incident_log or session_results ────────
+        incident_count: int = 0
+        if focused_car_idx is not None:
+            if has_incident_log:
+                inc_row = conn.execute(
+                    "SELECT COALESCE(SUM(incident_points), 0) AS total FROM incident_log WHERE car_idx = ?",
+                    (focused_car_idx,),
+                ).fetchone()
+                if inc_row:
+                    incident_count = int(inc_row["total"] or 0)
+            if incident_count == 0 and has_session_results:
+                # Fall back to session_results for the race session
+                race_session_num = _resolve_session_num(["RACE"], "last")
+                if race_session_num is not None:
+                    sr_row = conn.execute(
+                        "SELECT incidents FROM session_results WHERE session_num = ? AND car_idx = ? LIMIT 1",
+                        (race_session_num, focused_car_idx),
+                    ).fetchone()
+                    if sr_row:
+                        incident_count = int(sr_row["incidents"] or 0)
+
         # ── 8. Compute speed in kph from speed_ms ────────────────────────────
         speed_kph = 0.0
         lap_pct_val = 0.0
@@ -530,7 +698,7 @@ def build_frame_data(
             "series_name": series_name or "",
             "track_name": track_name or "",
             "current_lap": tick.get("race_laps", 0),
-            "total_laps": 0,       # not stored in DB; caller may override
+            "total_laps": total_laps_meta,
             "session_time": _format_session_time(session_time),
             "session_time_seconds": round(float(session_time), 3),
             "replay_frame": tick.get("replay_frame", 0),
@@ -538,6 +706,7 @@ def build_frame_data(
             "flag": flag,
             # Focused driver — populated below if we have state
             "driver_name": None,
+            "driver_short_name": None,
             "car_name": None,
             "car_number": "",
             "position": None,
@@ -545,9 +714,9 @@ def build_frame_data(
             "irating": 0,
             "iracing_cust_id": 0,
             "team_color": "#3B82F6",
-            "last_lap_time": None,   # not captured in DB schema
+            "last_lap_time": last_lap_time,
             "best_lap_time": best_lap_time,
-            "incident_count": 0,     # not stored per-tick
+            "incident_count": incident_count,
             # Computed telemetry
             "relative_gap": focused_relative,
             "speed_kph": speed_kph,
@@ -570,7 +739,7 @@ def build_frame_data(
             "race_season": None,
             "race_week": None,
             "race_date": None,
-            "venue_display_name": None,
+            "track_name": None,
             "driver_nickname": None,
             "driver_avatar": None,
         }
@@ -578,6 +747,7 @@ def build_frame_data(
         if focused_state and focused_driver:
             frame_data.update({
                 "driver_name": focused_driver.get("user_name") or None,
+                "driver_short_name": _make_driver_short_name(focused_driver.get("user_name") or None),
                 "car_name": focused_driver.get("car_class_name") or None,
                 "car_number": focused_driver.get("car_number", ""),
                 "position": focused_state.get("position"),
