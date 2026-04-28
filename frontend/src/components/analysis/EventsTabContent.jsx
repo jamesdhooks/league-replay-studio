@@ -8,6 +8,7 @@ import EventDetail from './EventDetail'
 import EventParticleOverlay from './EventParticleOverlay'
 import { HighlightContext } from '../../context/HighlightContext'
 import { EVENT_CONFIG, formatTime, scoreColor } from './analysisConstants'
+import { resolveTypePadding } from '../../utils/highlight-padding'
 
 export default function EventsTabContent({
   isAnalyzing, isScanning, isRedetecting, progress,
@@ -226,8 +227,7 @@ export default function EventsTabContent({
                     {/* Time */}
                     <div className="flex items-center px-2 py-1.5">
                       {(() => {
-                        const typeBefore = params?.paddingByType?.[type]?.before
-                        const typeAfter = params?.paddingByType?.[type]?.after
+                        const { before: typeBefore, after: typeAfter } = resolveTypePadding(params, type)
                         const paddingBefore = ev.metadata?.padding_before ?? typeBefore ?? params?.paddingBefore ?? 0
                         const paddingAfter = ev.metadata?.padding_after ?? typeAfter ?? params?.paddingAfter ?? 0
                         const effectiveStart = Math.max(0, startSec - paddingBefore - raceStart)

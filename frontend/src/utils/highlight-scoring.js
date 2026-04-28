@@ -13,6 +13,8 @@
  * See scoring_engine.py for the authoritative 8-stage pipeline.
  */
 
+import { resolveTypePadding } from './highlight-padding'
+
 // ── Shared constants (mirrored from scoring_engine.py) ───────────────────
 
 /** Base scores by event type for the multi-pass scoring pipeline */
@@ -332,8 +334,7 @@ export function buildReason(event, score, overrides, minSeverity, inclusion, tie
 export function computeHighlightSelection(events, weights, targetDuration, minSeverity, overrides, raceDuration, drivers, params = {}) {
   const getSelectionDuration = (evt) => {
     const coreDuration = Math.max(0, (evt.end_time_seconds || 0) - (evt.start_time_seconds || 0))
-    const typeBefore = params?.paddingByType?.[evt.event_type]?.before
-    const typeAfter = params?.paddingByType?.[evt.event_type]?.after
+    const { before: typeBefore, after: typeAfter } = resolveTypePadding(params, evt.event_type)
     const before = Math.max(0, evt.metadata?.padding_before ?? typeBefore ?? params?.paddingBefore ?? 0)
     const after = Math.max(0, evt.metadata?.padding_after ?? typeAfter ?? params?.paddingAfter ?? 0)
     return coreDuration + before + after
@@ -768,12 +769,12 @@ const MAX_CONTEXT_PER_GAP = 3
 function computeClipWindow(evt, params) {
   const start = evt.start_time_seconds || 0
   const end = evt.end_time_seconds || start
-  const typeSettings = params?.paddingByType?.[evt.event_type] || {}
+  const { before: typeBefore, after: typeAfter } = resolveTypePadding(params, evt.event_type)
   const meta = (typeof evt.metadata === 'string')
     ? (() => { try { return JSON.parse(evt.metadata) } catch { return {} } })()
     : (evt.metadata || {})
-  const before = Math.max(0, meta.padding_before ?? typeSettings.before ?? params?.paddingBefore ?? 2.0)
-  const after = Math.max(0, meta.padding_after ?? typeSettings.after ?? params?.paddingAfter ?? 5.0)
+  const before = Math.max(0, meta.padding_before ?? typeBefore ?? params?.paddingBefore ?? 2.0)
+  const after = Math.max(0, meta.padding_after ?? typeAfter ?? params?.paddingAfter ?? 5.0)
   const clipStart = Math.max(0, start - before)
   const clipEnd = end + after
   return { clipStart, clipEnd, clipDuration: clipEnd - clipStart }

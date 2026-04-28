@@ -70,7 +70,7 @@
 {"seq": 188, "ts": 1776797357.4394803, "command": "camera-car", "params": {"car_idx": 12, "group_num": 3, "car_num": 33}, "result": "ok", "source": "bridge"}
 {"seq": 189, "ts": 1776797357.4404879, "command": "camera", "params": {"group_num": 3, "target": "car_idx=12"}, "result": "ok", "source": "unknown"}
 {"seq": 190, "ts": 1776797357.5191503, "command": "seek-session-time", "params": {"session_num": 2, "session_time_ms": 936417}, "result": "ok", "source": "bridge"}
-{"seq": 191, "ts": 1776797357.586378, "command": "seek-session-time", "params": {"session_num": 1, "session_time_ms": 953837}, "result": "ok", "source": "bridge"}
+{"seq": 191, "ts": 1776797357.586369, "command": "seek-session-time", "params": {"session_num": 1, "session_time_ms": 953837}, "result": "ok", "source": "bridge"}
 {"seq": 192, "ts": 1776797357.874025, "command": "seek-session-time", "params": {"session_num": 1, "session_time_ms": 936417}, "result": "ok", "source": "bridge"}
 {"seq": 193, "ts": 1776797357.9388103, "command": "seek-session-time", "params": {"session_num": 0, "session_time_ms": 953837}, "result": "ok", "source": "bridge"}
 {"seq": 194, "ts": 1776797358.2366128, "command": "seek-session-time", "params": {"session_num": 0, "session_time_ms": 936417}, "result": "ok", "source": "bridge"}
@@ -125,7 +125,7 @@
 {"seq": 243, "ts": 1776797365.8782346, "command": "camera", "params": {"group_num": 7, "target": "car_idx=6"}, "result": "ok", "source": "unknown"}
 {"seq": 244, "ts": 1776797365.9702325, "command": "seek-session-time", "params": {"session_num": 2, "session_time_ms": 1020847}, "result": "ok", "source": "bridge"}
 {"seq": 245, "ts": 1776797366.2034495, "command": "seek-session-time", "params": {"session_num": 1, "session_time_ms": 1029415}, "result": "ok", "source": "bridge"}
-{"seq": 246, "ts": 1776797366.4299582, "command": "seek-session-time", "params": {"session_num": 1, "session_time_ms": 1020847}, "result": "ok", "source": "bridge"}
+{"seq": 246, "ts": 1776797366.5299582, "command": "seek-session-time", "params": {"session_num": 1, "session_time_ms": 1020847}, "result": "ok", "source": "bridge"}
 {"seq": 247, "ts": 1776797366.5572228, "command": "seek-session-time", "params": {"session_num": 0, "session_time_ms": 1029415}, "result": "ok", "source": "bridge"}
 {"seq": 248, "ts": 1776797366.6695616, "command": "seek-session-time", "params": {"session_num": 0, "session_time_ms": 1020847}, "result": "ok", "source": "bridge"}
 {"seq": 249, "ts": 1776797366.9184165, "command": "seek-time", "params": {"session_num": 2, "requested_session_num": 2, "session_time_ms": 1029415, "drift_ms": 372955, "replay_session_num": 1}, "result": "ok", "source": "unknown"}
@@ -791,7 +791,7 @@
 {"seq": 421, "ts": 1776798531.7836642, "command": "seek-session-time", "params": {"session_num": 2, "session_time_ms": 1013809}, "result": "ok", "source": "bridge"}
 {"seq": 422, "ts": 1776798532.168367, "command": "seek-time", "params": {"session_num": 2, "requested_session_num": 2, "session_time_ms": 1013809, "drift_ms": 40, "replay_session_num": 2}, "result": "ok", "source": "unknown"}
 {"seq": 423, "ts": 1776798532.225142, "command": "camera-car", "params": {"car_idx": 6, "group_num": 22, "car_num": 529}, "result": "ok", "source": "bridge"}
-{"seq": 424, "ts": 1776798532.2563786, "command": "camera", "params": {"group_num": 22, "target": "car_idx=6"}, "result": "ok", "source": "unknown"}
+{"seq": 424, "ts": 1776798532.2563696, "command": "camera", "params": {"group_num": 22, "target": "car_idx=6"}, "result": "ok", "source": "unknown"}
 {"seq": 425, "ts": 1776798532.368611, "command": "set-replay-speed", "params": {"speed": 2}, "result": "ok", "source": "bridge"}
 {"seq": 426, "ts": 1776798532.3691084, "command": "speed", "params": {"speed": 2}, "result": "ok", "source": "unknown"}
 {"seq": 427, "ts": 1776798532.4771397, "command": "set-replay-speed", "params": {"speed": 1}, "result": "ok", "source": "bridge"}
@@ -936,7 +936,7 @@
 {"seq": 566, "ts": 1776798660.8170264, "command": "speed", "params": {"speed": 2}, "result": "ok", "source": "unknown"}
 {"seq": 567, "ts": 1776798660.9144971, "command": "set-replay-speed", "params": {"speed": 2}, "result": "ok", "source": "bridge"}
 {"seq": 568, "ts": 1776798660.9170294, "command": "speed", "params": {"speed": 2}, "result": "ok", "source": "unknown"}
-{"seq": 569, "ts": 1776798660.9637872, "command": "seek-session-time", "params": {"session_num": 2, "session_time_ms": 485500}, "result": "ok", "source": "bridge"}
+{"seq": 569, "ts": 1776798660.9636972, "command": "seek-session-time", "params": {"session_num": 2, "session_time_ms": 485500}, "result": "ok", "source": "bridge"}
 {"seq": 570, "ts": 1776798660.9719093, "command": "set-replay-speed", "params": {"speed": 1}, "result": "ok", "source": "bridge"}
 {"seq": 571, "ts": 1776798660.9809632, "command": "play", "params": {"speed": 1}, "result": "ok", "source": "unknown"}
 {"seq": 572, "ts": 1776798661.0254667, "command": "set-replay-speed", "params": {"speed": 1}, "result": "ok", "source": "bridge"}

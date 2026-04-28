@@ -835,7 +835,7 @@ def main() -> None:
     print(f"   Project ID : {project_id}")
     print(f"   Project dir: {project_dir}")
     print(f"   Events     : {len(events)}")
-    print(f"   Server URL : http://127.0.0.1:6378\n")
+    print(f"   Server URL : http://127.0.0.1:6369\n")
 
 
 if __name__ == "__main__":

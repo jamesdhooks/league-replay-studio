@@ -9,6 +9,7 @@ import HighlightControlsHelp from './HighlightControlsHelp'
 import Tooltip from '../ui/Tooltip'
 import CollapsibleSection from '../ui/CollapsibleSection'
 import LabeledSlider from '../ui/LabeledSlider'
+import { resolveTypePadding } from '../../utils/highlight-padding'
 
 /**
  * HighlightWeightSliders — Priority sliders for each event type.
@@ -686,9 +687,9 @@ export default function HighlightWeightSliders() {
                 <span className="w-4" />
               </div>
               {eventTypes.map(type => {
-                const typeSettings = params.paddingByType?.[type] || {}
-                const hasBefore = typeSettings.before != null
-                const hasAfter = typeSettings.after != null
+                const { before, after, sourceType } = resolveTypePadding(params, type)
+                const hasBefore = before != null
+                const hasAfter = after != null
                 const hasAny = hasBefore || hasAfter
                 const color = EVENT_COLORS[type] || '#666'
                 return (
@@ -700,7 +701,7 @@ export default function HighlightWeightSliders() {
                     <input
                       type="number"
                       min={0} max={15} step={0.5}
-                      value={hasBefore ? typeSettings.before : ''}
+                      value={hasBefore ? before : ''}
                       placeholder={`${params.paddingBefore}`}
                       onChange={e => {
                         const v = e.target.value === '' ? null : parseFloat(e.target.value)
@@ -720,7 +721,7 @@ export default function HighlightWeightSliders() {
                     <input
                       type="number"
                       min={0} max={30} step={0.5}
-                      value={hasAfter ? typeSettings.after : ''}
+                      value={hasAfter ? after : ''}
                       placeholder={`${params.paddingAfter}`}
                       onChange={e => {
                         const v = e.target.value === '' ? null : parseFloat(e.target.value)
@@ -742,7 +743,7 @@ export default function HighlightWeightSliders() {
                         if (!hasAny) return
                         setParams(p => {
                           const pbt = { ...p.paddingByType }
-                          delete pbt[type]
+                          delete pbt[sourceType || type]
                           return { ...p, paddingByType: pbt }
                         })
                       }}

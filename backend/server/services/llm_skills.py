@@ -1082,6 +1082,7 @@ class OverlayFullDesignSkill(LLMSkill):
               frame.track_name   : string — Venue name for display.
               frame.race_season          : string — Season identifier.
               frame.race_date            : string — Race date string.
+              frame.race_date_friendly   : string — Friendly race date label (e.g., "July 13th, 2025").
               frame.driver_short_name    : string — Focused driver short code.
               entry.driver_short_name    : string — Short name in standings rows.
               entry.qualifying_time      : string — Best lap in qualifying.

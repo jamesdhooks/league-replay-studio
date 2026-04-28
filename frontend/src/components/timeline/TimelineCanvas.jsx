@@ -1,6 +1,7 @@
 import { useRef, useEffect, useCallback, useState, useContext } from 'react'
 import { useTimeline, TRACKS, TRACK_HEADER_WIDTH, EVENT_COLORS } from '../../context/TimelineContext'
 import { HighlightContext } from '../../context/HighlightContext'
+import { resolveTypePadding } from '../../utils/highlight-padding'
 
 /** Height of the time ruler at top */
 const RULER_HEIGHT = 24
@@ -279,11 +280,12 @@ export default function TimelineCanvas() {
         const ew = Math.max(2, (evt.end_time_seconds - evt.start_time_seconds) * pixelsPerSecond)
 
         // Resolve padding: per-event override → per-type default → global default
+        const { before: typeBefore, after: typeAfter } = resolveTypePadding(hlParams, evt.event_type)
         const pb = evt.metadata?.padding_before
-          ?? hlParams.paddingByType?.[evt.event_type]?.before
+          ?? typeBefore
           ?? hlParams.paddingBefore ?? 0
         const pa = evt.metadata?.padding_after
-          ?? hlParams.paddingByType?.[evt.event_type]?.after
+          ?? typeAfter
           ?? hlParams.paddingAfter ?? 0
 
         // Skip events (and their padding) entirely off-screen

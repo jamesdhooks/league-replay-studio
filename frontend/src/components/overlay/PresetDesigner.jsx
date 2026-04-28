@@ -160,7 +160,7 @@ export default function PresetDesigner({ presetId, onOpenBuild }) {
     if (selectedPreset && engineStatus?.engine_initialized) {
       handleRefreshPreview()
     }
-  }, [activeSection, previewRenderMode, selectedPreset?.sections?.[activeSection]?.length])
+  }, [activeSection, previewRenderMode, selectedPreset?.sections?.[activeSection]?.length, selectedPreset?.variables])
 
   useEffect(() => {
     const node = previewViewportRef.current
@@ -553,7 +553,13 @@ export default function PresetDesigner({ presetId, onOpenBuild }) {
           activeSection={activeSection}
           activeSectionElements={selectedPreset.sections?.[activeSection] || []}
           projectId={activeProject?.id ?? null}
-          onUpdate={(variables) => updatePreset(selectedPreset.id, { variables })}
+          onUpdate={async (variables) => {
+            const result = await updatePreset(selectedPreset.id, { variables })
+            if (result?.success) {
+              handleRefreshPreview()
+            }
+            return result
+          }}
           onClose={() => {}}
         />
       ),
@@ -567,6 +573,9 @@ export default function PresetDesigner({ presetId, onOpenBuild }) {
           presetId={selectedPreset.id}
           projectId={activeProject?.id ?? null}
           isBuiltin={false}
+          onAssetsChanged={() => {
+            handleRefreshPreview()
+          }}
           onClose={() => {}}
         />
       ),

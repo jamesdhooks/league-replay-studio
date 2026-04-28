@@ -58,10 +58,48 @@ def _new_request_id() -> str:
     return uuid.uuid4().hex[:10]
 
 
+_PROGRESS_DETAIL_KEYS = (
+    "provider",
+    "model",
+    "attempt",
+    "next_attempt",
+    "max_attempts",
+    "attempts",
+    "status_code",
+    "retryable",
+    "error_category",
+    "elapsed_ms",
+    "backoff_seconds",
+    "timeout_seconds",
+    "user_prompt_chars",
+    "system_prompt_chars",
+)
+
+
+def _format_progress_details(payload: dict[str, Any]) -> str:
+    """Render selected progress metadata as a compact log-friendly string."""
+    details: list[str] = []
+    for key in _PROGRESS_DETAIL_KEYS:
+        value = payload.get(key)
+        if value is None:
+            continue
+        details.append(f"{key}={value}")
+
+    error_detail = payload.get("error_detail")
+    if isinstance(error_detail, str) and error_detail.strip():
+        compact = " ".join(error_detail.split())
+        if len(compact) > 220:
+            compact = f"{compact[:217]}..."
+        details.append(f"error_detail={compact}")
+
+    return " ".join(details)
+
+
 def _make_progress_callback(action: str, request_id: str, preset_id: str | None):
     def _callback(payload: dict[str, Any]) -> None:
         stage = payload.get("stage", "unknown")
         message = payload.get("message", stage)
+        detail_suffix = _format_progress_details(payload)
         event_payload = {
             "source": "llm_overlay",
             "action": action,
@@ -69,13 +107,23 @@ def _make_progress_callback(action: str, request_id: str, preset_id: str | None)
             "preset_id": preset_id,
             **payload,
         }
-        logger.info(
-            "[LLM API] [%s] %s stage=%s message=%s",
-            request_id,
-            action,
-            stage,
-            message,
-        )
+        if detail_suffix:
+            logger.info(
+                "[LLM API] [%s] %s stage=%s message=%s details=%s",
+                request_id,
+                action,
+                stage,
+                message,
+                detail_suffix,
+            )
+        else:
+            logger.info(
+                "[LLM API] [%s] %s stage=%s message=%s",
+                request_id,
+                action,
+                stage,
+                message,
+            )
         _broadcast_overlay_ai(EventType.OVERLAY_AI_STATUS, event_payload)
 
     return _callback

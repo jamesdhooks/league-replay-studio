@@ -26,6 +26,7 @@ before rendering.
 
 from __future__ import annotations
 
+from datetime import datetime
 import hashlib
 import json
 import logging
@@ -37,6 +38,50 @@ import httpx
 from server.config import DATA_DIR
 
 logger = logging.getLogger(__name__)
+
+
+def _day_ordinal(day: int) -> str:
+    """Return an ordinal suffix for day-of-month values."""
+    if 10 <= day % 100 <= 20:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+
+
+def _format_race_date_friendly(value: Any) -> Optional[str]:
+    """Convert ISO race date strings into a human-friendly label.
+
+    Example: "2025-07-13" -> "July 13th, 2025"
+    """
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+
+    parsed = None
+
+    # First, try full ISO parsing (handles timezone/timestamp variants).
+    try:
+        normalized = raw.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        parsed = None
+
+    # Fallback: parse date token from common API formats.
+    if parsed is None:
+        date_token = raw.split("T", 1)[0].split(" ", 1)[0]
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+            try:
+                parsed = datetime.strptime(date_token, fmt)
+                break
+            except ValueError:
+                continue
+
+    if parsed is None:
+        return None
+
+    day = parsed.day
+    return f"{parsed.strftime('%B')} {day}{_day_ordinal(day)}, {parsed.year}"
 
 # ── Plugin storage ──────────────────────────────────────────────────────────
 
@@ -120,6 +165,7 @@ EXPECTED_FORMATS: dict[str, dict[str, Any]] = {
             {"field": "series", "type": "string", "required": False},
             {"field": "week_number", "type": "int", "required": False},
             {"field": "race_date", "type": "string", "required": False, "description": "ISO date string."},
+            {"field": "race_date_friendly", "type": "string", "required": False, "description": "Friendly date string (e.g., 'July 13th, 2025')."},
             {"field": "track_name", "type": "string", "required": False},
         ],
         "request_example": {"subsession_id": 12345678},
@@ -128,6 +174,7 @@ EXPECTED_FORMATS: dict[str, dict[str, Any]] = {
             "series": "IMSA SportsCar Championship",
             "week_number": 5,
             "race_date": "2025-03-15",
+            "race_date_friendly": "March 15th, 2025",
             "track_name": "Daytona International Speedway — Road Course",
         },
     },
@@ -186,7 +233,7 @@ EXPECTED_FORMATS: dict[str, dict[str, Any]] = {
 
 WHITELIST: dict[str, set[str]] = {
     PLUGIN_DRIVER_DETAILS: {"nickname", "avatar"},
-    PLUGIN_RACE_DETAILS: {"season", "series", "week_number", "race_date", "track_name"},
+    PLUGIN_RACE_DETAILS: {"season", "series", "week_number", "race_date", "race_date_friendly", "track_name"},
     PLUGIN_CHAMPIONSHIP_STANDINGS: {
         "championship_position", "driver_name", "iracing_cust_id",
         "total_points", "points_delta", "position_delta", "participated",
@@ -496,7 +543,7 @@ class DataPluginService:
         """Fetch race details from the configured race_details plugin.
 
         Returns a dict with season, series, week_number, race_date,
-        track_name.
+        race_date_friendly, and track_name.
         """
         plugin = self._get_enabled_plugin(PLUGIN_RACE_DETAILS)
         if not plugin or not subsession_id:
@@ -637,7 +684,10 @@ class DataPluginService:
             frame_data["race_season"] = race_details.get("season")
             frame_data["series_name"] = race_details.get("series")
             frame_data["race_week"] = race_details.get("week_number")
-            frame_data["race_date"] = race_details.get("race_date")
+            race_date = race_details.get("race_date")
+            frame_data["race_date"] = race_date
+            plugin_friendly = race_details.get("race_date_friendly")
+            frame_data["race_date_friendly"] = plugin_friendly or _format_race_date_friendly(race_date)
             frame_data["track_name"] = race_details.get("track_name")
 
         # Championship standings — also enrich with driver details
@@ -669,7 +719,11 @@ class DataPluginService:
                 continue
             ptype = plugin["plugin_type"]
             wl = WHITELIST.get(ptype, set())
-            result[ptype] = sorted(wl)
+            values = set(wl)
+            if ptype == PLUGIN_RACE_DETAILS:
+                # Always exposed in frame_data; derived from race_date when absent upstream.
+                values.add("race_date_friendly")
+            result[ptype] = sorted(values)
         return result
 
     # ── Helpers ──────────────────────────────────────────────────────────────
@@ -840,7 +894,7 @@ class DataPluginService:
         elif plugin_type == PLUGIN_RACE_DETAILS:
             if not isinstance(data, dict):
                 return {"valid": False, "error": "Expected a JSON object with race details"}
-            expected = {"season", "race_date", "track_name"}
+            expected = {"season", "race_date", "race_date_friendly", "track_name"}
             found = set(data.keys()) & expected
             return {"valid": len(found) > 0, "fields_found": list(data.keys())}
 
@@ -875,10 +929,16 @@ class DataPluginService:
             return result
 
         if plugin_type == PLUGIN_RACE_DETAILS:
-            return {
+            normalized = {
                 k: v for k, v in data.items()
                 if isinstance(data, dict) and k in WHITELIST[PLUGIN_RACE_DETAILS]
             } if isinstance(data, dict) else {}
+            if isinstance(normalized, dict):
+                normalized["race_date_friendly"] = (
+                    normalized.get("race_date_friendly")
+                    or _format_race_date_friendly(normalized.get("race_date"))
+                )
+            return normalized
 
         if plugin_type == PLUGIN_CHAMPIONSHIP_STANDINGS:
             standings_raw = data.get("standings", []) if isinstance(data, dict) else []

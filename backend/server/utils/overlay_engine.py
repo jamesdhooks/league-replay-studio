@@ -27,6 +27,40 @@ from server.utils.overlay_animation import compute_profile_window_ms
 logger = logging.getLogger(__name__)
 
 
+def _resolve_render_base_url() -> str:
+    """Resolve backend origin used by Playwright HTML rendering.
+
+    Relative asset URLs like `/api/presets/...` need a real document origin when
+    rendering via `page.set_content(...)` (which otherwise uses `about:blank`).
+    """
+    host = os.environ.get("LRS_HOST", "127.0.0.1")
+    port = os.environ.get("LRS_PORT", "6369")
+    return f"http://{host}:{port}/"
+
+
+def _inject_base_href(html: str, base_url: str) -> str:
+    """Inject a `<base>` tag so relative URLs resolve during headless render."""
+    if not html:
+        return html
+    if "<base " in html.lower():
+        return html
+
+    base_tag = f'<base href="{base_url}">'
+
+    lower_html = html.lower()
+    head_idx = lower_html.find("<head")
+    if head_idx >= 0:
+        head_end = lower_html.find(">", head_idx)
+        if head_end >= 0:
+            return html[: head_end + 1] + base_tag + html[head_end + 1 :]
+
+    body_idx = lower_html.find("<body")
+    if body_idx >= 0:
+        return html[:body_idx] + "<head>" + base_tag + "</head>" + html[body_idx:]
+
+    return "<head>" + base_tag + "</head>" + html
+
+
 def _format_exc(exc: Exception) -> str:
     """Return a non-empty, user-facing error message for exceptions."""
     msg = str(exc).strip()
@@ -431,8 +465,10 @@ class OverlayEngine:
         analyze_animations: bool = False,
         animation_time_ms: float | None = None,
     ) -> dict[str, Any] | None:
+        base_url = _resolve_render_base_url()
+        rendered_with_base = _inject_base_href(rendered_html, base_url)
         cache_key = hashlib.sha1(rendered_html.encode("utf-8")).hexdigest()
-        await self._page.set_content(rendered_html, wait_until="domcontentloaded")
+        await self._page.set_content(rendered_with_base, wait_until="domcontentloaded")
         try:
             await self._page.wait_for_load_state("networkidle", timeout=5000)
         except Exception:

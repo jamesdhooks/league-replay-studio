@@ -1,6 +1,60 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { Plus, Trash2, Copy, Link2, AlertTriangle, CheckCircle2, Loader2, RefreshCw } from 'lucide-react'
 import { usePreset } from '../../context/PresetContext'
+import { useLocalStorage } from '../../hooks/useLocalStorage'
+import { HexColorPicker } from 'react-colorful'
+
+const HEX_COLOR_PATTERN = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/
+const RGB_COLOR_PATTERN = /^rgba?\(([^)]+)\)$/i
+
+function clampColorChannel(value) {
+  return Math.max(0, Math.min(255, Math.round(value)))
+}
+
+function rgbToHex(r, g, b) {
+  const toHex = (n) => clampColorChannel(n).toString(16).padStart(2, '0')
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`
+}
+
+function hexToRgb(value) {
+  const normalized = normalizeHexColor(value)
+  if (!normalized) return null
+  return {
+    r: parseInt(normalized.slice(1, 3), 16),
+    g: parseInt(normalized.slice(3, 5), 16),
+    b: parseInt(normalized.slice(5, 7), 16),
+  }
+}
+
+function parseRgbString(value) {
+  if (typeof value !== 'string') return null
+  const match = value.trim().match(RGB_COLOR_PATTERN)
+  if (!match) return null
+  const channels = match[1].split(',').map((part) => Number.parseFloat(part.trim()))
+  if (channels.length < 3 || channels.slice(0, 3).some((n) => Number.isNaN(n))) return null
+  return {
+    r: clampColorChannel(channels[0]),
+    g: clampColorChannel(channels[1]),
+    b: clampColorChannel(channels[2]),
+  }
+}
+
+function parseColorToRgb(value) {
+  return hexToRgb(value) || parseRgbString(value)
+}
+
+function normalizeHexColor(value) {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!HEX_COLOR_PATTERN.test(trimmed)) return null
+  if (trimmed.length === 4) {
+    const r = trimmed[1]
+    const g = trimmed[2]
+    const b = trimmed[3]
+    return `#${r}${r}${g}${g}${b}${b}`.toLowerCase()
+  }
+  return trimmed.toLowerCase()
+}
 
 /**
  * VariableEditor — edit preset CSS variables with usage diagnostics.
@@ -132,6 +186,10 @@ export default function VariableEditor({
   const { listAssets, getHtmlContent, getDataContext } = usePreset()
 
   const [variables, setVariables] = useState(() => normalizeVariables(preset?.variables || {}))
+  const [swatches, setSwatches] = useLocalStorage('lrs:overlay:color-swatches', [
+    '#ffffff', '#000000', '#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899',
+  ])
+  const [activePickerVar, setActivePickerVar] = useState(null)
   const [saveState, setSaveState] = useState('idle') // idle | pending | saving | saved | error
   const [saveError, setSaveError] = useState('')
   const [savedAt, setSavedAt] = useState(null)
@@ -183,6 +241,23 @@ export default function VariableEditor({
     setSaveState('pending')
     setSaveError('')
   }, [variables])
+
+  const persistSwatch = useCallback((color) => {
+    const normalized = normalizeHexColor(color)
+    if (!normalized) return
+    setSwatches((prev) => {
+      const list = Array.isArray(prev) ? prev : []
+      const deduped = [normalized, ...list.filter(c => c !== normalized)]
+      return deduped.slice(0, 36)
+    })
+  }, [setSwatches])
+
+  const removeSwatch = useCallback((color) => {
+    setSwatches((prev) => {
+      const list = Array.isArray(prev) ? prev : []
+      return list.filter(c => c !== color)
+    })
+  }, [setSwatches])
 
   const refreshBindings = useCallback(async () => {
     if (!preset?.id) return
@@ -427,7 +502,11 @@ export default function VariableEditor({
       <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-1">
         {Object.entries(variables).map(([name, meta]) => {
           const val = typeof meta === 'object' ? meta : { value: meta, type: 'text', label: name }
-          const isColor = val.type === 'color' || (val.value && val.value.startsWith('#'))
+          const parsedRgb = parseColorToRgb(val.value)
+          const isColor = val.type === 'color' || parsedRgb != null
+          const currentRgb = parsedRgb || { r: 255, g: 255, b: 255 }
+          const pickerColor = rgbToHex(currentRgb.r, currentRgb.g, currentRgb.b)
+          const pickerOpen = activePickerVar === name
           return (
             <div key={name} className="flex items-center gap-2 text-xs">
               <code className="text-[10px] text-text-tertiary truncate w-36" title={name}>{name}</code>
@@ -438,14 +517,100 @@ export default function VariableEditor({
                 className="bg-bg-primary border border-border rounded px-1.5 py-0.5 text-[10px] text-text-primary w-28 focus:border-blue-500 focus:outline-none disabled:opacity-50"
                 placeholder="Label"
               />
-              <div className="flex items-center gap-1 flex-1">
+              <div className="flex items-center gap-1 flex-1 relative">
                 {isColor && (
-                  <input
-                    type="color"
-                    value={val.value || '#ffffff'}
-                    onChange={e => handleValueChange(name, e.target.value)}
-                    className="w-5 h-5 rounded cursor-pointer border border-border"
-                  />
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setActivePickerVar(prev => prev === name ? null : name)}
+                      className="w-5 h-5 rounded border border-border shrink-0"
+                      title={pickerOpen ? 'Close color picker' : 'Open color picker'}
+                      style={{ backgroundColor: pickerColor }}
+                    />
+                    {pickerOpen && (
+                      <div className="absolute left-0 top-7 z-20 w-72 rounded border border-border bg-bg-primary p-2 shadow-xl space-y-2">
+                        <HexColorPicker color={pickerColor} onChange={(color) => handleValueChange(name, color)} />
+                        <div className="grid grid-cols-[44px_1fr] items-center gap-2 text-[10px]">
+                          <span className="text-text-tertiary">HEX</span>
+                          <input
+                            type="text"
+                            value={pickerColor}
+                            onChange={(e) => {
+                              const next = normalizeHexColor(e.target.value)
+                              if (next) handleValueChange(name, next)
+                            }}
+                            className="bg-bg-secondary border border-border rounded px-1.5 py-1 text-[10px] text-text-primary font-mono focus:border-blue-500 focus:outline-none"
+                          />
+                        </div>
+                        <div className="grid grid-cols-[44px_1fr] items-center gap-2 text-[10px]">
+                          <span className="text-text-tertiary">RGB</span>
+                          <div className="grid grid-cols-3 gap-1">
+                            {['r', 'g', 'b'].map((channel) => (
+                              <input
+                                key={`${name}-${channel}`}
+                                type="number"
+                                min={0}
+                                max={255}
+                                value={currentRgb[channel]}
+                                onChange={(e) => {
+                                  const parsed = Number.parseInt(e.target.value, 10)
+                                  const nextValue = Number.isNaN(parsed)
+                                    ? currentRgb[channel]
+                                    : clampColorChannel(parsed)
+                                  const nextRgb = {
+                                    ...currentRgb,
+                                    [channel]: nextValue,
+                                  }
+                                  handleValueChange(name, rgbToHex(nextRgb.r, nextRgb.g, nextRgb.b))
+                                }}
+                                className="bg-bg-secondary border border-border rounded px-1 py-1 text-[10px] text-text-primary font-mono focus:border-blue-500 focus:outline-none"
+                              />
+                            ))}
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                          <button
+                            type="button"
+                            onClick={() => persistSwatch(pickerColor)}
+                            className="text-[10px] px-2 py-1 rounded border border-border hover:bg-bg-secondary text-text-secondary"
+                          >
+                            Save to swatches
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setActivePickerVar(null)}
+                            className="text-[10px] px-2 py-1 rounded border border-border hover:bg-bg-secondary text-text-secondary"
+                          >
+                            Done
+                          </button>
+                        </div>
+                        <div className="space-y-1">
+                          <div className="text-[10px] text-text-tertiary">Swatches</div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {(Array.isArray(swatches) ? swatches : []).map((swatch) => (
+                              <div key={`${name}-${swatch}`} className="relative group">
+                                <button
+                                  type="button"
+                                  onClick={() => handleValueChange(name, swatch)}
+                                  className="w-5 h-5 rounded border border-border"
+                                  style={{ backgroundColor: swatch }}
+                                  title={`Apply ${swatch}`}
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => removeSwatch(swatch)}
+                                  className="absolute -top-1 -right-1 hidden group-hover:flex items-center justify-center w-3.5 h-3.5 rounded-full border border-border bg-bg-primary text-[9px] leading-none text-text-secondary"
+                                  title="Remove swatch"
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
                 <input
                   type="text"

@@ -1,8 +1,9 @@
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo, useEffect } from 'react'
 import {
   BookOpen, Copy, ChevronDown, ChevronRight, Search,
   Activity, Cpu, Plug, Monitor,
 } from 'lucide-react'
+import { usePreset } from '../../context/PresetContext'
 
 /**
  * Variable source grouping — maps source IDs from VARIABLE_SOURCES
@@ -24,12 +25,40 @@ const SECTION_ORDER = ['plugin', 'telemetry', 'computed', 'resolution']
  * Displays a searchable tree of template variables that users can click
  * to copy the Jinja2 expression (e.g., {{ frame.driver_name }}).
  */
-export default function DataContextInspector({ variables, variableDocs, variableSources, onInsertVariable }) {
+export default function DataContextInspector({
+  variables,
+  variableDocs,
+  variableSources,
+  onInsertVariable,
+  templateId = null,
+  projectId = null,
+}) {
+  const { listAssets } = usePreset()
   const [search, setSearch] = useState('')
   const [expandedSections, setExpandedSections] = useState({
     telemetry: true, computed: true, plugin: true, resolution: false,
   })
+  const [expandedAssetSections, setExpandedAssetSections] = useState({ global: true, project: true })
   const [copiedKey, setCopiedKey] = useState(null)
+  const [assetContext, setAssetContext] = useState({ assets: [], bindings: { effective: {} } })
+
+  useEffect(() => {
+    let mounted = true
+    const loadAssets = async () => {
+      if (!templateId) {
+        if (mounted) setAssetContext({ assets: [], bindings: { effective: {} } })
+        return
+      }
+      const result = await listAssets(templateId, { projectId })
+      if (!mounted) return
+      setAssetContext({
+        assets: result?.assets || [],
+        bindings: result?.bindings || { effective: {} },
+      })
+    }
+    loadAssets()
+    return () => { mounted = false }
+  }, [listAssets, templateId, projectId])
 
   // ── Group variables by source ──────────────────────────────────────────
   const groupedVars = useMemo(() => {
@@ -53,6 +82,10 @@ export default function DataContextInspector({ variables, variableDocs, variable
   // ── Toggle section ───────────────────────────────────────────────────────
   const toggleSection = useCallback((section) => {
     setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }))
+  }, [])
+
+  const toggleAssetSection = useCallback((section) => {
+    setExpandedAssetSections((prev) => ({ ...prev, [section]: !prev[section] }))
   }, [])
 
   // ── Copy variable expression ─────────────────────────────────────────────
@@ -109,6 +142,49 @@ export default function DataContextInspector({ variables, variableDocs, variable
 
   // ── Count matching entries per group ──────────────────────────────────────
   const sectionOrder = SECTION_ORDER
+  const assetEntries = useMemo(() => {
+    const assets = Array.isArray(assetContext.assets) ? assetContext.assets : []
+    const effective = assetContext?.bindings?.effective || {}
+    const byAssetKey = new Map()
+    assets.forEach((asset) => {
+      byAssetKey.set(`${asset.scope}:${asset.filename}`, asset)
+    })
+
+    return Object.entries(effective)
+      .map(([variableName, binding]) => {
+        const scope = binding?.scope || 'global'
+        const filename = binding?.filename || ''
+        const key = `${scope}:${filename}`
+        const asset = byAssetKey.get(key)
+        return {
+          variableName,
+          scope,
+          filename,
+          token: `{{ frame.assets.${variableName} }}`,
+          url: asset?.url || (filename ? `/api/presets/${templateId}/assets/${filename}?scope=${scope}` : ''),
+        }
+      })
+      .filter((entry) => entry.filename)
+  }, [assetContext, templateId])
+
+  const filteredAssetEntries = useMemo(() => {
+    if (!search) return assetEntries
+    const q = search.toLowerCase()
+    return assetEntries.filter((entry) => (
+      entry.variableName.toLowerCase().includes(q)
+      || entry.filename.toLowerCase().includes(q)
+      || entry.scope.toLowerCase().includes(q)
+    ))
+  }, [assetEntries, search])
+
+  const globalAssetEntries = useMemo(
+    () => filteredAssetEntries.filter((entry) => entry.scope === 'global'),
+    [filteredAssetEntries],
+  )
+  const projectAssetEntries = useMemo(
+    () => filteredAssetEntries.filter((entry) => entry.scope === 'project'),
+    [filteredAssetEntries],
+  )
 
   return (
     <div className="flex flex-col h-full bg-bg-primary border-t border-border">
@@ -134,6 +210,71 @@ export default function DataContextInspector({ variables, variableDocs, variable
             className="w-full bg-bg-secondary border border-border rounded pl-6 pr-2 py-1 text-xxs text-text-primary focus:border-accent focus:outline-none"
           />
         </div>
+      </div>
+
+      <div className="border-b border-border">
+        <div className="px-3 py-1.5 text-[10px] font-semibold text-text-secondary">Asset Variables</div>
+
+        {[
+          { id: 'global', label: 'Global', entries: globalAssetEntries, tone: 'text-blue-400 bg-blue-500/15' },
+          { id: 'project', label: 'Per Project', entries: projectAssetEntries, tone: 'text-emerald-400 bg-emerald-500/15' },
+        ].map((section) => {
+          const isExpanded = expandedAssetSections[section.id]
+          return (
+            <div key={section.id}>
+              <button
+                onClick={() => toggleAssetSection(section.id)}
+                className="w-full flex items-center gap-1.5 px-3 py-1.5 text-xxs font-medium text-text-secondary hover:bg-bg-secondary/50"
+              >
+                {isExpanded
+                  ? <ChevronDown className="w-3 h-3 text-text-tertiary" />
+                  : <ChevronRight className="w-3 h-3 text-text-tertiary" />
+                }
+                <span>{section.label}</span>
+                <span className={`text-[9px] px-1.5 py-0.5 rounded-full ml-1 ${section.tone}`}>
+                  {section.entries.length}
+                </span>
+              </button>
+
+              {isExpanded && (
+                <div className="pl-3 pr-2 pb-2 space-y-1">
+                  {section.entries.length === 0 ? (
+                    <div className="px-2 py-1 text-[10px] text-text-tertiary italic">No assets</div>
+                  ) : section.entries.map((entry) => (
+                    <div
+                      key={`${section.id}:${entry.variableName}`}
+                      className="group flex items-start gap-2 px-2 py-1.5 rounded hover:bg-bg-secondary/80"
+                    >
+                      {entry.url ? (
+                        <img
+                          src={entry.url}
+                          alt={entry.filename}
+                          className="w-10 h-7 rounded border border-border object-cover bg-bg-secondary flex-shrink-0"
+                          onError={(e) => { e.currentTarget.style.display = 'none' }}
+                        />
+                      ) : (
+                        <div className="w-10 h-7 rounded border border-border bg-bg-secondary flex-shrink-0" />
+                      )}
+
+                      <div className="min-w-0 flex-1">
+                        <code className="text-[10px] text-text-primary font-mono truncate block">{entry.token}</code>
+                        <div className="text-[9px] text-text-tertiary truncate">{entry.filename}</div>
+                      </div>
+
+                      <button
+                        onClick={() => copyVariable(`frame.assets.${entry.variableName}`)}
+                        className="text-[10px] transition-opacity flex-shrink-0 text-text-tertiary opacity-0 group-hover:opacity-100"
+                        title="Copy asset token"
+                      >
+                        <Copy className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })}
       </div>
 
       {/* ── Variable tree grouped by source ──────────────────────────────── */}

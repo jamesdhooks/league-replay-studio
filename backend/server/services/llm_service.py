@@ -60,6 +60,8 @@ _GOOGLE_API_URL = (
 _MAX_RETRIES = 3
 _INITIAL_BACKOFF = 1.0  # seconds
 _HTTP_TIMEOUT = 60.0  # seconds per request
+_MAX_DETAIL_LOG_LEN = 280
+_RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 
 # ── Exceptions ──────────────────────────────────────────────────────────────
 
@@ -372,6 +374,34 @@ class LLMService:
 
     # ── Provider dispatch ───────────────────────────────────────────────────
 
+    @staticmethod
+    def _shorten_detail(detail: str, max_len: int = _MAX_DETAIL_LOG_LEN) -> str:
+        """Return a single-line, bounded-length detail string for logs/events."""
+        if not detail:
+            return ""
+        compact = " ".join(str(detail).split())
+        if len(compact) <= max_len:
+            return compact
+        return f"{compact[: max_len - 3]}..."
+
+    @staticmethod
+    def _classify_provider_error(
+        exc: LLMProviderError,
+    ) -> tuple[str, bool]:
+        """Classify provider failures and whether they are usually retryable."""
+        status = exc.status_code
+        if status is None:
+            return ("transport_error", True)
+        if status == 429:
+            return ("rate_limited", True)
+        if status in {408, 502, 503, 504}:
+            return ("upstream_unavailable", True)
+        if status >= 500:
+            return ("provider_server_error", True)
+        if status in {400, 401, 403, 404, 409, 422}:
+            return ("request_or_auth_error", False)
+        return ("provider_http_error", status in _RETRYABLE_STATUS_CODES)
+
     async def _call_provider(
         self,
         system_prompt: str,
@@ -388,6 +418,7 @@ class LLMService:
         # Extract provider name separately so log statements never
         # reference the cfg dict that contains the API key.
         provider_name: str = str(settings_service.get("llm_provider", "none"))
+        model_name = str(cfg.get("model", ""))
 
         if provider_name == "none":
             raise LLMConfigError("LLM provider is set to 'none'")
@@ -408,6 +439,9 @@ class LLMService:
                 "provider_selected",
                 f"Using provider {provider_name}",
                 provider=provider_name,
+                model=model_name,
+                max_attempts=_MAX_RETRIES,
+                timeout_seconds=_HTTP_TIMEOUT,
             )
 
         last_exc: Optional[Exception] = None
@@ -420,8 +454,12 @@ class LLMService:
                         "provider_attempt_started",
                         f"Provider request attempt {attempt} started",
                         provider=provider_name,
+                        model=model_name,
                         attempt=attempt,
                         max_attempts=_MAX_RETRIES,
+                        user_prompt_chars=len(user_prompt),
+                        system_prompt_chars=len(system_prompt),
+                        response_format_enabled=bool(response_format),
                     )
                 result = await dispatch_fn(
                     cfg=cfg,
@@ -431,16 +469,18 @@ class LLMService:
                 )
                 elapsed = time.monotonic() - t0
                 logger.info(
-                    "[LLM] %s call succeeded in %.2fs (attempt %d)",
+                    "[LLM] %s call succeeded in %.2fs (attempt %d, model=%s)",
                     provider_name,
                     elapsed,
                     attempt,
+                    model_name,
                 )
                 if progress_callback is not None:
                     progress_callback(
                         "provider_attempt_succeeded",
                         f"Provider request succeeded on attempt {attempt}",
                         provider=provider_name,
+                        model=model_name,
                         attempt=attempt,
                         elapsed_ms=round(elapsed * 1000, 1),
                     )
@@ -448,36 +488,85 @@ class LLMService:
             except LLMProviderError as exc:
                 elapsed = time.monotonic() - t0
                 last_exc = exc
+                status_code = exc.status_code
+                error_category, retryable = self._classify_provider_error(exc)
+                detail_preview = self._shorten_detail(exc.detail or str(exc))
+                will_retry = attempt < _MAX_RETRIES
                 logger.warning(
-                    "[LLM] %s call failed in %.2fs (attempt %d/%d): %s",
+                    "[LLM] %s call failed in %.2fs (attempt %d/%d, model=%s, "
+                    "status=%s, category=%s, retryable=%s): %s | detail=%s",
                     provider_name,
                     elapsed,
                     attempt,
                     _MAX_RETRIES,
+                    model_name,
+                    status_code,
+                    error_category,
+                    retryable,
                     exc,
+                    detail_preview,
                 )
                 if progress_callback is not None:
                     progress_callback(
                         "provider_attempt_failed",
                         f"Provider request attempt {attempt} failed",
                         provider=provider_name,
+                        model=model_name,
                         attempt=attempt,
                         max_attempts=_MAX_RETRIES,
                         elapsed_ms=round(elapsed * 1000, 1),
+                        status_code=status_code,
+                        retryable=retryable,
+                        error_category=error_category,
                         detail=str(exc),
+                        error_detail=detail_preview,
                     )
-                if attempt < _MAX_RETRIES:
+                if will_retry:
                     backoff = _INITIAL_BACKOFF * (2 ** (attempt - 1))
                     if progress_callback is not None:
                         progress_callback(
                             "provider_retrying",
-                            f"Retrying provider request after {backoff:.1f}s backoff",
+                            "Retrying provider request after "
+                            f"{backoff:.1f}s backoff",
                             provider=provider_name,
+                            model=model_name,
                             attempt=attempt,
                             next_attempt=attempt + 1,
                             backoff_seconds=backoff,
+                            status_code=status_code,
+                            retryable=retryable,
+                            error_category=error_category,
                         )
                     await asyncio.sleep(backoff)
+
+        if isinstance(last_exc, LLMProviderError):
+            final_category, final_retryable = self._classify_provider_error(last_exc)
+            final_detail = self._shorten_detail(last_exc.detail or str(last_exc))
+            logger.error(
+                "[LLM] %s request exhausted retries (attempts=%d, model=%s, "
+                "status=%s, category=%s, retryable=%s): %s | detail=%s",
+                provider_name,
+                _MAX_RETRIES,
+                model_name,
+                last_exc.status_code,
+                final_category,
+                final_retryable,
+                last_exc,
+                final_detail,
+            )
+            if progress_callback is not None:
+                progress_callback(
+                    "provider_exhausted",
+                    f"Provider failed after {_MAX_RETRIES} attempts",
+                    provider=provider_name,
+                    model=model_name,
+                    attempts=_MAX_RETRIES,
+                    status_code=last_exc.status_code,
+                    retryable=final_retryable,
+                    error_category=final_category,
+                    detail=str(last_exc),
+                    error_detail=final_detail,
+                )
 
         raise last_exc  # type: ignore[misc]
 

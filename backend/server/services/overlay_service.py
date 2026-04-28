@@ -301,6 +301,7 @@ SAMPLE_FRAME_DATA: dict[str, Any] = {
     "race_season": "2025 Season 2",
     "race_week": 5,
     "race_date": "2025-03-15",
+    "race_date_friendly": "March 15th, 2025",
     "track_name": "Daytona International Speedway — Road Course",
     "driver_nickname": "MaxV",
     "driver_avatar": "a_abc123def456",
@@ -392,6 +393,7 @@ VARIABLE_DOCS: dict[str, str] = {
     "frame.race_season": "Season name from the data plugin (e.g., '2025 Season 2')",
     "frame.race_week": "Week number within the season (integer)",
     "frame.race_date": "Date of the race (ISO 8601 string, e.g., '2025-03-15')",
+    "frame.race_date_friendly": "Friendly race date label (e.g., 'July 13th, 2025')",
     "frame.track_name": "Formatted venue name from the data plugin",
     "frame.driver_nickname": "Display nickname for the focused driver from the data plugin",
     "frame.driver_avatar": "Avatar for the focused driver — a URL or Discord avatar hash (e.g., 'a_abc123def456')",
@@ -424,7 +426,7 @@ VARIABLE_SOURCES: dict[str, str] = {
     "standings": "telemetry", "qualifying_standings": "computed", "final_standings": "computed",
     # Championship + 3rd party
     "championship_standings": "plugin", "race_season": "plugin", "race_week": "plugin",
-    "race_date": "plugin", "track_name": "plugin",
+    "race_date": "plugin", "race_date_friendly": "plugin", "track_name": "plugin",
     "driver_nickname": "plugin", "driver_avatar": "plugin",
 }
 

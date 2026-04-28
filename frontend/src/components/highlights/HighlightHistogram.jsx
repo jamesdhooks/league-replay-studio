@@ -6,6 +6,7 @@ import { useToast } from '../../context/ToastContext'
 import { useIRacing } from '../../context/IRacingContext'
 import { formatTime, formatDuration } from '../../utils/time'
 import { Columns3, ArrowRight, RotateCw, Download, FileText, Loader2, Zap } from 'lucide-react'
+import { resolveTypePadding } from '../../utils/highlight-padding'
 import ScoringReportModal from './ScoringReportModal'
 import EventTile from './EventTile'
 import ProductionColumn from './ProductionColumn'
@@ -467,9 +468,9 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
                      className={`relative${idx < BUCKET_COUNT - 1 ? ' border-b border-border-subtle' : ''}`}
                      style={{ height: BUCKET_ROW_H }}>
                   {bucketEvents.map(evt => {
-                    const typeSettings = params.paddingByType?.[evt.event_type] || {}
-                    const paddingBefore = typeSettings.before != null ? typeSettings.before : params.paddingBefore
-                    const paddingAfter = typeSettings.after != null ? typeSettings.after : params.paddingAfter
+                    const { before: typeBefore, after: typeAfter } = resolveTypePadding(params, evt.event_type)
+                    const paddingBefore = typeBefore != null ? typeBefore : params.paddingBefore
+                    const paddingAfter = typeAfter != null ? typeAfter : params.paddingAfter
                     return (
                     <EventTile
                       key={evt.id} event={evt} totalDuration={totalDuration}
@@ -583,9 +584,9 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
                 className={`flex-1 min-w-0 relative ${idx < BUCKET_COUNT - 1 ? 'border-r border-border-subtle' : 'border-r border-border'}`}
               >
                 {bucketEvents.map(evt => {
-                  const typeSettings = params.paddingByType?.[evt.event_type] || {}
-                  const paddingBefore = typeSettings.before != null ? typeSettings.before : params.paddingBefore
-                  const paddingAfter = typeSettings.after != null ? typeSettings.after : params.paddingAfter
+                  const { before: typeBefore, after: typeAfter } = resolveTypePadding(params, evt.event_type)
+                  const paddingBefore = typeBefore != null ? typeBefore : params.paddingBefore
+                  const paddingAfter = typeAfter != null ? typeAfter : params.paddingAfter
                   return (
                   <EventTile
                     key={evt.id} event={evt} totalDuration={totalDuration}

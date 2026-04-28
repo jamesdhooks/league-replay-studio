@@ -7,6 +7,7 @@ import { EVENT_TYPE_LABELS } from '../../context/HighlightContext'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { apiPost } from '../../services/api'
 import { formatTimePrecise, formatTime } from '../../utils/time'
+import { resolveTypePadding } from '../../utils/highlight-padding'
 import EventControlsBar from '../ui/EventControlsBar'
 import {
   Info, X, RotateCcw, Scissors, Trash2,
@@ -336,8 +337,7 @@ export default function EventInspectorPanel({ projectId }) {
   }
 
   const eventColor = EVENT_COLORS[editState.event_type] || '#6b7280'
-  const typeBefore = params.paddingByType?.[editState.event_type]?.before ?? null
-  const typeAfter = params.paddingByType?.[editState.event_type]?.after ?? null
+  const { before: typeBefore, after: typeAfter } = resolveTypePadding(params, editState.event_type)
   const effectiveBefore = editState.padding_before ?? typeBefore ?? params.paddingBefore
   const effectiveAfter = editState.padding_after ?? typeAfter ?? params.paddingAfter
   const sourceBefore = editState.padding_before != null ? 'event'

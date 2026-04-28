@@ -25,6 +25,7 @@ import LogTabContent from './LogTabContent'
 import EventsTabContent from './EventsTabContent'
 import DataStreamViz from '../collect/DataStreamViz'
 import ResizableRowPane from '../ui/ResizableRowPane'
+import { resolveTypePadding } from '../../utils/highlight-padding'
 
 export default memo(function AnalysisPanel() {
   // ── Context ────────────────────────────────────────────────────────────
@@ -301,13 +302,13 @@ export default memo(function AnalysisPanel() {
     if (!events?.length) return []
 
     return events.map((event) => {
-      const typePad = params?.paddingByType?.[event.event_type] || {}
+      const { before: typeBefore, after: typeAfter } = resolveTypePadding(params, event.event_type)
       const padBefore = event.metadata?.padding_before
-        ?? typePad.before
+        ?? typeBefore
         ?? params?.paddingBefore
         ?? 0
       const padAfter = event.metadata?.padding_after
-        ?? typePad.after
+        ?? typeAfter
         ?? params?.paddingAfter
         ?? 0
 

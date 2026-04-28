@@ -2,6 +2,7 @@ import React from 'react'
 import { EVENT_TYPE_LABELS } from '../../context/HighlightContext'
 import { EVENT_COLORS } from '../../context/TimelineContext'
 import { formatTime, formatDuration } from '../../utils/time'
+import { resolveTypePadding } from '../../utils/highlight-padding'
 import { Layers } from 'lucide-react'
 
 export default function ResultColumn({
@@ -18,9 +19,9 @@ export default function ResultColumn({
         const duration = Math.max(0, (evt.end_time_seconds || 0) - (evt.start_time_seconds || 0))
 
         // Compute per-event padding (type override → global default → 0)
-        const typeSettings = paddingParams?.paddingByType?.[evt.event_type] || {}
-        const paddingBefore = typeSettings.before != null ? typeSettings.before : (paddingParams?.paddingBefore ?? 0)
-        const paddingAfter = typeSettings.after != null ? typeSettings.after : (paddingParams?.paddingAfter ?? 0)
+        const { before: typeBefore, after: typeAfter } = resolveTypePadding(paddingParams, evt.event_type)
+        const paddingBefore = typeBefore != null ? typeBefore : (paddingParams?.paddingBefore ?? 0)
+        const paddingAfter = typeAfter != null ? typeAfter : (paddingParams?.paddingAfter ?? 0)
 
         let topStyle, heightStyle, minH, padBeforeStyle, padAfterStyle
         if (compress && compressPositions) {

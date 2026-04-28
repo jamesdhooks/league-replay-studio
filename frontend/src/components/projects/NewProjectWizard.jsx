@@ -2,8 +2,58 @@
 import { X, FolderOpen, FileSearch, ChevronRight, Sparkles, Gamepad2 } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext'
 import { useToast } from '../../context/ToastContext'
-import { apiGet } from '../../services/api'
+import { apiGet, apiPost } from '../../services/api'
 import { formatFileSize } from '../../utils/format'
+
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    if (value == null) continue
+    const s = String(value).trim()
+    if (s) return s
+  }
+  return ''
+}
+
+function firstPositiveInt(...values) {
+  for (const value of values) {
+    const n = Number(value)
+    if (Number.isInteger(n) && n > 0) return n
+  }
+  return null
+}
+
+function buildAutoProjectName(activeSession, raceDetails) {
+  const series = firstNonEmpty(
+    raceDetails?.series,
+    activeSession?.series,
+    activeSession?.series_name,
+    activeSession?.session_type,
+  )
+  const raceNum = firstPositiveInt(
+    raceDetails?.race_number,
+    raceDetails?.race_num,
+    activeSession?.race_number,
+    activeSession?.race_num,
+    raceDetails?.week_number,
+    activeSession?.week_number,
+    activeSession?.race_week,
+  )
+  const track = firstNonEmpty(
+    raceDetails?.track_name,
+    activeSession?.track_name,
+  )
+
+  if (series && raceNum && track) {
+    return `${series} Week ${raceNum} - ${track}`
+  }
+  if (series && track) {
+    return `${series} - ${track}`
+  }
+  if (track) {
+    return track
+  }
+  return ''
+}
 
 /**
  * New Project Wizard â€” multi-step dialog for creating a new project.
@@ -26,12 +76,45 @@ function NewProjectWizard({ onClose, onCreated }) {
 
   // Active iRacing session (for autofill chip)
   const [activeSession, setActiveSession] = useState(null)
+  const [raceDetails, setRaceDetails] = useState(null)
 
   // Fetch active iRacing session on mount
   useEffect(() => {
-    apiGet('/iracing/session')
-      .then(data => { if (data?.connected) setActiveSession(data) })
-      .catch(() => {}) // non-fatal
+    let cancelled = false
+
+    const loadAutoFillContext = async () => {
+      try {
+        const data = await apiGet('/iracing/session')
+        if (!data?.connected || cancelled) return
+
+        setActiveSession(data)
+
+        const subsessionId = Number(data.subsession_id || 0)
+        if (!Number.isInteger(subsessionId) || subsessionId <= 0) return
+
+        const pluginList = await apiGet('/data-plugins/')
+        const raceDetailsPlugin = (pluginList?.plugins || []).find(
+          p => p?.enabled && p?.plugin_type === 'race_details'
+        )
+        if (!raceDetailsPlugin?.id || cancelled) return
+
+        const preview = await apiPost(`/data-plugins/${raceDetailsPlugin.id}/preview`, {
+          request_body: { subsession_id: subsessionId },
+        }, { retries: 0 })
+
+        if (!cancelled && preview?.success && preview?.normalized_data) {
+          setRaceDetails(preview.normalized_data)
+        }
+      } catch {
+        // Non-fatal: wizard still works without plugin metadata.
+      }
+    }
+
+    loadAutoFillContext()
+
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   // Replay discovery
@@ -122,6 +205,7 @@ function NewProjectWizard({ onClose, onCreated }) {
               trackName={trackName}
               setTrackName={setTrackName}
               activeSession={activeSession}
+              raceDetails={raceDetails}
             />
           )}
           {step === 2 && (
@@ -184,14 +268,20 @@ function NewProjectWizard({ onClose, onCreated }) {
 
 // â”€â”€ Step Components â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-function Step1_Name({ name, setName, trackName, setTrackName, activeSession }) {
+function Step1_Name({ name, setName, trackName, setTrackName, activeSession, raceDetails }) {
+  const autoTrackName = firstNonEmpty(raceDetails?.track_name, activeSession?.track_name)
+  const autoProjectName = buildAutoProjectName(activeSession, raceDetails)
+
   return (
     <div className="space-y-4">
       {/* Active iRacing session autofill chip */}
-      {activeSession?.track_name ? (
+      {autoTrackName ? (
         <button
           type="button"
-          onClick={() => setTrackName(activeSession.track_name)}
+          onClick={() => {
+            setTrackName(autoTrackName)
+            if (autoProjectName) setName(autoProjectName)
+          }}
           className="w-full flex items-center gap-2 px-3 py-2 rounded-lg border
                      border-accent/30 bg-accent/5 hover:bg-accent/10 text-left
                      transition-colors group"
@@ -199,9 +289,14 @@ function Step1_Name({ name, setName, trackName, setTrackName, activeSession }) {
           <Gamepad2 className="w-3.5 h-3.5 text-accent shrink-0" />
           <div className="flex-1 min-w-0">
             <span className="text-xxs text-accent font-medium">Active session: </span>
-            <span className="text-xxs text-text-primary">{activeSession.track_name}</span>
+            <span className="text-xxs text-text-primary">{autoTrackName}</span>
             {activeSession.session_type && (
               <span className="text-xxs text-text-tertiary ml-1">({activeSession.session_type})</span>
+            )}
+            {autoProjectName && (
+              <div className="text-xxs text-text-secondary mt-0.5 truncate">
+                Name: {autoProjectName}
+              </div>
             )}
           </div>
           <span className="text-xxs text-accent font-semibold shrink-0 opacity-70 group-hover:opacity-100">

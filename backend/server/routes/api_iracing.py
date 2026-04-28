@@ -334,6 +334,7 @@ class Driver(BaseModel):
 
 class IRacingSessionResponse(BaseModel):
     connected: bool
+    subsession_id: int = 0
     track_name: str = ""
     session_type: str = ""
     avg_lap_time: float = 0.0
@@ -388,6 +389,7 @@ async def get_iracing_session() -> IRacingSessionResponse:
     session = bridge.session_data
     return IRacingSessionResponse(
         connected=bridge.is_connected,
+        subsession_id=session.get("subsession_id", 0),
         track_name=session.get("track_name", ""),
         session_type=session.get("session_type", ""),
         avg_lap_time=session.get("avg_lap_time", 0.0),

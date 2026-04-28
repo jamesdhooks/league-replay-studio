@@ -277,10 +277,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS for local development (Vite dev server on port 4299)
+# CORS for local development (Vite dev server on port 5299)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:4299", "http://127.0.0.1:4299"],
+    allow_origins=["http://localhost:5299", "http://127.0.0.1:5299"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -539,7 +539,7 @@ def _apply_app_user_model_id() -> None:
 
 # ── Server runner ────────────────────────────────────────────────────────────
 
-def start_server(port: int = 6378, reload_enabled: bool = False) -> None:
+def start_server(port: int = 6369, reload_enabled: bool = False) -> None:
     """Start the FastAPI server with uvicorn."""
     import uvicorn
     if sys.platform.startswith("win") and hasattr(asyncio, "WindowsProactorEventLoopPolicy"):
@@ -572,7 +572,7 @@ def start_server(port: int = 6378, reload_enabled: bool = False) -> None:
 
 def main() -> None:
     """Launch the application — pywebview window or browser."""
-    port = int(os.environ.get("LRS_PORT", "6378"))
+    port = int(os.environ.get("LRS_PORT", "6369"))
     argv = sys.argv[1:]
     web_only = (os.environ.get("WEB_ONLY", "0") == "1") or ("--web" in argv)
     reload_requested = (os.environ.get("LRS_RELOAD", "0") == "1") or ("--reload" in argv)

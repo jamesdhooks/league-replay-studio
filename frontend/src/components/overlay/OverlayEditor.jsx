@@ -735,11 +735,17 @@ export default function OverlayEditor({ designId }) {
 
     if (result?.success) {
       setSavedContent(htmlContent)
-      addToast('Design saved', 'success')
+      if (aiActiveTurnId && aiSnapshotsRef.current[aiActiveTurnId]) {
+        setAiActiveTurnId(null)
+        setAiPreviewMode('after')
+        addToast('AI preview accepted and design saved', 'success')
+      } else {
+        addToast('Design saved', 'success')
+      }
     } else {
       addToast(result?.error || 'Save failed', 'error')
     }
-  }, [designId, designMeta, htmlContent, updateHtmlContent, addToast])
+  }, [designId, designMeta, htmlContent, updateHtmlContent, addToast, aiActiveTurnId])
 
   // ── Revert handler ───────────────────────────────────────────────────────
   const handleRevert = useCallback(() => {
@@ -1175,6 +1181,8 @@ export default function OverlayEditor({ designId }) {
       variables={dataContext?.variables || {}}
       variableDocs={dataContext?.variable_docs || {}}
       variableSources={dataContext?.variable_sources || {}}
+      templateId={designId}
+      projectId={activeProject?.id ?? null}
       onInsertVariable={insertAtCursor}
     />
   ) : rightSidebarActiveTab === 'animations' ? (
