@@ -6,7 +6,6 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
-from server import mcp_overlay_server
 from server import mcp_lrs_server
 
 
@@ -21,23 +20,23 @@ def test_mcp_overlay_tools_route_to_lrs_api_with_expected_payloads(monkeypatch):
         calls.append((method, path, json_body))
         return {"success": True, "path": path}
 
-    monkeypatch.setattr(mcp_overlay_server, "_request", fake_request)
+    monkeypatch.setattr(mcp_lrs_server, "_request", fake_request)
 
-    run_async(mcp_overlay_server.list_overlay_designs())
-    run_async(mcp_overlay_server.get_overlay_html("podium"))
+    run_async(mcp_lrs_server.list_overlay_designs())
+    run_async(mcp_lrs_server.get_overlay_html("podium"))
     run_async(
-        mcp_overlay_server.update_overlay_html(
+        mcp_lrs_server.update_overlay_html(
             "podium",
             "<html>updated</html>",
             "expected-hash",
             "Tighten podium layout",
         )
     )
-    run_async(mcp_overlay_server.validate_overlay_html("podium", "<html>check</html>", project_id=12))
-    run_async(mcp_overlay_server.list_overlay_revisions("podium"))
-    run_async(mcp_overlay_server.restore_overlay_revision("podium", "rev-1", expected_sha256="current-hash"))
+    run_async(mcp_lrs_server.validate_overlay_html("podium", "<html>check</html>", project_id=12))
+    run_async(mcp_lrs_server.list_overlay_revisions("podium"))
+    run_async(mcp_lrs_server.restore_overlay_revision("podium", "rev-1", expected_sha256="current-hash"))
     run_async(
-        mcp_overlay_server.render_overlay_preview(
+        mcp_lrs_server.render_overlay_preview(
             "podium",
             section="qualifying",
             project_id=12,
@@ -46,7 +45,7 @@ def test_mcp_overlay_tools_route_to_lrs_api_with_expected_payloads(monkeypatch):
         )
     )
     run_async(
-        mcp_overlay_server.render_overlay_html_preview(
+        mcp_lrs_server.render_overlay_html_preview(
             "podium",
             "<html>draft</html>",
             project_id=12,
@@ -119,9 +118,9 @@ def test_mcp_overlay_tools_route_to_lrs_api_with_expected_payloads(monkeypatch):
 def test_mcp_preview_artifacts_are_written_for_agent_inspection(tmp_path, monkeypatch):
     png_bytes = b"not-really-a-png-but-good-enough-for-base64"
     png_base64 = base64.b64encode(png_bytes).decode("ascii")
-    monkeypatch.setattr(mcp_overlay_server, "PREVIEW_ARTIFACT_DIR", tmp_path)
+    monkeypatch.setattr(mcp_lrs_server, "PREVIEW_ARTIFACT_DIR", tmp_path)
 
-    result = mcp_overlay_server._attach_preview_artifacts(
+    result = mcp_lrs_server._attach_preview_artifacts(
         {
             "success": True,
             "png_base64": png_base64,

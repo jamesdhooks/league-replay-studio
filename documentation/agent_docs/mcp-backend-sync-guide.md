@@ -38,16 +38,16 @@ Use REST/backend services for:
 - WebSocket broadcasts
 - YouTube upload policy
 
-## Compatibility
+## MCP Bridge Entry Point
 
-`backend/server/mcp_overlay_server.py` is a compatibility shim for older overlay-only MCP configurations. Keep it working when moving or renaming MCP internals.
+`backend/server/mcp_lrs_server.py` is the single MCP bridge entry point for League Replay Studio. Keep overlay, project, pipeline, upload, and future agent tools in this bridge instead of adding compatibility shims or parallel MCP servers.
 
 ## Testing
 
 Minimum focused validation for MCP/backend sync:
 
 ```bash
-py -3.11 -m pytest tests\backend\test_agent_facade.py tests\backend\test_mcp_overlay_server.py -q
+py -3.11 -m pytest tests\backend\test_agent_facade.py tests\backend\test_mcp_lrs_server.py -q
 ```
 
 Add tests when:
