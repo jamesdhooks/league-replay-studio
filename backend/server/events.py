@@ -98,6 +98,8 @@ class EventType:
     OVERLAY_AI_STATUS         = "overlay:ai_status"
     OVERLAY_AI_COMPLETED      = "overlay:ai_completed"
     OVERLAY_AI_ERROR          = "overlay:ai_error"
+    OVERLAY_TEMPLATE_UPDATED  = "overlay:template_updated"
+    OVERLAY_TEMPLATE_REVISION_CREATED = "overlay:template_revision_created"
     OVERLAY_ERROR             = "overlay:error"
 
     # Composition (trim → overlay → transition → stitch)

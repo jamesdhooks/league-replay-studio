@@ -44,6 +44,7 @@ Follow the standards in `agent-doc.md`. Key principles:
 
 ### API & Backend
 - **[api-conventions-guide.md](api-conventions-guide.md)** — REST API field naming, Pydantic patterns, snake_case enforcement
+- **[mcp-backend-sync-guide.md](mcp-backend-sync-guide.md)** — Keep MCP tools, agent facade APIs, capabilities, and backend features in sync
 - **[testing-guidelines.md](testing-guidelines.md)** — pytest, FastAPI TestClient, mocking strategies, in-memory SQLite
 - **[logging-and-debugging-guide.md](logging-and-debugging-guide.md)** — Log levels, prefixes, what to log vs not log
 - **[settings-system-guide.md](settings-system-guide.md)** — Configuration management patterns

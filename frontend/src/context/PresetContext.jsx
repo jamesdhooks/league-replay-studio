@@ -269,6 +269,14 @@ export function PresetProvider({ children }) {
   }, [])
 
   // ── HTML content management ───────────────────────────────────────────
+  const getHtmlRecord = useCallback(async (presetId) => {
+    try {
+      return await apiGet(`/presets/${presetId}/html`)
+    } catch {
+      return null
+    }
+  }, [])
+
   const getHtmlContent = useCallback(async (presetId) => {
     try {
       const result = await apiGet(`/presets/${presetId}/html`)
@@ -278,11 +286,59 @@ export function PresetProvider({ children }) {
     }
   }, [])
 
-  const updateHtmlContent = useCallback(async (presetId, htmlContent) => {
+  const updateHtmlContent = useCallback(async (presetId, htmlContent, opts = {}) => {
     try {
-      return await apiPut(`/presets/${presetId}/html`, { html_content: htmlContent })
+      return await apiPut(`/presets/${presetId}/html`, {
+        html_content: htmlContent,
+        summary: opts.summary || '',
+        author: opts.author || 'user',
+        source: opts.source || 'ui',
+        expected_sha256: opts.expectedSha256 || opts.expected_sha256 || null,
+      })
+    } catch (err) {
+      return { success: false, error: err.message, detail: err.detail, status: err.status }
+    }
+  }, [])
+
+  const listRevisions = useCallback(async (presetId) => {
+    try {
+      return await apiGet(`/presets/${presetId}/revisions`)
+    } catch (err) {
+      return { revisions: [], count: 0, error: err.message }
+    }
+  }, [])
+
+  const getRevision = useCallback(async (presetId, revisionId) => {
+    try {
+      return await apiGet(`/presets/${presetId}/revisions/${revisionId}`)
     } catch (err) {
       return { success: false, error: err.message }
+    }
+  }, [])
+
+  const restoreRevision = useCallback(async (presetId, revisionId, opts = {}) => {
+    try {
+      return await apiPost(`/presets/${presetId}/revisions/${revisionId}/restore`, {
+        summary: opts.summary || '',
+        author: opts.author || 'user',
+        source: opts.source || 'ui',
+        expected_sha256: opts.expectedSha256 || opts.expected_sha256 || null,
+      })
+    } catch (err) {
+      return { success: false, error: err.message, detail: err.detail, status: err.status }
+    }
+  }, [])
+
+  const validateHtmlContent = useCallback(async (presetId, htmlContent, opts = {}) => {
+    try {
+      return await apiPost(`/presets/${presetId}/validate-html`, {
+        html_content: htmlContent,
+        project_id: opts.projectId ?? null,
+        frame_data: opts.frameData || null,
+        render_screenshot: opts.renderScreenshot ?? false,
+      })
+    } catch (err) {
+      return { success: false, valid: false, error: err.message }
     }
   }, [])
 
@@ -359,8 +415,13 @@ export function PresetProvider({ children }) {
     uploadIntroVideo,
     deleteIntroVideo,
     renderPreview,
+    getHtmlRecord,
     getHtmlContent,
     updateHtmlContent,
+    listRevisions,
+    getRevision,
+    restoreRevision,
+    validateHtmlContent,
     renderEditorPreview,
     getDataContext,
   }), [
@@ -372,7 +433,8 @@ export function PresetProvider({ children }) {
     addElement, updateElement, removeElement,
     listAssets, uploadAsset, deleteAsset, moveAssetScope, setAssetVariable,
     uploadIntroVideo, deleteIntroVideo, renderPreview,
-    getHtmlContent, updateHtmlContent, renderEditorPreview, getDataContext,
+    getHtmlRecord, getHtmlContent, updateHtmlContent, listRevisions, getRevision,
+    restoreRevision, validateHtmlContent, renderEditorPreview, getDataContext,
   ])
 
   return (

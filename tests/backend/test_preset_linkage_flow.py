@@ -61,10 +61,13 @@ def test_update_html_content(isolated_preset_paths):
     assert html == "<div>Updated</div>"
 
 
-def test_update_html_content_rejects_builtin(isolated_preset_paths):
-    """Built-in presets cannot have their HTML content updated."""
+def test_update_html_content_materializes_builtin(isolated_preset_paths):
+    """Built-in presets materialize into saved editable designs on first HTML write."""
+    presets_dir, _ = isolated_preset_paths
     svc = preset_module.PresetService()
-    assert svc.update_html_content("broadcast_preset", "<div>Hack</div>") is False
+    assert svc.update_html_content("broadcast_preset", "<div>Custom broadcast</div>") is True
+    assert svc.get_html_content("broadcast_preset") == "<div>Custom broadcast</div>"
+    assert (presets_dir / "broadcast_preset" / "preset.json").exists()
 
 
 def test_duplicate_copies_html(isolated_preset_paths):
