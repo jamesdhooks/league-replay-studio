@@ -53,11 +53,13 @@ def _format_lap_time(seconds: float) -> Optional[str]:
 
 
 def _format_session_time(session_time: float) -> str:
-    """Convert raw session seconds to HH:MM:SS string."""
+    """Convert raw session seconds to MM:SS (<1h) or HH:MM:SS (>=1h)."""
     total = max(0, int(session_time))
     h = total // 3600
     m = (total % 3600) // 60
     s = total % 60
+    if h <= 0:
+        return f"{m:02d}:{s:02d}"
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
@@ -97,7 +99,7 @@ def _empty_frame_data(section: str) -> dict[str, Any]:
         "track_name": "",
         "current_lap": 0,
         "total_laps": 0,
-        "session_time": "00:00:00",
+        "session_time": "00:00",
         "session_time_seconds": 0.0,
         "replay_frame": 0,
         "frame_timestamp_ms": 0,
@@ -237,6 +239,7 @@ def build_frame_data(
                 if state.get("position") == 1:
                     entry["gap"] = "Leader"
                     entry["gap_to_leader"] = "Leader"
+                    entry["relative"] = "LEADER"
                 elif leader_est_local is not None and est is not None and est >= leader_est_local:
                     gap_secs = est - leader_est_local
                     formatted_gap = (
@@ -439,6 +442,7 @@ def build_frame_data(
                 if idx == 0:
                     entry["gap"] = "Leader"
                     entry["gap_to_leader"] = "Leader"
+                    entry["relative"] = "LEADER"
                 elif metric is not None and leader_metric is not None and metric >= leader_metric:
                     gap_secs = metric - leader_metric
                     formatted_gap = (
@@ -547,6 +551,7 @@ def build_frame_data(
             if cs["position"] == 1:
                 entry["gap"] = "Leader"
                 entry["gap_to_leader"] = "Leader"
+                entry["relative"] = "LEADER"
             elif leader_est is not None and est is not None and est >= leader_est:
                 gap_secs = est - leader_est
                 formatted_gap = (

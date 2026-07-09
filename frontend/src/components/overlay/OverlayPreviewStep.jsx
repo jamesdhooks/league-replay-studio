@@ -96,6 +96,43 @@ function getOverlayEventLabel(seg) {
   return 'Clip'
 }
 
+function buildStandingsFromSessionDrivers(drivers = [], focusedCarIdx = null) {
+  if (!Array.isArray(drivers) || drivers.length === 0) return []
+
+  const sorted = [...drivers]
+    .filter(Boolean)
+    .sort((a, b) => {
+      const aPos = Number(a.position ?? a.pos ?? 9999)
+      const bPos = Number(b.position ?? b.pos ?? 9999)
+      return aPos - bPos
+    })
+
+  return sorted.slice(0, 20).map((driver, idx) => {
+    const pos = Number(driver.position ?? driver.pos ?? (idx + 1))
+    const carIdx = Number(driver.car_idx ?? driver.carIdx ?? -1)
+    const name = driver.driver_name
+      || driver.user_name
+      || driver.name
+      || `Driver ${idx + 1}`
+    const carNumber = String(driver.car_number ?? driver.number ?? '')
+    const rawGap = driver.gap ?? driver.gap_to_leader ?? null
+    const gapText = pos === 1
+      ? 'Leader'
+      : (rawGap === null || rawGap === undefined || rawGap === '' ? '---' : String(rawGap))
+
+    return {
+      position: pos,
+      driver_name: name,
+      car_number: carNumber,
+      is_player: (focusedCarIdx !== null && focusedCarIdx !== undefined) ? carIdx === focusedCarIdx : Boolean(driver.is_player),
+      gap: gapText,
+      gap_to_leader: gapText,
+      relative: driver.relative ?? null,
+      iracing_cust_id: Number(driver.iracing_cust_id ?? driver.cust_id ?? 0),
+    }
+  })
+}
+
 function sanitizePreviewHtmlForInlineRender(html, renderWidth = 1920, renderHeight = 1080) {
   if (!html || typeof html !== 'string') return ''
 
@@ -228,6 +265,14 @@ export default function OverlayPreviewStep({
     cameraTargetKey: null,
     cameraStatus: 'idle',
     cameraError: null,
+    standingsSource: null,
+    standingsCount: 0,
+    standingsPreview: null,
+    previewSection: null,
+    pageIndex: null,
+    pageStart: null,
+    pageEnd: null,
+    totalPages: null,
   })
   const [timelineCollapsed, setTimelineCollapsed] = useLocalStorage('lrs:overlay:timeline:collapsed', false)
   const [raceSessionNum, setRaceSessionNum] = useState(null)
@@ -401,6 +446,8 @@ export default function OverlayPreviewStep({
     replaySpeed: playbackSpeed,
     setReplaySpeed,
     driftSeconds,
+    replayState,
+    optimisticLocalTime,
     displayLocalTime: playheadTime,
     setOptimisticLocalTime,
     clockRef,
@@ -647,6 +694,42 @@ export default function OverlayPreviewStep({
     return bucket * interval
   }, [htmlRenderIntervalSeconds, playheadTime, playing, previewRenderMode])
 
+  const paginationPreviewState = useMemo(() => {
+    if (!paginationConfig || totalDuration <= 0) return null
+
+    const standingsCount = Array.isArray(previewFrame?.standings) && previewFrame.standings.length > 0
+      ? previewFrame.standings.length
+      : Array.isArray(sessionData?.drivers) && sessionData.drivers.length > 0
+        ? sessionData.drivers.length
+        : 0
+
+    if (!standingsCount || standingsCount <= paginationConfig.itemsPerPage) return null
+
+    const totalPages = Math.max(1, Math.ceil(standingsCount / paginationConfig.itemsPerPage))
+    if (totalPages <= 1) return null
+
+    const intervalSeconds = paginationConfig.cycleDurationSeconds > 0
+      ? paginationConfig.cycleDurationSeconds
+      : Math.max(0.001, totalDuration / totalPages)
+
+    const effectiveTime = Math.max(0, previewRenderMode === 'html' ? renderPlayheadTime : playheadTime)
+    const pageIndex = Math.floor(effectiveTime / intervalSeconds) % totalPages
+    const nextFlipAt = Math.min(totalDuration, (Math.floor(effectiveTime / intervalSeconds) + 1) * intervalSeconds)
+
+    return {
+      totalPages,
+      intervalSeconds,
+      pageIndex,
+      nextFlipAt,
+      standingsCount,
+    }
+  }, [paginationConfig, playheadTime, previewFrame?.standings, previewRenderMode, renderPlayheadTime, sessionData?.drivers, totalDuration])
+
+  const paginationPreviewBadge = useMemo(() => {
+    if (!paginationPreviewState) return null
+    return `Page ${paginationPreviewState.pageIndex + 1}/${paginationPreviewState.totalPages} · Next ${formatTime(paginationPreviewState.nextFlipAt)}`
+  }, [paginationPreviewState])
+
   // ── Range slider zoom/pan ───────────────────────────────────────────────
   // Dynamic zoom: content width = containerW / rangeWidth so full range = no scroll
   const rangeWidth = rangeEnd - rangeStart
@@ -682,6 +765,222 @@ export default function OverlayPreviewStep({
     width: Math.max(0, Number(previewBoxSize?.width) || 0),
     height: Math.max(0, Number(previewBoxSize?.height) || 0),
   }), [previewBoxSize?.height, previewBoxSize?.width])
+
+  const debugSummary = useMemo(() => {
+    if (!previewFrame) return null
+    return {
+      driver_name: previewFrame.driver_name ?? null,
+      position: previewFrame.position ?? null,
+      current_lap: previewFrame.current_lap ?? null,
+      flag: previewFrame.flag ?? null,
+      standings_count: Array.isArray(previewFrame.standings) ? previewFrame.standings.length : 0,
+      session_time: previewFrame.session_time ?? null,
+    }
+  }, [previewFrame])
+
+  const handleCopyDebugPanel = useCallback(async () => {
+    const payload = {
+      panel: 'overlay-debug',
+      run: debugInfo.renderSeq,
+      frameSource: debugInfo.frameSource,
+      telemetry: {
+        status: debugInfo.telemetryStatus,
+        error: debugInfo.telemetryError,
+      },
+      render: {
+        status: debugInfo.renderStatus,
+        ms: debugInfo.renderMs,
+        error: debugInfo.renderError,
+      },
+      requested: {
+        presetId: debugInfo.requestedPresetId,
+        preferHtml: debugInfo.requestedPreferHtml,
+      },
+      backend: {
+        renderSource: debugInfo.renderSource,
+        renderHtmlLength: debugInfo.renderHtmlLength,
+        hasHtmlContent: debugInfo.backendHasHtmlContent,
+        sectionElementCount: debugInfo.backendSectionElementCount,
+        preferHtmlContent: debugInfo.backendPreferHtmlContent,
+        usedElementFilter: debugInfo.backendUsedElementFilter,
+      },
+      animation: {
+        mode: debugInfo.animationMode,
+        summary: debugInfo.animationSummary,
+      },
+      camera: {
+        status: debugInfo.cameraStatus,
+        targetKey: debugInfo.cameraTargetKey,
+        error: debugInfo.cameraError,
+      },
+      sessionTime: debugInfo.sessionTime,
+      focusedCarIdx: debugInfo.focusedCarIdx,
+      standingsUsed: {
+        source: debugInfo.standingsSource,
+        count: debugInfo.standingsCount,
+        preview: debugInfo.standingsPreview,
+      },
+      pagination: {
+        section: debugInfo.previewSection,
+        pageIndex: debugInfo.pageIndex,
+        pageStart: debugInfo.pageStart,
+        pageEnd: debugInfo.pageEnd,
+        totalPages: debugInfo.totalPages,
+      },
+      frameSummary: debugSummary,
+    }
+
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
+      showSuccess('Overlay debug copied')
+    } catch {
+      showError('Failed to copy overlay debug')
+    }
+  }, [debugInfo, debugSummary, showError, showSuccess])
+
+  // Overlay content rendered inside SharedPreviewHost (fixed z-30) so it sits above the stream
+  const streamOverlayContent = useMemo(() => {
+    const overlayLayer = (() => {
+      if (!overlayVisible || !hasSelectedDesign) return null
+      if (previewRenderMode === 'png' && visualPreviewImage) {
+        return (
+          <div className="absolute inset-0 pointer-events-none">
+            <img
+              src={visualPreviewImage}
+              alt="Visual preset preview"
+              className="absolute inset-0 w-full h-full object-contain"
+              style={{ zoom: previewZoom }}
+            />
+          </div>
+        )
+      }
+      if (previewRenderMode === 'html' && visualPreviewHtml && !previewFullscreen) {
+        return (
+          <div className="pointer-events-none overflow-hidden absolute inset-0">
+            <div className="w-full h-full flex items-center justify-center" style={{ background: 'transparent' }}>
+              <IsolatedHtmlPreview
+                html={visualPreviewHtml}
+                underlaySrc={null}
+                className="absolute left-1/2 top-1/2 border-0 bg-transparent pointer-events-none"
+                style={{
+                  width: `${previewRenderSize.width}px`,
+                  height: `${previewRenderSize.height}px`,
+                  marginLeft: `-${previewRenderSize.width / 2}px`,
+                  marginTop: `-${previewRenderSize.height / 2}px`,
+                  transformOrigin: 'center center',
+                  transform: `scale(${previewOverlayScale})`,
+                  background: 'transparent',
+                }}
+                zoom={previewZoom}
+              />
+            </div>
+          </div>
+        )
+      }
+      return null
+    })()
+
+    return (
+      <>
+        {overlayLayer}
+        {overlayVisible && hasSelectedDesign && previewLoading && (
+          <div className="absolute left-1/2 bottom-4 -translate-x-1/2 z-20 pointer-events-none">
+            <div className="px-4 py-2 rounded-md bg-black/75 border border-white/20 text-white/90 text-xs flex items-center gap-2 shadow-lg">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              Rendering overlay...
+            </div>
+          </div>
+        )}
+        {overlayVisible && hasSelectedDesign && visualPreviewError && !previewLoading && (
+          <div className="absolute left-3 right-3 bottom-3 pointer-events-none">
+            <div className="px-2 py-1 rounded bg-red-900/70 border border-red-700/40 text-red-200 text-xxs">
+              {visualPreviewError}
+            </div>
+          </div>
+        )}
+        {overlayVisible && !hasSelectedDesign && (
+          <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+            <div className="px-2 py-1 rounded bg-black/60 text-white/80 text-xxs">
+              Select a design to render overlay preview
+            </div>
+          </div>
+        )}
+        {debugEnabled && (
+          <div className="absolute left-3 bottom-3 z-20 w-80 max-w-[calc(100%-1.5rem)] rounded-lg border border-amber-500/30 bg-black/75 text-[10px] font-mono text-amber-100 shadow-xl backdrop-blur-sm pointer-events-auto">
+            <div className="px-2 py-1 border-b border-amber-500/20 flex items-center justify-between">
+              <span className="font-semibold">Overlay Debug</span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleCopyDebugPanel}
+                  className="inline-flex items-center gap-1 rounded border border-amber-500/20 px-1.5 py-0.5 text-[9px] text-amber-200 transition-colors hover:bg-amber-500/10"
+                  title="Copy formatted debug details"
+                  aria-label="Copy formatted debug details"
+                >
+                  <Copy className="w-3 h-3" />
+                  Copy
+                </button>
+                <span className="text-amber-300/80">run #{debugInfo.renderSeq}</span>
+              </div>
+            </div>
+            <div className="px-2 py-1.5 space-y-1.5 leading-4">
+              <div className="grid grid-cols-[110px_1fr] gap-1">
+                <span className="text-amber-300/80">Frame source</span>
+                <span>{debugInfo.frameSource}</span>
+                <span className="text-amber-300/80">Telemetry</span>
+                <span>{debugInfo.telemetryStatus}{debugInfo.telemetryError ? ` (${debugInfo.telemetryError})` : ''}</span>
+                <span className="text-amber-300/80">Render</span>
+                <span>{debugInfo.renderStatus}{debugInfo.renderMs != null ? ` (${debugInfo.renderMs}ms)` : ''}{debugInfo.renderError ? ` (${debugInfo.renderError})` : ''}</span>
+                <span className="text-amber-300/80">Requested preset</span>
+                <span>{debugInfo.requestedPresetId || 'n/a'}</span>
+                <span className="text-amber-300/80">Requested prefer html</span>
+                <span>{String(debugInfo.requestedPreferHtml)}</span>
+                <span className="text-amber-300/80">Render source</span>
+                <span>{debugInfo.renderSource || 'n/a'}{debugInfo.renderHtmlLength != null ? ` (len ${debugInfo.renderHtmlLength})` : ''}</span>
+                <span className="text-amber-300/80">Backend has html</span>
+                <span>{debugInfo.backendHasHtmlContent == null ? 'n/a' : String(debugInfo.backendHasHtmlContent)}</span>
+                <span className="text-amber-300/80">Backend section elems</span>
+                <span>{debugInfo.backendSectionElementCount == null ? 'n/a' : String(debugInfo.backendSectionElementCount)}</span>
+                <span className="text-amber-300/80">Backend prefer html</span>
+                <span>{debugInfo.backendPreferHtmlContent == null ? 'n/a' : String(debugInfo.backendPreferHtmlContent)}</span>
+                <span className="text-amber-300/80">Backend element filter</span>
+                <span>{debugInfo.backendUsedElementFilter == null ? 'n/a' : String(debugInfo.backendUsedElementFilter)}</span>
+                <span className="text-amber-300/80">Animation</span>
+                <span>
+                  {debugInfo.animationMode}
+                  {debugInfo.animationSummary?.maxWindowMs ? ` (${Math.round(debugInfo.animationSummary.maxWindowMs)}ms)` : ''}
+                  {debugInfo.animationSummary?.animatedCount ? ` [${debugInfo.animationSummary.animatedCount} keyframe]` : ''}
+                  {debugInfo.animationSummary?.transitionCount ? ` [${debugInfo.animationSummary.transitionCount} transition]` : ''}
+                </span>
+                <span className="text-amber-300/80">Camera</span>
+                <span>{debugInfo.cameraStatus}{debugInfo.cameraTargetKey ? ` (${debugInfo.cameraTargetKey})` : ''}{debugInfo.cameraError ? ` (${debugInfo.cameraError})` : ''}</span>
+                <span className="text-amber-300/80">Session time</span>
+                <span>{debugInfo.sessionTime != null ? `${debugInfo.sessionTime.toFixed(2)}s` : 'n/a'}</span>
+                <span className="text-amber-300/80">Focused car</span>
+                <span>{debugInfo.focusedCarIdx ?? 'leader'}</span>
+                <span className="text-amber-300/80">Standings source</span>
+                <span>{debugInfo.standingsSource || 'n/a'}</span>
+                <span className="text-amber-300/80">Standings used</span>
+                <span>{Number(debugInfo.standingsCount || 0)}</span>
+              </div>
+              {Array.isArray(debugInfo.standingsPreview) && debugInfo.standingsPreview.length > 0 && (
+                <div className="pt-1 border-t border-amber-500/20">
+                  <div className="text-amber-300/80 mb-0.5">Standings preview</div>
+                  <div>{JSON.stringify(debugInfo.standingsPreview)}</div>
+                </div>
+              )}
+              {debugSummary && (
+                <div className="pt-1 border-t border-amber-500/20">
+                  <div className="text-amber-300/80 mb-0.5">Frame summary</div>
+                  <div>{JSON.stringify(debugSummary)}</div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+        {showEventOverlay && <IracingCommandLog />}
+      </>
+    )
+  }, [debugEnabled, debugInfo, debugSummary, hasSelectedDesign, handleCopyDebugPanel, overlayVisible, previewFullscreen, previewLoading, previewOverlayScale, previewRenderMode, previewRenderSize, previewZoom, showEventOverlay, visualPreviewError, visualPreviewHtml, visualPreviewImage])
 
   // Sync: range slider → scroll position
   useEffect(() => {
@@ -816,13 +1115,21 @@ export default function OverlayPreviewStep({
       setClockUserScrubbing(false)
       setIsDraggingPlayhead(false)
       seekReplayToAbsoluteTime(mapLocalTimeToAbsoluteTime(finalTime))
-      setTimeout(() => setOptimisticLocalTime(null), 1200)
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
     }
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
-  }, [clockRef, mapLocalTimeToAbsoluteTime, reanchorClock, scrubToClientX, seekReplayToAbsoluteTime, setClockUserScrubbing, setIsDraggingPlayhead, setOptimisticLocalTime])
+  }, [clockRef, mapLocalTimeToAbsoluteTime, reanchorClock, scrubToClientX, seekReplayToAbsoluteTime, setClockUserScrubbing, setIsDraggingPlayhead])
+
+  useEffect(() => {
+    if (optimisticLocalTime === null || !replayState || replayState.session_time === null) return
+    const replayLocalTime = mapAbsoluteToLocalTime(replayState.session_time)
+    if (!Number.isFinite(replayLocalTime)) return
+    if (Math.abs(replayLocalTime - optimisticLocalTime) <= 0.35) {
+      setOptimisticLocalTime(null)
+    }
+  }, [mapAbsoluteToLocalTime, optimisticLocalTime, replayState, setOptimisticLocalTime])
 
   const seekToSegment = useCallback((idx) => {
     if (idx < 0 || idx >= timelineSegments.length) return
@@ -849,7 +1156,15 @@ export default function OverlayPreviewStep({
     }
   }, [activeSection, mapLocalTimeToAbsoluteTime, sectionSegments.length, seekReplayToAbsoluteTime])
 
-  const buildFallbackFrameData = useCallback((absSessionTime) => ({
+  const buildFallbackFrameData = useCallback((absSessionTime) => {
+    const segmentStandings = Array.isArray(currentSegment?.standings) ? currentSegment.standings : []
+    const fallbackStandings = buildStandingsFromSessionDrivers(
+      sessionData?.drivers,
+      currentSegment ? getFocusCarIdx(currentSegment, absSessionTime) : null,
+    )
+    const standings = segmentStandings.length > 1 ? segmentStandings : fallbackStandings
+
+    return {
     section: activeSection,
     series_name: currentSegment?.series_name || 'iRacing Series',
     track_name: currentSegment?.track_name || sessionData?.track_name || 'Track Name',
@@ -861,10 +1176,11 @@ export default function OverlayPreviewStep({
     car_name: currentSegment?.car_name || 'Car',
     irating: currentSegment?.irating ?? 0,
     team_color: currentSegment?.team_color || '#3B82F6',
-    standings: currentSegment?.standings || [],
+    standings,
     flag: currentSegment?.flag || 'green',
     event_type: currentSegment?.event_type || currentSegment?.type || 'event',
-  }), [activeSection, currentSegment, sessionData?.track_name])
+  }
+  }, [activeSection, currentSegment, getFocusCarIdx, sessionData?.drivers, sessionData?.track_name])
 
   // Render actual visual preset output in preview when a visual preset is active.
   useEffect(() => {
@@ -883,6 +1199,7 @@ export default function OverlayPreviewStep({
     timer = setTimeout(async () => {
       const runSeq = ++renderSeqRef.current
       const startedAt = performance.now()
+      let standingsSource = 'segment_fallback'
       setPreviewLoading(true)
       updateDebug({
         renderSeq: runSeq,
@@ -896,6 +1213,14 @@ export default function OverlayPreviewStep({
         renderError: null,
         requestedPresetId: effectiveSelectedPresetId,
         requestedPreferHtml: true,
+        standingsSource: null,
+        standingsCount: 0,
+        standingsPreview: null,
+        previewSection: activeSection,
+        pageIndex: null,
+        pageStart: null,
+        pageEnd: null,
+        totalPages: null,
       })
       try {
         let frameData = buildFallbackFrameData(absSessionTime)
@@ -937,6 +1262,7 @@ export default function OverlayPreviewStep({
                 // Keep script context fields available for template logic.
                 event_type: currentSegment?.event_type || currentSegment?.type || telemetryResponse.frame_data.event_type || 'event',
               }
+              standingsSource = 'telemetry_frame_data'
               updateDebug({
                 frameSource: 'telemetry',
                 telemetryStatus: 'ok',
@@ -980,6 +1306,52 @@ export default function OverlayPreviewStep({
           ...frameData,
           overlay_section_elapsed_seconds: Math.max(0, renderPlayheadTime),
           overlay_section_duration_seconds: Math.max(0, totalDuration || 0),
+        }
+
+        if ((!Array.isArray(frameData.standings) || frameData.standings.length <= 1) && Array.isArray(sessionData?.drivers) && sessionData.drivers.length > 1) {
+          frameData = {
+            ...frameData,
+            standings: buildStandingsFromSessionDrivers(
+              sessionData.drivers,
+              currentSegment ? getFocusCarIdx(currentSegment, absSessionTime) : null,
+            ),
+          }
+          standingsSource = 'session_drivers_fallback'
+        }
+
+        const standingsUsed = Array.isArray(frameData.standings) ? frameData.standings : []
+        if (standingsSource === 'segment_fallback' && standingsUsed.length > 1) {
+          standingsSource = 'segment_standings'
+        }
+        updateDebug({
+          standingsSource,
+          standingsCount: standingsUsed.length,
+          standingsPreview: standingsUsed.slice(0, 5).map((entry) => ({
+            position: entry?.position ?? null,
+            driver_name: entry?.driver_name ?? null,
+            car_number: entry?.car_number ?? null,
+            gap: entry?.gap ?? null,
+            is_player: Boolean(entry?.is_player),
+          })),
+          previewSection: activeSection,
+          pageIndex: Number.isFinite(frameData?.overlay_page_index) ? Number(frameData.overlay_page_index) : null,
+          pageStart: Number.isFinite(frameData?.page_start) ? Number(frameData.page_start) : null,
+          pageEnd: Number.isFinite(frameData?.page_end) ? Number(frameData.page_end) : null,
+          totalPages: Number.isFinite(frameData?.total_pages) ? Number(frameData.total_pages) : null,
+        })
+
+        if (paginationConfig && totalDuration > 0) {
+          const standingsCount = Array.isArray(frameData?.standings) ? frameData.standings.length : 0
+          if (standingsCount > paginationConfig.itemsPerPage) {
+            const totalPages = Math.max(1, Math.ceil(standingsCount / paginationConfig.itemsPerPage))
+            if (totalPages > 1) {
+              const intervalSeconds = paginationConfig.cycleDurationSeconds > 0
+                ? paginationConfig.cycleDurationSeconds
+                : Math.max(0.001, totalDuration / totalPages)
+              const effectiveTime = Math.max(0, previewRenderMode === 'html' ? renderPlayheadTime : playheadTime)
+              frameData.overlay_page_index = Math.floor(effectiveTime / intervalSeconds) % totalPages
+            }
+          }
         }
 
         setPreviewFrame(frameData)
@@ -1137,6 +1509,7 @@ export default function OverlayPreviewStep({
     overlayVisible,
     currentSegment,
     renderPlayheadTime,
+    playheadTime,
     mapLocalTimeToAbsoluteTime,
     totalDuration,
     debugEnabled,
@@ -1145,69 +1518,11 @@ export default function OverlayPreviewStep({
     projectId,
     renderPreview,
     previewRenderMode,
+    paginationConfig,
+    sessionData?.drivers,
     sessionData?.track_name,
     updateDebug,
   ])
-
-  const debugSummary = useMemo(() => {
-    if (!previewFrame) return null
-    return {
-      driver_name: previewFrame.driver_name ?? null,
-      position: previewFrame.position ?? null,
-      current_lap: previewFrame.current_lap ?? null,
-      flag: previewFrame.flag ?? null,
-      standings_count: Array.isArray(previewFrame.standings) ? previewFrame.standings.length : 0,
-      session_time: previewFrame.session_time ?? null,
-    }
-  }, [previewFrame])
-
-  const handleCopyDebugPanel = useCallback(async () => {
-    const payload = {
-      panel: 'overlay-debug',
-      run: debugInfo.renderSeq,
-      frameSource: debugInfo.frameSource,
-      telemetry: {
-        status: debugInfo.telemetryStatus,
-        error: debugInfo.telemetryError,
-      },
-      render: {
-        status: debugInfo.renderStatus,
-        ms: debugInfo.renderMs,
-        error: debugInfo.renderError,
-      },
-      requested: {
-        presetId: debugInfo.requestedPresetId,
-        preferHtml: debugInfo.requestedPreferHtml,
-      },
-      backend: {
-        renderSource: debugInfo.renderSource,
-        renderHtmlLength: debugInfo.renderHtmlLength,
-        hasHtmlContent: debugInfo.backendHasHtmlContent,
-        sectionElementCount: debugInfo.backendSectionElementCount,
-        preferHtmlContent: debugInfo.backendPreferHtmlContent,
-        usedElementFilter: debugInfo.backendUsedElementFilter,
-      },
-      animation: {
-        mode: debugInfo.animationMode,
-        summary: debugInfo.animationSummary,
-      },
-      camera: {
-        status: debugInfo.cameraStatus,
-        targetKey: debugInfo.cameraTargetKey,
-        error: debugInfo.cameraError,
-      },
-      sessionTime: debugInfo.sessionTime,
-      focusedCarIdx: debugInfo.focusedCarIdx,
-      frameSummary: debugSummary,
-    }
-
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
-      showSuccess('Overlay debug copied')
-    } catch {
-      showError('Failed to copy overlay debug')
-    }
-  }, [debugInfo, debugSummary, showError, showSuccess])
 
   const persistedTimeLabel = useMemo(() => {
     if (!scriptGeneratedAt) return null
@@ -1246,6 +1561,12 @@ export default function OverlayPreviewStep({
 
   const topbarContextControls = (
     <>
+      {previewLoading && (
+        <span className="rounded-full border border-amber-500/40 bg-amber-900/25 px-2 py-1 text-xxs font-medium text-amber-200 inline-flex items-center gap-1">
+          <Loader2 className="w-3 h-3 animate-spin" />
+          Recalculating preview
+        </span>
+      )}
       {persistedTimeLabel && (
         <span className="rounded-full border border-success/30 bg-success/10 px-2 py-1 text-xxs font-medium text-success">
           Persisted {persistedTimeLabel}
@@ -1254,6 +1575,14 @@ export default function OverlayPreviewStep({
       {previewAnimationBadge && (
         <span className={`rounded-full border px-2 py-1 text-xxs font-medium ${previewAnimationBadge.className}`}>
           {previewAnimationBadge.label}
+        </span>
+      )}
+      {paginationPreviewBadge && (
+        <span
+          className="rounded-full border border-cyan-500/40 bg-cyan-900/20 px-2 py-1 text-xxs font-medium text-cyan-200"
+          title="Auto-pagination preview status"
+        >
+          {paginationPreviewBadge}
         </span>
       )}
       <span
@@ -1422,6 +1751,7 @@ export default function OverlayPreviewStep({
                       onPlayPause={togglePlay}
                       isPortrait={false}
                       aspectRatio={streamAspectRatio}
+                      overlayContent={streamOverlayContent}
                     />
                   ) : (
                     <div className="absolute inset-0 bg-black/90" />
@@ -1436,11 +1766,9 @@ export default function OverlayPreviewStep({
                   </div>
                 )}
 
-                {/* Overlay layer */}
-                {overlayVisible && hasSelectedDesign && previewRenderMode === 'png' && visualPreviewImage && (
-                  <div
-                    className="absolute inset-0 pointer-events-none"
-                  >
+                {/* Overlay layer — non-stream mode (no PreviewPlayer portal) */}
+                {!showLiveStreamUnderlay && overlayVisible && hasSelectedDesign && previewRenderMode === 'png' && visualPreviewImage && (
+                  <div className="absolute inset-0 pointer-events-none">
                     <img
                       src={visualPreviewImage}
                       alt="Visual preset preview"
@@ -1454,7 +1782,7 @@ export default function OverlayPreviewStep({
                     className={`pointer-events-none overflow-hidden ${
                       previewFullscreen
                         ? 'fixed inset-0 z-50 bg-black'
-                        : 'absolute inset-0'
+                        : showLiveStreamUnderlay ? 'hidden' : 'absolute inset-0'
                     }`}
                   >
                     <div
@@ -1474,7 +1802,7 @@ export default function OverlayPreviewStep({
                       )}
                       <IsolatedHtmlPreview
                         html={visualPreviewHtml}
-                        underlaySrc={showLiveStreamUnderlay ? streamUrl : null}
+                        underlaySrc={null}
                         className={previewFullscreen ? 'w-full h-full border-0 bg-transparent' : 'absolute left-1/2 top-1/2 border-0 bg-transparent pointer-events-none'}
                         style={previewFullscreen ? {
                           background: 'transparent',
@@ -1492,93 +1820,114 @@ export default function OverlayPreviewStep({
                     </div>
                   </div>
                 )}
-                {overlayVisible && hasSelectedDesign && previewLoading && (
-                  <div className="absolute left-1/2 bottom-4 -translate-x-1/2 z-20 pointer-events-none">
-                    <div className="px-4 py-2 rounded-md bg-black/75 border border-white/20 text-white/90 text-xs flex items-center gap-2 shadow-lg">
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      Rendering overlay...
-                    </div>
-                  </div>
-                )}
-                {overlayVisible && hasSelectedDesign && visualPreviewError && !previewLoading && (
-                  <div className="absolute left-3 right-3 bottom-3 pointer-events-none">
-                    <div className="px-2 py-1 rounded bg-red-900/70 border border-red-700/40 text-red-200 text-xxs">
-                      {visualPreviewError}
-                    </div>
-                  </div>
-                )}
-                {overlayVisible && !hasSelectedDesign && (
-                  <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-                    <div className="px-2 py-1 rounded bg-black/60 text-white/80 text-xxs">
-                      Select a design to render overlay preview
-                    </div>
-                  </div>
-                )}
-
-                {debugEnabled && (
-                  <div className="absolute left-3 bottom-3 z-20 w-80 max-w-[calc(100%-1.5rem)] rounded-lg border border-amber-500/30 bg-black/75 text-[10px] font-mono text-amber-100 shadow-xl backdrop-blur-sm">
-                    <div className="px-2 py-1 border-b border-amber-500/20 flex items-center justify-between">
-                      <span className="font-semibold">Overlay Debug</span>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={handleCopyDebugPanel}
-                          className="inline-flex items-center gap-1 rounded border border-amber-500/20 px-1.5 py-0.5 text-[9px] text-amber-200 transition-colors hover:bg-amber-500/10"
-                          title="Copy formatted debug details"
-                          aria-label="Copy formatted debug details"
-                        >
-                          <Copy className="w-3 h-3" />
-                          Copy
-                        </button>
-                        <span className="text-amber-300/80">run #{debugInfo.renderSeq}</span>
-                      </div>
-                    </div>
-                    <div className="px-2 py-1.5 space-y-1.5 leading-4">
-                      <div className="grid grid-cols-[110px_1fr] gap-1">
-                        <span className="text-amber-300/80">Frame source</span>
-                        <span>{debugInfo.frameSource}</span>
-                        <span className="text-amber-300/80">Telemetry</span>
-                        <span>{debugInfo.telemetryStatus}{debugInfo.telemetryError ? ` (${debugInfo.telemetryError})` : ''}</span>
-                        <span className="text-amber-300/80">Render</span>
-                        <span>{debugInfo.renderStatus}{debugInfo.renderMs != null ? ` (${debugInfo.renderMs}ms)` : ''}{debugInfo.renderError ? ` (${debugInfo.renderError})` : ''}</span>
-                        <span className="text-amber-300/80">Requested preset</span>
-                        <span>{debugInfo.requestedPresetId || 'n/a'}</span>
-                        <span className="text-amber-300/80">Requested prefer html</span>
-                        <span>{String(debugInfo.requestedPreferHtml)}</span>
-                        <span className="text-amber-300/80">Render source</span>
-                        <span>{debugInfo.renderSource || 'n/a'}{debugInfo.renderHtmlLength != null ? ` (len ${debugInfo.renderHtmlLength})` : ''}</span>
-                        <span className="text-amber-300/80">Backend has html</span>
-                        <span>{debugInfo.backendHasHtmlContent == null ? 'n/a' : String(debugInfo.backendHasHtmlContent)}</span>
-                        <span className="text-amber-300/80">Backend section elems</span>
-                        <span>{debugInfo.backendSectionElementCount == null ? 'n/a' : String(debugInfo.backendSectionElementCount)}</span>
-                        <span className="text-amber-300/80">Backend prefer html</span>
-                        <span>{debugInfo.backendPreferHtmlContent == null ? 'n/a' : String(debugInfo.backendPreferHtmlContent)}</span>
-                        <span className="text-amber-300/80">Backend element filter</span>
-                        <span>{debugInfo.backendUsedElementFilter == null ? 'n/a' : String(debugInfo.backendUsedElementFilter)}</span>
-                        <span className="text-amber-300/80">Animation</span>
-                        <span>
-                          {debugInfo.animationMode}
-                          {debugInfo.animationSummary?.maxWindowMs ? ` (${Math.round(debugInfo.animationSummary.maxWindowMs)}ms)` : ''}
-                          {debugInfo.animationSummary?.animatedCount ? ` [${debugInfo.animationSummary.animatedCount} keyframe]` : ''}
-                          {debugInfo.animationSummary?.transitionCount ? ` [${debugInfo.animationSummary.transitionCount} transition]` : ''}
-                        </span>
-                        <span className="text-amber-300/80">Camera</span>
-                        <span>{debugInfo.cameraStatus}{debugInfo.cameraTargetKey ? ` (${debugInfo.cameraTargetKey})` : ''}{debugInfo.cameraError ? ` (${debugInfo.cameraError})` : ''}</span>
-                        <span className="text-amber-300/80">Session time</span>
-                        <span>{debugInfo.sessionTime != null ? `${debugInfo.sessionTime.toFixed(2)}s` : 'n/a'}</span>
-                        <span className="text-amber-300/80">Focused car</span>
-                        <span>{debugInfo.focusedCarIdx ?? 'leader'}</span>
-                      </div>
-                      {debugSummary && (
-                        <div className="pt-1 border-t border-amber-500/20">
-                          <div className="text-amber-300/80 mb-0.5">Frame summary</div>
-                          <div>{JSON.stringify(debugSummary)}</div>
+                {/* Status / debug / events — only when stream underlay is off (otherwise they're in streamOverlayContent) */}
+                {!showLiveStreamUnderlay && (
+                  <>
+                    {overlayVisible && hasSelectedDesign && previewLoading && (
+                      <div className="absolute left-1/2 bottom-4 -translate-x-1/2 z-20 pointer-events-none">
+                        <div className="px-4 py-2 rounded-md bg-black/75 border border-white/20 text-white/90 text-xs flex items-center gap-2 shadow-lg">
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          Rendering overlay...
                         </div>
-                      )}
-                    </div>
-                  </div>
+                      </div>
+                    )}
+                    {overlayVisible && hasSelectedDesign && visualPreviewError && !previewLoading && (
+                      <div className="absolute left-3 right-3 bottom-3 pointer-events-none">
+                        <div className="px-2 py-1 rounded bg-red-900/70 border border-red-700/40 text-red-200 text-xxs">
+                          {visualPreviewError}
+                        </div>
+                      </div>
+                    )}
+                    {overlayVisible && !hasSelectedDesign && (
+                      <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                        <div className="px-2 py-1 rounded bg-black/60 text-white/80 text-xxs">
+                          Select a design to render overlay preview
+                        </div>
+                      </div>
+                    )}
+                    {debugEnabled && (
+                      <div className="absolute left-3 bottom-3 z-20 w-80 max-w-[calc(100%-1.5rem)] rounded-lg border border-amber-500/30 bg-black/75 text-[10px] font-mono text-amber-100 shadow-xl backdrop-blur-sm">
+                        <div className="px-2 py-1 border-b border-amber-500/20 flex items-center justify-between">
+                          <span className="font-semibold">Overlay Debug</span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={handleCopyDebugPanel}
+                              className="inline-flex items-center gap-1 rounded border border-amber-500/20 px-1.5 py-0.5 text-[9px] text-amber-200 transition-colors hover:bg-amber-500/10"
+                              title="Copy formatted debug details"
+                              aria-label="Copy formatted debug details"
+                            >
+                              <Copy className="w-3 h-3" />
+                              Copy
+                            </button>
+                            <span className="text-amber-300/80">run #{debugInfo.renderSeq}</span>
+                          </div>
+                        </div>
+                        <div className="px-2 py-1.5 space-y-1.5 leading-4">
+                          <div className="grid grid-cols-[110px_1fr] gap-1">
+                            <span className="text-amber-300/80">Frame source</span>
+                            <span>{debugInfo.frameSource}</span>
+                            <span className="text-amber-300/80">Telemetry</span>
+                            <span>{debugInfo.telemetryStatus}{debugInfo.telemetryError ? ` (${debugInfo.telemetryError})` : ''}</span>
+                            <span className="text-amber-300/80">Render</span>
+                            <span>{debugInfo.renderStatus}{debugInfo.renderMs != null ? ` (${debugInfo.renderMs}ms)` : ''}{debugInfo.renderError ? ` (${debugInfo.renderError})` : ''}</span>
+                            <span className="text-amber-300/80">Requested preset</span>
+                            <span>{debugInfo.requestedPresetId || 'n/a'}</span>
+                            <span className="text-amber-300/80">Requested prefer html</span>
+                            <span>{String(debugInfo.requestedPreferHtml)}</span>
+                            <span className="text-amber-300/80">Render source</span>
+                            <span>{debugInfo.renderSource || 'n/a'}{debugInfo.renderHtmlLength != null ? ` (len ${debugInfo.renderHtmlLength})` : ''}</span>
+                            <span className="text-amber-300/80">Backend has html</span>
+                            <span>{debugInfo.backendHasHtmlContent == null ? 'n/a' : String(debugInfo.backendHasHtmlContent)}</span>
+                            <span className="text-amber-300/80">Backend section elems</span>
+                            <span>{debugInfo.backendSectionElementCount == null ? 'n/a' : String(debugInfo.backendSectionElementCount)}</span>
+                            <span className="text-amber-300/80">Backend prefer html</span>
+                            <span>{debugInfo.backendPreferHtmlContent == null ? 'n/a' : String(debugInfo.backendPreferHtmlContent)}</span>
+                            <span className="text-amber-300/80">Backend element filter</span>
+                            <span>{debugInfo.backendUsedElementFilter == null ? 'n/a' : String(debugInfo.backendUsedElementFilter)}</span>
+                            <span className="text-amber-300/80">Animation</span>
+                            <span>
+                              {debugInfo.animationMode}
+                              {debugInfo.animationSummary?.maxWindowMs ? ` (${Math.round(debugInfo.animationSummary.maxWindowMs)}ms)` : ''}
+                              {debugInfo.animationSummary?.animatedCount ? ` [${debugInfo.animationSummary.animatedCount} keyframe]` : ''}
+                              {debugInfo.animationSummary?.transitionCount ? ` [${debugInfo.animationSummary.transitionCount} transition]` : ''}
+                            </span>
+                            <span className="text-amber-300/80">Camera</span>
+                            <span>{debugInfo.cameraStatus}{debugInfo.cameraTargetKey ? ` (${debugInfo.cameraTargetKey})` : ''}{debugInfo.cameraError ? ` (${debugInfo.cameraError})` : ''}</span>
+                            <span className="text-amber-300/80">Session time</span>
+                            <span>{debugInfo.sessionTime != null ? `${debugInfo.sessionTime.toFixed(2)}s` : 'n/a'}</span>
+                            <span className="text-amber-300/80">Focused car</span>
+                            <span>{debugInfo.focusedCarIdx ?? 'leader'}</span>
+                            <span className="text-amber-300/80">Standings source</span>
+                            <span>{debugInfo.standingsSource || 'n/a'}</span>
+                            <span className="text-amber-300/80">Standings used</span>
+                            <span>{Number(debugInfo.standingsCount || 0)}</span>
+                            <span className="text-amber-300/80">Section</span>
+                            <span>{debugInfo.previewSection || 'n/a'}</span>
+                            <span className="text-amber-300/80">Page window</span>
+                            <span>{debugInfo.pageStart == null || debugInfo.pageEnd == null ? 'n/a' : `${debugInfo.pageStart}-${debugInfo.pageEnd}`} {debugInfo.pageIndex == null || debugInfo.totalPages == null ? '' : `(p${debugInfo.pageIndex + 1}/${debugInfo.totalPages})`}</span>
+                            <span className="text-amber-300/80">Section</span>
+                            <span>{debugInfo.previewSection || 'n/a'}</span>
+                            <span className="text-amber-300/80">Page window</span>
+                            <span>{debugInfo.pageStart == null || debugInfo.pageEnd == null ? 'n/a' : `${debugInfo.pageStart}-${debugInfo.pageEnd}`} {debugInfo.pageIndex == null || debugInfo.totalPages == null ? '' : `(p${debugInfo.pageIndex + 1}/${debugInfo.totalPages})`}</span>
+                          </div>
+                          {Array.isArray(debugInfo.standingsPreview) && debugInfo.standingsPreview.length > 0 && (
+                            <div className="pt-1 border-t border-amber-500/20">
+                              <div className="text-amber-300/80 mb-0.5">Standings preview</div>
+                              <div>{JSON.stringify(debugInfo.standingsPreview)}</div>
+                            </div>
+                          )}
+                          {debugSummary && (
+                            <div className="pt-1 border-t border-amber-500/20">
+                              <div className="text-amber-300/80 mb-0.5">Frame summary</div>
+                              <div>{JSON.stringify(debugSummary)}</div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    {showEventOverlay && <IracingCommandLog />}
+                  </>
                 )}
-
-                {showEventOverlay && <IracingCommandLog />}
               </div>
             </div>
           }
@@ -1719,6 +2068,19 @@ export default function OverlayPreviewStep({
                           style={{ top, height }}
                           onMouseDown={handleTimelinePointerDown}
                         >
+                          {paginationTimelineEvents.map((event, idx) => {
+                            const left = totalDuration > 0 ? (event.atSeconds / totalDuration) * 100 : 0
+                            return (
+                              <div
+                                key={`evt-page-marker-${idx}`}
+                                className="absolute top-0 bottom-0 z-20 pointer-events-none"
+                                style={{ left: `${left}%` }}
+                                title={`${event.label} at ${formatTime(event.atSeconds)}`}
+                              >
+                                <div className="absolute top-0 bottom-0 w-px bg-cyan-400/35" />
+                              </div>
+                            )
+                          })}
                           {timelineSegments.map(({ seg, timelineStart, duration }, idx) => {
                             const relStart = timelineStart
                             const segDur = duration
@@ -1726,6 +2088,14 @@ export default function OverlayPreviewStep({
                             const width = totalDuration > 0 ? (segDur / totalDuration) * 100 : 0
                             const isActive = currentSegment?.id === seg.id
                             const eventLabel = getOverlayEventLabel(seg)
+                            const paginationLabel = (() => {
+                              if (!paginationPreviewState) return null
+                              const interval = Math.max(0.001, paginationPreviewState.intervalSeconds)
+                              const startPage = Math.floor(Math.max(0, relStart) / interval) % paginationPreviewState.totalPages
+                              const endPage = Math.floor(Math.max(0, relStart + Math.max(0, segDur) - 0.001) / interval) % paginationPreviewState.totalPages
+                              if (startPage === endPage) return `P${startPage + 1}`
+                              return `P${startPage + 1}->P${endPage + 1}`
+                            })()
                             return (
                               <button
                                 key={`evt-${seg.id || idx}`}
@@ -1740,7 +2110,7 @@ export default function OverlayPreviewStep({
                                 onMouseDown={(e) => { e.stopPropagation(); seekTimelineAndReplay(relStart) }}
                               >
                                 <span className={`text-xxs truncate block ${isActive ? 'text-accent' : 'text-text-secondary'}`}>
-                                  {eventLabel}
+                                  {eventLabel}{paginationLabel ? ` · ${paginationLabel}` : ''}
                                 </span>
                               </button>
                             )

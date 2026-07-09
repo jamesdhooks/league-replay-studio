@@ -1,10 +1,10 @@
 {
   "id": "preset_0047e7a5",
   "name": "Test",
-  "description": "Overlay design",
+  "description": "ZZZ_OVERRIDE_CHECK_3",
   "style": "blank",
   "is_builtin": false,
-  "version": "1.0.0",
+  "version": "1.0.7",
   "sections": {
     "intro": [],
     "qualifying_results": [],

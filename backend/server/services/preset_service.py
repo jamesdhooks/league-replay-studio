@@ -254,6 +254,26 @@ def _load_builtin_html(style: str) -> str:
     return ""
 
 
+def _normalize_frame_override_container(value: Any) -> dict[str, Any]:
+    """Normalize frame override payload into {global, projects} container."""
+    if not isinstance(value, dict):
+        return {"global": {}, "projects": {}}
+
+    has_scoped_shape = isinstance(value.get("global"), dict) or isinstance(value.get("projects"), dict)
+    if has_scoped_shape:
+        global_map = dict(value.get("global") or {})
+        projects_raw = value.get("projects") or {}
+        projects = {}
+        if isinstance(projects_raw, dict):
+            for pid, overrides in projects_raw.items():
+                if isinstance(overrides, dict):
+                    projects[str(pid)] = dict(overrides)
+        return {"global": global_map, "projects": projects}
+
+    # Legacy flat map becomes global defaults.
+    return {"global": dict(value), "projects": {}}
+
+
 def _make_builtin_preset(
     preset_id: str,
     name: str,
@@ -270,6 +290,7 @@ def _make_builtin_preset(
         "version": "1.0.0",
         "sections": {section: DEFAULT_ELEMENTS.get(section, []) for section in VIDEO_SECTIONS},
         "variables": variables or dict(DEFAULT_VARIABLES),
+        "frame_variable_overrides": _normalize_frame_override_container({}),
         "intro_video_path": None,
     }
 
@@ -396,6 +417,7 @@ class PresetService:
             "version": "1.0.0",
             "sections": data.get("sections", {section: [] for section in VIDEO_SECTIONS}),
             "variables": data.get("variables", dict(DEFAULT_VARIABLES)),
+            "frame_variable_overrides": _normalize_frame_override_container(data.get("frame_variable_overrides")),
             "intro_video_path": data.get("intro_video_path"),
         }
 
@@ -422,9 +444,12 @@ class PresetService:
 
         preset_id = preset["id"]
 
-        for key in ("name", "description", "style", "sections", "variables", "intro_video_path"):
+        for key in ("name", "description", "style", "sections", "variables", "frame_variable_overrides", "intro_video_path"):
             if key in updates:
-                preset[key] = updates[key]
+                if key == "frame_variable_overrides":
+                    preset[key] = _normalize_frame_override_container(updates[key])
+                else:
+                    preset[key] = updates[key]
 
         # Write overlay HTML content if provided
         if "html_content" in updates:
@@ -1118,6 +1143,9 @@ class PresetService:
                 data = json.loads(preset_path.read_text(encoding="utf-8"))
                 data["is_builtin"] = False
                 data.setdefault("style", "custom")
+                data["frame_variable_overrides"] = _normalize_frame_override_container(
+                    data.get("frame_variable_overrides")
+                )
 
                 # Legacy migration: infer style from old template_id
                 legacy_template_id = data.pop("template_id", None)

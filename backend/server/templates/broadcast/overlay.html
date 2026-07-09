@@ -21,6 +21,9 @@
 <body>
   {% set quali_rows = frame.qualifying_standings if frame.qualifying_standings is defined and frame.qualifying_standings else frame.standings %}
   {% set result_rows = frame.final_standings if frame.final_standings is defined and frame.final_standings else frame.standings %}
+  {% set _pg_start = page_start if page_start is defined and page_start is not none else 0 %}
+  {% set _pg_end_10 = page_end if page_end is defined and page_end is not none else (_pg_start + 10) %}
+  {% set _pg_end_12 = page_end if page_end is defined and page_end is not none else (_pg_start + 12) %}
   <div class="overlay">
 
   {% if frame.section is defined and frame.section == 'intro' %}
@@ -68,8 +71,8 @@
             <div class="text-right">Delta</div>
           </div>
           <div class="flex-1 min-h-0 overflow-hidden py-2 space-y-2">
-            {% for entry in quali_rows[:10] %}
-            <div class="grid grid-cols-[92px_minmax(0,1.6fr)_120px_160px_150px] gap-3 items-center rounded-2xl px-4 py-4 {% if entry.is_player | default(false) %}broadcast-player{% elif loop.first %}broadcast-leader{% elif loop.index is even %}broadcast-row-alt{% else %}broadcast-row{% endif %}">
+            {% for entry in quali_rows[_pg_start:_pg_end_10] %}
+            <div class="grid grid-cols-[92px_minmax(0,1.6fr)_120px_160px_150px] gap-3 items-center rounded-2xl px-4 py-4 {% if entry.is_player | default(false) %}broadcast-player{% elif (entry.position | default(0)) == 1 %}broadcast-leader{% elif loop.index is even %}broadcast-row-alt{% else %}broadcast-row{% endif %}">
               <div class="flex items-center gap-3">
                 <div class="text-slate-300 text-[10px] uppercase tracking-[0.25em]">P</div>
                 <div class="text-3xl font-black tabular-nums">{{ entry.position | default(loop.index) }}</div>
@@ -80,7 +83,7 @@
               </div>
               <div class="text-right text-xl font-semibold tabular-nums text-slate-200">#{{ entry.car_number | default('') }}</div>
               <div class="text-right text-2xl font-bold tabular-nums">{{ entry.qualifying_time | default(entry.fastest_lap_time | default('--:--.---')) }}</div>
-              <div class="text-right text-lg font-semibold tabular-nums {% if loop.first %}text-amber-200{% else %}text-slate-300{% endif %}">{{ entry.gap_to_leader | default(entry.gap | default('Pole')) }}</div>
+              <div class="text-right text-lg font-semibold tabular-nums {% if (entry.position | default(0)) == 1 %}text-amber-200{% else %}text-slate-300{% endif %}">{{ entry.gap_to_leader | default(entry.gap | default('Pole')) }}</div>
             </div>
             {% endfor %}
           </div>
@@ -111,8 +114,8 @@
             <div class="text-right">Average</div>
           </div>
           <div class="flex-1 min-h-0 overflow-hidden py-2 space-y-2">
-            {% for entry in result_rows[:10] %}
-            <div class="grid grid-cols-[84px_minmax(0,1.4fr)_150px_110px_150px_150px] gap-3 items-center rounded-2xl px-4 py-4 {% if entry.is_player | default(false) %}broadcast-player{% elif loop.first %}broadcast-leader{% elif loop.index is even %}broadcast-row-alt{% else %}broadcast-row{% endif %}">
+            {% for entry in result_rows[_pg_start:_pg_end_10] %}
+            <div class="grid grid-cols-[84px_minmax(0,1.4fr)_150px_110px_150px_150px] gap-3 items-center rounded-2xl px-4 py-4 {% if entry.is_player | default(false) %}broadcast-player{% elif (entry.position | default(0)) == 1 %}broadcast-leader{% elif loop.index is even %}broadcast-row-alt{% else %}broadcast-row{% endif %}">
               <div class="text-3xl font-black tabular-nums">{{ entry.position | default(loop.index) }}</div>
               <div class="min-w-0">
                 <div class="text-2xl font-semibold truncate">{{ entry.driver_name | default('Driver') }}</div>
@@ -159,15 +162,15 @@
         <div class="text-right">To Next</div>
       </div>
       <div class="px-3 py-3 space-y-2">
-        {% for entry in frame.standings[:12] %}
-        <div class="grid grid-cols-[72px_104px_minmax(0,1fr)_118px] gap-3 items-center rounded-xl px-3 py-3 {% if entry.is_player | default(false) %}broadcast-player{% elif loop.first %}broadcast-leader{% elif loop.index is even %}broadcast-row-alt{% else %}broadcast-row{% endif %}">
+        {% for entry in frame.standings[_pg_start:_pg_end_12] %}
+        <div class="grid grid-cols-[72px_104px_minmax(0,1fr)_118px] gap-3 items-center rounded-xl px-3 py-3 {% if entry.is_player | default(false) %}broadcast-player{% elif (entry.position | default(0)) == 1 %}broadcast-leader{% elif loop.index is even %}broadcast-row-alt{% else %}broadcast-row{% endif %}">
           <div class="text-2xl font-black tabular-nums">{{ entry.position | default(loop.index) }}</div>
           <div class="text-xl font-black tracking-[0.18em] uppercase">{{ entry.driver_short_name | default('DRV') }}</div>
           <div class="min-w-0">
             <div class="text-lg font-semibold truncate">{{ entry.driver_name | default('Driver') }}</div>
             <div class="text-[11px] uppercase tracking-[0.24em] text-slate-300/80 mt-1">#{{ entry.car_number | default('') }}</div>
           </div>
-          <div class="text-right text-lg font-semibold tabular-nums">{{ entry.relative | default('Leader' if loop.first else '--') }}</div>
+          <div class="text-right text-lg font-semibold tabular-nums">{{ entry.relative | default('LEADER' if (entry.position | default(0)) == 1 else '--', true) }}</div>
         </div>
         {% endfor %}
       </div>

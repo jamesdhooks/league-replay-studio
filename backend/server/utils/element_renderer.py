@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
+import json
 from typing import Any, Optional
 
 from jinja2 import Environment, BaseLoader, select_autoescape
@@ -33,6 +34,101 @@ def _create_string_env() -> Environment:
 
 
 _jinja_env = _create_string_env()
+
+
+def _coerce_override_value(raw: Any) -> Any:
+    """Best-effort conversion from persisted override text into runtime value."""
+    candidate = raw.get("value") if isinstance(raw, dict) and "value" in raw else raw
+    if not isinstance(candidate, str):
+        return candidate
+
+    text = candidate.strip()
+    if text == "":
+        return ""
+
+    lower = text.lower()
+    if lower == "true":
+        return True
+    if lower == "false":
+        return False
+    if lower == "null":
+        return None
+
+    if text.startswith("{") or text.startswith("["):
+        try:
+            return json.loads(text)
+        except Exception:
+            return candidate
+
+    if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
+        try:
+            return int(text)
+        except Exception:
+            return candidate
+
+    try:
+        if any(ch in text for ch in [".", "e", "E"]):
+            return float(text)
+    except Exception:
+        return candidate
+
+    return candidate
+
+
+def resolve_frame_variable_overrides(
+    frame_variable_overrides: dict[str, Any] | None,
+    project_id: int | None = None,
+) -> dict[str, Any]:
+    """Resolve effective frame overrides for a project (defaults + overrides).
+
+    Supported storage formats:
+      1) Legacy flat map: {"driver_name": "Alice"}
+      2) Scoped map: {
+           "global": {...},
+           "projects": {"123": {...}}
+         }
+    """
+    if not isinstance(frame_variable_overrides, dict):
+        return {}
+
+    has_scoped_shape = (
+        isinstance(frame_variable_overrides.get("global"), dict)
+        or isinstance(frame_variable_overrides.get("projects"), dict)
+    )
+
+    if not has_scoped_shape:
+        return dict(frame_variable_overrides)
+
+    defaults = dict(frame_variable_overrides.get("global") or {})
+    effective = dict(defaults)
+
+    projects = frame_variable_overrides.get("projects") or {}
+    if project_id is not None and isinstance(projects, dict):
+        key = str(project_id)
+        project_overrides = projects.get(key)
+        if isinstance(project_overrides, dict):
+            effective.update(project_overrides)
+
+    return effective
+
+
+def apply_frame_variable_overrides(
+    frame_data: dict[str, Any],
+    frame_variable_overrides: dict[str, Any] | None,
+    project_id: int | None = None,
+) -> dict[str, Any]:
+    """Apply user-defined frame variable overrides as final runtime values."""
+    merged = dict(frame_data or {})
+    effective_overrides = resolve_frame_variable_overrides(frame_variable_overrides, project_id)
+    if not effective_overrides:
+        return merged
+
+    for name, raw in effective_overrides.items():
+        if not isinstance(name, str) or not name:
+            continue
+        merged[name] = _coerce_override_value(raw)
+
+    return merged
 
 
 def render_element_template(
@@ -91,7 +187,17 @@ def render_element_template(
     safe_page_index = page_index % total_pages
     page_start = safe_page_index * items_per_page
     page_end = page_start + items_per_page
-    page_key = f"page-{safe_page_index + 1}-rows-{page_start}-{min(page_end, len(standings))}"
+
+    # Partial-last-page guard: if the window extends past the field but the
+    # field is large enough to fill a full page, slide back so the display is
+    # always completely filled rather than showing a tiny subsection.
+    if page_end > len(standings) >= items_per_page:
+        page_start = len(standings) - items_per_page
+        page_end = len(standings)
+    elif page_end > len(standings):
+        page_end = len(standings)
+
+    page_key = f"page-{safe_page_index + 1}-rows-{page_start}-{page_end}"
 
     try:
         template = _jinja_env.from_string(template_str)
@@ -142,6 +248,24 @@ def _resolve_auto_page_index(
     if total_pages <= 1:
         return 0
 
+    # Optional explicit override from UI preview controls.
+    forced_page_index = frame_data.get("overlay_page_index")
+    try:
+        if forced_page_index is not None:
+            return int(forced_page_index) % total_pages
+    except (TypeError, ValueError):
+        pass
+
+    # Player-follow: show the bracket/page that contains the player.
+    # Partial-last-page sliding is handled in render_element_template so we
+    # only need to return the natural page index here.
+    player_idx = next(
+        (i for i, s in enumerate(standings) if isinstance(s, dict) and s.get("is_player")),
+        None,
+    )
+    if player_idx is not None:
+        return (player_idx // items_per_page) % total_pages
+
     elapsed = frame_data.get("overlay_section_elapsed_seconds", frame_data.get("overlay_clip_elapsed_seconds", 0.0))
     duration = frame_data.get("overlay_section_duration_seconds", frame_data.get("overlay_clip_duration_seconds", 0.0))
 
@@ -174,6 +298,7 @@ def compose_preset_html(
     preset: dict[str, Any],
     section: str,
     frame_data: dict[str, Any],
+    project_id: int | None = None,
     resolution: dict[str, int] | None = None,
     asset_base_url: str = "/api/presets",
     element_filter: str | None = None,
@@ -206,9 +331,15 @@ def compose_preset_html(
     sections = preset.get("sections", {})
     elements = sections.get(section, [])
 
+    effective_frame_data = apply_frame_variable_overrides(
+        frame_data,
+        preset.get("frame_variable_overrides") if isinstance(preset, dict) else None,
+        project_id=project_id,
+    )
+
     resolved_page_index = page_index
     if resolved_page_index is None:
-        resolved_page_index = _resolve_auto_page_index(elements, frame_data)
+        resolved_page_index = _resolve_auto_page_index(elements, effective_frame_data)
 
     logger.debug(
         "[ElementRenderer] compose_preset_html: section=%s, preset=%s, page=%d",
@@ -239,7 +370,7 @@ def compose_preset_html(
         '<head>',
         '  <meta charset="UTF-8">',
         f'  <meta name="viewport" content="width={resolution["width"]}, height={resolution["height"]}">',
-        '  <script src="https://cdn.tailwindcss.com"></script>',
+        '  <script id="lrs-tailwind-runtime">{% include "_shared/tailwind.runtime.js" %}</script>',
         '  <style>',
         '    * { margin: 0; padding: 0; box-sizing: border-box; }',
         f'    html, body {{ width: {resolution["width"]}px; height: {resolution["height"]}px; background: transparent; overflow: hidden; }}',
@@ -274,7 +405,7 @@ def compose_preset_html(
 
         # Render this element's Jinja2 template
         rendered_content = render_element_template(
-            template_str, frame_data, pos, variables,
+            template_str, effective_frame_data, pos, variables,
             pagination=elem.get("pagination"),
             page_index=resolved_page_index,
         )

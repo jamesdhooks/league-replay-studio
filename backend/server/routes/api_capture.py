@@ -31,6 +31,7 @@ from pydantic import BaseModel
 from server.services.capture_service import capture_service
 from server.events import EventType, make_event
 from server.utils.command_log import command_log
+from server.utils.capture_resolution import resolve_capture_resolution
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +197,7 @@ class ScriptCaptureRequest(BaseModel):
     capture_mode: str = "all"           # all, uncaptured_only, specific_segments, time_range
     segment_ids: list[str] | None = None  # for specific_segments mode
     time_range: dict | None = None        # {start, end} for time_range mode
+    capture_resolution: str = "1080p"     # target iRacing client resolution
 
 
 @router.post("/script-capture", status_code=202)
@@ -256,6 +258,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
 
     # ── Preflight checks (fail fast before background worker starts) ──────
     software = settings_service.get("capture_software") or "native"
+    capture_resolution, capture_width, capture_height = resolve_capture_resolution(body.capture_resolution)
 
     # Manual mode cannot run automated scripted capture.
     if software == "manual":
@@ -309,6 +312,29 @@ async def start_script_capture(body: ScriptCaptureRequest):
                     "Grant folder permissions or choose a different output folder."
                 ),
             ) from exc
+
+    # Size the game window before replay/capture automation starts so the
+    # recorder sees the intended client resolution from the first frame.
+    from server.utils.window_capture import resize_capture_target
+
+    resize_result = resize_capture_target(capture_width, capture_height)
+    command_log.record(
+        "capture-window-resize",
+        {
+            "project_id": body.project_id,
+            "capture_resolution": capture_resolution,
+            "requested_width": capture_width,
+            "requested_height": capture_height,
+            "result": resize_result,
+        },
+        result="ok" if resize_result.get("success") else "error",
+        source="api_capture",
+    )
+    if not resize_result.get("success"):
+        raise HTTPException(
+            status_code=400,
+            detail=resize_result.get("error") or "Failed to resize capture target window",
+        )
 
     # Probe replay commandability so we fail fast instead of segment-loop churn.
     preflight_snapshot = iracing_bridge.capture_snapshot()
@@ -455,6 +481,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
             "abort_action": None,
             "abort_reason": None,
             "capture_mode": capture_mode,
+            "capture_resolution": capture_resolution,
         })
 
     def _progress_cb(data: dict) -> None:
@@ -527,6 +554,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
             "project_id": body.project_id,
             "total_segments": _script_capture_state["total_segments"],
             "capture_mode": software,
+            "capture_resolution": capture_resolution,
         })
 
         # Build the recorder backend based on the configured capture software.
@@ -547,7 +575,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
             native_engine = CaptureEngine()
             try:
                 if not native_engine.is_running:
-                    native_engine.start(fps=30, quality=80, max_width=1920)
+                    native_engine.start(fps=30, quality=80, max_width=capture_width)
                     started_native = True
             except Exception as exc:
                 logger.error("[Capture API] Failed to start native engine: %s", exc)
@@ -633,6 +661,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
                     "project_id": body.project_id,
                     "capture_software": software,
                     "capture_mode": capture_mode,
+                    "capture_resolution": capture_resolution,
                     "success": False,
                     "cancelled": True,
                     "error": "Script capture cancelled by user",
@@ -683,6 +712,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 "project_id": body.project_id,
                 "capture_software": software,
                 "capture_mode": capture_mode,
+                "capture_resolution": capture_resolution,
                 "success": True,
                 "error": None,
                 "started_at": _script_capture_state.get("started_at"),
@@ -743,6 +773,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 "project_id": body.project_id,
                 "capture_software": software,
                 "capture_mode": capture_mode,
+                "capture_resolution": capture_resolution,
                 "success": False,
                 "error": str(exc),
                 "abort_segment_id": abort_segment_id,
@@ -782,6 +813,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
         "accepted": True,
         "project_id": body.project_id,
         "total_segments": _script_capture_state["total_segments"],
+        "capture_resolution": capture_resolution,
         "message": "Script capture started — follow progress via WebSocket",
     }
 

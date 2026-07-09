@@ -21,20 +21,19 @@
 <body>
   {% set quali_rows = frame.qualifying_standings if frame.qualifying_standings is defined and frame.qualifying_standings else frame.standings %}
   {% set result_rows = frame.final_standings if frame.final_standings is defined and frame.final_standings else frame.standings %}
+  {% set _pg_start = page_start if page_start is defined and page_start is not none else 0 %}
+  {% set _pg_end_10 = page_end if page_end is defined and page_end is not none else (_pg_start + 10) %}
+  {% set _pg_end_12 = page_end if page_end is defined and page_end is not none else (_pg_start + 12) %}
   <div class="overlay">
 
   {% if frame.section is defined and frame.section == 'intro' %}
-    <div class="absolute inset-0 px-10 py-10 flex flex-col justify-between">
-      <div class="flex items-center justify-between text-[11px] uppercase tracking-[0.35em] text-sky-200/90">
-        <span>{{ frame.series_name | default('Race Broadcast') }}</span>
-        <span>{{ frame.track_name | default(frame.track_name | default('')) }}</span>
-      </div>
+    <div class="absolute inset-0 px-10 py-10 flex flex-col justify-between top-[100px]">
       <div class="broadcast-shell rounded-[2rem] px-12 py-12 max-w-5xl relative">
         {% if frame.assets.logo_primary %}
           <img src="{{ frame.assets.logo_primary }}" alt="Series Logo" class="absolute top-12 right-12 h-16">
         {% endif %}
         <div class="broadcast-header-line h-1.5 w-40 rounded-full mb-6"></div>
-        <div class="text-slate-300 uppercase tracking-[0.45em] text-sm mb-3">Track Feature</div>
+        <div class="text-slate-300 uppercase tracking-[0.45em] text-sm mb-3">Week {{ frame.race_week }}</div>
         <div class="text-7xl font-black uppercase tracking-tight leading-none">{{ frame.track_name | default('Circuit Name') }}</div>
         <div class="mt-6 flex items-end justify-between gap-10">
           <div class="max-w-2xl text-slate-300 text-xl leading-relaxed">
@@ -42,24 +41,25 @@
           </div>
           <div class="text-right text-sm text-slate-400 uppercase tracking-[0.35em]">
             <div>{{ frame.race_season | default('Season') }}</div>
-            <div class="mt-2">{{ frame.race_date | default('Race Day') }}</div>
+            <div class="mt-2">{{ frame.race_date_friendly | default('Race Day') }}</div>
           </div>
         </div>
       </div>
-      <div class="flex justify-end text-slate-400 text-xs uppercase tracking-[0.35em]">LRS Broadcast Package</div>
     </div>
 
   {% elif frame.section is defined and frame.section == 'qualifying_results' %}
-    <div class="absolute inset-0 px-10 py-8">
-      <div class="broadcast-shell rounded-[1.75rem] overflow-hidden h-full flex flex-col">
+    <div class="absolute inset-0 flex items-center justify-center px-10 py-8">
+      <div class="broadcast-shell rounded-[1.75rem] overflow-hidden h-full max-w-4xl max-h-[90vh] flex flex-col">
         <div class="px-8 py-5 border-b border-slate-700/70 bg-slate-950/60 flex items-end justify-between">
           <div>
             <div class="text-sky-300 text-xs uppercase tracking-[0.35em]">Qualifying Results</div>
             <div class="text-4xl font-black uppercase tracking-tight mt-2">{{ frame.track_name | default('Circuit Name') }}</div>
           </div>
-          <div class="text-right">
-            <div class="text-slate-300 text-sm uppercase tracking-[0.35em]">{{ frame.series_name | default('Series') }}</div>
-            <div class="text-slate-500 text-xs mt-2 uppercase tracking-[0.3em]">Grid locked</div>
+          <div class="flex flex-col items-end"> {# Changed this div to flex-col items-end #}
+            {% if frame.assets.logo_primary %}
+                <img src="{{ frame.assets.logo_primary }}" alt="Series Logo" class="h-10 mb-2">
+            {% endif %}
+            <div class="text-slate-300 text-sm uppercase tracking-[0.35em]">{{ frame.series_name | default('Series') }} · Week {{ frame.race_week | default('') }}</div>
           </div>
         </div>
         <div class="px-6 py-5 flex-1 min-h-0 flex flex-col">
@@ -71,19 +71,19 @@
             <div class="text-right">Delta</div>
           </div>
           <div class="flex-1 min-h-0 overflow-hidden py-2 space-y-2">
-            {% for entry in quali_rows[:10] %}
-            <div class="grid grid-cols-[92px_minmax(0,1.6fr)_120px_160px_150px] gap-3 items-center rounded-2xl px-4 py-4 {% if entry.is_player | default(false) %}broadcast-player{% elif loop.first %}broadcast-leader{% elif loop.index is even %}broadcast-row-alt{% else %}broadcast-row{% endif %}">
+            {% for entry in quali_rows[_pg_start:_pg_end_10] %}
+            <div class="grid grid-cols-[92px_minmax(0,1.6fr)_120px_160px_150px] gap-3 items-center rounded-2xl px-4 py-3 {% if entry.is_player | default(false) %}broadcast-player{% elif (entry.position | default(0)) == 1 %}broadcast-leader{% elif loop.index is even %}broadcast-row-alt{% else %}broadcast-row{% endif %}">
               <div class="flex items-center gap-3">
                 <div class="text-slate-300 text-[10px] uppercase tracking-[0.25em]">P</div>
-                <div class="text-3xl font-black tabular-nums">{{ entry.position | default(loop.index) }}</div>
+                <div class="text-2xl font-black tabular-nums">{{ entry.position | default(loop.index) }}</div>
               </div>
-              <div class="min-w-0">
-                <div class="text-2xl font-semibold truncate">{{ entry.driver_name | default('Driver') }}</div>
-                <div class="mt-1 text-[11px] uppercase tracking-[0.28em] text-slate-300/80">{{ entry.driver_short_name | default('DRV') }}</div>
+              <div class="min-w-0 flex items-baseline gap-2">
+                <div class="text-xl font-semibold truncate">{{ entry.driver_name | default('Driver') }}</div>
+                <div class="text-xs uppercase tracking-[0.28em] text-slate-300/80">{{ entry.driver_short_name | default('DRV') }}</div>
               </div>
-              <div class="text-right text-xl font-semibold tabular-nums text-slate-200">#{{ entry.car_number | default('') }}</div>
-              <div class="text-right text-2xl font-bold tabular-nums">{{ entry.qualifying_time | default(entry.fastest_lap_time | default('--:--.---')) }}</div>
-              <div class="text-right text-lg font-semibold tabular-nums {% if loop.first %}text-amber-200{% else %}text-slate-300{% endif %}>{{ entry.gap_to_leader | default(entry.gap | default('Pole')) }}</div>
+              <div class="text-right text-lg font-semibold tabular-nums text-slate-200">#{{ entry.car_number | default('') }}</div>
+              <div class="text-right text-xl font-bold tabular-nums">{{ entry.qualifying_time | default(entry.fastest_lap_time | default('--:--.---')) }}</div>
+              <div class="text-right text-base font-semibold tabular-nums {% if (entry.position | default(0)) == 1 %}text-amber-200{% else %}text-slate-300{% endif %}">{{ entry.gap_to_leader | default(entry.gap | default('Pole')) }}</div>
             </div>
             {% endfor %}
           </div>
@@ -114,8 +114,8 @@
             <div class="text-right">Average</div>
           </div>
           <div class="flex-1 min-h-0 overflow-hidden py-2 space-y-2">
-            {% for entry in result_rows[:10] %}
-            <div class="grid grid-cols-[84px_minmax(0,1.4fr)_150px_110px_150px_150px] gap-3 items-center rounded-2xl px-4 py-4 {% if entry.is_player | default(false) %}broadcast-player{% elif loop.first %}broadcast-leader{% elif loop.index is even %}broadcast-row-alt{% else %}broadcast-row{% endif %}>
+            {% for entry in result_rows[_pg_start:_pg_end_10] %}
+            <div class="grid grid-cols-[84px_minmax(0,1.4fr)_150px_110px_150px_150px] gap-3 items-center rounded-2xl px-4 py-4 {% if entry.is_player | default(false) %}broadcast-player{% elif (entry.position | default(0)) == 1 %}broadcast-leader{% elif loop.index is even %}broadcast-row-alt{% else %}broadcast-row{% endif %}">
               <div class="text-3xl font-black tabular-nums">{{ entry.position | default(loop.index) }}</div>
               <div class="min-w-0">
                 <div class="text-2xl font-semibold truncate">{{ entry.driver_name | default('Driver') }}</div>
@@ -157,12 +157,12 @@
         <div class="text-right pr-4">Relative</div>
       </div>
       <div class="px-3 py-4 space-y-1">
-        {% for entry in frame.standings[:12] %}
-        <div class="grid grid-cols-[20px_30px_minmax(0,1fr)_minmax(0,1fr)] gap-3 items-center rounded-xl px-3 py-1.5 {% if entry.is_player | default(false) %}broadcast-player{% elif loop.first %}broadcast-leader{% elif loop.index is even %}broadcast-row-alt{% else %}broadcast-row{% endif %}>
+        {% for entry in frame.standings[_pg_start:_pg_end_12] %}
+        <div class="grid grid-cols-[20px_30px_minmax(0,1fr)_minmax(0,1fr)] gap-3 items-center rounded-xl px-3 py-1.5 {% if entry.is_player | default(false) %}broadcast-player{% elif (entry.position | default(0)) == 1 %}broadcast-leader{% elif loop.index is even %}broadcast-row-alt{% else %}broadcast-row{% endif %}">
           <div class="text-lg font-black tabular-nums">{{ entry.position | default(loop.index) }}</div>
           <div class="text-base font-semibold tabular-nums">#{{ entry.car_number | default('') }}</div>
           <div class="text-lg font-black tracking-[0.18em] uppercase">{{ entry.driver_short_name | default('DRV') }}</div>
-          <div class="text-right text-base font-semibold tabular-nums pr-4">{{ entry.relative | default('Leader' if loop.first else '--') }}</div>
+          <div class="text-right text-base font-semibold tabular-nums pr-4">{{ entry.relative | default('LEADER' if (entry.position | default(0)) == 1 else '--', true) }}</div>
         </div>
         {% endfor %}
       </div>

@@ -95,6 +95,26 @@ DEFAULT_FLOOR_BOOST = 1.5                # Multiplier applied to events of an un
 DEFAULT_MIX_MAX = 1.0                    # Hard cap default = no cap
 DEFAULT_MAX_FLOOR_REBALANCE_SWAPS = 3    # Cap on Pass 4 swap thrash
 
+# ── Driver coverage defaults (Balanced Selection v3 — driver layer) ──────────
+# After type-diversity is applied, each candidate's effective score is further
+# multiplied by a driverCoverageFactor that rewards events introducing unseen
+# or under-represented drivers.  The blend toward 1.0 is controlled by
+# driver_coverage_strength so 0 fully disables the layer.
+#
+#   driver_scale = driver_coverage_strength / 100
+#   unseen_frac  = unseen_drivers / max(total_involved, 1)
+#   raw_boost    = unseen_frac * (new_driver_boost - 1.0)
+#   raw_penalty  = (1 - unseen_frac) * repeat_driver_penalty
+#   factor       = 1.0 + (raw_boost - raw_penalty) * driver_scale
+#
+# Blending toward 1.0 guarantees driver_coverage_strength=0 is a no-op.
+DEFAULT_DRIVER_COVERAGE_STRENGTH = 35    # 0–100; 0 = fully disabled
+DEFAULT_NEW_DRIVER_BOOST = 1.40          # Max factor for an all-unseen-driver event
+DEFAULT_REPEAT_DRIVER_PENALTY = 0.25     # Max penalty for a fully-repeated-driver event
+DEFAULT_TARGET_UNIQUE_DRIVER_SHARE = 0.60  # Fraction of field to cover before rebalance succeeds
+DEFAULT_MAX_DRIVER_COVERAGE_SWAPS = 4    # Cap on driver-rebalance swaps
+DEFAULT_DRIVER_SWAP_SCORE_FLOOR = 0.85   # Replacement must score ≥ this fraction of displaced clip
+
 # ── Video Sections ──────────────────────────────────────────────────────────
 # The final highlight video is composed of four ordered sections.
 # Each non-race section uses a static "TV cam" (iRacing camera group)

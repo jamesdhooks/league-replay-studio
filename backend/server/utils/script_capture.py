@@ -65,6 +65,8 @@ MAX_CAMERA_RETRIES = 3              # attempts to validate camera/driver switch
 SEEK_COOLDOWN = 0.8                 # seconds between seek retry attempts
 CAMERA_COOLDOWN = 0.5               # seconds between camera retry attempts
 SEEK_TOLERANCE_MS = 3000            # ±ms tolerance for seek validation
+SEEK_SETTLE_TIMEOUT = 2.0           # seconds to poll telemetry after seek
+SEEK_SETTLE_POLL = 0.1              # seconds between seek-settle reads
 CONTIGUOUS_GAP_THRESHOLD = 1.0      # max gap (seconds) to treat segments as contiguous
 OBS_POLL_INTERVAL = 1.0             # seconds between file-size stability checks
 OBS_STABLE_CHECKS = 3               # consecutive stable-size checks before moving file
@@ -826,6 +828,87 @@ class ScriptCaptureEngine:
 
     # -- Validation/retry helpers -------------------------------------------
 
+    def _race_session_num(self, iracing_bridge: Any) -> int:
+        """Return the replay session index whose type/name looks like Race."""
+        try:
+            sessions = iracing_bridge.session_data.get("sessions", [])
+        except Exception:
+            sessions = []
+
+        for session_info in sessions:
+            label = f"{session_info.get('type', '')} {session_info.get('name', '')}".lower()
+            if "race" in label:
+                try:
+                    return int(session_info.get("index", -1))
+                except (TypeError, ValueError):
+                    return -1
+        return -1
+
+    def _seek_measurement(
+        self,
+        iracing_bridge: Any,
+        expected_session: int,
+        target_ms: int,
+        timeout_s: float = SEEK_SETTLE_TIMEOUT,
+    ) -> Optional[dict]:
+        """Poll telemetry after a replay seek and return the best readback.
+
+        replay_search_session_time() can return before ReplaySessionNum and
+        SessionTime have fully settled, especially when jumping between
+        qualifying and race. Prefer an in-session, in-tolerance snapshot, but
+        keep the best observed snapshot for logging and retry decisions.
+        """
+        deadline = self._now() + max(0.0, timeout_s)
+        best: Optional[dict] = None
+
+        while True:
+            if self._cancelled:
+                return best
+
+            snapshot = iracing_bridge.capture_snapshot()
+            if snapshot:
+                actual_ms = int((snapshot.get("session_time") or 0.0) * 1000)
+                drift_ms = abs(actual_ms - target_ms)
+                replay_session_num = snapshot.get("replay_session_num")
+                try:
+                    replay_session_num = int(replay_session_num) if replay_session_num is not None else None
+                except (TypeError, ValueError):
+                    replay_session_num = None
+
+                session_matches = replay_session_num is None or replay_session_num == expected_session
+                seek_valid = drift_ms <= SEEK_TOLERANCE_MS and session_matches
+                measurement = {
+                    "snapshot": snapshot,
+                    "actual_ms": actual_ms,
+                    "drift_ms": drift_ms,
+                    "replay_session_num": replay_session_num,
+                    "session_matches": session_matches,
+                    "seek_valid": seek_valid,
+                }
+
+                if (
+                    best is None
+                    or (measurement["session_matches"] and not best["session_matches"])
+                    or (
+                        measurement["session_matches"] == best["session_matches"]
+                        and measurement["drift_ms"] < best["drift_ms"]
+                    )
+                ):
+                    best = measurement
+
+                if seek_valid:
+                    return measurement
+
+            if self._now() >= deadline:
+                return best
+
+            _interruptible_sleep(
+                min(SEEK_SETTLE_POLL, max(0.0, deadline - self._now())),
+                lambda: self._cancelled,
+                _now=self._now,
+                _sleep=self._sleep,
+            )
+
     def _find_best_session_for_target(
         self,
         seg_id: str,
@@ -834,7 +917,9 @@ class ScriptCaptureEngine:
     ) -> int:
         """Probe available sessions to find which one contains the target time.
         
-        Returns the session number with the smallest drift, or 0 if none valid.
+        Returns the in-tolerance session number with the smallest drift, or 0 if
+        none validate. Large-drift probes are useful diagnostics, but they are
+        not valid session resolutions.
         """
         target_ms = max(0, int(target_time_s * 1000))
         session_data = iracing_bridge.session_data
@@ -847,6 +932,8 @@ class ScriptCaptureEngine:
         
         best_session = 0
         best_drift = float('inf')
+        closest_session = 0
+        closest_drift = float('inf')
         
         # Probe each available session
         for session_info in available_sessions:
@@ -857,18 +944,18 @@ class ScriptCaptureEngine:
             if not iracing_bridge.replay_search_session_time(session_idx, target_ms):
                 continue
             
-            # Wait for seek to settle
-            _interruptible_sleep(
-                0.3, lambda: self._cancelled,
-                _now=self._now, _sleep=self._sleep,
+            measurement = self._seek_measurement(
+                iracing_bridge,
+                session_idx,
+                target_ms,
+                timeout_s=SEEK_SETTLE_TIMEOUT,
             )
-            
-            # Check actual position
-            snapshot = iracing_bridge.capture_snapshot()
-            if snapshot:
-                actual_time = snapshot.get("session_time", 0.0)
-                actual_ms = int(actual_time * 1000)
-                drift_ms = abs(actual_ms - target_ms)
+            if measurement:
+                actual_ms = measurement["actual_ms"]
+                drift_ms = measurement["drift_ms"]
+                replay_session_num = measurement["replay_session_num"]
+                session_matches = measurement["session_matches"]
+                effective_drift_ms = drift_ms if session_matches else float("inf")
                 
                 command_log.record(
                     "session-probe",
@@ -879,22 +966,39 @@ class ScriptCaptureEngine:
                         "target_ms": target_ms,
                         "actual_ms": actual_ms,
                         "drift_ms": drift_ms,
+                        "replay_session_num": replay_session_num,
+                        "session_matches": session_matches,
+                        "seek_valid": measurement["seek_valid"],
                     },
                     source="script_capture",
                 )
                 
                 self._log_entry(seg_id, "seek",
                     f"Session probe: session={session_idx} ({session_type}) "
-                    f"drift={drift_ms}ms",
-                    extra={"session_idx": session_idx, "drift_ms": drift_ms})
+                    f"landed={replay_session_num} drift={drift_ms}ms",
+                    extra={
+                        "session_idx": session_idx,
+                        "replay_session_num": replay_session_num,
+                        "session_matches": session_matches,
+                        "drift_ms": drift_ms,
+                        "seek_valid": measurement["seek_valid"],
+                    })
                 
-                if drift_ms < best_drift:
-                    best_drift = drift_ms
+                if drift_ms < closest_drift:
+                    closest_drift = drift_ms
+                    closest_session = session_idx
+
+                if measurement["seek_valid"] and effective_drift_ms < best_drift:
+                    best_drift = effective_drift_ms
                     best_session = session_idx
         
         if best_drift == float('inf'):
             self._log_entry(seg_id, "seek",
-                "Session probe failed for all sessions — defaulting to 0")
+                "Session probe found no in-tolerance session — defaulting to 0",
+                extra={
+                    "closest_session": closest_session,
+                    "closest_drift": closest_drift if closest_drift != float('inf') else None,
+                })
             return 0
         
         self._log_entry(seg_id, "seek",
@@ -903,10 +1007,7 @@ class ScriptCaptureEngine:
         
         # Seek to the best session one more time to land on it
         iracing_bridge.replay_search_session_time(best_session, target_ms)
-        _interruptible_sleep(
-            0.3, lambda: self._cancelled,
-            _now=self._now, _sleep=self._sleep,
-        )
+        self._seek_measurement(iracing_bridge, best_session, target_ms)
         
         return best_session
 
@@ -931,6 +1032,23 @@ class ScriptCaptureEngine:
         if session_num >= 0:
             self._log_entry(seg_id, "seek",
                 f"Using segment session_num={session_num} from script metadata")
+            if segment:
+                section = str(segment.get("section", "")).lower()
+                seg_type = str(segment.get("type", "")).lower()
+                if seg_type in {"broll", "bridge"} and section in {"intro", "qualifying_results", "race_results"}:
+                    race_session_num = self._race_session_num(iracing_bridge)
+                    if race_session_num >= 0 and race_session_num != session_num:
+                        self._log_entry(
+                            seg_id,
+                            "seek",
+                            f"Using race session {race_session_num} for production b-roll section '{section}'",
+                            extra={
+                                "metadata_session_num": session_num,
+                                "race_session_num": race_session_num,
+                                "section": section,
+                            },
+                        )
+                        session_num = race_session_num
         else:
             # Fall back to current replay session
             session_num = iracing_bridge.get_replay_session_num()
@@ -938,6 +1056,8 @@ class ScriptCaptureEngine:
                 self._log_entry(seg_id, "seek",
                     "Replay session num unavailable — probing available sessions...")
                 session_num = self._find_best_session_for_target(seg_id, iracing_bridge, target_time_s)
+
+        resolved_session_once = False
 
         for attempt in range(1, MAX_SEEK_RETRIES + 1):
             if self._cancelled:
@@ -969,17 +1089,14 @@ class ScriptCaptureEngine:
                 )
                 continue
 
-            _interruptible_sleep(
-                0.5, lambda: self._cancelled,
-                _now=self._now, _sleep=self._sleep,
-            )  # allow seek to settle
-
-            # Validate: read back current session time
-            snapshot = iracing_bridge.capture_snapshot()
-            if snapshot:
-                actual_time = snapshot.get("session_time", 0.0)
-                actual_ms = int(actual_time * 1000)
-                drift_ms = abs(actual_ms - target_ms)
+            measurement = self._seek_measurement(iracing_bridge, session_num, target_ms)
+            if measurement:
+                snapshot = measurement["snapshot"]
+                actual_ms = measurement["actual_ms"]
+                drift_ms = measurement["drift_ms"]
+                replay_session_num = measurement["replay_session_num"]
+                session_matches = measurement["session_matches"]
+                seek_valid = measurement["seek_valid"]
                 command_log.record(
                     "seek-session-time-validate",
                     {
@@ -990,22 +1107,44 @@ class ScriptCaptureEngine:
                         "drift_ms": drift_ms,
                         "replay_speed": snapshot.get("replay_speed"),
                         "replay_frame": snapshot.get("replay_frame"),
-                        "replay_session_num": snapshot.get("replay_session_num"),
+                        "replay_session_num": replay_session_num,
+                        "session_matches": session_matches,
                     },
-                    result="ok" if drift_ms <= SEEK_TOLERANCE_MS else "drift",
+                    result="ok" if seek_valid else ("session_mismatch" if not session_matches else "drift"),
                     source="script_capture",
                 )
 
                 self._log_entry(seg_id, "validate",
                     f"Seek validation: target={target_ms}ms actual={actual_ms}ms "
-                    f"drift={drift_ms}ms",
-                    success=drift_ms <= SEEK_TOLERANCE_MS,
+                    f"drift={drift_ms}ms session={replay_session_num}",
+                    success=seek_valid,
                     attempt=attempt,
                     expected=target_ms,
                     actual=actual_ms)
 
-                if drift_ms <= SEEK_TOLERANCE_MS:
+                if seek_valid:
                     return True
+
+                if not resolved_session_once:
+                    resolved_session_once = True
+                    resolved_session = self._find_best_session_for_target(
+                        seg_id,
+                        iracing_bridge,
+                        target_time_s,
+                    )
+                    if resolved_session != session_num:
+                        self._log_entry(
+                            seg_id,
+                            "seek",
+                            f"Resolved replay session {session_num} -> {resolved_session}",
+                            extra={
+                                "requested_session": session_num,
+                                "resolved_session": resolved_session,
+                                "landed_session": replay_session_num,
+                                "drift_ms": drift_ms,
+                            },
+                        )
+                        session_num = resolved_session
             else:
                 command_log.record(
                     "seek-session-time-validate",

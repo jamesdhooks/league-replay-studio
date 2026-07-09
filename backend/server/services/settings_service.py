@@ -88,6 +88,19 @@ def _validate_capture_software(value: Any) -> tuple[bool, str]:
     return True, ""
 
 
+def _validate_capture_resolution(value: Any) -> tuple[bool, str]:
+    try:
+        from server.utils.capture_resolution import get_capture_resolution_presets
+
+        valid_ids = {preset["id"] for preset in get_capture_resolution_presets()}
+    except Exception:
+        valid_ids = {"1080p", "1440p"}
+
+    if value not in valid_ids:
+        return False, f"capture_resolution must be one of {sorted(valid_ids)}"
+    return True, ""
+
+
 def _validate_hotkey(value: Any) -> tuple[bool, str]:
     if not isinstance(value, str):
         return False, "hotkey must be a string"
@@ -163,6 +176,7 @@ def _validate_llm_temperature(value: Any) -> tuple[bool, str]:
 VALIDATORS: dict[str, Any] = {
     "theme": _validate_theme,
     "capture_software": _validate_capture_software,
+    "capture_resolution": _validate_capture_resolution,
     "capture_hotkey_start": _validate_hotkey,
     "capture_hotkey_stop": _validate_hotkey,
     "encoding_preset": _validate_encoding_preset,

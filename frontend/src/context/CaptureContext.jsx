@@ -24,9 +24,12 @@ export function CaptureProvider({ children }) {
   const [error, setError] = useState(null)
   const [testResult, setTestResult] = useState(null)
   const [loading, setLoading] = useState(false)
+  const detectionInFlightRef = useRef(false)
 
   // ── Detect software ─────────────────────────────────────────────────────
   const detectSoftware = useCallback(async () => {
+    if (detectionInFlightRef.current) return null
+    detectionInFlightRef.current = true
     try {
       const data = await apiGet('/capture/software')
       setSoftware(data.software || [])
@@ -37,6 +40,8 @@ export function CaptureProvider({ children }) {
     } catch (err) {
       console.error('[Capture] Detection failed:', err)
       return null
+    } finally {
+      detectionInFlightRef.current = false
     }
   }, [])
 
@@ -173,6 +178,7 @@ export function CaptureProvider({ children }) {
         capture_mode: options.captureMode ?? 'all',
         segment_ids: options.segmentIds ?? null,
         time_range: options.timeRange ?? null,
+        capture_resolution: options.captureResolution ?? '1080p',
       })
       return result
     } catch (err) {
@@ -196,6 +202,31 @@ export function CaptureProvider({ children }) {
       console.error('[Capture] Script cancel error:', err)
     }
   }, [])
+
+  // Keep software readiness fresh for toolbar chips and capture controls.
+  useEffect(() => {
+    let cancelled = false
+    const refresh = () => {
+      if (!cancelled) detectSoftware()
+    }
+
+    refresh()
+    const intervalId = setInterval(refresh, 7500)
+    const handleFocus = () => refresh()
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') refresh()
+    }
+
+    window.addEventListener('focus', handleFocus)
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => {
+      cancelled = true
+      clearInterval(intervalId)
+      window.removeEventListener('focus', handleFocus)
+      document.removeEventListener('visibilitychange', handleVisibility)
+    }
+  }, [detectSoftware])
+
   // ── WebSocket subscriptions ─────────────────────────────────────────────
   useEffect(() => {
     const unsubs = [

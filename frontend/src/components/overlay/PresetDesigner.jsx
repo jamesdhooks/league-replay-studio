@@ -11,6 +11,7 @@ import IsolatedHtmlPreview from '../ui/IsolatedHtmlPreview'
 import PreviewPlayer from '../analysis/PreviewPlayer'
 import IracingCommandLog from '../highlights/IracingCommandLog'
 import { wsClient } from '../../services/websocket'
+import { apiGet, apiPost } from '../../services/api'
 import OverlayWorkspaceTopbar from './OverlayWorkspaceTopbar'
 import {
   Trash2,
@@ -130,11 +131,15 @@ export default function PresetDesigner({ presetId, onOpenBuild }) {
   const [previewRenderSize, setPreviewRenderSize] = useState({ width: 1920, height: 1080 })
   const [previewLoading, setPreviewLoading] = useState(false)
   const previewTimeoutRef = useRef(null)
+  const previewRequestSeqRef = useRef(0)
   const previewViewportRef = useRef(null)
   const [previewViewportSize, setPreviewViewportSize] = useState({ width: 0, height: 0 })
     const [previewRenderDebug, setPreviewRenderDebug] = useState(null)
   const [commandFeedCount, setCommandFeedCount] = useState(0)
   const [lastCommandLabel, setLastCommandLabel] = useState(null)
+    const [lastTelemetryFrame, setLastTelemetryFrame] = useState(null)
+    const [manualPageEnabled, setManualPageEnabled] = useState(false)
+    const [manualPageIndex, setManualPageIndex] = useState(0)
 
   useEffect(() => {
     const unsub = wsClient.subscribe('iracing:command', (data) => {
@@ -160,7 +165,7 @@ export default function PresetDesigner({ presetId, onOpenBuild }) {
     if (selectedPreset && engineStatus?.engine_initialized) {
       handleRefreshPreview()
     }
-  }, [activeSection, previewRenderMode, selectedPreset?.sections?.[activeSection]?.length, selectedPreset?.variables])
+  }, [activeSection, previewRenderMode, selectedPreset?.sections?.[activeSection]?.length, selectedPreset?.variables, manualPageEnabled, manualPageIndex, engineStatus?.engine_initialized])
 
   useEffect(() => {
     const node = previewViewportRef.current
@@ -221,11 +226,61 @@ export default function PresetDesigner({ presetId, onOpenBuild }) {
     // Debounce
     if (previewTimeoutRef.current) clearTimeout(previewTimeoutRef.current)
     previewTimeoutRef.current = setTimeout(async () => {
+      const requestSeq = ++previewRequestSeqRef.current
       setPreviewLoading(true)
+      setPreviewImage(null)
+      setPreviewHtml(null)
       try {
+        const projectId = activeProject?.id ?? null
+        let liveFrameData = null
+
+        if (projectId != null) {
+          try {
+            const replayState = await apiGet('/iracing/replay/state')
+            const sessionTime = Number(replayState?.session_time)
+            const focusedCarIdxRaw = replayState?.cam_car_idx
+            const focusedCarIdx = Number.isFinite(Number(focusedCarIdxRaw))
+              ? Number(focusedCarIdxRaw)
+              : null
+
+            if (Number.isFinite(sessionTime)) {
+              const telemetryResponse = await apiPost(`/overlay/frame-data/${projectId}`, {
+                session_time: sessionTime,
+                section: activeSection,
+                focused_car_idx: focusedCarIdx,
+                series_name: '',
+                track_name: activeProject?.track_name || '',
+              })
+
+              if (telemetryResponse?.frame_data) {
+                liveFrameData = telemetryResponse.frame_data
+              }
+            }
+          } catch {
+            // Fall back to server-side sample/plugin frame generation.
+          }
+        }
+
+        setLastTelemetryFrame(liveFrameData)
+
+        // Always render the displayed page index so the preview matches the counter.
+        // manualPageIndex defaults to 0 (page 1) on mount.
+        const pageIndexOverride = Math.max(0, Math.trunc(manualPageIndex))
+        const previewFrameData = liveFrameData
+          ? {
+              ...liveFrameData,
+              overlay_page_index: pageIndexOverride,
+            }
+          : {
+              section: activeSection,
+              overlay_page_index: pageIndexOverride,
+            }
+
         const result = await Promise.race([
           renderPreview(selectedPreset.id, activeSection, {
-            projectId: activeProject?.id ?? null,
+            projectId,
+            frameData: previewFrameData,
+            pageIndex: pageIndexOverride,
             includeRenderedHtml: previewRenderMode === 'html',
             renderScreenshot: previewRenderMode !== 'html',
               includeDebug: true,
@@ -237,6 +292,7 @@ export default function PresetDesigner({ presetId, onOpenBuild }) {
         ])
         const renderWidth = Number(result?.width) || 1920
         const renderHeight = Number(result?.height) || 1080
+        if (requestSeq !== previewRequestSeqRef.current) return
         setPreviewRenderSize({ width: renderWidth, height: renderHeight })
         setPreviewRenderDebug(result?.debug_render || null)
         console.debug('[PresetDesigner][render-preview]', {
@@ -260,15 +316,48 @@ export default function PresetDesigner({ presetId, onOpenBuild }) {
           setPreviewHtml(null)
         }
       } catch (err) {
+        if (requestSeq !== previewRequestSeqRef.current) return
         // Preview errors are non-fatal, but show a helpful toast for timeout/stalls.
         if (err?.message?.includes('timed out')) {
           addToast('Preview refresh timed out. Try Refresh again.', 'warning')
         }
       } finally {
-        setPreviewLoading(false)
+        if (requestSeq === previewRequestSeqRef.current) {
+          setPreviewLoading(false)
+        }
       }
     }, 300)
-  }, [selectedPreset, activeSection, renderPreview, addToast, previewRenderMode])
+  }, [selectedPreset, activeSection, renderPreview, addToast, previewRenderMode, activeProject?.id, activeProject?.track_name, manualPageEnabled, manualPageIndex])
+
+  const paginationControlState = useMemo(() => {
+    const elements = selectedPreset?.sections?.[activeSection]
+    if (!Array.isArray(elements) || elements.length === 0) return null
+
+    const paginationElement = elements.find((elem) => {
+      const pag = elem?.pagination
+      return Boolean(pag && pag.enabled)
+    })
+    if (!paginationElement) return null
+
+    const pagination = paginationElement.pagination || {}
+    const parsedItemsPerPage = Number.parseInt(pagination.items_per_page, 10)
+    const itemsPerPage = Number.isFinite(parsedItemsPerPage) && parsedItemsPerPage > 0 ? parsedItemsPerPage : 10
+    const standingsCount = Array.isArray(lastTelemetryFrame?.standings)
+      ? lastTelemetryFrame.standings.length
+      : Number(previewRenderDebug?.frame_summary?.standings_count) || 0
+    const totalPages = standingsCount > 0 ? Math.max(1, Math.ceil(standingsCount / itemsPerPage)) : 1
+    const effectivePageIndex = totalPages > 0
+      ? Math.max(0, Math.min(totalPages - 1, Math.trunc(manualPageIndex)))
+      : 0
+
+    return {
+      totalPages,
+      effectivePageIndex,
+      itemsPerPage,
+      standingsCount,
+      enabled: standingsCount > 0,
+    }
+  }, [activeSection, lastTelemetryFrame?.standings, manualPageIndex, previewRenderDebug?.frame_summary?.standings_count, selectedPreset])
 
   if (!selectedPreset) {
     return (
@@ -314,6 +403,45 @@ export default function PresetDesigner({ presetId, onOpenBuild }) {
         <button onClick={() => initEngine()} className="rounded-md bg-blue-600 px-2 py-1 text-xxs font-medium text-white hover:bg-blue-500">
           Init Engine
         </button>
+      )}
+
+      {paginationControlState && (
+        <div className="flex items-center gap-1 rounded-md border border-cyan-500/35 bg-cyan-900/15 px-1 py-0.5">
+          <button
+            onClick={() => setManualPageEnabled((v) => !v)}
+            className={`px-2 py-0.5 rounded text-xxs font-medium transition-colors ${manualPageEnabled ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/40' : 'text-cyan-200/80 hover:text-cyan-100'}`}
+            title={manualPageEnabled ? 'Use manual page override' : 'Use automatic page progression'}
+          >
+            {manualPageEnabled ? 'Manual' : 'Auto'}
+          </button>
+          <button
+            onClick={() => {
+              if (!paginationControlState.enabled) return
+              setManualPageEnabled(true)
+              setManualPageIndex((v) => Math.max(0, v - 1))
+            }}
+            disabled={!paginationControlState.enabled}
+            className="px-1.5 py-0.5 rounded text-xxs text-cyan-200 disabled:opacity-40 hover:bg-cyan-500/20"
+            title="Previous page"
+          >
+            -
+          </button>
+          <span className="px-1 text-xxs font-mono text-cyan-100">
+            P{(paginationControlState.effectivePageIndex || 0) + 1}/{paginationControlState.totalPages}
+          </span>
+          <button
+            onClick={() => {
+              if (!paginationControlState.enabled) return
+              setManualPageEnabled(true)
+              setManualPageIndex((v) => Math.min(Math.max(0, paginationControlState.totalPages - 1), v + 1))
+            }}
+            disabled={!paginationControlState.enabled}
+            className="px-1.5 py-0.5 rounded text-xxs text-cyan-200 disabled:opacity-40 hover:bg-cyan-500/20"
+            title="Next page"
+          >
+            +
+          </button>
+        </div>
       )}
     </>
   )
@@ -487,7 +615,7 @@ export default function PresetDesigner({ presetId, onOpenBuild }) {
             {previewLoading ? (
               <>
                 <Loader2 className="w-8 h-8 opacity-60 animate-spin" />
-                <span>Rendering preview...</span>
+                <span>Rendering overlay...</span>
               </>
             ) : (
               <>
@@ -553,8 +681,8 @@ export default function PresetDesigner({ presetId, onOpenBuild }) {
           activeSection={activeSection}
           activeSectionElements={selectedPreset.sections?.[activeSection] || []}
           projectId={activeProject?.id ?? null}
-          onUpdate={async (variables) => {
-            const result = await updatePreset(selectedPreset.id, { variables })
+          onUpdate={async (updates) => {
+            const result = await updatePreset(selectedPreset.id, updates)
             if (result?.success) {
               handleRefreshPreview()
             }

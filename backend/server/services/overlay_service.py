@@ -180,7 +180,7 @@ SAMPLE_FRAME_DATA: dict[str, Any] = {
     "standings": [
         {
             "position": 1, "driver_name": "Lewis Hamilton", "driver_short_name": "HAM", "gap": "Leader",
-            "gap_to_leader": "Leader", "relative": None, "is_player": False, "car_number": "44",
+            "gap_to_leader": "Leader", "relative": "LEADER", "is_player": False, "car_number": "44",
             "qualifying_time": "1:33.215", "fastest_lap_time": "1:33.215", "average_lap_time": "1:35.412",
             "incidents": 1, "laps_completed": 20, "reason_out": "",
             "iracing_cust_id": 11111, "nickname": None, "avatar": None,
@@ -240,7 +240,7 @@ SAMPLE_FRAME_DATA: dict[str, Any] = {
     "qualifying_standings": [
         {
             "position": 1, "driver_name": "Lewis Hamilton", "driver_short_name": "HAM", "car_number": "44",
-            "qualifying_time": "1:33.215", "gap": "Pole", "gap_to_leader": "Pole", "relative": None,
+            "qualifying_time": "1:33.215", "gap": "Pole", "gap_to_leader": "Pole", "relative": "LEADER",
             "fastest_lap_time": "1:33.215", "average_lap_time": None, "incidents": 0, "laps_completed": 0,
             "is_player": False, "iracing_cust_id": 11111, "nickname": None, "avatar": None, "reason_out": "",
         },
@@ -260,7 +260,7 @@ SAMPLE_FRAME_DATA: dict[str, Any] = {
     "final_standings": [
         {
             "position": 1, "driver_name": "Lewis Hamilton", "driver_short_name": "HAM", "car_number": "44",
-            "gap": "Winner", "gap_to_leader": "Winner", "relative": None,
+            "gap": "Winner", "gap_to_leader": "Winner", "relative": "LEADER",
             "fastest_lap_time": "1:33.215", "average_lap_time": "1:35.412", "qualifying_time": "1:33.215",
             "incidents": 1, "laps_completed": 20, "is_player": False, "iracing_cust_id": 11111,
             "nickname": None, "avatar": None, "reason_out": "",

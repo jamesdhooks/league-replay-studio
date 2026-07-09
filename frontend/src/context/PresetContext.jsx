@@ -243,11 +243,17 @@ export function PresetProvider({ children }) {
   // ── Render preview ────────────────────────────────────────────────────
   const renderPreview = useCallback(async (presetId, section, opts = {}) => {
     try {
+      const derivedPageIndex = Number.isFinite(opts.pageIndex)
+        ? Number(opts.pageIndex)
+        : Number.isFinite(opts.frameData?.overlay_page_index)
+          ? Number(opts.frameData.overlay_page_index)
+          : null
       const result = await apiPost(`/presets/${presetId}/render-preview`, {
         section,
         project_id: opts.projectId ?? null,
         element_id: opts.elementId || null,
         frame_data: opts.frameData || null,
+        page_index: derivedPageIndex,
         variables: opts.variables || null,
         analyze_animations: opts.analyzeAnimations ?? true,
         include_rendered_html: opts.includeRenderedHtml ?? false,
@@ -282,10 +288,16 @@ export function PresetProvider({ children }) {
 
   const renderEditorPreview = useCallback(async (presetId, htmlContent, frameData, opts = {}) => {
     try {
+      const derivedPageIndex = Number.isFinite(opts.pageIndex)
+        ? Number(opts.pageIndex)
+        : Number.isFinite(frameData?.overlay_page_index)
+          ? Number(frameData.overlay_page_index)
+          : null
       return await apiPost(`/presets/${presetId}/editor-preview`, {
         html_content: htmlContent,
         project_id: opts.projectId ?? null,
         frame_data: frameData,
+        page_index: derivedPageIndex,
         include_rendered_html: opts.includeRenderedHtml ?? false,
         render_screenshot: opts.renderScreenshot ?? true,
       })

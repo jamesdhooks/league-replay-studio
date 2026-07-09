@@ -9,6 +9,7 @@ GET  /api/iracing/cameras             — available camera groups
 GET  /api/iracing/windows             — list visible windows for manual picker
 GET  /api/iracing/capture-target      — current capture target
 POST /api/iracing/capture-target      — set manual capture target window
+POST /api/iracing/capture-target/resize — resize target client area
 DELETE /api/iracing/capture-target    — reset to auto-detect
 POST /api/iracing/replay/play         — play replay at 1× speed
 POST /api/iracing/replay/pause        — pause replay
@@ -819,6 +820,12 @@ class CaptureTargetRequest(BaseModel):
     hwnd: int = Field(..., description="Window handle to capture")
 
 
+class CaptureTargetResizeRequest(BaseModel):
+    width: int = Field(..., ge=320, le=3840, description="Target client width")
+    height: int = Field(..., ge=240, le=2160, description="Target client height")
+    hwnd: Optional[int] = Field(None, description="Optional target HWND override")
+
+
 @router.post("/capture-target")
 async def set_capture_target_endpoint(body: CaptureTargetRequest) -> dict:
     """Set a manual capture target by window handle."""
@@ -839,6 +846,28 @@ async def set_capture_target_endpoint(body: CaptureTargetRequest) -> dict:
         "width": width,
         "height": height,
     }
+
+
+@router.post("/capture-target/resize")
+async def resize_capture_target_endpoint(body: CaptureTargetResizeRequest) -> dict:
+    """Resize the manual or auto-detected capture target client area."""
+    from server.utils.window_capture import resize_capture_target
+
+    result = resize_capture_target(body.width, body.height, body.hwnd)
+    command_log.record(
+        "capture-target-resize",
+        {
+            "requested_width": body.width,
+            "requested_height": body.height,
+            "hwnd": body.hwnd,
+            "result": result,
+        },
+        result="ok" if result.get("success") else "error",
+        source="api_iracing",
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "Resize failed")
+    return result
 
 
 @router.delete("/capture-target")

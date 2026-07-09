@@ -136,7 +136,7 @@
               {% for entry in quali_rows[:10] %}
               <div class="grid grid-cols-[80px_minmax(0,1.6fr)_100px_140px_120px] gap-3 items-center rounded-sm px-6 py-3 text-primary
                 {% if entry.is_player | default(false) %}overlay-player
-                {% elif loop.first %}overlay-leader
+                {% elif (entry.position | default(0)) == 1 %}overlay-leader
                 {% elif loop.index is even %}overlay-row-alt
                 {% else %}overlay-row{% endif %}">
                 <div class="flex items-center gap-2">
@@ -188,7 +188,7 @@
               {% for entry in result_rows[:10] %}
               <div class="grid grid-cols-[70px_minmax(0,1.4fr)_120px_80px_120px_120px] gap-3 items-center rounded-sm px-6 py-3 text-primary
                 {% if entry.is_player | default(false) %}overlay-player
-                {% elif loop.first %}overlay-leader
+                {% elif (entry.position | default(0)) == 1 %}overlay-leader
                 {% elif loop.index is even %}overlay-row-alt
                 {% else %}overlay-row{% endif %}">
                 <div class="clamp-3xl font-black tabular-nums">{{ entry.position | default(loop.index) }}</div>
@@ -230,12 +230,12 @@
         {% for entry in frame.standings[:12] %}
         <div class="grid grid-cols-[60px_minmax(0,1fr)_100px] gap-3 items-center rounded-sm px-4 py-2 text-primary
           {% if entry.is_player | default(false) %}overlay-player
-          {% elif loop.first %}overlay-leader
+          {% elif (entry.position | default(0)) == 1 %}overlay-leader
           {% elif loop.index is even %}overlay-row-alt
           {% else %}overlay-row{% endif %}">
           <div class="clamp-2xl font-black tabular-nums">{{ entry.position | default(loop.index) }}</div>
           <div class="clamp-xl font-black tracking-wide uppercase">{{ entry.driver_short_name | default('DRV') }}</div>
-          <div class="text-right clamp-lg font-semibold tabular-nums font-mono">{{ entry.gap | default('Leader' if loop.first else '--') }}</div>
+          <div class="text-right clamp-lg font-semibold tabular-nums font-mono">{{ entry.gap | default('Leader' if (entry.position | default(0)) == 1 else '--') }}</div>
         </div>
         {% endfor %}
       </div>

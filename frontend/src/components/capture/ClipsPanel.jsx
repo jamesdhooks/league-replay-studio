@@ -12,6 +12,7 @@ import {
   Clapperboard, Trophy, Flag, Star, FileVideo,
   ChevronDown, ChevronRight, AlertTriangle,
   Radio, Camera, Repeat, Clock, ArrowRight, Circle,
+  Copy, Check,
 } from 'lucide-react'
 
 // ── Section metadata ──────────────────────────────────────────────────────
@@ -72,8 +73,6 @@ function getFailureHint(latestFailure, scriptCaptureError) {
 // ── Script Timeline (read-only, progress bars) ────────────────────────────
 
 function ScriptTimeline({ strategies, currentSegmentId, completedIndex, totalSegments, segmentStates, replaySessionTime }) {
-  if (!strategies?.length) return null
-
   const visibleStrategies = useMemo(
     () => (Array.isArray(strategies)
       ? strategies.filter((strat) => String(strat?.type || '').toLowerCase() !== 'bridge')
@@ -81,10 +80,11 @@ function ScriptTimeline({ strategies, currentSegmentId, completedIndex, totalSeg
     [strategies],
   )
 
-  if (!visibleStrategies.length) return null
-
-  const totalDuration = visibleStrategies.reduce((sum, s) => sum + (s.duration || 0), 0)
-  if (totalDuration <= 0) return null
+  const totalDuration = useMemo(
+    () => visibleStrategies.reduce((sum, s) => sum + (s.duration || 0), 0),
+    [visibleStrategies],
+  )
+  const hasTimeline = visibleStrategies.length > 0 && totalDuration > 0
 
   const {
     containerRef,
@@ -96,7 +96,7 @@ function ScriptTimeline({ strategies, currentSegmentId, completedIndex, totalSeg
     toX,
     handleTimelineScroll,
   } = useTimelineViewport({
-    totalDuration,
+    totalDuration: hasTimeline ? totalDuration : 1,
     fallbackWidth: 800,
   })
 
@@ -175,6 +175,8 @@ function ScriptTimeline({ strategies, currentSegmentId, completedIndex, totalSeg
       inclusion: strat.section === 'race' ? 'highlight' : null,
     }))
   ), [timelineEntries])
+
+  if (!hasTimeline) return null
 
   return (
     <div className="flex-1 min-h-0 flex flex-col overflow-hidden" ref={containerRef}>
@@ -293,8 +295,45 @@ function ScriptTimeline({ strategies, currentSegmentId, completedIndex, totalSeg
 
 // ── Capture Action Log ────────────────────────────────────────────────────
 
+function buildStructuredCaptureLog(rawLog, entries) {
+  const rawEntries = Array.isArray(rawLog) ? rawLog : []
+  const failures = rawEntries.filter(entry => entry?.success === false)
+  const retries = rawEntries.filter(entry => entry?.action === 'retry')
+  const latestFailure = failures[failures.length - 1] || null
+
+  return {
+    schema: 'league-replay-studio.capture-log',
+    schema_version: 1,
+    copied_at: new Date().toISOString(),
+    entry_count: rawEntries.length,
+    failure_count: failures.length,
+    retry_count: retries.length,
+    latest_failure: latestFailure,
+    entries: rawEntries,
+    display_entries: entries,
+  }
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.setAttribute('readonly', '')
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  textarea.select()
+  document.execCommand('copy')
+  document.body.removeChild(textarea)
+}
+
 function CaptureActionLog({ log, maxVisible = 50, expandedByDefault = false, maxHeightClass = 'max-h-48', variant = 'card' }) {
   const [expanded, setExpanded] = useState(expandedByDefault)
+  const [copied, setCopied] = useState(false)
   const scrollRef = useRef(null)
   const prevCountRef = useRef(0)
   const isSidebar = variant === 'sidebar'
@@ -308,21 +347,42 @@ function CaptureActionLog({ log, maxVisible = 50, expandedByDefault = false, max
     prevCountRef.current = entries.length
   }, [expanded, entries.length])
 
-  if (!entries.length) return null
-
   const displayLog = expanded ? entries : entries.slice(-maxVisible)
+  const handleCopy = useCallback(async () => {
+    const payload = JSON.stringify(buildStructuredCaptureLog(log, entries), null, 2)
+    await copyTextToClipboard(payload)
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1400)
+  }, [entries, log])
+
+  if (!entries.length) return null
 
   return (
     <div className={`h-full min-h-0 flex flex-col ${isSidebar ? 'gap-0' : 'gap-1'}`}>
-      <button
-        onClick={() => setExpanded(prev => !prev)}
-        aria-label={expanded ? 'Collapse capture log' : 'Expand capture log'}
-        className={`flex items-center gap-1.5 text-xxs font-semibold uppercase tracking-wider hover:text-text-secondary transition-colors ${isSidebar ? 'px-3 py-2 border-b border-border text-text-secondary' : 'text-text-tertiary'}`}
-      >
-        {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-        <Radio className="w-3 h-3" />
-        Capture Log ({entries.length} entries)
-      </button>
+      <div className={`flex items-center gap-1 ${isSidebar ? 'px-3 py-2 border-b border-border text-text-secondary' : 'text-text-tertiary'}`}>
+        <button
+          onClick={() => setExpanded(prev => !prev)}
+          aria-label={expanded ? 'Collapse capture log' : 'Expand capture log'}
+          className="min-w-0 flex-1 flex items-center gap-1.5 text-xxs font-semibold uppercase tracking-wider hover:text-text-secondary transition-colors text-left"
+        >
+          {expanded ? <ChevronDown className="w-3 h-3 shrink-0" /> : <ChevronRight className="w-3 h-3 shrink-0" />}
+          <Radio className="w-3 h-3 shrink-0" />
+          <span className="truncate">Capture Log ({entries.length} entries)</span>
+        </button>
+        <button
+          type="button"
+          onClick={handleCopy}
+          aria-label="Copy structured capture log"
+          title={copied ? 'Copied' : 'Copy structured capture log'}
+          className={`h-6 w-6 shrink-0 inline-flex items-center justify-center rounded-md border transition-colors ${
+            copied
+              ? 'border-success/30 bg-success/10 text-success'
+              : 'border-border text-text-tertiary hover:text-text-primary hover:bg-bg-hover'
+          }`}
+        >
+          {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+        </button>
+      </div>
 
       {expanded && (
         <div
@@ -345,12 +405,12 @@ function ScriptSegmentLog({ strategies, currentSegmentId, completedIndex, maxHei
   if (!strategies?.length) return null
 
   return (
-    <div className="space-y-1">
-      <div className="flex items-center gap-1.5 text-xxs font-semibold text-text-tertiary uppercase tracking-wider">
+    <div className="border-t border-border bg-bg-primary">
+      <div className="flex items-center gap-1.5 px-3 py-2 border-b border-border bg-bg-secondary text-xxs font-semibold text-text-tertiary uppercase tracking-wider">
         <Clock className="w-3 h-3" />
         Script Log ({strategies.length} segments)
       </div>
-      <div className={`${maxHeightClass} overflow-y-auto rounded-md border border-border bg-bg-primary p-1.5 space-y-1`}>
+      <div className={`${maxHeightClass} overflow-y-auto`}>
         {strategies.map((strat, idx) => (
           <SegmentStrategyCard
             key={strat.segment_id || idx}
@@ -385,12 +445,12 @@ function SegmentStrategyCard({ strategy, isCurrent, isCompleted }) {
   const Icon = SECTION_ICONS[strategy.section] || Film
 
   return (
-    <div className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md border transition-all
+    <div className={`flex items-center gap-2 px-3 py-2 border-b border-border-subtle last:border-b-0 transition-colors
       ${isCurrent
-        ? 'border-accent bg-accent/10 ring-1 ring-accent/30'
+        ? 'bg-accent/10 ring-1 ring-inset ring-accent/35'
         : isCompleted
-          ? 'border-success/30 bg-success/5'
-          : 'border-border bg-bg-primary'
+          ? 'bg-success/5'
+          : 'bg-bg-primary'
       }`}
     >
       <div className="shrink-0">
@@ -810,13 +870,13 @@ export default function ClipsPanel({
 
       {/* ── Script Segments ─────────────────────────────────────────────── */}
       {showSegmentLog && scriptCaptureStrategies.length > 0 && (
-        <div className="space-y-1">
-          <div className="flex items-center gap-1.5 text-xxs font-semibold text-text-tertiary uppercase tracking-wider">
+        <div className="border border-border bg-bg-primary">
+          <div className="flex items-center gap-1.5 px-3 py-2 border-b border-border bg-bg-secondary text-xxs font-semibold text-text-tertiary uppercase tracking-wider">
             <Clock className="w-3 h-3" />
             Script Segments ({scriptCaptureStrategies.length})
           </div>
 
-          <div className="space-y-1 max-h-64 overflow-y-auto">
+          <div className="max-h-64 overflow-y-auto">
             {scriptCaptureStrategies.map((strat, idx) => (
               <SegmentStrategyCard
                 key={strat.segment_id || idx}

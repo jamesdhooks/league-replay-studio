@@ -39,8 +39,8 @@ function buildAutoProjectName(activeSession, raceDetails) {
     activeSession?.race_week,
   )
   const track = firstNonEmpty(
-    raceDetails?.track_name,
     activeSession?.track_name,
+    raceDetails?.track_name,
   )
 
   if (series && raceNum && track) {
@@ -269,7 +269,7 @@ function NewProjectWizard({ onClose, onCreated }) {
 // â”€â”€ Step Components â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function Step1_Name({ name, setName, trackName, setTrackName, activeSession, raceDetails }) {
-  const autoTrackName = firstNonEmpty(raceDetails?.track_name, activeSession?.track_name)
+  const autoTrackName = firstNonEmpty(activeSession?.track_name, raceDetails?.track_name)
   const autoProjectName = buildAutoProjectName(activeSession, raceDetails)
 
   return (

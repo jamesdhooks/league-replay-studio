@@ -83,6 +83,11 @@ const DEFAULT_PARAMS = {
   mixTargets: {},               // Per-type target share of script duration (0–1). UI display only — drives mixMin/mixMax suggestions.
   mixMin: {},                   // Per-type soft floor (0–1). Floor-rebalance pass swaps in under-floor types.
   mixMax: {},                   // Per-type hard cap (0–1). Selection of a type stops at this share.
+  // ── Driver Coverage (Balanced Selection v3 — driver layer) ──────────
+  driverCoverageStrength: 35,   // 0–100. 0 = disabled. Controls how strongly driver-coverage factors influence selection.
+  newDriverBoost: 1.40,         // Factor ceiling for events introducing only unseen drivers (1.0 = off).
+  repeatDriverPenalty: 0.25,    // Max fractional penalty applied when all involved drivers are already covered.
+  targetUniqueDriverShare: 0.60, // Fraction of the field to cover before driver rebalance is considered met (0.30–0.90).
 }
 
 /** Event type labels for UI display */
@@ -406,6 +411,11 @@ export function HighlightProvider({ children }) {
           bucket_repeat_penalty: params.bucketRepeatPenalty ?? 0.25,
           mix_min: params.mixMin || {},
           mix_max: params.mixMax || {},
+          // Driver coverage
+          driver_coverage_strength: params.driverCoverageStrength ?? 35,
+          new_driver_boost: params.newDriverBoost ?? 1.40,
+          repeat_driver_penalty: params.repeatDriverPenalty ?? 0.25,
+          target_unique_driver_share: params.targetUniqueDriverShare ?? 0.60,
         },
         tuning: {
           normalizationMode: params.normalizationMode ?? 'cross_type',
@@ -473,6 +483,11 @@ export function HighlightProvider({ children }) {
           bucket_repeat_penalty: params.bucketRepeatPenalty ?? 0.25,
           mix_min: params.mixMin || {},
           mix_max: params.mixMax || {},
+          // Driver coverage
+          driver_coverage_strength: params.driverCoverageStrength ?? 35,
+          new_driver_boost: params.newDriverBoost ?? 1.40,
+          repeat_driver_penalty: params.repeatDriverPenalty ?? 0.25,
+          target_unique_driver_share: params.targetUniqueDriverShare ?? 0.60,
         },
         tuning: {
           normalizationMode: params.normalizationMode ?? 'cross_type',

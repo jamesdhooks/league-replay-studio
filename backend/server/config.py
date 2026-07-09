@@ -36,6 +36,7 @@ DEFAULT_CONFIG: dict = {
     "iracing_replay_dir": "",
     "default_project_dir": "",
     "capture_software": "obs",
+    "capture_resolution": "1080p",
     "capture_hotkey_start": "F9",
     "capture_hotkey_stop": "F9",
     "encoding_preset": "youtube_1080p",

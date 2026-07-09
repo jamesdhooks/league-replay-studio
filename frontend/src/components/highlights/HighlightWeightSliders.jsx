@@ -4,7 +4,7 @@ import { EVENT_COLORS } from '../../context/TimelineContext'
 import { useAnalysis } from '../../context/AnalysisContext'
 import { useIRacing } from '../../context/IRacingContext'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
-import { Wand2, SlidersHorizontal, Info, ListOrdered, Target, Sliders, Film, X, Camera, ChevronDown, Shuffle, HelpCircle, Save, Trash2, BookMarked } from 'lucide-react'
+import { Wand2, SlidersHorizontal, Info, ListOrdered, Target, Sliders, Film, X, Camera, ChevronDown, Shuffle, HelpCircle, Save, Trash2, BookMarked, Users } from 'lucide-react'
 import HighlightControlsHelp from './HighlightControlsHelp'
 import Tooltip from '../ui/Tooltip'
 import CollapsibleSection from '../ui/CollapsibleSection'
@@ -397,6 +397,63 @@ export default function HighlightWeightSliders() {
                 />
               </div>
             </details>
+          </div>
+        </CollapsibleSection>
+      </div>
+
+      {/* Driver Coverage */}
+      <div className="pt-2 border-t border-border-subtle space-y-2">
+        <CollapsibleSection
+          icon={Users}
+          label="Driver Coverage"
+          open={!collapsed.driverCoverage}
+          onToggle={() => toggle('driverCoverage')}
+        >
+          <div className="mt-2 space-y-2.5">
+            <LabeledSlider
+              label="Coverage Strength"
+              tooltip="How strongly to push for field-wide driver coverage. 0 = disabled (pure score-greedy). Higher values boost events featuring drivers not yet seen in the reel and gently penalise repeated drivers. Still favours front-runners and story moments."
+              min={0}
+              max={100}
+              step={5}
+              value={params.driverCoverageStrength ?? 35}
+              onChange={v => setParams(p => ({ ...p, driverCoverageStrength: v }))}
+              valueDisplay={`${params.driverCoverageStrength ?? 35}`}
+              labelWidth="7rem"
+            />
+            <LabeledSlider
+              label="New Driver Boost"
+              tooltip="Score multiplier ceiling for events that introduce a driver not yet featured in the reel. 1.0 = no boost. Works in proportion to Coverage Strength."
+              min={1.0}
+              max={2.0}
+              step={0.05}
+              value={params.newDriverBoost ?? 1.40}
+              onChange={v => setParams(p => ({ ...p, newDriverBoost: v }))}
+              valueDisplay={`${(params.newDriverBoost ?? 1.40).toFixed(2)}×`}
+              labelWidth="7rem"
+            />
+            <LabeledSlider
+              label="Repeat Penalty"
+              tooltip="Fractional score penalty applied when every involved driver has already been shown. 0 = no penalty. Works in proportion to Coverage Strength."
+              min={0}
+              max={0.75}
+              step={0.05}
+              value={params.repeatDriverPenalty ?? 0.25}
+              onChange={v => setParams(p => ({ ...p, repeatDriverPenalty: v }))}
+              valueDisplay={(params.repeatDriverPenalty ?? 0.25).toFixed(2)}
+              labelWidth="7rem"
+            />
+            <LabeledSlider
+              label="Coverage Target"
+              tooltip="Fraction of the field (0.30–0.90) to aim for when Coverage Strength > 0. Once this share of drivers appears in the reel the rebalance pass stops swapping."
+              min={0.30}
+              max={0.90}
+              step={0.05}
+              value={params.targetUniqueDriverShare ?? 0.60}
+              onChange={v => setParams(p => ({ ...p, targetUniqueDriverShare: v }))}
+              valueDisplay={`${Math.round((params.targetUniqueDriverShare ?? 0.60) * 100)}%`}
+              labelWidth="7rem"
+            />
           </div>
         </CollapsibleSection>
       </div>

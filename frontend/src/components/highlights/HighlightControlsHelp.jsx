@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   X, ListOrdered, Target, Shuffle, Sliders, Film, Camera,
-  HelpCircle, ChevronRight, Info, Wand2,
+  HelpCircle, ChevronRight, Info, Wand2, Users,
 } from 'lucide-react'
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -141,6 +141,7 @@ const SECTIONS = [
             { icon: ListOrdered, label: 'Event Priorities',  color: 'text-accent', desc: 'Weight sliders that control how much each event type is valued relative to others.' },
             { icon: Target,       label: 'Minimum Score',    color: 'text-event-fastest', desc: 'Filter out low-severity events before selection even begins.' },
             { icon: Shuffle,      label: 'Mix & Diversity',  color: 'text-event-overtake', desc: 'Prevent any single event type from dominating. Set floors, caps, and decay.' },
+            { icon: Users,        label: 'Driver Coverage',  color: 'text-event-incident', desc: 'Softly broaden field coverage without overriding strong race-story events.' },
             { icon: Sliders,      label: 'Direction Tuning', color: 'text-event-battle', desc: 'Race-context boosts, driver focus, PiP behaviour, and phase bonuses.' },
             { icon: Film,         label: 'Clip Padding',     color: 'text-event-pit', desc: 'How many seconds before and after each event to include in the clip.' },
             { icon: Camera,       label: 'Camera Selection', color: 'text-event-leader', desc: 'Which camera groups to use and how to weight them during playback.' },
@@ -376,6 +377,92 @@ const SECTIONS = [
         <Note>
           All three diversity mechanisms are proportional to Diversity Strength. Setting it to 0
           deactivates all of them at once — no decay, no floor, no bucket penalty.
+        </Note>
+      </div>
+    ),
+  },
+
+  {
+    id: 'drivercoverage',
+    icon: Users,
+    label: 'Driver Coverage',
+    content: (
+      <div className="space-y-5">
+        <SectionTitle>Driver Coverage</SectionTitle>
+        <Body>
+          By default the algorithm is pure score-greedy — a race where three front-runners battle
+          constantly will fill your entire reel with those same faces. Driver Coverage adds a soft
+          incentive to spread airtime across the field, without sacrificing race-story or hard-earned
+          S/A-tier moments.
+        </Body>
+
+        <div className="space-y-2">
+          {[
+            { label: 'Score factor',     desc: 'Events featuring drivers not yet seen get a gentle score boost. Events where every driver is already well covered receive a small penalty.' },
+            { label: 'Rebalance pass',   desc: 'After main selection a swap pass replaces the weakest B/C non-mandatory clips with new-driver candidates — subject to a score floor so quality never collapses.' },
+            { label: 'Always safe',      desc: 'Mandatory events (race start/finish), forced overrides, and S/A-tier clips are never touched by the rebalance pass.' },
+          ].map(({ label, desc }) => (
+            <div key={label} className="flex gap-3 p-2.5 rounded-xl bg-bg-primary border border-border">
+              <ChevronRight size={13} className="text-accent shrink-0 mt-0.5" />
+              <div>
+                <p className="text-xs font-medium text-text-primary">{label}</p>
+                <p className="text-xxs text-text-tertiary mt-0.5 leading-relaxed">{desc}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Coverage Strength */}
+        <SubLabel>Coverage Strength — master knob</SubLabel>
+        <GuideBox>
+          <DemoSlider label="Coverage Strength" value={35} min={0} max={100} displayValue="35" accent />
+        </GuideBox>
+        <Body>
+          The master dial for this layer. <strong className="text-text-primary">0</strong> disables
+          everything — no factor is applied and no swaps occur, identical to pre-feature behaviour.
+          The default of <strong className="text-text-primary">35</strong> gives a gentle nudge towards
+          broader coverage without overriding race story. Push to
+          <strong className="text-text-primary"> 70–100</strong> only if you explicitly want equal
+          airtime over narrative quality.
+        </Body>
+
+        {/* New Driver Boost + Repeat Penalty */}
+        <SubLabel>Boost &amp; Penalty knobs</SubLabel>
+        <GuideBox>
+          <DemoSlider label="New Driver Boost"  value={1.40} min={1.0} max={2.0} displayValue="1.40×" />
+          <DemoSlider label="Repeat Penalty"    value={0.25} min={0}   max={0.75} displayValue="0.25" />
+        </GuideBox>
+        <div className="space-y-2">
+          <Body>
+            <strong className="text-text-primary">New Driver Boost:</strong> The score multiplier
+            ceiling applied when every driver in an event is appearing for the first time in the reel.
+            1.0 = no boost. 1.40 (default) means a fully-unseen-driver event can score up to 40% higher
+            than its raw score suggests.
+          </Body>
+          <Body>
+            <strong className="text-text-primary">Repeat Penalty:</strong> The maximum fractional score
+            reduction when every involved driver is already well represented. 0.25 (default) means a
+            fully-repeated event scores at most 25% lower. Both knobs scale proportionally with Coverage
+            Strength — at strength 0 they have zero effect.
+          </Body>
+        </div>
+
+        {/* Coverage Target */}
+        <SubLabel>Coverage Target</SubLabel>
+        <GuideBox>
+          <DemoSlider label="Coverage Target" value={0.60} min={0.30} max={0.90} displayValue="60%" />
+        </GuideBox>
+        <Body>
+          Fraction of the field the rebalance pass aims to cover before stopping. At the default
+          <strong className="text-text-primary"> 60%</strong> the pass swaps clips until at least
+          60% of all race drivers have appeared at least once, or the swap cap (4) is reached,
+          whichever comes first.
+        </Body>
+
+        <Note>
+          Driver Coverage operates independently of Mix &amp; Diversity. You can have both active
+          at the same time — Coverage Strength controls driver breadth, Diversity Strength controls
+          event-type breadth. Setting either to 0 is a strict no-op.
         </Note>
       </div>
     ),

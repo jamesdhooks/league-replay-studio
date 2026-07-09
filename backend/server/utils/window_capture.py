@@ -233,6 +233,179 @@ def find_iracing_window() -> Optional[dict]:
     return _get_window_rect(hwnd)
 
 
+def _get_client_size(hwnd: int) -> Optional[dict]:
+    """Return the target window client-area size."""
+    if not _IS_WINDOWS:
+        return None
+
+    try:
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        if not user32.IsWindow(hwnd):
+            return None
+
+        rect = ctypes.wintypes.RECT()
+        if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
+            return None
+
+        return {
+            "width": max(0, int(rect.right - rect.left)),
+            "height": max(0, int(rect.bottom - rect.top)),
+        }
+    except Exception:
+        logger.debug("Failed to read client size for hwnd=%s", hwnd, exc_info=True)
+        return None
+
+
+def resize_capture_target(width: int, height: int, hwnd: Optional[int] = None) -> dict:
+    """Resize the selected/auto-detected capture target to a client resolution.
+
+    ``width`` and ``height`` are client-area pixels. The outer window frame is
+    expanded as needed so WGC/PrintWindow capture sees the requested game area.
+    """
+    if not _IS_WINDOWS:
+        return {
+            "success": False,
+            "error": "Window resizing is only supported on Windows",
+        }
+
+    target_width = int(width or 0)
+    target_height = int(height or 0)
+    if target_width < 320 or target_height < 240:
+        return {
+            "success": False,
+            "error": f"Invalid capture resolution {target_width}x{target_height}",
+        }
+
+    target_hwnd = int(hwnd or 0) or _find_iracing_hwnd()
+    if not target_hwnd:
+        return {
+            "success": False,
+            "error": "Capture target window not found",
+        }
+
+    try:
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        if not user32.IsWindow(target_hwnd):
+            return {
+                "success": False,
+                "error": f"Capture target hwnd={target_hwnd} is no longer valid",
+            }
+
+        title_buf = ctypes.create_unicode_buffer(256)
+        user32.GetWindowTextW(target_hwnd, title_buf, 256)
+        title = title_buf.value.strip()
+
+        SW_RESTORE = 9
+        if user32.IsIconic(target_hwnd) or user32.IsZoomed(target_hwnd):
+            user32.ShowWindow(target_hwnd, SW_RESTORE)
+            time.sleep(0.2)
+
+        before_client = _get_client_size(target_hwnd) or {}
+
+        GWL_STYLE = -16
+        GWL_EXSTYLE = -20
+        get_window_long = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+        get_window_long.restype = ctypes.c_longlong
+        style = int(get_window_long(target_hwnd, GWL_STYLE))
+        ex_style = int(get_window_long(target_hwnd, GWL_EXSTYLE))
+        has_menu = bool(user32.GetMenu(target_hwnd))
+
+        desired_rect = ctypes.wintypes.RECT(0, 0, target_width, target_height)
+        adjusted = False
+        adjust_for_dpi = getattr(user32, "AdjustWindowRectExForDpi", None)
+        if adjust_for_dpi:
+            dpi = 96
+            get_dpi_for_window = getattr(user32, "GetDpiForWindow", None)
+            if get_dpi_for_window:
+                dpi = int(get_dpi_for_window(target_hwnd) or 96)
+            adjusted = bool(adjust_for_dpi(
+                ctypes.byref(desired_rect),
+                style,
+                has_menu,
+                ex_style,
+                dpi,
+            ))
+
+        if not adjusted:
+            adjusted = bool(user32.AdjustWindowRectEx(
+                ctypes.byref(desired_rect),
+                style,
+                has_menu,
+                ex_style,
+            ))
+
+        if not adjusted:
+            return {
+                "success": False,
+                "error": "Windows could not calculate the adjusted window rectangle",
+            }
+
+        outer_width = int(desired_rect.right - desired_rect.left)
+        outer_height = int(desired_rect.bottom - desired_rect.top)
+
+        current_rect = ctypes.wintypes.RECT()
+        if not user32.GetWindowRect(target_hwnd, ctypes.byref(current_rect)):
+            return {
+                "success": False,
+                "error": "Unable to read current capture target position",
+            }
+
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        ok = bool(user32.SetWindowPos(
+            target_hwnd,
+            None,
+            int(current_rect.left),
+            int(current_rect.top),
+            outer_width,
+            outer_height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        ))
+        if not ok:
+            err = ctypes.windll.kernel32.GetLastError()  # type: ignore[attr-defined]
+            return {
+                "success": False,
+                "error": f"SetWindowPos failed with Win32 error {err}",
+            }
+
+        time.sleep(0.2)
+        after_client = _get_client_size(target_hwnd) or {}
+
+        result = {
+            "success": True,
+            "hwnd": target_hwnd,
+            "title": title,
+            "requested_width": target_width,
+            "requested_height": target_height,
+            "width": int(after_client.get("width") or 0) or None,
+            "height": int(after_client.get("height") or 0) or None,
+            "before_width": int(before_client.get("width") or 0) or None,
+            "before_height": int(before_client.get("height") or 0) or None,
+            "outer_width": outer_width,
+            "outer_height": outer_height,
+        }
+        logger.info(
+            "Capture target resized: hwnd=%s title=%r client %sx%s -> %sx%s requested=%sx%s",
+            target_hwnd,
+            title,
+            result["before_width"],
+            result["before_height"],
+            result["width"],
+            result["height"],
+            target_width,
+            target_height,
+        )
+        return result
+
+    except Exception as exc:
+        logger.warning("Failed to resize capture target", exc_info=True)
+        return {
+            "success": False,
+            "error": str(exc),
+            "hwnd": target_hwnd,
+        }
+
+
 def _capture_with_printwindow(hwnd: int) -> Optional["Image.Image"]:
     """Capture window content using Win32 PrintWindow API.
 

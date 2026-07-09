@@ -498,9 +498,9 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
   }
 
   // Pass 2: Bucket fill — Balanced Selection v3 marginal-utility loop.
-  // Effective score = score × type_decay × quota_pressure × bucket_diversity.
-  // When diversityStrength === 0, all factors collapse to 1.0 and behavior is
-  // identical to the legacy strict-by-score selection.
+  // Effective score = score × type_decay × quota_pressure × bucket_diversity × driver_coverage.
+  // When diversityStrength === 0, type factors collapse to 1.0 (legacy).
+  // When driverCoverageStrength === 0, driver factor also collapses to 1.0.
   const diversityStrength = Math.max(0, Number(params.diversityStrength ?? 0))
   const divScale = diversityStrength / 50
   const typeDecayBase = Math.max(0.01, Math.min(1.0, Number(params.typeDecayBase ?? 0.85)))
@@ -510,10 +510,17 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
   const mixMax = params.mixMax || {}
   const target = Math.max(targetDuration || 1, 1)
 
+  // Driver coverage params
+  const driverCoverageStrength = Math.max(0, Math.min(100, Number(params.driverCoverageStrength ?? 35)))
+  const driverScale = driverCoverageStrength / 100
+  const newDriverBoost = Math.max(1.0, Number(params.newDriverBoost ?? 1.40))
+  const repeatDriverPenalty = Math.max(0, Math.min(1.0, Number(params.repeatDriverPenalty ?? 0.25)))
+
   // Track per-type stats from Pass 1 (must-have / overrides already in highlightIds).
   const typeCount = {}
   const typeUsedDuration = {}
   const bucketTypeCount = {}  // key: `${bucket}|${type}`
+  const seenDriverIds = new Set()  // driver IDs already represented in the selected timeline
   for (const evt of scored) {
     if (!highlightIds.has(evt.id)) continue
     const t = evt.event_type
@@ -522,6 +529,7 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     typeUsedDuration[t] = (typeUsedDuration[t] || 0) + evt.selectionDuration
     const k = `${b}|${t}`
     bucketTypeCount[k] = (bucketTypeCount[k] || 0) + 1
+    if (Array.isArray(evt.involved_drivers)) evt.involved_drivers.forEach(d => seenDriverIds.add(d))
   }
 
   const typeDecayFactor = (count) =>
@@ -538,6 +546,19 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
   const bucketDivFactor = (b, t) => {
     const c = bucketTypeCount[`${b}|${t}`] || 0
     return (divScale <= 0 || c <= 0) ? 1.0 : 1.0 / (1.0 + bucketRepeatPenalty * c * divScale)
+  }
+  // Driver coverage factor: boosts events with unseen drivers, gently penalises full repeats.
+  // Collapses to 1.0 when driverScale === 0.
+  const driverCoverageFactor = (evt) => {
+    if (driverScale <= 0) return 1.0
+    const involved = Array.isArray(evt.involved_drivers) ? evt.involved_drivers : []
+    if (involved.length === 0) return 1.0
+    const unseenCount = involved.filter(d => !seenDriverIds.has(d)).length
+    const unseenFrac = unseenCount / involved.length
+    const rawBoost = unseenFrac * (newDriverBoost - 1.0)
+    const rawPenalty = (1.0 - unseenFrac) * repeatDriverPenalty
+    const rawFactor = 1.0 + rawBoost - rawPenalty
+    return 1.0 + (rawFactor - 1.0) * driverScale
   }
 
   // Build the eligible pool once, then re-rank each iteration so diversity
@@ -595,6 +616,7 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
       const q = quotaPressure(t)
       if (q <= 0) continue
       const eff = evt.score * q * typeDecayFactor(typeCount[t] || 0) * bucketDivFactor(b, t)
+        * driverCoverageFactor(evt)
         + (tierPriMap[evt.tier] || 0) * 0.001
       if (eff > bestEff) {
         bestEff = eff
@@ -611,12 +633,65 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     typeCount[t] = (typeCount[t] || 0) + 1
     typeUsedDuration[t] = (typeUsedDuration[t] || 0) + bestEvt.selectionDuration
     bucketTypeCount[`${b}|${t}`] = (bucketTypeCount[`${b}|${t}`] || 0) + 1
+    if (Array.isArray(bestEvt.involved_drivers)) bestEvt.involved_drivers.forEach(d => seenDriverIds.add(d))
   }
 
   // Demote any remaining eligible events not selected → full-video tier.
   for (const evt of eligible) {
     if (!placed.has(evt.id) && !highlightIds.has(evt.id)) {
       fullVideoIds.add(evt.id)
+    }
+  }
+
+  // Pass 4 (client) — Driver coverage rebalance.
+  // If unique-driver coverage is below targetUniqueDriverShare and strength > 0,
+  // swap out low-tier repeated-driver clips for best new-driver candidates.
+  const MANDATORY_SET = new Set(['race_start', 'race_finish', 'restart'])
+  const targetUniqueDriverShare = Math.max(0.10, Math.min(1.0, Number(params.targetUniqueDriverShare ?? 0.60)))
+  const driverSwapScoreFloor = 0.85
+  const maxDriverSwaps = 4
+  const totalDrivers = drivers.length || 0
+  if (driverScale > 0 && totalDrivers > 0) {
+    const coverageTarget = Math.ceil(totalDrivers * targetUniqueDriverShare)
+    let swapsDone = 0
+    while (seenDriverIds.size < coverageTarget && swapsDone < maxDriverSwaps) {
+      // Best unselected event introducing at least one uncovered driver
+      let bestCand = null, bestCandScore = -1
+      for (const evt of eligible) {
+        if (highlightIds.has(evt.id)) continue
+        if (!Array.isArray(evt.involved_drivers)) continue
+        const hasNew = evt.involved_drivers.some(d => !seenDriverIds.has(d))
+        if (!hasNew) continue
+        if (evt.score > bestCandScore) { bestCandScore = evt.score; bestCand = evt }
+      }
+      if (!bestCand) break
+      // Find the weakest swappable included event: non-mandatory, tier B/C, no new drivers
+      const included = scored.filter(e => highlightIds.has(e.id))
+        .sort((a, b) => a.score - b.score)
+      let swapTarget = null
+      for (const evt of included) {
+        if (MANDATORY_SET.has(evt.event_type)) continue
+        if (evt.override === 'highlight') continue  // force-included by user
+        if (evt.tier === 'S' || evt.tier === 'A') continue
+        if (Array.isArray(evt.involved_drivers) && evt.involved_drivers.some(d => !seenDriverIds.has(d))) continue
+        if (bestCandScore < evt.score * driverSwapScoreFloor) continue
+        swapTarget = evt
+        break
+      }
+      if (!swapTarget) break
+      // Perform swap
+      highlightIds.delete(swapTarget.id)
+      fullVideoIds.add(swapTarget.id)
+      placed.delete(swapTarget.id)
+      highlightIds.add(bestCand.id)
+      placed.add(bestCand.id)
+      // Rebuild seenDriverIds
+      seenDriverIds.clear()
+      for (const e of scored) {
+        if (!highlightIds.has(e.id)) continue
+        if (Array.isArray(e.involved_drivers)) e.involved_drivers.forEach(d => seenDriverIds.add(d))
+      }
+      swapsDone++
     }
   }
 
@@ -679,8 +754,10 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
       evt.involved_drivers.forEach(d => allDriverIds.add(d))
     }
   }
-  const totalDrivers = drivers.length || 1
-  const driverCoveragePct = Math.round((allDriverIds.size / totalDrivers) * 100)
+  const _totalDrivers = drivers.length || 1
+  const driverCoveragePct = Math.round((allDriverIds.size / _totalDrivers) * 100)
+  const _coverageTarget = Math.ceil(_totalDrivers * (params.targetUniqueDriverShare ?? 0.60))
+  const driverTargetMet = allDriverIds.size >= _coverageTarget
 
   // Event type distribution (selected highlights)
   const typeCounts = {}
@@ -713,6 +790,13 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     mixTargets: params.mixTargets || {},
     floorsUnmet,
     capsHit,
+    // Driver coverage diagnostics
+    driverCoverageStrength: params.driverCoverageStrength ?? 35,
+    driverUniqueCount: allDriverIds.size,
+    driverTotalCount: _totalDrivers,
+    driverCoveragePct,
+    driverTargetMet,
+    driverTargetUniqueShare: params.targetUniqueDriverShare ?? 0.60,
   }
 
   // Tier distribution
@@ -732,7 +816,9 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     pacing: pacingScore,
     driverCoverage: driverCoveragePct,
     driverCount: allDriverIds.size,
-    totalDrivers,
+    totalDrivers: _totalDrivers,
+    driverTargetMet,
+    driverTargetCount: _coverageTarget,
     typeCounts,
     tierCounts,
     selectionDiagnostics,

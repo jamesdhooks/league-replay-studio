@@ -7,7 +7,7 @@ import { useOverlaySettings } from '../../context/OverlaySettingsContext'
 import { useToast } from '../../context/ToastContext'
 import { useLLM } from '../../context/LLMContext'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
-import { apiPost } from '../../services/api'
+import { apiGet, apiPost } from '../../services/api'
 import EditorPreview from './EditorPreview'
 import DataContextInspector from './DataContextInspector'
 import AnimationPicker from './AnimationPicker'
@@ -324,6 +324,9 @@ export default function OverlayEditor({ designId }) {
   const [aiShowDetails, setAiShowDetails] = useState(false)
   const [elementPickerActive, setElementPickerActive] = useState(false)
   const [dataContext, setDataContext] = useState(null)
+  const [liveFrameData, setLiveFrameData] = useState(null)
+  const [manualPageEnabled, setManualPageEnabled] = useState(false)
+  const [manualPageIndex, setManualPageIndex] = useState(0)
   const [previewHighlightSelector, setPreviewHighlightSelector] = useState(null)
   const [previewHighlightNonce, setPreviewHighlightNonce] = useState(0)
   const previewSection = activeSection
@@ -337,6 +340,9 @@ export default function OverlayEditor({ designId }) {
   const previewTimerRef = useRef(null)
   const aiSnapshotsRef = useRef({})
   const aiConversationRef = useRef(null)
+  // Ref-based access to liveFrameData so it doesn't become a dep of triggerPreview
+  // (avoids re-rendering every second due to the 1s polling interval).
+  const liveFrameDataRef = useRef(null)
 
   const htmlElementIndex = useMemo(() => buildHtmlElementIndex(htmlContent), [htmlContent])
 
@@ -453,6 +459,159 @@ export default function OverlayEditor({ designId }) {
     setAiSelectedArchiveId('')
   }, [designId])
 
+  // Keep ref in sync with liveFrameData state without adding it to triggerPreview deps.
+  useEffect(() => {
+    liveFrameDataRef.current = liveFrameData
+  }, [liveFrameData])
+
+  // Track htmlContent in a ref so the availability-change effect below can
+  // access the current content without listing it in its own deps.
+  const htmlContentRef = useRef(htmlContent)
+  useEffect(() => { htmlContentRef.current = htmlContent }, [htmlContent])
+
+  // ── Debounced preview rendering ──────────────────────────────────────────
+  const triggerPreview = useCallback(async (content) => {
+    const html = content || ''
+    if (!html.trim()) {
+      setPreviewData(null)
+      setPreviewError(null)
+      setRenderTime(null)
+      return
+    }
+
+    setIsRendering(true)
+    setPreviewError(null)
+    setPreviewData(null)
+    setPreviewHtml(null)
+    setRenderTime(null)
+
+    try {
+      const currentLiveFrame = liveFrameDataRef.current
+      const baseFrame = dataContext?.variables || FALLBACK_FRAME_DATA
+      // Always render the displayed page index so the preview matches the counter.
+      // manualPageIndex defaults to 0 (page 1) on mount.
+      const pageIndexOverride = Math.max(0, Math.trunc(manualPageIndex))
+      const effectiveFrame = currentLiveFrame
+        ? {
+            ...baseFrame,
+            ...currentLiveFrame,
+            section: previewSection,
+            overlay_page_index: pageIndexOverride,
+          }
+        : {
+            ...baseFrame,
+            section: previewSection,
+            overlay_page_index: pageIndexOverride,
+          }
+      const result = await renderEditorPreview(
+        designId,
+        html,
+        effectiveFrame,
+        {
+          projectId: activeProject?.id ?? null,
+          pageIndex: pageIndexOverride,
+          includeRenderedHtml: previewRenderMode === 'html',
+          renderScreenshot: previewRenderMode !== 'html',
+        },
+      )
+
+      const renderWidth = Number(result?.width) || 1920
+      const renderHeight = Number(result?.height) || 1080
+      setPreviewResolution({ width: renderWidth, height: renderHeight })
+
+      if (result?.success && previewRenderMode === 'html' && result?.rendered_html) {
+        const safeHtml = sanitizePreviewHtmlForInlineRender(result.rendered_html, renderWidth, renderHeight)
+        if (safeHtml) {
+          setPreviewHtml(safeHtml)
+          setPreviewData(null)
+          setRenderTime(result.elapsed_ms)
+          setPreviewError(null)
+        } else {
+          setPreviewHtml(null)
+          setPreviewData(null)
+          setPreviewError('HTML preview was blocked by safeguards')
+        }
+      } else if (result?.success && previewRenderMode !== 'html' && result?.png_base64) {
+        setPreviewData(result.png_base64)
+        setPreviewHtml(null)
+        setRenderTime(result.elapsed_ms)
+        setPreviewError(null)
+      } else {
+        setPreviewHtml(null)
+        setPreviewData(null)
+        setPreviewError(result?.error || 'Preview render failed')
+      }
+    } catch (err) {
+      setPreviewHtml(null)
+      setPreviewError(err?.message || 'Preview render failed')
+      setPreviewData(null)
+    } finally {
+      setIsRendering(false)
+    }
+  }, [designId, dataContext, manualPageEnabled, manualPageIndex, previewRenderMode, renderEditorPreview, previewSection, activeProject?.id])
+
+  // When live frame data transitions null→non-null (replay becomes available) or
+  // non-null→null (replay stops), re-trigger the preview so the overlay reflects
+  // the correct is_player / leader highlighting without waiting for an HTML edit.
+  const prevLiveDataAvailableRef = useRef(false)
+  useEffect(() => {
+    const isAvailable = liveFrameData !== null
+    const wasAvailable = prevLiveDataAvailableRef.current
+    prevLiveDataAvailableRef.current = isAvailable
+    if (isAvailable !== wasAvailable && !loading && htmlContentRef.current) {
+      triggerPreview(htmlContentRef.current)
+    }
+  }, [liveFrameData, loading, triggerPreview])
+
+  useEffect(() => {
+    let cancelled = false
+    let intervalId = null
+
+    const projectId = activeProject?.id ?? null
+    if (projectId == null) {
+      setLiveFrameData(null)
+      return undefined
+    }
+
+    const refreshLiveFrameData = async () => {
+      try {
+        const replayState = await apiGet('/iracing/replay/state')
+        const sessionTime = Number(replayState?.session_time)
+        const focusedCarIdxRaw = replayState?.cam_car_idx
+        const focusedCarIdx = Number.isFinite(Number(focusedCarIdxRaw))
+          ? Number(focusedCarIdxRaw)
+          : null
+
+        if (!Number.isFinite(sessionTime)) {
+          if (!cancelled) setLiveFrameData(null)
+          return
+        }
+
+        const telemetryResponse = await apiPost(`/overlay/frame-data/${projectId}`, {
+          session_time: sessionTime,
+          section: previewSection,
+          focused_car_idx: focusedCarIdx,
+          series_name: '',
+          track_name: activeProject?.track_name || '',
+        })
+
+        if (!cancelled) {
+          setLiveFrameData(telemetryResponse?.frame_data || null)
+        }
+      } catch {
+        if (!cancelled) setLiveFrameData(null)
+      }
+    }
+
+    refreshLiveFrameData()
+    intervalId = setInterval(refreshLiveFrameData, 1000)
+
+    return () => {
+      cancelled = true
+      if (intervalId) clearInterval(intervalId)
+    }
+  }, [activeProject?.id, activeProject?.track_name, previewSection])
+
   const archiveCurrentChat = useCallback(() => {
     const normalized = Array.isArray(aiConversation)
       ? aiConversation.map((entry, idx) => normalizeAiConversationEntry(entry, idx))
@@ -514,66 +673,35 @@ export default function OverlayEditor({ designId }) {
     addToast(`Loaded chat: ${source.title || 'AI chat'}`, 'info')
   }, [addToast, aiArchivedChats, setAiConversation])
 
-  // ── Debounced preview rendering ──────────────────────────────────────────
-  const triggerPreview = useCallback(async (content) => {
-    const html = content || ''
-    if (!html.trim()) {
-      setPreviewData(null)
-      setPreviewError(null)
-      setRenderTime(null)
-      return
+  const paginationControlState = useMemo(() => {
+    const sectionElements = designMeta?.sections?.[previewSection]
+    if (!Array.isArray(sectionElements) || sectionElements.length === 0) return null
+
+    const paginationElement = sectionElements.find((elem) => {
+      const pag = elem?.pagination
+      return Boolean(pag && pag.enabled)
+    })
+    if (!paginationElement) return null
+
+    const pagination = paginationElement.pagination || {}
+    const parsedItemsPerPage = Number.parseInt(pagination.items_per_page, 10)
+    const itemsPerPage = Number.isFinite(parsedItemsPerPage) && parsedItemsPerPage > 0 ? parsedItemsPerPage : 10
+    const standingsCount = Array.isArray(liveFrameData?.standings)
+      ? liveFrameData.standings.length
+      : Array.isArray(dataContext?.variables?.standings)
+        ? dataContext.variables.standings.length
+        : 0
+    const totalPages = standingsCount > 0 ? Math.max(1, Math.ceil(standingsCount / itemsPerPage)) : 1
+    const effectivePageIndex = totalPages > 0
+      ? Math.max(0, Math.min(totalPages - 1, Math.trunc(manualPageIndex)))
+      : 0
+
+    return {
+      totalPages,
+      effectivePageIndex,
+      enabled: standingsCount > 0,
     }
-
-    setIsRendering(true)
-    setPreviewError(null)
-
-    try {
-      const baseFrame = dataContext?.variables || FALLBACK_FRAME_DATA
-      const result = await renderEditorPreview(
-        designId,
-        html,
-        { ...baseFrame, section: previewSection },
-        {
-          projectId: activeProject?.id ?? null,
-          includeRenderedHtml: previewRenderMode === 'html',
-          renderScreenshot: previewRenderMode !== 'html',
-        },
-      )
-
-      const renderWidth = Number(result?.width) || 1920
-      const renderHeight = Number(result?.height) || 1080
-      setPreviewResolution({ width: renderWidth, height: renderHeight })
-
-      if (result?.success && previewRenderMode === 'html' && result?.rendered_html) {
-        const safeHtml = sanitizePreviewHtmlForInlineRender(result.rendered_html, renderWidth, renderHeight)
-        if (safeHtml) {
-          setPreviewHtml(safeHtml)
-          setPreviewData(null)
-          setRenderTime(result.elapsed_ms)
-          setPreviewError(null)
-        } else {
-          setPreviewHtml(null)
-          setPreviewData(null)
-          setPreviewError('HTML preview was blocked by safeguards')
-        }
-      } else if (result?.success && previewRenderMode !== 'html' && result?.png_base64) {
-        setPreviewData(result.png_base64)
-        setPreviewHtml(null)
-        setRenderTime(result.elapsed_ms)
-        setPreviewError(null)
-      } else {
-        setPreviewHtml(null)
-        setPreviewData(null)
-        setPreviewError(result?.error || 'Preview render failed')
-      }
-    } catch (err) {
-      setPreviewHtml(null)
-      setPreviewError(err?.message || 'Preview render failed')
-      setPreviewData(null)
-    } finally {
-      setIsRendering(false)
-    }
-  }, [designId, dataContext, previewRenderMode, renderEditorPreview, previewSection])
+  }, [dataContext?.variables?.standings, designMeta?.sections, liveFrameData?.standings, manualPageIndex, previewSection])
 
   // Trigger preview on content change or section change (200ms debounce)
   useEffect(() => {
@@ -1537,6 +1665,44 @@ export default function OverlayEditor({ designId }) {
         <Save className="w-3.5 h-3.5" />
         Save
       </button>
+      {paginationControlState && (
+        <div className="ml-1 flex items-center gap-1 rounded-md border border-cyan-500/35 bg-cyan-900/15 px-1 py-0.5">
+          <button
+            onClick={() => setManualPageEnabled((v) => !v)}
+            className={`px-2 py-0.5 rounded text-xxs font-medium transition-colors ${manualPageEnabled ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/40' : 'text-cyan-200/80 hover:text-cyan-100'}`}
+            title={manualPageEnabled ? 'Use manual page override' : 'Use automatic page progression'}
+          >
+            {manualPageEnabled ? 'Manual' : 'Auto'}
+          </button>
+          <button
+            onClick={() => {
+              if (!paginationControlState.enabled) return
+              setManualPageEnabled(true)
+              setManualPageIndex((v) => Math.max(0, v - 1))
+            }}
+            disabled={!paginationControlState.enabled}
+            className="px-1.5 py-0.5 rounded text-xxs text-cyan-200 disabled:opacity-40 hover:bg-cyan-500/20"
+            title="Previous page"
+          >
+            -
+          </button>
+          <span className="px-1 text-xxs font-mono text-cyan-100">
+            P{(paginationControlState.effectivePageIndex || 0) + 1}/{paginationControlState.totalPages}
+          </span>
+          <button
+            onClick={() => {
+              if (!paginationControlState.enabled) return
+              setManualPageEnabled(true)
+              setManualPageIndex((v) => Math.min(Math.max(0, paginationControlState.totalPages - 1), v + 1))
+            }}
+            disabled={!paginationControlState.enabled}
+            className="px-1.5 py-0.5 rounded text-xxs text-cyan-200 disabled:opacity-40 hover:bg-cyan-500/20"
+            title="Next page"
+          >
+            +
+          </button>
+        </div>
+      )}
     </>
   )
 

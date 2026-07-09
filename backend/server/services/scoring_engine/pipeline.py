@@ -78,6 +78,7 @@ def generate_highlights(
 
     # Stage 3: Allocate timeline (mutates constraints with "_diagnostics")
     alloc_constraints = dict(constraints)
+    alloc_constraints.setdefault("num_drivers", num_drivers)  # needed for driver coverage rebalance
     timeline = allocate_timeline(scored, target_duration, alloc_constraints)
     selection_diagnostics = alloc_constraints.get("_diagnostics", {})
 

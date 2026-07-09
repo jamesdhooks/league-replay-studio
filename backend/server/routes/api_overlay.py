@@ -79,6 +79,21 @@ class FrameDataRequest(BaseModel):
     track_name: str = ""
 
 
+def _apply_section_standings_fallback(frame_data: dict[str, Any], section: str) -> None:
+    """Normalize standings to section-specific authoritative lists when present."""
+    if not isinstance(frame_data, dict):
+        return
+
+    if section in {"qualifying", "qualifying_results"}:
+        qualifying = frame_data.get("qualifying_standings")
+        if isinstance(qualifying, list) and qualifying:
+            frame_data["standings"] = qualifying
+    elif section in {"results", "race_results"}:
+        final_results = frame_data.get("final_standings")
+        if isinstance(final_results, list) and final_results:
+            frame_data["standings"] = final_results
+
+
 class CompositeRequest(BaseModel):
     """Request body for overlay compositing.
 
@@ -343,11 +358,13 @@ async def build_frame_data_endpoint(project_id: int, body: FrameDataRequest):
             series_name=series_name,
             track_name=track_name,
         )
+        _apply_section_standings_fallback(frame_data, body.section)
 
         # Enrich with 3rd party data plugin data (if any plugins are configured)
         from server.services.data_plugin_service import data_plugin_service
         subsession_id = int(project.get("subsession_id", 0) or 0)
         frame_data = await data_plugin_service.enrich_frame_data(frame_data, subsession_id)
+        _apply_section_standings_fallback(frame_data, body.section)
 
         return {"frame_data": frame_data, "project_id": project_id}
     except Exception as exc:
@@ -596,6 +613,7 @@ async def render_preset_preview(body: dict[str, Any]):
         preset=preset,
         section=section,
         frame_data=frame_data,
+        project_id=body.get("project_id"),
         resolution=resolution,
         element_filter=element_id,
     )

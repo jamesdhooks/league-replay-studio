@@ -1085,6 +1085,7 @@ class OverlayCompositor:
                 preset=preset,
                 section=section,
                 frame_data=initial_frame_data,
+                project_id=initial_frame_data.get("project_id"),
                 resolution=resolution,
                 page_index=initial_page_index,
             )
@@ -1129,6 +1130,7 @@ class OverlayCompositor:
                             preset=preset,
                             section=section,
                             frame_data=page_frame_data,
+                            project_id=page_frame_data.get("project_id"),
                             resolution=resolution,
                             page_index=page_index,
                         )
@@ -1253,6 +1255,7 @@ class OverlayCompositor:
                             preset=preset,
                             section=section,
                             frame_data=static_frame,
+                            project_id=static_frame.get("project_id"),
                             resolution=resolution,
                             page_index=page_index,
                         )
@@ -1294,6 +1297,7 @@ class OverlayCompositor:
                         preset=preset,
                         section=section,
                         frame_data=animated_frame,
+                        project_id=animated_frame.get("project_id"),
                         resolution=resolution,
                         page_index=page_index,
                     )
@@ -1334,6 +1338,7 @@ class OverlayCompositor:
                         preset=preset,
                         section=section,
                         frame_data=trailing_frame,
+                        project_id=trailing_frame.get("project_id"),
                         resolution=resolution,
                         page_index=page_index,
                     )

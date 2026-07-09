@@ -17,6 +17,8 @@
 <body>
   {% set quali_rows = frame.qualifying_standings if frame.qualifying_standings is defined and frame.qualifying_standings else frame.standings %}
   {% set result_rows = frame.final_standings if frame.final_standings is defined and frame.final_standings else frame.standings %}
+  {% set _pg_start = page_start if page_start is defined and page_start is not none else 0 %}
+  {% set _pg_end_12 = page_end if page_end is defined and page_end is not none else (_pg_start + 12) %}
   <div class="overlay">
 
   {% if frame.section is defined and frame.section == 'intro' %}
@@ -50,8 +52,8 @@
             <div class="text-right">Gap</div>
           </div>
           <div class="py-2 space-y-1.5">
-            {% for entry in quali_rows[:12] %}
-            <div class="grid grid-cols-[80px_minmax(0,1.4fr)_110px_150px_120px] gap-3 items-center px-3 py-3 classic-panel {% if entry.is_player | default(false) %}text-yellow-200 bg-blue-950/50{% elif loop.first %}bg-yellow-900/35 text-yellow-100{% endif %}">
+            {% for entry in quali_rows[_pg_start:_pg_end_12] %}
+            <div class="grid grid-cols-[80px_minmax(0,1.4fr)_110px_150px_120px] gap-3 items-center px-3 py-3 classic-panel {% if entry.is_player | default(false) %}text-yellow-200 bg-blue-950/50{% elif (entry.position | default(0)) == 1 %}bg-yellow-900/35 text-yellow-100{% endif %}">
               <div class="text-2xl font-bold tabular-nums">{{ entry.position | default(loop.index) }}</div>
               <div class="min-w-0">
                 <div class="truncate text-xl font-bold uppercase">{{ entry.driver_name | default('Driver') }}</div>
@@ -85,8 +87,8 @@
             <div class="text-right">Avg</div>
           </div>
           <div class="py-2 space-y-1.5">
-            {% for entry in result_rows[:12] %}
-            <div class="grid grid-cols-[72px_minmax(0,1.3fr)_130px_90px_130px_130px] gap-3 items-center px-3 py-3 classic-panel {% if entry.is_player | default(false) %}text-yellow-200 bg-blue-950/50{% elif loop.first %}bg-yellow-900/35 text-yellow-100{% endif %}">
+            {% for entry in result_rows[_pg_start:_pg_end_12] %}
+            <div class="grid grid-cols-[72px_minmax(0,1.3fr)_130px_90px_130px_130px] gap-3 items-center px-3 py-3 classic-panel {% if entry.is_player | default(false) %}text-yellow-200 bg-blue-950/50{% elif (entry.position | default(0)) == 1 %}bg-yellow-900/35 text-yellow-100{% endif %}">
               <div class="text-2xl font-bold tabular-nums">{{ entry.position | default(loop.index) }}</div>
               <div class="min-w-0">
                 <div class="truncate text-xl font-bold uppercase">{{ entry.driver_name | default('Driver') }}</div>
@@ -118,12 +120,12 @@
         <div class="text-right">Rel</div>
       </div>
       <div class="px-2 py-2 space-y-1.5">
-        {% for entry in frame.standings[:12] %}
-        <div class="grid grid-cols-[60px_90px_minmax(0,1fr)_100px] gap-3 items-center px-3 py-3 classic-panel {% if entry.is_player | default(false) %}text-yellow-200 bg-blue-950/50{% elif loop.first %}bg-yellow-900/35 text-yellow-100{% endif %}">
+        {% for entry in frame.standings[_pg_start:_pg_end_12] %}
+        <div class="grid grid-cols-[60px_90px_minmax(0,1fr)_100px] gap-3 items-center px-3 py-3 classic-panel {% if entry.is_player | default(false) %}text-yellow-200 bg-blue-950/50{% elif (entry.position | default(0)) == 1 %}bg-yellow-900/35 text-yellow-100{% endif %}">
           <div class="text-2xl font-bold tabular-nums">{{ entry.position | default(loop.index) }}</div>
           <div class="text-lg font-bold uppercase">{{ entry.driver_short_name | default('DRV') }}</div>
           <div class="truncate text-lg uppercase">{{ entry.driver_name | default('Driver') }}</div>
-          <div class="text-right text-sm tabular-nums">{{ entry.relative | default('---') }}</div>
+          <div class="text-right text-sm tabular-nums">{{ entry.relative | default('LEADER' if (entry.position | default(0)) == 1 else '---', true) }}</div>
         </div>
         {% endfor %}
       </div>

@@ -34,6 +34,7 @@ import logging
 import re
 import hashlib
 import base64
+from uuid import uuid4
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Query
@@ -41,12 +42,38 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from server.services.preset_service import preset_service, VIDEO_SECTIONS
+from server.services.debug_log_service import debug_log_service
+from server.utils.element_renderer import apply_frame_variable_overrides, resolve_frame_variable_overrides
 
 logger = logging.getLogger(__name__)
 
 MAX_ASSET_SIZE_BYTES = 10 * 1024 * 1024      # 10 MB
 MAX_VIDEO_SIZE_BYTES = 500 * 1024 * 1024      # 500 MB
 router = APIRouter(prefix="/api/presets", tags=["presets"])
+
+
+def _sha1_text(value: str) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    return hashlib.sha1(value.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _build_result_summary(result: dict[str, Any] | None) -> dict[str, Any]:
+    payload = result or {}
+    rendered_html = payload.get("rendered_html") if isinstance(payload.get("rendered_html"), str) else ""
+    png_base64 = payload.get("png_base64") if isinstance(payload.get("png_base64"), str) else ""
+    return {
+        "success": bool(payload.get("success")),
+        "error": payload.get("error"),
+        "elapsed_ms": payload.get("elapsed_ms"),
+        "width": payload.get("width"),
+        "height": payload.get("height"),
+        "rendered_html_length": len(rendered_html),
+        "rendered_html_sha1": _sha1_text(rendered_html),
+        "rendered_html_head": rendered_html[:2000],
+        "png_base64_length": len(png_base64),
+        "png_base64_sha1": _sha1_text(png_base64),
+    }
 
 
 # ── Request models ──────────────────────────────────────────────────────────
@@ -57,6 +84,7 @@ class CreatePresetRequest(BaseModel):
     style: str = "custom"
     sections: dict[str, Any] | None = None
     variables: dict[str, Any] | None = None
+    frame_variable_overrides: dict[str, Any] | None = None
     html_content: str | None = None
 
 class UpdatePresetRequest(BaseModel):
@@ -65,6 +93,7 @@ class UpdatePresetRequest(BaseModel):
     style: str | None = None
     sections: dict[str, Any] | None = None
     variables: dict[str, Any] | None = None
+    frame_variable_overrides: dict[str, Any] | None = None
     intro_video_path: str | None = None
     html_content: str | None = None
 
@@ -97,6 +126,7 @@ class RenderPreviewRequest(BaseModel):
     render_screenshot: bool = True
     include_debug: bool = False
     prefer_html_content: bool = False
+    page_index: int | None = None
 
 
 class AssetScopeUpdateRequest(BaseModel):
@@ -150,7 +180,8 @@ def _apply_section_preview_overrides(frame_data: dict[str, Any], section: str) -
     }.get(section, section)
 
     frame_data["section_canonical"] = section
-    frame_data["section"] = section_alias
+    frame_data["section"] = section  # canonical form so all tabs/endpoints agree
+    frame_data["section_alias"] = section_alias  # legacy alias kept for old templates
     frame_data["overlay_preview_section"] = section
     frame_data["overlay_preview_section_label"] = section_labels.get(section, section)
 
@@ -161,6 +192,8 @@ def _apply_section_preview_overrides(frame_data: dict[str, Any], section: str) -
 
     elif section == "qualifying_results":
         qualifying = frame_data.get("qualifying_results")
+        if not (isinstance(qualifying, list) and qualifying):
+            qualifying = frame_data.get("qualifying_standings")
         if isinstance(qualifying, list) and qualifying:
             frame_data["standings"] = qualifying
         frame_data["current_lap"] = frame_data.get("current_lap", 0)
@@ -168,9 +201,111 @@ def _apply_section_preview_overrides(frame_data: dict[str, Any], section: str) -
 
     elif section == "race_results":
         results = frame_data.get("race_results")
+        if not (isinstance(results, list) and results):
+            results = frame_data.get("final_standings")
         if isinstance(results, list) and results:
             frame_data["standings"] = results
         frame_data["flag"] = "checkered"
+
+
+def _apply_pagination_preview_context(
+    frame_data: dict[str, Any],
+    preset: dict[str, Any],
+    section: str,
+    forced_page_index: int | None = None,
+) -> None:
+    """Populate page_* variables for html-content preview templates.
+
+    Some custom overlay.html templates slice standings with page_start/page_end,
+    so these must be present even when rendering via raw html-content path.
+    """
+    if not isinstance(frame_data, dict):
+        return
+
+    standings = frame_data.get("standings")
+    if not isinstance(standings, list) or not standings:
+        return
+
+    section_elements = (preset or {}).get("sections", {}).get(section, [])
+    pagination = None
+    if isinstance(section_elements, list) and section_elements:
+        for elem in section_elements:
+            pag = elem.get("pagination") if isinstance(elem, dict) else None
+            if isinstance(pag, dict) and pag.get("enabled"):
+                pagination = pag
+                break
+
+    # Support html-only overlays that do not carry section element pagination
+    # metadata by falling back to explicit frame_data hints or sane defaults.
+    if isinstance(pagination, dict):
+        raw_items_per_page = pagination.get("items_per_page", 10)
+    else:
+        raw_items_per_page = (
+            frame_data.get("items_per_page")
+            or frame_data.get("overlay_items_per_page")
+            or frame_data.get("pagination_items_per_page")
+            or max(1, len(standings))
+        )
+    try:
+        items_per_page = int(raw_items_per_page or 10)
+    except (TypeError, ValueError):
+        items_per_page = 10
+    items_per_page = max(1, items_per_page)
+
+    total_pages = max(1, (len(standings) + items_per_page - 1) // items_per_page)
+
+    resolved_index: int
+    if forced_page_index is not None:
+        resolved_index = int(forced_page_index)
+    elif frame_data.get("overlay_page_index") is not None:
+        try:
+            resolved_index = int(frame_data.get("overlay_page_index"))
+        except (TypeError, ValueError):
+            resolved_index = 0
+    else:
+        elapsed = frame_data.get("overlay_section_elapsed_seconds", frame_data.get("overlay_clip_elapsed_seconds", 0.0))
+        duration = frame_data.get("overlay_section_duration_seconds", frame_data.get("overlay_clip_duration_seconds", 0.0))
+        try:
+            elapsed_seconds = max(0.0, float(elapsed or 0.0))
+        except (TypeError, ValueError):
+            elapsed_seconds = 0.0
+        try:
+            duration_seconds = max(0.0, float(duration or 0.0))
+        except (TypeError, ValueError):
+            duration_seconds = 0.0
+        raw_cycle_seconds = (
+            pagination.get("cycle_duration_seconds", 0.0)
+            if isinstance(pagination, dict)
+            else (
+                frame_data.get("cycle_duration_seconds")
+                or frame_data.get("overlay_cycle_duration_seconds")
+                or 0.0
+            )
+        )
+        try:
+            fixed_interval = float(raw_cycle_seconds or 0.0)
+        except (TypeError, ValueError):
+            fixed_interval = 0.0
+        if fixed_interval > 0:
+            interval = fixed_interval
+        elif duration_seconds > 0:
+            interval = duration_seconds / total_pages
+        else:
+            interval = 1.0
+        interval = max(0.001, interval)
+        resolved_index = int(elapsed_seconds / interval)
+
+    safe_page_index = resolved_index % total_pages
+    page_start = safe_page_index * items_per_page
+    page_end = min(page_start + items_per_page, len(standings))
+    page_key = f"page-{safe_page_index + 1}-rows-{page_start}-{page_end}"
+
+    frame_data["overlay_page_index"] = safe_page_index
+    frame_data["page_index"] = safe_page_index
+    frame_data["total_pages"] = total_pages
+    frame_data["page_start"] = page_start
+    frame_data["page_end"] = page_end
+    frame_data["page_key"] = page_key
 
 
 _TAILWIND_CDN_SCRIPT_RE = re.compile(
@@ -331,16 +466,16 @@ async def get_preset(preset_id: str):
 
 
 @router.post("")
-async def create_preset(body: CreatePresetRequest):
+async def create_preset(body: dict[str, Any]):
     """Create a new custom preset."""
-    result = preset_service.create_preset(body.model_dump(exclude_none=True))
+    result = preset_service.create_preset(body or {})
     return {"success": True, "preset": result}
 
 
 @router.put("/{preset_id}")
-async def update_preset(preset_id: str, body: UpdatePresetRequest):
+async def update_preset(preset_id: str, body: dict[str, Any]):
     """Update a custom preset."""
-    result = preset_service.update_preset(preset_id, body.model_dump(exclude_none=True))
+    result = preset_service.update_preset(preset_id, body or {})
     if not result:
         raise HTTPException(status_code=404, detail="Preset not found")
     return {"success": True, "preset": result}
@@ -615,6 +750,7 @@ class EditorPreviewRequest(BaseModel):
     analyze_animations: bool = False
     include_rendered_html: bool = False
     render_screenshot: bool = True
+    page_index: int | None = None
 
 
 @router.post("/{preset_id}/editor-preview")
@@ -627,15 +763,68 @@ async def editor_preview(preset_id: str, body: EditorPreviewRequest):
     if not preset:
         raise HTTPException(status_code=404, detail="Preset not found")
 
+    debug_request_id = f"editor-preview-{uuid4().hex}"
+    debug_log_service.write(
+        "overlay.editor_preview.request",
+        {
+            "debug_request_id": debug_request_id,
+            "preset_id": preset_id,
+            "project_id": body.project_id,
+            "section": (body.frame_data or {}).get("section"),
+            "request": {
+                "page_index": body.page_index,
+                "analyze_animations": bool(body.analyze_animations),
+                "include_rendered_html": bool(body.include_rendered_html),
+                "render_screenshot": bool(body.render_screenshot),
+                "html_content_length": len(body.html_content or ""),
+                "html_content_sha1": _sha1_text(body.html_content or ""),
+                "html_content_head": (body.html_content or "")[:2000],
+                "frame_data": body.frame_data,
+            },
+        },
+    )
+
     # Smart merge: use SAMPLE_FRAME_DATA as defaults, overlay caller values.
     frame_data = _merge_preview_frame_data(SAMPLE_FRAME_DATA, body.frame_data)
+    if body.page_index is not None:
+        frame_data["overlay_page_index"] = int(body.page_index)
+    # Apply the same section overrides used by render-preview so Build/Design/Preview
+    # tabs all see the same frame.section canonical value.
+    section = frame_data.get("section") or "race"
+    _apply_section_preview_overrides(frame_data, section)
     frame_data = await _enrich_with_plugin_data(frame_data, body.project_id)
     _inject_asset_variables(frame_data, preset_id, body.project_id)
+    frame_data = apply_frame_variable_overrides(
+        frame_data,
+        preset.get("frame_variable_overrides"),
+        project_id=body.project_id,
+    )
+    _apply_pagination_preview_context(frame_data, preset, section, body.page_index)
+    frame_data["_debug_request_id"] = debug_request_id
+
+    debug_log_service.write(
+        "overlay.editor_preview.runtime",
+        {
+            "debug_request_id": debug_request_id,
+            "preset_id": preset_id,
+            "section": section,
+            "frame_data": frame_data,
+        },
+    )
 
     try:
         if not overlay_engine.initialized:
             init_result = await overlay_service.initialize()
             if not init_result.get("success"):
+                debug_log_service.write(
+                    "overlay.editor_preview.output",
+                    {
+                        "debug_request_id": debug_request_id,
+                        "preset_id": preset_id,
+                        "section": section,
+                        "result": _build_result_summary(init_result),
+                    },
+                )
                 return init_result
 
         runtime_html = _inject_preset_css_variables(body.html_content, preset)
@@ -646,8 +835,26 @@ async def editor_preview(preset_id: str, body: EditorPreviewRequest):
             include_rendered_html=body.include_rendered_html,
             render_screenshot=body.render_screenshot,
         )
+        debug_log_service.write(
+            "overlay.editor_preview.output",
+            {
+                "debug_request_id": debug_request_id,
+                "preset_id": preset_id,
+                "section": section,
+                "result": _build_result_summary(result),
+            },
+        )
         return result
-    except Exception:
+    except Exception as exc:
+        debug_log_service.write(
+            "overlay.editor_preview.exception",
+            {
+                "debug_request_id": debug_request_id,
+                "preset_id": preset_id,
+                "section": section,
+                "error": str(exc),
+            },
+        )
         logger.exception("[Preset] Editor preview failed for %s", preset_id)
         raise HTTPException(status_code=500, detail="Editor preview rendering failed")
 
@@ -664,6 +871,11 @@ async def get_editor_context(preset_id: str, project_id: int | None = None):
     variables = dict(SAMPLE_FRAME_DATA)
     variables = await _enrich_with_plugin_data(variables, project_id)
     _inject_asset_variables(variables, preset_id, project_id)
+    variables = apply_frame_variable_overrides(
+        variables,
+        preset.get("frame_variable_overrides"),
+        project_id=project_id,
+    )
 
     return {
         "preset_id": preset_id,
@@ -693,6 +905,28 @@ async def render_preset_preview(preset_id: str, body: RenderPreviewRequest):
     if not preset:
         raise HTTPException(status_code=404, detail="Preset not found")
 
+    debug_request_id = f"render-preview-{uuid4().hex}"
+    debug_log_service.write(
+        "overlay.render_preview.request",
+        {
+            "debug_request_id": debug_request_id,
+            "preset_id": preset_id,
+            "request": {
+                "section": body.section,
+                "project_id": body.project_id,
+                "element_id": body.element_id,
+                "page_index": body.page_index,
+                "variables": body.variables,
+                "analyze_animations": bool(body.analyze_animations),
+                "include_rendered_html": bool(body.include_rendered_html),
+                "render_screenshot": bool(body.render_screenshot),
+                "include_debug": bool(body.include_debug),
+                "prefer_html_content": bool(body.prefer_html_content),
+                "frame_data": body.frame_data,
+            },
+        },
+    )
+
     section = body.section
 
     # Start with rich SAMPLE_FRAME_DATA defaults, then overlay any
@@ -700,9 +934,18 @@ async def render_preset_preview(preset_id: str, body: RenderPreviewRequest):
     # overlay templates always have displayable content even when the
     # frontend sends sparse telemetry or a minimal fallback dict.
     frame_data = _merge_preview_frame_data(SAMPLE_FRAME_DATA, body.frame_data)
+    if body.page_index is not None:
+        frame_data["overlay_page_index"] = int(body.page_index)
     _apply_section_preview_overrides(frame_data, section)
     frame_data = await _enrich_with_plugin_data(frame_data, body.project_id)
     _inject_asset_variables(frame_data, preset_id, body.project_id)
+    frame_data = apply_frame_variable_overrides(
+        frame_data,
+        preset.get("frame_variable_overrides"),
+        project_id=body.project_id,
+    )
+    _apply_pagination_preview_context(frame_data, preset, section, body.page_index)
+    frame_data["_debug_request_id"] = debug_request_id
     if body.variables:
         preset = copy.deepcopy(preset)
         preset["variables"] = body.variables
@@ -729,15 +972,40 @@ async def render_preset_preview(preset_id: str, body: RenderPreviewRequest):
             preset=preset,
             section=section,
             frame_data=frame_data,
+            project_id=body.project_id,
             resolution=resolution,
             element_filter=body.element_id,
         )
+
+    debug_log_service.write(
+        "overlay.render_preview.runtime",
+        {
+            "debug_request_id": debug_request_id,
+            "preset_id": preset_id,
+            "section": section,
+            "render_source": render_source,
+            "frame_data": frame_data,
+            "html_content_length": len(html_content),
+            "html_content_sha1": _sha1_text(html_content),
+            "html_content_head": html_content[:2000],
+        },
+    )
 
     # Render via overlay engine
     try:
         if not overlay_engine.initialized:
             init_result = await overlay_service.initialize()
             if not init_result.get("success"):
+                debug_log_service.write(
+                    "overlay.render_preview.output",
+                    {
+                        "debug_request_id": debug_request_id,
+                        "preset_id": preset_id,
+                        "section": section,
+                        "render_source": render_source,
+                        "result": _build_result_summary(init_result),
+                    },
+                )
                 return init_result
 
         result = await overlay_engine.render_raw_html(
@@ -747,13 +1015,36 @@ async def render_preset_preview(preset_id: str, body: RenderPreviewRequest):
             include_rendered_html=True,
             render_screenshot=body.render_screenshot,
         )
-    except Exception:
+        debug_log_service.write(
+            "overlay.render_preview.output",
+            {
+                "debug_request_id": debug_request_id,
+                "preset_id": preset_id,
+                "section": section,
+                "render_source": render_source,
+                "result": _build_result_summary(result),
+            },
+        )
+    except Exception as exc:
+        debug_log_service.write(
+            "overlay.render_preview.exception",
+            {
+                "debug_request_id": debug_request_id,
+                "preset_id": preset_id,
+                "section": section,
+                "error": str(exc),
+            },
+        )
         logger.exception("[Preset] Render preview failed for %s", preset_id)
         raise HTTPException(status_code=500, detail="Failed to render preview")
 
     if body.include_debug and isinstance(result, dict):
         rendered_html = result.get("rendered_html") if isinstance(result.get("rendered_html"), str) else ""
         png_base64 = result.get("png_base64") if isinstance(result.get("png_base64"), str) else ""
+        effective_overrides = resolve_frame_variable_overrides(
+            preset.get("frame_variable_overrides"),
+            project_id=body.project_id,
+        )
 
         rendered_html_sha1 = hashlib.sha1(rendered_html.encode("utf-8")).hexdigest() if rendered_html else None
         png_base64_sha1 = hashlib.sha1(png_base64.encode("ascii", errors="ignore")).hexdigest() if png_base64 else None
@@ -771,6 +1062,12 @@ async def render_preset_preview(preset_id: str, body: RenderPreviewRequest):
             "section": section,
             "frame_section": frame_data.get("section"),
             "frame_section_canonical": frame_data.get("section_canonical"),
+            "frame_overlay_page_index": frame_data.get("overlay_page_index"),
+            "frame_page_index": frame_data.get("page_index"),
+            "frame_page_start": frame_data.get("page_start"),
+            "frame_page_end": frame_data.get("page_end"),
+            "frame_total_pages": frame_data.get("total_pages"),
+            "frame_page_key": frame_data.get("page_key"),
             "render_source": render_source,
             "has_html_content": has_html_content,
             "section_element_count": len(section_elements),
@@ -792,6 +1089,11 @@ async def render_preset_preview(preset_id: str, body: RenderPreviewRequest):
                 "flag": frame_data.get("flag", ""),
                 "standings_count": len(frame_data.get("standings", [])),
                 "session_time": frame_data.get("session_time", ""),
+            },
+            "effective_override_keys": sorted(list(effective_overrides.keys())),
+            "effective_override_sample": {
+                key: frame_data.get(key)
+                for key in sorted(list(effective_overrides.keys()))[:10]
             },
         }
 

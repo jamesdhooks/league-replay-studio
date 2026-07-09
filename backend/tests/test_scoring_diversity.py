@@ -211,3 +211,201 @@ def test_per_type_normalization_mode_is_honored():
     # Each type should have exactly one (min, max) pair recorded.
     for t, bounds in by_type.items():
         assert len(bounds) == 1, f"per-type bounds should be uniform within type {t}: {bounds}"
+
+
+# ---------------------------------------------------------------------------
+# Driver Coverage tests
+# ---------------------------------------------------------------------------
+
+def _make_driver_pool(num_drivers: int = 12) -> list[dict]:
+    """Pool where 3 drivers dominate scores but every driver has at least one medium event."""
+    events: list[dict] = []
+    eid = 0
+    # 15 high-scoring battles featuring only drivers 1, 2, 3
+    for i in range(15):
+        eid += 1
+        events.append({
+            "id": eid,
+            "event_type": "battle",
+            "start_time_seconds": i * 20.0,
+            "end_time_seconds": i * 20.0 + 10.0,
+            "duration": 10.0,
+            "severity": 8.0,
+            "score": 9.0 + (i % 3) * 0.05,
+            "tier": "A",
+            "bucket": "mid",
+            "involved_drivers": [1, 2, 3],
+            "drivers": [1, 2, 3],
+            "score_components": {},
+        })
+    # 1 medium event per driver 4–num_drivers
+    for d in range(4, num_drivers + 1):
+        eid += 1
+        events.append({
+            "id": eid,
+            "event_type": "overtake",
+            "start_time_seconds": 400.0 + (d - 4) * 25.0,
+            "end_time_seconds": 400.0 + (d - 4) * 25.0 + 10.0,
+            "duration": 10.0,
+            "severity": 5.0,
+            "score": 5.5,
+            "tier": "B",
+            "bucket": "mid",
+            "involved_drivers": [d],
+            "drivers": [d],
+            "score_components": {},
+        })
+    return events
+
+
+def _driver_ids_in_timeline(timeline: list[dict]) -> set:
+    ids: set = set()
+    for evt in timeline:
+        for d in evt.get("involved_drivers", []):
+            ids.add(d)
+    return ids
+
+
+def test_driver_coverage_strength_zero_is_noop():
+    """driver_coverage_strength=0 must produce the same timeline as omitting the param."""
+    events = _make_driver_pool(12)
+    base_constraints = {"diversity_strength": 0, "min_severity": 0, "num_drivers": 12}
+
+    t_no_param = allocate_timeline(events, 300.0, dict(base_constraints))
+    t_zero = allocate_timeline(events, 300.0, dict(base_constraints) | {"driver_coverage_strength": 0})
+
+    ids_no_param = {e["id"] for e in t_no_param}
+    ids_zero = {e["id"] for e in t_zero}
+    assert ids_no_param == ids_zero, (
+        "driver_coverage_strength=0 must be a strict no-op; "
+        f"ids differ: added={ids_zero - ids_no_param}, removed={ids_no_param - ids_zero}"
+    )
+
+
+def test_new_driver_boost_increases_unique_coverage():
+    """With coverage strength=60 the timeline should cover more unique drivers
+    than with strength=0, since back-field events get a scoring boost."""
+    events = _make_driver_pool(12)
+    base = {"diversity_strength": 30, "min_severity": 0, "num_drivers": 12}
+
+    t_off = allocate_timeline(events, 300.0, dict(base) | {"driver_coverage_strength": 0})
+    t_on = allocate_timeline(events, 300.0, dict(base) | {
+        "driver_coverage_strength": 60,
+        "new_driver_boost": 1.50,
+        "repeat_driver_penalty": 0.30,
+        "target_unique_driver_share": 0.60,
+    })
+
+    drivers_off = _driver_ids_in_timeline(t_off)
+    drivers_on = _driver_ids_in_timeline(t_on)
+    assert len(drivers_on) >= len(drivers_off), (
+        f"Coverage strength should not decrease unique drivers; "
+        f"off={len(drivers_off)}, on={len(drivers_on)}"
+    )
+
+
+def test_driver_rebalance_protects_mandatory_and_high_tier():
+    """Mandatory events (race_start, race_finish) and S/A-tier events must
+    never be displaced during the driver-coverage rebalance pass."""
+    events = _make_driver_pool(12)
+    # Add mandatory and S-tier events
+    events.append({
+        "id": 900,
+        "event_type": "race_start",
+        "start_time_seconds": 0.0,
+        "end_time_seconds": 10.0,
+        "duration": 10.0,
+        "severity": 10.0,
+        "score": 10.0,
+        "tier": "S",
+        "bucket": "start",
+        "involved_drivers": [1, 2, 3],
+        "drivers": [1, 2, 3],
+        "score_components": {},
+    })
+    events.append({
+        "id": 901,
+        "event_type": "race_finish",
+        "start_time_seconds": 590.0,
+        "end_time_seconds": 600.0,
+        "duration": 10.0,
+        "severity": 10.0,
+        "score": 10.0,
+        "tier": "S",
+        "bucket": "end",
+        "involved_drivers": [1, 2, 3],
+        "drivers": [1, 2, 3],
+        "score_components": {},
+    })
+    constraints = {
+        "diversity_strength": 0,
+        "min_severity": 0,
+        "num_drivers": 12,
+        "driver_coverage_strength": 80,
+        "target_unique_driver_share": 0.90,
+        "max_driver_coverage_swaps": 10,
+    }
+    timeline = allocate_timeline(events, 300.0, constraints)
+    selected_ids = {e["id"] for e in timeline}
+    assert 900 in selected_ids, "race_start (mandatory) must never be swapped out"
+    assert 901 in selected_ids, "race_finish (mandatory) must never be swapped out"
+
+
+def test_driver_swap_score_floor_respected():
+    """A very weak new-driver candidate must not displace a strong incumbent
+    because the driver_swap_score_floor prevents low-quality swaps."""
+    # One strong incumbent (driver 1 only, score=9.0)
+    # One weak new-driver candidate (driver 99, score=1.0)
+    # Floor=0.85 → candidate must score ≥ 9.0 * 0.85 = 7.65 — fails.
+    events = [
+        {
+            "id": 1,
+            "event_type": "battle",
+            "start_time_seconds": 0.0, "end_time_seconds": 10.0, "duration": 10.0,
+            "severity": 9.0, "score": 9.0, "tier": "B", "bucket": "mid",
+            "involved_drivers": [1], "drivers": [1], "score_components": {},
+        },
+        {
+            "id": 2,
+            "event_type": "overtake",
+            "start_time_seconds": 20.0, "end_time_seconds": 30.0, "duration": 10.0,
+            "severity": 1.0, "score": 1.0, "tier": "C", "bucket": "mid",
+            "involved_drivers": [99], "drivers": [99], "score_components": {},
+        },
+    ]
+    constraints = {
+        "diversity_strength": 0,
+        "min_severity": 0,
+        "num_drivers": 2,
+        "driver_coverage_strength": 80,
+        "target_unique_driver_share": 0.90,
+        "driver_swap_score_floor": 0.85,
+        "max_driver_coverage_swaps": 4,
+    }
+    timeline = allocate_timeline(events, 100.0, constraints)
+    selected_ids = {e["id"] for e in timeline}
+    # event 1 (score=9.0) should be kept; event 2 (score=1.0 < 7.65 floor) must not displace it
+    assert 1 in selected_ids, (
+        "Strong incumbent (score=9.0) must not be displaced by weak candidate (score=1.0)"
+    )
+
+
+def test_driver_diagnostics_attached():
+    """allocate_timeline must attach driver coverage diagnostics to constraints['_diagnostics']."""
+    events = _make_driver_pool(8)
+    constraints = {
+        "diversity_strength": 0,
+        "min_severity": 0,
+        "num_drivers": 8,
+        "driver_coverage_strength": 40,
+        "target_unique_driver_share": 0.50,
+    }
+    allocate_timeline(events, 300.0, constraints)
+    diags = constraints.get("_diagnostics")
+    assert isinstance(diags, dict), "_diagnostics should be a dict"
+    assert "driver_unique_count" in diags, "expected driver_unique_count in diagnostics"
+    assert "driver_coverage_pct" in diags, "expected driver_coverage_pct in diagnostics"
+    assert "driver_target_met" in diags, "expected driver_target_met in diagnostics"
+    assert "driver_swaps" in diags, "expected driver_swaps in diagnostics"
+    assert isinstance(diags["driver_swaps"], list), "driver_swaps should be a list"
+

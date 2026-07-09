@@ -20,6 +20,11 @@ import ResizableRowPane from '../ui/ResizableRowPane'
 import CollapsibleSection from '../ui/CollapsibleSection'
 import PreviewPlayer from '../analysis/PreviewPlayer'
 import ProjectFileBrowser from '../projects/ProjectFileBrowser'
+import {
+  CAPTURE_RESOLUTION_OPTIONS,
+  DEFAULT_CAPTURE_RESOLUTION_ID,
+  isCaptureResolutionId,
+} from '../../utils/captureResolutions'
 
 const VALID_CAPTURE_MODES = new Set(Object.values(CAPTURE_MODES))
 const CAPTURE_MODE_META = {
@@ -48,7 +53,7 @@ const CAPTURE_MODE_META = {
 function readCachedCaptureMode(projectId) {
   if (!projectId) return null
   try {
-    const cached = localStorage.getItem(`lrs:capture-mode:${projectId}`)
+    const cached = globalThis.localStorage?.getItem(`lrs:capture-mode:${projectId}`)
     return VALID_CAPTURE_MODES.has(cached) ? cached : null
   } catch {
     return null
@@ -58,7 +63,7 @@ function readCachedCaptureMode(projectId) {
 function writeCachedCaptureMode(projectId, mode) {
   if (!projectId || !VALID_CAPTURE_MODES.has(mode)) return
   try {
-    localStorage.setItem(`lrs:capture-mode:${projectId}`, mode)
+    globalThis.localStorage?.setItem(`lrs:capture-mode:${projectId}`, mode)
   } catch {
     // Ignore storage failures (private mode/quota), backend remains source of truth.
   }
@@ -235,12 +240,10 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
     return () => clearInterval(intervalId)
   }, [projectId, scriptCaptureRunning, fetchState])
 
-  // Detect software on mount
-  useEffect(() => {
-    detectSoftware()
-  }, [detectSoftware])
-
   const isCaptureMode = scriptCaptureRunning || captureState === 'capturing'
+  const captureResolution = isCaptureResolutionId(settings?.capture_resolution)
+    ? settings.capture_resolution
+    : DEFAULT_CAPTURE_RESOLUTION_ID
 
   // ── Handlers ──────────────────────────────────────────────────────────
 
@@ -268,6 +271,7 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
       captureMode,
       segmentIds: captureMode === 'specific_segments' ? selectedSegmentIds : null,
       timeRange: captureMode === 'time_range' ? captureTimeRange : null,
+      captureResolution,
     }
 
     const result = await startScriptCapture(projectId, script, options)
@@ -312,6 +316,17 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
       showSuccess(`Capture method set to ${SW_LABELS[swId] ?? swId}`)
     } catch (err) {
       showError(err.message || 'Failed to update capture method')
+    }
+  }
+
+  const handleCaptureResolutionChange = async (resolutionId) => {
+    if (!isCaptureResolutionId(resolutionId)) return
+    try {
+      await updateSetting('capture_resolution', resolutionId)
+      const preset = CAPTURE_RESOLUTION_OPTIONS.find(option => option.id === resolutionId)
+      showSuccess(`Capture resolution set to ${preset?.label ?? resolutionId}`)
+    } catch (err) {
+      showError(err.message || 'Failed to update capture resolution')
     }
   }
 
@@ -510,6 +525,30 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
         </Section>
       )}
 
+      <Section icon={FileVideo} title="Capture Resolution">
+        <div className="grid grid-cols-2 gap-1.5">
+          {CAPTURE_RESOLUTION_OPTIONS.map((option) => {
+            const isSelected = captureResolution === option.id
+            return (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => handleCaptureResolutionChange(option.id)}
+                disabled={setupOptionsDisabled}
+                className={`rounded-md border px-2.5 py-2 text-left transition-colors disabled:opacity-50 disabled:cursor-not-allowed
+                  ${isSelected
+                    ? 'border-accent/50 bg-accent/10 ring-1 ring-accent/20'
+                    : 'border-border-subtle bg-bg-primary hover:border-border hover:bg-bg-hover'
+                  }`}
+              >
+                <div className="text-xs font-semibold text-text-primary">{option.label}</div>
+                <div className="text-xxs text-text-tertiary">{option.detail}</div>
+              </button>
+            )
+          })}
+        </div>
+      </Section>
+
       <TrashBin projectId={projectId} />
 
       <Section icon={Monitor} title="Capture Software">
@@ -536,7 +575,9 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
                       <div className="flex-1 min-w-0">
                         <div className="text-xs font-medium text-text-primary">{SW_LABELS[sw.id] ?? sw.label}</div>
                         <div className="text-xxs text-text-tertiary truncate">
-                          {SW_DESCS[sw.id] ?? (sw.running ? 'Ready' : 'Not detected')}
+                          {sw.detected_process
+                            ? `Detected ${sw.detected_process}`
+                            : (SW_DESCS[sw.id] ?? (sw.running ? 'Ready' : 'Not detected'))}
                         </div>
                       </div>
                       <div className="flex flex-col items-end gap-0.5 shrink-0">

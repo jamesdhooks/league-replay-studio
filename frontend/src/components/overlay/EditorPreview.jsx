@@ -71,10 +71,10 @@ export default function EditorPreview({
   }, [elementPickerActive, onElementSelected, renderHeight, renderWidth])
 
   return (
-    <div className="h-full min-h-0 flex flex-col bg-bg-primary">
+    <div className={`h-full min-h-0 flex flex-col ${showStreamUnderlay ? 'bg-transparent' : 'bg-bg-primary'}`}>
       <div
         ref={containerRef}
-        className="relative flex-1 min-h-0 flex items-center justify-center bg-[#0a0a0a] overflow-hidden"
+        className={`relative flex-1 min-h-0 flex items-center justify-center overflow-hidden ${showStreamUnderlay ? 'bg-transparent' : 'bg-[#0a0a0a]'}`}
       >
         {(overlayVisible && (previewRenderMode === 'png' ? previewData : previewHtml)) ? (
           <div
@@ -121,7 +121,7 @@ export default function EditorPreview({
             {isRendering ? (
               <>
                 <Loader2 className="w-8 h-8 animate-spin text-blue-400" />
-                <span className="text-sm">Rendering preview…</span>
+                <span className="text-sm">Rendering overlay...</span>
               </>
             ) : previewError ? (
               <>

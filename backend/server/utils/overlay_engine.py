@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import base64
 import logging
 import os
 import re
@@ -22,6 +23,7 @@ from typing import Any, Optional
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from server.services.debug_log_service import debug_log_service
 from server.utils.overlay_animation import compute_profile_window_ms
 
 logger = logging.getLogger(__name__)
@@ -609,12 +611,26 @@ class OverlayEngine:
         Returns:
             Dict with rendering result including base64 PNG data.
         """
-        import base64
-
         if not self._initialized or not self._page:
             return {"success": False, "error": "Engine not initialized"}
 
         start = time.perf_counter()
+        debug_request_id = None
+        if isinstance(frame_data, dict):
+            debug_request_id = frame_data.get("_debug_request_id")
+
+        debug_log_service.write(
+            "overlay.render_raw_html.input",
+            {
+                "debug_request_id": debug_request_id,
+                "include_rendered_html": bool(include_rendered_html),
+                "render_screenshot": bool(render_screenshot),
+                "analyze_animations": bool(analyze_animations),
+                "html_content_length": len(html_content or ""),
+                "html_content_sha1": hashlib.sha1((html_content or "").encode("utf-8", errors="ignore")).hexdigest() if html_content else None,
+                "frame_data": frame_data,
+            },
+        )
 
         try:
             async with self._render_lock:
@@ -625,11 +641,31 @@ class OverlayEngine:
                 try:
                     env = self._get_jinja_env()
                     jinja_tmpl = env.from_string(html_content)
+                    # Keep `frame.*` as the primary context, but also expose
+                    # pagination helpers at top-level for overlay.html templates
+                    # that slice standings via page_start/page_end variables.
+                    pagination_ctx = {
+                        "page_start": frame_data.get("page_start"),
+                        "page_end": frame_data.get("page_end"),
+                        "page_index": frame_data.get("page_index"),
+                        "total_pages": frame_data.get("total_pages"),
+                        "page_key": frame_data.get("page_key"),
+                        "overlay_page_index": frame_data.get("overlay_page_index"),
+                    }
                     rendered_html = jinja_tmpl.render(
                         frame=frame_data,
                         resolution=self._current_resolution,
+                        **pagination_ctx,
                     )
                 except Exception as tmpl_exc:
+                    debug_log_service.write(
+                        "overlay.render_raw_html.output",
+                        {
+                            "debug_request_id": debug_request_id,
+                            "success": False,
+                            "error": f"Template error: {tmpl_exc}",
+                        },
+                    )
                     return {
                         "success": False,
                         "error": f"Template error: {tmpl_exc}",
@@ -675,11 +711,47 @@ class OverlayEngine:
             if animation_time_ms is not None:
                 result["animation_time_ms"] = round(float(animation_time_ms), 2)
 
+            rendered_html_payload = result.get("rendered_html") if isinstance(result.get("rendered_html"), str) else ""
+            png_base64_payload = result.get("png_base64") if isinstance(result.get("png_base64"), str) else ""
+            png_bytes_sha1 = None
+            if png_base64_payload:
+                try:
+                    png_bytes_sha1 = hashlib.sha1(base64.b64decode(png_base64_payload)).hexdigest()
+                except Exception:
+                    png_bytes_sha1 = None
+
+            debug_log_service.write(
+                "overlay.render_raw_html.output",
+                {
+                    "debug_request_id": debug_request_id,
+                    "success": True,
+                    "elapsed_ms": result.get("elapsed_ms"),
+                    "width": result.get("width"),
+                    "height": result.get("height"),
+                    "size_bytes": result.get("size_bytes"),
+                    "rendered_html_length": len(rendered_html_payload),
+                    "rendered_html_sha1": hashlib.sha1(rendered_html_payload.encode("utf-8", errors="ignore")).hexdigest() if rendered_html_payload else None,
+                    "rendered_html_head": rendered_html_payload[:2000],
+                    "png_base64_length": len(png_base64_payload),
+                    "png_base64_sha1": hashlib.sha1(png_base64_payload.encode("ascii", errors="ignore")).hexdigest() if png_base64_payload else None,
+                    "png_bytes_sha1": png_bytes_sha1,
+                },
+            )
+
             return result
 
         except Exception as exc:
             elapsed_ms = (time.perf_counter() - start) * 1000
             logger.error("[Overlay] render_raw_html failed: %s (%.1fms)", exc, elapsed_ms)
+            debug_log_service.write(
+                "overlay.render_raw_html.output",
+                {
+                    "debug_request_id": debug_request_id,
+                    "success": False,
+                    "error": _format_exc(exc),
+                    "elapsed_ms": round(elapsed_ms, 2),
+                },
+            )
             return {"success": False, "error": _format_exc(exc), "elapsed_ms": round(elapsed_ms, 2)}
 
     # ── Batch rendering ──────────────────────────────────────────────────────

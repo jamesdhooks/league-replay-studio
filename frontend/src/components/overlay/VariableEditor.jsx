@@ -90,6 +90,53 @@ function stableKeyFromVariables(input) {
   return JSON.stringify(sorted)
 }
 
+function normalizeFrameVariableOverrides(input) {
+  const normalizeFlat = (source) => {
+    const normalized = {}
+    Object.keys(source || {}).forEach((key) => {
+      const val = source[key]
+      if (val && typeof val === 'object' && !Array.isArray(val)) {
+        normalized[key] = {
+          value: String(val.value ?? ''),
+          label: String(val.label ?? key),
+        }
+        return
+      }
+      normalized[key] = {
+        value: String(val ?? ''),
+        label: key,
+      }
+    })
+    return normalized
+  }
+
+  const src = input || {}
+  const hasScopedShape = src && typeof src === 'object' && (src.global || src.projects)
+  if (!hasScopedShape) {
+    return {
+      global: normalizeFlat(src),
+      projects: {},
+    }
+  }
+
+  const normalizedProjects = {}
+  Object.entries(src.projects || {}).forEach(([pid, values]) => {
+    normalizedProjects[String(pid)] = normalizeFlat(values || {})
+  })
+
+  return {
+    global: normalizeFlat(src.global || {}),
+    projects: normalizedProjects,
+  }
+}
+
+function stableKeyFromEditorState(cssVars, frameOverrides) {
+  return JSON.stringify({
+    variables: normalizeVariables(cssVars),
+    frame_variable_overrides: normalizeFrameVariableOverrides(frameOverrides),
+  })
+}
+
 function parseCssVariableRefs(text) {
   const refs = new Set()
   if (!text) return refs
@@ -176,6 +223,23 @@ function ListPanel({ title, items, tone = 'muted', emptyLabel = 'None', itemRend
   )
 }
 
+function SetOverrideButton({ active, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      data-testid="frame-var-set-override"
+      className={`rounded border px-2 py-0.5 text-[9px] font-semibold tracking-wide transition-colors ${active
+        ? 'border-emerald-500/50 text-emerald-200 bg-emerald-500/20 hover:bg-emerald-500/25'
+        : 'border-accent/50 text-accent bg-accent/10 hover:bg-accent/20'
+      }`}
+      title="Set manual override"
+    >
+      {active ? 'SET ✓' : 'SET'}
+    </button>
+  )
+}
+
 export default function VariableEditor({
   preset,
   activeSection,
@@ -186,6 +250,8 @@ export default function VariableEditor({
   const { listAssets, getHtmlContent, getDataContext } = usePreset()
 
   const [variables, setVariables] = useState(() => normalizeVariables(preset?.variables || {}))
+  const [frameOverrides, setFrameOverrides] = useState(() => normalizeFrameVariableOverrides(preset?.frame_variable_overrides || {}))
+  const [frameOverrideScope, setFrameOverrideScope] = useState(projectId != null ? 'project' : 'global')
   const [swatches, setSwatches] = useLocalStorage('lrs:overlay:color-swatches', [
     '#ffffff', '#000000', '#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899',
   ])
@@ -199,7 +265,7 @@ export default function VariableEditor({
   const [dataContext, setDataContext] = useState(null)
 
   const hydratingRef = useRef(false)
-  const lastPersistedKeyRef = useRef(stableKeyFromVariables(preset?.variables || {}))
+  const lastPersistedKeyRef = useRef(stableKeyFromEditorState(preset?.variables || {}, preset?.frame_variable_overrides || {}))
   const lastHydratedPresetIdRef = useRef(preset?.id || null)
 
   const handleValueChange = useCallback((name, newValue) => {
@@ -241,6 +307,85 @@ export default function VariableEditor({
     setSaveState('pending')
     setSaveError('')
   }, [variables])
+
+  const handleSetFrameOverride = useCallback((name, fallbackValue = '') => {
+    if (!name) return
+    const scopedProjectId = projectId != null ? String(projectId) : null
+    const activeScope = frameOverrideScope === 'project' && scopedProjectId ? 'project' : 'global'
+    setFrameOverrides((prev) => {
+      const next = normalizeFrameVariableOverrides(prev)
+      if (activeScope === 'project') {
+        const current = { ...(next.projects[scopedProjectId] || {}) }
+        current[name] = {
+          ...(current[name] || { label: name }),
+          value: String(fallbackValue ?? current[name]?.value ?? ''),
+        }
+        next.projects[scopedProjectId] = current
+      } else {
+        const current = { ...(next.global || {}) }
+        current[name] = {
+          ...(current[name] || { label: name }),
+          value: String(fallbackValue ?? current[name]?.value ?? ''),
+        }
+        next.global = current
+      }
+      return next
+    })
+    setSaveState('pending')
+    setSaveError('')
+  }, [frameOverrideScope, projectId])
+
+  const handleFrameOverrideValueChange = useCallback((name, value) => {
+    const scopedProjectId = projectId != null ? String(projectId) : null
+    const activeScope = frameOverrideScope === 'project' && scopedProjectId ? 'project' : 'global'
+    setFrameOverrides((prev) => {
+      const next = normalizeFrameVariableOverrides(prev)
+      if (activeScope === 'project') {
+        const current = { ...(next.projects[scopedProjectId] || {}) }
+        current[name] = {
+          ...(current[name] || { label: name }),
+          value,
+        }
+        next.projects[scopedProjectId] = current
+      } else {
+        const current = { ...(next.global || {}) }
+        current[name] = {
+          ...(current[name] || { label: name }),
+          value,
+        }
+        next.global = current
+      }
+      return next
+    })
+    setSaveState('pending')
+    setSaveError('')
+  }, [frameOverrideScope, projectId])
+
+  const handleFrameOverrideRemove = useCallback((name) => {
+    const scopedProjectId = projectId != null ? String(projectId) : null
+    const activeScope = frameOverrideScope === 'project' && scopedProjectId ? 'project' : 'global'
+    setFrameOverrides((prev) => {
+      const next = normalizeFrameVariableOverrides(prev)
+      if (activeScope === 'project') {
+        const current = { ...(next.projects[scopedProjectId] || {}) }
+        delete current[name]
+        next.projects[scopedProjectId] = current
+      } else {
+        const current = { ...(next.global || {}) }
+        delete current[name]
+        next.global = current
+      }
+      return next
+    })
+    setSaveState('pending')
+    setSaveError('')
+  }, [frameOverrideScope, projectId])
+
+  useEffect(() => {
+    if (projectId == null && frameOverrideScope === 'project') {
+      setFrameOverrideScope('global')
+    }
+  }, [frameOverrideScope, projectId])
 
   const persistSwatch = useCallback((color) => {
     const normalized = normalizeHexColor(color)
@@ -293,7 +438,7 @@ export default function VariableEditor({
     }
     loadDataContext()
     return () => { mounted = false }
-  }, [preset?.id, projectId, getDataContext])
+  }, [preset?.id, preset?.frame_variable_overrides, projectId, getDataContext])
 
   useEffect(() => {
     refreshBindings()
@@ -301,18 +446,23 @@ export default function VariableEditor({
 
   useEffect(() => {
     if (!preset?.id) return
-    const nextKey = stableKeyFromVariables(preset.variables || {})
-    const shouldHydrate = lastHydratedPresetIdRef.current !== preset.id || nextKey !== lastPersistedKeyRef.current
-    if (!shouldHydrate) return
+    const presetChanged = lastHydratedPresetIdRef.current !== preset.id
+    if (!presetChanged) return
+
+    const nextKey = stableKeyFromEditorState(
+      preset.variables || {},
+      preset.frame_variable_overrides || {},
+    )
 
     hydratingRef.current = true
     setVariables(normalizeVariables(preset.variables || {}))
+    setFrameOverrides(normalizeFrameVariableOverrides(preset.frame_variable_overrides || {}))
     lastPersistedKeyRef.current = nextKey
     lastHydratedPresetIdRef.current = preset.id
     setSaveState('idle')
     setSaveError('')
     setSavedAt(null)
-  }, [preset?.id, preset?.variables])
+  }, [preset?.id, preset?.variables, preset?.frame_variable_overrides])
 
   useEffect(() => {
     if (hydratingRef.current) {
@@ -321,7 +471,7 @@ export default function VariableEditor({
     }
     if (!preset?.id) return undefined
 
-    const nextKey = stableKeyFromVariables(variables)
+    const nextKey = stableKeyFromEditorState(variables, frameOverrides)
     if (nextKey === lastPersistedKeyRef.current) return undefined
 
     setSaveState('pending')
@@ -329,13 +479,16 @@ export default function VariableEditor({
       setSaveState('saving')
       setSaveError('')
       try {
-        const result = await onUpdate(variables)
+        const result = await onUpdate({
+          variables,
+          frame_variable_overrides: frameOverrides,
+        })
         if (result && result.success === false) {
           setSaveState('error')
           setSaveError(result.error || 'Failed to save variables')
           return
         }
-        lastPersistedKeyRef.current = stableKeyFromVariables(variables)
+        lastPersistedKeyRef.current = stableKeyFromEditorState(variables, frameOverrides)
         setSaveState('saved')
         setSavedAt(Date.now())
       } catch (err) {
@@ -345,7 +498,7 @@ export default function VariableEditor({
     }, 500)
 
     return () => window.clearTimeout(timeoutId)
-  }, [variables, onUpdate, preset?.id])
+  }, [variables, frameOverrides, onUpdate, preset?.id])
 
   const sectionTemplateText = useMemo(() => {
     return (activeSectionElements || [])
@@ -422,6 +575,31 @@ export default function VariableEditor({
     })
     return map
   }, [frameVarsUsed, frameFromSection, frameFromHtml])
+
+  const frameOverrideGlobal = useMemo(
+    () => normalizeFrameVariableOverrides(frameOverrides).global || {},
+    [frameOverrides],
+  )
+
+  const frameOverrideProject = useMemo(() => {
+    const normalized = normalizeFrameVariableOverrides(frameOverrides)
+    const key = projectId != null ? String(projectId) : ''
+    if (!key) return {}
+    return normalized.projects?.[key] || {}
+  }, [frameOverrides, projectId])
+
+  const activeFrameOverrides = useMemo(() => {
+    if (frameOverrideScope === 'project' && projectId != null) return frameOverrideProject
+    return frameOverrideGlobal
+  }, [frameOverrideGlobal, frameOverrideProject, frameOverrideScope, projectId])
+
+  const effectiveFrameOverrides = useMemo(() => {
+    const merged = { ...frameOverrideGlobal }
+    Object.entries(frameOverrideProject || {}).forEach(([name, value]) => {
+      merged[name] = value
+    })
+    return merged
+  }, [frameOverrideGlobal, frameOverrideProject])
 
   const SOURCE_GROUP_COLORS = {
     telemetry: 'text-blue-400',
@@ -672,6 +850,70 @@ export default function VariableEditor({
         </div>
 
         <div className="pt-2 border-t border-border/60 mt-3 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-semibold text-text-secondary">Frame Variable Overrides</span>
+            <div className="inline-flex items-center rounded border border-border bg-bg-primary/70 p-0.5">
+              <button
+                type="button"
+                onClick={() => setFrameOverrideScope('global')}
+                className={`px-2 py-0.5 rounded text-[9px] ${frameOverrideScope === 'global' ? 'bg-accent/20 text-accent border border-accent/40' : 'text-text-tertiary hover:text-text-primary'}`}
+              >
+                Global
+              </button>
+              <button
+                type="button"
+                onClick={() => setFrameOverrideScope('project')}
+                disabled={projectId == null}
+                className={`px-2 py-0.5 rounded text-[9px] ${frameOverrideScope === 'project' ? 'bg-accent/20 text-accent border border-accent/40' : 'text-text-tertiary hover:text-text-primary'} disabled:opacity-40`}
+              >
+                Per Project
+              </button>
+            </div>
+          </div>
+
+          <p className="text-[9px] text-text-tertiary leading-relaxed">
+            Manual overrides are the final source of truth for <code className="text-accent">frame.*</code> variables.
+            Effective values resolve as Global defaults plus Per Project overrides.
+          </p>
+
+          {Object.keys(activeFrameOverrides || {}).length === 0 ? (
+            <p className="text-[10px] text-text-tertiary">
+              No {frameOverrideScope === 'project' ? 'project' : 'global'} overrides yet. Click <span className="text-text-secondary font-semibold">SET</span> on any frame variable above.
+            </p>
+          ) : (
+            <div className="space-y-1">
+              {Object.entries(activeFrameOverrides)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([name, meta]) => {
+                  const value = typeof meta === 'object' ? (meta?.value ?? '') : meta
+                  return (
+                    <div key={`fovr-${frameOverrideScope}-${name}`} className="flex items-center gap-2 text-xs">
+                      <span className={`flex-shrink-0 rounded px-1 py-0.5 text-[9px] font-mono font-bold border ${frameOverrideScope === 'project' ? 'bg-blue-500/15 text-blue-400 border-blue-500/20' : 'bg-emerald-500/15 text-emerald-400 border-emerald-500/20'}`}>
+                        {frameOverrideScope === 'project' ? 'P' : 'G'}
+                      </span>
+                      <code className="text-[10px] text-text-tertiary truncate w-32" title={name}>{name}</code>
+                      <input
+                        type="text"
+                        value={String(value ?? '')}
+                        onChange={(e) => handleFrameOverrideValueChange(name, e.target.value)}
+                        className="flex-1 bg-bg-primary border border-border rounded px-1.5 py-0.5 text-[10px] text-text-primary font-mono focus:border-blue-500 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleFrameOverrideRemove(name)}
+                        className="p-0.5 rounded hover:bg-red-700/50 text-text-tertiary hover:text-red-400"
+                        title="Remove override"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  )
+                })}
+            </div>
+          )}
+        </div>
+
+        <div className="pt-2 border-t border-border/60 mt-3 space-y-2">
           <span className="text-[11px] font-semibold text-text-secondary">Frame Template Variables</span>
           <p className="text-[9px] text-text-tertiary leading-relaxed">
             Variables parsed from <code className="text-accent">{'{{ frame.X }}'}</code> in section templates and HTML.
@@ -690,11 +932,25 @@ export default function VariableEditor({
                 const isArray = Array.isArray(rawVal)
                 const isObj = rawVal && typeof rawVal === 'object' && !isArray
                 const displayVal = rawVal === undefined ? '' : isArray ? `Array[${rawVal.length}]` : isObj ? '{...}' : JSON.stringify(rawVal)
+                const rawText = rawVal === undefined
+                  ? ''
+                  : (typeof rawVal === 'string' ? rawVal : JSON.stringify(rawVal))
+                const hasOverride = Boolean(effectiveFrameOverrides[name])
+                const hasScopedOverride = Boolean(activeFrameOverrides[name])
                 return (
                   <div key={name} className="flex items-start gap-2" title={doc}>
                     <code className={`text-[10px] font-mono whitespace-nowrap flex-shrink-0 ${groupColor}`}>{name}</code>
                     <span className="text-[10px] text-text-tertiary truncate flex-1 font-mono">{displayVal}</span>
                     <div className="flex items-center gap-1 flex-shrink-0">
+                      {hasOverride && (
+                        <span className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[9px] text-accent uppercase tracking-wider">
+                          override
+                        </span>
+                      )}
+                      <SetOverrideButton
+                        active={hasScopedOverride}
+                        onClick={() => handleSetFrameOverride(name, rawText)}
+                      />
                       {(frameVarSources[name] || []).map(renderTag)}
                     </div>
                   </div>
@@ -706,12 +962,21 @@ export default function VariableEditor({
               tone="warn"
               items={Array.from(unlinkedFrameVars).sort()}
               emptyLabel="None"
-              itemRenderer={(name) => (
-                <div key={name} className="flex items-center justify-between gap-2">
-                  <code className="text-[10px] font-mono break-all text-amber-300">{name}</code>
-                  <div className="flex items-center gap-1">{(frameVarSources[name] || []).map(renderTag)}</div>
-                </div>
-              )}
+              itemRenderer={(name) => {
+                const hasScopedOverride = Boolean(activeFrameOverrides[name])
+                return (
+                  <div key={name} className="flex items-center justify-between gap-2">
+                    <code className="text-[10px] font-mono break-all text-amber-300">{name}</code>
+                    <div className="flex items-center gap-1">
+                      <SetOverrideButton
+                        active={hasScopedOverride}
+                        onClick={() => handleSetFrameOverride(name, '')}
+                      />
+                      {(frameVarSources[name] || []).map(renderTag)}
+                    </div>
+                  </div>
+                )
+              }}
             />
             <ListPanel
               title="Defined but Unused"

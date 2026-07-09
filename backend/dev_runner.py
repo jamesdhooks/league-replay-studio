@@ -93,18 +93,9 @@ def main() -> int:
 
     backend_cmd = [
         sys.executable,
-        "-m",
-        "uvicorn",
-        "app:app",
-        "--host",
-        BACKEND_HOST,
-        "--port",
-        str(BACKEND_PORT),
+        "app.py",
+        "--web",
         "--reload",
-        "--reload-dir",
-        str(BACKEND_DIR),
-        "--log-level",
-        "warning",
     ]
 
     processes: list[tuple[str, subprocess.Popen]] = []

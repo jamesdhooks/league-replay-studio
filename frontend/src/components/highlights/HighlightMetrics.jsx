@@ -13,7 +13,7 @@ import CollapsibleSection from '../ui/CollapsibleSection'
  * Updates within 100ms of any parameter change (computed in HighlightContext).
  */
 export default memo(function HighlightMetrics() {
-  const { metrics, targetDuration, videoScript } = useHighlight()
+  const { metrics, targetDuration, videoScript, params } = useHighlight()
   const { raceDuration } = useTimeline()
   const [metricsExpanded, setMetricsExpanded] = useLocalStorage('lrs:editing:metrics:expanded', true)
 
@@ -97,6 +97,15 @@ export default memo(function HighlightMetrics() {
             value={`${metrics.driverCount} / ${metrics.totalDrivers}`}
             suffix={` (${metrics.driverCoverage}%)`}
           />
+          {(params?.driverCoverageStrength ?? 35) > 0 && metrics.totalDrivers > 0 && (
+            <MetricBar
+              icon={Users}
+              label={`Coverage${metrics.driverTargetMet ? ' ✓' : ''}`}
+              tooltip={`Driver coverage target: ${Math.round((params?.targetUniqueDriverShare ?? 0.60) * 100)}% of field — ${metrics.driverTargetMet ? 'target met' : 'below target'}`}
+              value={metrics.driverCoverage}
+              color={metrics.driverCoverage >= 60 ? 'bg-success' : metrics.driverCoverage >= 35 ? 'bg-warning' : 'bg-danger'}
+            />
+          )}
 
           {/* Tier distribution */}
           {metrics.tierCounts && (

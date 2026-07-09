@@ -19,6 +19,8 @@ import platform
 import re
 import subprocess
 import time
+import csv
+import io
 from pathlib import Path
 from typing import Any, Optional
 
@@ -29,7 +31,7 @@ logger = logging.getLogger(__name__)
 CAPTURE_SOFTWARE = {
     "obs": {
         "label": "OBS Studio",
-        "process_names": ["obs64.exe", "obs32.exe", "obs.exe"],
+        "process_names": ["obs64.exe", "obs32.exe", "obs.exe", "obs-studio.exe"],
         "default_hotkey_start": "F9",
         "default_hotkey_stop": "F9",   # OBS toggles with the same key
     },
@@ -60,14 +62,16 @@ def detect_capture_software() -> list[dict[str, Any]]:
     running_processes = _get_running_processes()
 
     for sw_id, sw_info in CAPTURE_SOFTWARE.items():
-        is_running = any(
-            proc_name.lower() in running_processes
-            for proc_name in sw_info["process_names"]
-        )
+        expected_processes = {_normalize_process_name(name) for name in sw_info["process_names"]}
+        detected_processes = sorted(expected_processes.intersection(running_processes))
+        is_running = len(detected_processes) > 0
         results.append({
             "id": sw_id,
             "label": sw_info["label"],
             "running": is_running,
+            "process_names": sw_info["process_names"],
+            "detected_process": detected_processes[0] if detected_processes else None,
+            "detected_processes": detected_processes,
             "default_hotkey_start": sw_info["default_hotkey_start"],
             "default_hotkey_stop": sw_info["default_hotkey_stop"],
         })
@@ -107,30 +111,177 @@ def is_software_running(software_id: str) -> bool:
     if not sw_info:
         return False
     running = _get_running_processes()
-    return any(p.lower() in running for p in sw_info["process_names"])
+    return any(_normalize_process_name(p) in running for p in sw_info["process_names"])
 
 
 def _get_running_processes() -> set[str]:
-    """Get a set of running process names (lowercase) on Windows."""
+    """Get a set of running process names (lowercase) on Windows.
+
+    OBS detection feeds both the toolbar chip and the capture controls, so it
+    needs to tolerate shell/path quirks. We combine multiple native Windows
+    process listings instead of trusting a single command shape.
+    """
     if platform.system() != "Windows":
         logger.debug("[Capture] Process detection only supported on Windows")
         return set()
-    try:
-        output = subprocess.check_output(
-            ["tasklist", "/fo", "csv", "/nh"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
-        )
-        processes = set()
-        for line in output.strip().split("\n"):
-            if line.startswith('"'):
-                name = line.split('"')[1].lower()
+
+    for source in (
+        _get_processes_from_windows_api,
+        _get_processes_from_tasklist,
+        _get_processes_from_powershell,
+        _get_processes_from_wmic,
+    ):
+        try:
+            processes = source()
+        except Exception as exc:
+            logger.debug("[Capture] Process source %s failed: %s", source.__name__, exc)
+            continue
+        if processes:
+            return processes
+
+    logger.warning("[Capture] Process detection returned no process names")
+    return set()
+
+
+def _normalize_process_name(name: str) -> str:
+    """Normalize a process executable name for exact basename matching."""
+    value = (name or "").strip().strip('"').replace("\\", "/")
+    if "/" in value:
+        value = value.rsplit("/", 1)[-1]
+    return value.lower()
+
+
+def _run_process_listing(command: list[str], timeout: float = 5) -> str:
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    completed = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        creationflags=creationflags,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout or ""
+
+
+def _get_processes_from_windows_api() -> set[str]:
+    """List processes through the Windows API without spawning helper shells."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+
+    process_count = 4096
+    while True:
+        process_ids = (wintypes.DWORD * process_count)()
+        bytes_returned = wintypes.DWORD()
+        if not psapi.EnumProcesses(process_ids, ctypes.sizeof(process_ids), ctypes.byref(bytes_returned)):
+            return set()
+        returned_count = bytes_returned.value // ctypes.sizeof(wintypes.DWORD)
+        if returned_count < process_count:
+            break
+        process_count *= 2
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    PROCESS_QUERY_INFORMATION = 0x0400
+    PROCESS_VM_READ = 0x0010
+    processes: set[str] = set()
+
+    for process_id in process_ids[:returned_count]:
+        if not process_id:
+            continue
+
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, process_id)
+        if not handle:
+            handle = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, process_id)
+        if not handle:
+            continue
+
+        try:
+            buffer = ctypes.create_unicode_buffer(32768)
+            size = wintypes.DWORD(len(buffer))
+            if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+                name = _normalize_process_name(buffer.value)
+                if name.endswith(".exe"):
+                    processes.add(name)
+                    continue
+
+            module_handle = wintypes.HMODULE()
+            module_bytes = wintypes.DWORD()
+            if psapi.EnumProcessModules(handle, ctypes.byref(module_handle), ctypes.sizeof(module_handle), ctypes.byref(module_bytes)):
+                module_name = ctypes.create_unicode_buffer(260)
+                if psapi.GetModuleBaseNameW(handle, module_handle, module_name, len(module_name)):
+                    name = _normalize_process_name(module_name.value)
+                    if name.endswith(".exe"):
+                        processes.add(name)
+        finally:
+            kernel32.CloseHandle(handle)
+
+    return processes
+
+
+def _get_processes_from_tasklist() -> set[str]:
+    """List processes using tasklist CSV output."""
+    commands = [
+        ["tasklist", "/fo", "csv", "/nh"],
+        [r"C:\Windows\System32\tasklist.exe", "/fo", "csv", "/nh"],
+    ]
+    processes: set[str] = set()
+    for command in commands:
+        output = _run_process_listing(command)
+        if not output:
+            continue
+
+        for row in csv.reader(io.StringIO(output)):
+            if not row:
+                continue
+            name = _normalize_process_name(row[0])
+            if name:
                 processes.add(name)
-        return processes
-    except (subprocess.SubprocessError, OSError) as exc:
-        logger.warning("[Capture] Failed to list processes: %s", exc)
-        return set()
+
+        # Defensive fallback for malformed/localized CSV output.
+        for match in re.finditer(r'"([^"]+\.exe)"', output, flags=re.IGNORECASE):
+            processes.add(_normalize_process_name(match.group(1)))
+
+        if processes:
+            break
+    return processes
+
+
+def _get_processes_from_wmic() -> set[str]:
+    """List processes using WMIC where it is still installed."""
+    output = _run_process_listing(["wmic", "process", "get", "name"], timeout=5)
+    processes: set[str] = set()
+    for line in output.splitlines():
+        name = _normalize_process_name(line)
+        if name.endswith(".exe"):
+            processes.add(name)
+    return processes
+
+
+def _get_processes_from_powershell() -> set[str]:
+    """List processes through CIM as a final Windows fallback."""
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "Get-CimInstance Win32_Process | Select-Object -ExpandProperty Name",
+    ]
+    output = _run_process_listing(command, timeout=6)
+    processes: set[str] = set()
+    for line in output.splitlines():
+        name = _normalize_process_name(line)
+        if name.endswith(".exe"):
+            processes.add(name)
+    return processes
 
 
 # ── Hotkey simulation ───────────────────────────────────────────────────────

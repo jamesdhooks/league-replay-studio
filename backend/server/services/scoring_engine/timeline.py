@@ -18,10 +18,16 @@ from .constants import (
     BUCKET_BOUNDARIES,
     DEFAULT_BUCKET_REPEAT_PENALTY,
     DEFAULT_DIVERSITY_STRENGTH,
+    DEFAULT_DRIVER_COVERAGE_STRENGTH,
+    DEFAULT_DRIVER_SWAP_SCORE_FLOOR,
     DEFAULT_FLOOR_BOOST,
+    DEFAULT_MAX_DRIVER_COVERAGE_SWAPS,
     DEFAULT_MAX_FLOOR_REBALANCE_SWAPS,
     DEFAULT_MIX_MAX,
+    DEFAULT_NEW_DRIVER_BOOST,
     DEFAULT_PIP_THRESHOLD,
+    DEFAULT_REPEAT_DRIVER_PENALTY,
+    DEFAULT_TARGET_UNIQUE_DRIVER_SHARE,
     DEFAULT_TYPE_DECAY_BASE,
     MANDATORY_TYPES,
     TV_CAM_PREFERENCES,
@@ -83,6 +89,39 @@ def _bucket_diversity_factor(bucket_type_count: int, repeat_penalty: float, scal
     if scale <= 0 or bucket_type_count <= 0:
         return 1.0
     return 1.0 / (1.0 + max(0.0, float(repeat_penalty)) * bucket_type_count * scale)
+
+
+def _driver_coverage_factor(
+    involved: set,
+    seen_drivers: set,
+    new_driver_boost: float,
+    repeat_driver_penalty: float,
+    driver_scale: float,
+) -> float:
+    """Marginal-utility factor for driver field coverage.
+
+    Rewards events that introduce unseen drivers; mildly penalises events
+    that repeat already-covered drivers.  Blended toward 1.0 by driver_scale
+    so driver_coverage_strength=0 is a strict no-op.
+
+    Args:
+        involved: Set of driver IDs for this event.
+        seen_drivers: Set of driver IDs already represented in the selected timeline.
+        new_driver_boost: Multiplier ceiling when all drivers are new (e.g. 1.40).
+        repeat_driver_penalty: Max fractional penalty when all drivers are repeats (e.g. 0.25).
+        driver_scale: driver_coverage_strength / 100.  0 disables; 1 = full strength.
+
+    Returns:
+        Float factor to multiply the candidate\'s effective score by.
+    """
+    if driver_scale <= 0 or not involved:
+        return 1.0
+    unseen = involved - seen_drivers
+    unseen_frac = len(unseen) / len(involved)
+    raw_boost = unseen_frac * (float(new_driver_boost) - 1.0)
+    raw_penalty = (1.0 - unseen_frac) * float(repeat_driver_penalty)
+    raw_factor = 1.0 + raw_boost - raw_penalty
+    return 1.0 + (raw_factor - 1.0) * driver_scale
 
 
 def _evt_duration(event: dict) -> float:
@@ -384,6 +423,15 @@ def allocate_timeline(
     mix_max: dict[str, float] = dict(constraints.get("mix_max") or {})
     div_scale = _diversity_scale(diversity_strength)
 
+    # ── Driver coverage constraints ────────────────────────────────────────
+    driver_coverage_strength = float(constraints.get("driver_coverage_strength", DEFAULT_DRIVER_COVERAGE_STRENGTH))
+    new_driver_boost = float(constraints.get("new_driver_boost", DEFAULT_NEW_DRIVER_BOOST))
+    repeat_driver_penalty = float(constraints.get("repeat_driver_penalty", DEFAULT_REPEAT_DRIVER_PENALTY))
+    target_unique_driver_share = float(constraints.get("target_unique_driver_share", DEFAULT_TARGET_UNIQUE_DRIVER_SHARE))
+    max_driver_swaps = int(constraints.get("max_driver_coverage_swaps", DEFAULT_MAX_DRIVER_COVERAGE_SWAPS))
+    driver_swap_score_floor = float(constraints.get("driver_swap_score_floor", DEFAULT_DRIVER_SWAP_SCORE_FLOOR))
+    driver_scale = max(0.0, driver_coverage_strength) / 100.0
+
     # Filter by minimum severity. Force-included events always remain candidates.
     # force_full_video events are intentionally excluded from highlight allocation.
     candidates = [
@@ -422,6 +470,7 @@ def allocate_timeline(
     type_count: dict[str, int] = defaultdict(int)
     type_used_duration: dict[str, float] = defaultdict(float)
     bucket_type_count: dict[tuple[str, str], int] = defaultdict(int)
+    seen_drivers: set = set()  # drivers already represented in the selected timeline
     for evt in timeline:
         b = evt.get("bucket", "mid")
         t = evt.get("event_type", "unknown")
@@ -430,13 +479,14 @@ def allocate_timeline(
         type_count[t] += 1
         type_used_duration[t] += d
         bucket_type_count[(b, t)] += 1
+        seen_drivers.update(_get_drivers(evt))
 
     selected_ids = {id(e) for e in timeline}
     remaining_pool = list(remaining)
     target = max(target_duration, 1.0)
 
     def _effective_score(evt: dict) -> float:
-        """Score after applying diversity/quota/bucket factors. <=0 means skip."""
+        """Score after applying diversity/quota/bucket/driver-coverage factors. <=0 means skip."""
         t = evt.get("event_type", "unknown")
         b = evt.get("bucket", "mid")
         share = type_used_duration[t] / target
@@ -445,7 +495,10 @@ def allocate_timeline(
             return 0.0
         decay = _type_decay_factor(type_count[t], type_decay_base, div_scale)
         bdiv = _bucket_diversity_factor(bucket_type_count[(b, t)], bucket_repeat_penalty, div_scale)
-        return max(0.0, evt.get("score", 0)) * q * decay * bdiv
+        dcov = _driver_coverage_factor(
+            _get_drivers(evt), seen_drivers, new_driver_boost, repeat_driver_penalty, driver_scale
+        )
+        return max(0.0, evt.get("score", 0)) * q * decay * bdiv * dcov
 
     # Marginal-utility greedy: re-rank remaining each iteration so diversity
     # terms (which depend on already-selected counts) update correctly.
@@ -480,6 +533,7 @@ def allocate_timeline(
         type_count[t] += 1
         type_used_duration[t] += evt_dur
         bucket_type_count[(b, t)] += 1
+        seen_drivers.update(_get_drivers(best_evt))
         remaining_pool.pop(best_idx)
 
     # Pass 2b — Overflow fill: if still under target, ignore bucket limits.
@@ -503,6 +557,7 @@ def allocate_timeline(
             type_count[t] += 1
             type_used_duration[t] += evt_dur
             bucket_type_count[(b, t)] += 1
+            seen_drivers.update(_get_drivers(evt))
 
     # Pass 4 — Floor rebalance: if any mix_min is unmet, swap low-tier non-mandatory
     # selected events for the strongest unmet-floor candidates. Capped at
@@ -576,6 +631,88 @@ def allocate_timeline(
             })
             swaps_done += 1
 
+    # Pass 5 — Driver coverage rebalance: if unique-driver share is below target,
+    # swap low-tier repeated-driver clips for the strongest new-driver candidate.
+    # Skips mandatory, force-included, and tier S/A events to protect story quality.
+    diagnostics_driver_swaps: list[dict] = []
+    total_race_drivers = constraints.get("num_drivers", 0)
+    if driver_scale > 0 and max_driver_swaps > 0 and total_race_drivers > 0:
+        current_unique = len(seen_drivers)
+        coverage_target_count = int(math.ceil(total_race_drivers * target_unique_driver_share))
+        driver_swaps_done = 0
+        while current_unique < coverage_target_count and driver_swaps_done < max_driver_swaps:
+            # Find the best unselected candidate that introduces at least one uncovered driver.
+            uncovered = set(range(total_race_drivers)) - seen_drivers  # rough; works for int IDs
+            # Re-derive from event data if available — check remaining_pool + all candidates
+            all_pool = [e for e in candidates if id(e) not in selected_ids]
+            best_cand = None
+            best_cand_score = -1.0
+            for evt in all_pool:
+                if not (_get_drivers(evt) - seen_drivers):
+                    continue  # no new drivers
+                s = evt.get("score", 0)
+                if s > best_cand_score:
+                    best_cand_score = s
+                    best_cand = evt
+            if best_cand is None:
+                break  # nothing introduces new drivers
+            # Find the weakest swappable selected event:
+            # non-mandatory, not force-included, tier B/C, score <= best_cand / driver_swap_score_floor.
+            swap_target = None
+            for evt in sorted(timeline, key=lambda e: e.get("score", 0)):
+                if evt.get("event_type") in MANDATORY_TYPES or evt.get("force_included"):
+                    continue
+                if evt.get("tier") in ("S", "A"):
+                    continue
+                # Only swap if the candidate is strong enough relative to the displaced clip.
+                if evt.get("score", 0) > 0 and best_cand_score < evt.get("score", 0) * driver_swap_score_floor:
+                    continue
+                # Don't swap an event that itself introduces new drivers (keep it for coverage).
+                if _get_drivers(evt) - seen_drivers:
+                    continue
+                swap_target = evt
+                break
+            if swap_target is None:
+                break  # can't safely swap anything
+            # Perform the swap.
+            sw_dur = _evt_selection_duration(swap_target, constraints)
+            sw_t = swap_target.get("event_type", "unknown")
+            sw_b = swap_target.get("bucket", "mid")
+            timeline.remove(swap_target)
+            selected_ids.discard(id(swap_target))
+            used_duration -= sw_dur
+            bucket_used[sw_b] -= sw_dur
+            type_count[sw_t] -= 1
+            type_used_duration[sw_t] -= sw_dur
+            bucket_type_count[(sw_b, sw_t)] = max(0, bucket_type_count[(sw_b, sw_t)] - 1)
+            # Update seen_drivers — rebuild from remaining timeline after removal.
+            seen_drivers = set()
+            for e in timeline:
+                seen_drivers.update(_get_drivers(e))
+
+            cand_dur = _evt_selection_duration(best_cand, constraints)
+            cand_b = best_cand.get("bucket", "mid")
+            cand_t = best_cand.get("event_type", "unknown")
+            timeline.append(best_cand)
+            selected_ids.add(id(best_cand))
+            used_duration += cand_dur
+            bucket_used[cand_b] += cand_dur
+            type_count[cand_t] += 1
+            type_used_duration[cand_t] += cand_dur
+            bucket_type_count[(cand_b, cand_t)] += 1
+            seen_drivers.update(_get_drivers(best_cand))
+
+            diagnostics_driver_swaps.append({
+                "in_id": best_cand.get("id"),
+                "in_type": cand_t,
+                "in_score": best_cand_score,
+                "out_id": swap_target.get("id"),
+                "out_type": sw_t,
+                "out_score": swap_target.get("score", 0),
+            })
+            current_unique = len(seen_drivers)
+            driver_swaps_done += 1
+
     # Pass 3 — Smoothing
     timeline = _smooth_timeline(
         timeline,
@@ -591,13 +728,16 @@ def allocate_timeline(
     total_dur = sum(_evt_selection_duration(e, constraints) for e in timeline)
     logger.info(
         "allocate_timeline: selected %d segments (%.1fs total) for %.1fs target — "
-        "diversity_strength=%.0f, swaps=%d",
+        "diversity_strength=%.0f, type_swaps=%d, driver_coverage_strength=%.0f, driver_swaps=%d, "
+        "unique_drivers=%d",
         len(timeline), total_dur, target_duration, diversity_strength, len(diagnostics_swaps),
+        driver_coverage_strength, len(diagnostics_driver_swaps), len(seen_drivers),
     )
 
     # Attach selection diagnostics for the caller. We can't set arbitrary attributes
     # on a built-in list, so we mutate the caller-provided constraints dict in place
     # under the "_diagnostics" key. The pipeline reads it back from there.
+    _final_unique_drivers = len(seen_drivers)
     diagnostics = {
         "diversity_strength": diversity_strength,
         "type_used_duration": dict(type_used_duration),
@@ -615,6 +755,19 @@ def allocate_timeline(
         "swaps": diagnostics_swaps,
         "total_duration": total_dur,
         "target_duration": target_duration,
+        # Driver coverage diagnostics
+        "driver_coverage_strength": driver_coverage_strength,
+        "driver_unique_count": _final_unique_drivers,
+        "driver_total_count": total_race_drivers,
+        "driver_coverage_pct": round(
+            _final_unique_drivers / max(total_race_drivers, 1) * 100, 1
+        ),
+        "driver_target_unique_share": target_unique_driver_share,
+        "driver_target_met": (
+            _final_unique_drivers >= int(math.ceil(total_race_drivers * target_unique_driver_share))
+            if total_race_drivers > 0 else True
+        ),
+        "driver_swaps": diagnostics_driver_swaps,
     }
     if isinstance(constraints, dict):
         constraints["_diagnostics"] = diagnostics

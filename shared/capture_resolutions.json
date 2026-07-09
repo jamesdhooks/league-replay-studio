@@ -1,0 +1,19 @@
+{
+  "default": "1080p",
+  "presets": [
+    {
+      "id": "1080p",
+      "label": "1080p",
+      "width": 1920,
+      "height": 1080,
+      "description": "Standard Full HD capture target"
+    },
+    {
+      "id": "1440p",
+      "label": "1440p",
+      "width": 2560,
+      "height": 1440,
+      "description": "High-quality QHD capture target"
+    }
+  ]
+}

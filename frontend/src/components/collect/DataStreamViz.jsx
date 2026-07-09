@@ -461,13 +461,20 @@ function drawHUD(ctx, W, H, isCollecting, tickCount, hz, label) {
 }
 
 // ── Component ──────────────────────────────────────────────────────────────────
-export default function DataStreamViz({ isCollecting = false, tickCount = 0, hz = 4, label = '' }) {
+export default function DataStreamViz({
+  isCollecting = false,
+  tickCount = 0,
+  hz = 4,
+  label = '',
+  controlsPosition = 'top-right',
+}) {
   const canvasRef = useRef(null)
   const propsRef  = useRef({ isCollecting, tickCount, hz, label })
   const modeRef = useRef('ridiculous')
   const lastGifRef = useRef(null)
   const [spectralMode, setSpectralMode] = useState('ridiculous')
   const [spectralSprites, setSpectralSprites] = useState([])
+  const controlsPositionClass = controlsPosition === 'bottom-right' ? 'bottom-3 right-3' : 'top-3 right-3'
   const stateRef  = useRef({
     particles:      [],
     pulses:         [],
@@ -739,7 +746,7 @@ export default function DataStreamViz({ isCollecting = false, tickCount = 0, hz 
         ))}
       </div>
 
-      <div className="absolute top-3 right-3 z-20 pointer-events-auto select-none">
+      <div className={`absolute ${controlsPositionClass} z-20 pointer-events-auto select-none`}>
         <div className="rounded-xl border border-border-strong/70 bg-bg-secondary/70 px-1.5 py-1.5 backdrop-blur-sm">
           <div className="px-1 pb-1 text-[9px] font-semibold uppercase tracking-[0.11em] text-text-secondary">
             Viz Intensity

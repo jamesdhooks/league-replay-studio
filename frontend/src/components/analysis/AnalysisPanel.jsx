@@ -687,6 +687,7 @@ export default memo(function AnalysisPanel() {
                               tickCount={effectiveProgress?.totalTicks ?? analysisStatus?.total_ticks ?? 0}
                               hz={4}
                               label={activeProject?.name ?? ''}
+                              controlsPosition="bottom-right"
                             />
                           </div>
                         ) : null}

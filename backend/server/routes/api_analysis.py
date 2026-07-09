@@ -2003,16 +2003,13 @@ async def generate_video_script_endpoint(project_id: int, body: VideoScriptReque
             # Add session_num context to each segment for capture phase
             race_session_num = int(_meta_val("race_session_num", 0))
             for segment in result.get("script", []):
-                # Segments are typically in the race session, but intro/results may vary
-                # Store race_session_num so capture can use it directly without probing
+                # Generated scripts use race-session time coordinates unless a
+                # segment explicitly overrides the replay session. B-roll/intro
+                # sections are placed on the production timeline, so defaulting
+                # them to practice/qualifying makes iRacing ignore or misland
+                # replay_search_session_time() during capture.
                 if "session_num" not in segment:
-                    section = segment.get("section", "race")
-                    if section == "race":
-                        segment["session_num"] = race_session_num
-                    else:
-                        # Intro/results may be in session 0 (qualifying) or earlier
-                        # Default to 0; probing will find the correct session if needed
-                        segment["session_num"] = 0
+                    segment["session_num"] = race_session_num
 
             logger.info(
                 "[Highlights API] Video script generated for project #%d: "
