@@ -380,6 +380,10 @@ class PresetService:
             return self._materialize_builtin_preset(preset_id)
         return preset
 
+    def ensure_editable_preset(self, preset_id: str) -> Optional[dict[str, Any]]:
+        """Return an editable preset, materializing built-ins when needed."""
+        return self._get_or_materialize_editable_preset(preset_id)
+
     def create_preset(self, data: dict[str, Any]) -> dict[str, Any]:
         """Create a new custom preset."""
         preset_id = data.get("id") or f"preset_{uuid.uuid4().hex[:8]}"
@@ -522,6 +526,9 @@ class PresetService:
         preset_dir = PRESETS_DIR / preset_id
         preset_dir.mkdir(parents=True, exist_ok=True)
         (preset_dir / "overlay.html").write_text(html_content, encoding="utf-8")
+        preset["version"] = _bump_version(preset.get("version", "1.0.0"))
+        self._save_preset(preset)
+        self._update_in_memory(preset)
         return True
 
     def _migrate_legacy_html(self, preset: dict[str, Any]) -> Optional[str]:

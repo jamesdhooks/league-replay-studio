@@ -50,7 +50,7 @@ from server.routes.api_capture import router as capture_router
 from server.routes.api_encoding import router as encoding_router
 from server.routes.api_preview import router as preview_router
 from server.routes.api_overlay import router as overlay_router
-from server.routes.api_preset import router as preset_router
+from server.routes.api_preset import router as preset_router, set_broadcast_fn as set_preset_broadcast_fn
 from server.routes.api_youtube import router as youtube_router
 from server.routes.api_pipeline import router as pipeline_router
 from server.utils.command_log import command_log
@@ -60,6 +60,7 @@ from server.routes.api_collection import router as collection_router
 from server.routes.api_composition import router as composition_router
 from server.routes.api_script_state import router as script_state_router
 from server.routes.api_data_plugins import router as data_plugins_router
+from server.routes.api_agent import router as agent_router
 
 # Services
 from server.services.iracing_bridge import bridge as iracing_bridge
@@ -248,6 +249,7 @@ async def lifespan(app: FastAPI):
             asyncio.run_coroutine_threadsafe(ws_manager.broadcast(message), loop)
 
     set_llm_broadcast_fn(_llm_broadcast)
+    set_preset_broadcast_fn(_llm_broadcast)
 
     # ── Wire command log broadcast ────────────────────────────────────────
     def _command_log_broadcast(message: dict) -> None:
@@ -305,6 +307,7 @@ app.include_router(collection_router)
 app.include_router(composition_router)
 app.include_router(script_state_router)
 app.include_router(data_plugins_router)
+app.include_router(agent_router)
 
 
 # ── WebSocket endpoint ──────────────────────────────────────────────────────

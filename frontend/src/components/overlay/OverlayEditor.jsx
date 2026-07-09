@@ -1,3 +1,4 @@
+/* global DOMParser */
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import Editor from '@monaco-editor/react'
 import { usePreset } from '../../context/PresetContext'
@@ -20,7 +21,7 @@ import { wsClient } from '../../services/websocket'
 import {
   Save, RotateCcw, BookOpen, Sparkles,
   Loader2,
-  Film, Award, Flag, Monitor, Bug, RefreshCw, Eye, EyeOff, ZoomIn, ZoomOut, Maximize2, MousePointer2, Copy, ChevronRight, ChevronLeft, Bot, Terminal, AlertTriangle,
+  Film, Award, Flag, Monitor, Bug, RefreshCw, Eye, EyeOff, ZoomIn, ZoomOut, Maximize2, MousePointer2, Copy, ChevronRight, ChevronLeft, Bot, Terminal, AlertTriangle, History,
 } from 'lucide-react'
 
 const HTML_ELEMENT_SCAN_LIMIT = 120
@@ -266,9 +267,10 @@ function buildHtmlElementIndex(html = '') {
  */
 export default function OverlayEditor({ designId }) {
   const {
-    getHtmlContent, updateHtmlContent,
+    getHtmlRecord, updateHtmlContent,
+    listRevisions, restoreRevision,
     renderEditorPreview, getDataContext,
-    selectedPreset, duplicatePreset,
+    selectedPreset,
     activeSection,
     setActiveSection,
   } = usePreset()
@@ -300,6 +302,7 @@ export default function OverlayEditor({ designId }) {
   // ── State ────────────────────────────────────────────────────────────────
   const [htmlContent, setHtmlContent] = useState('')
   const [savedContent, setSavedContent] = useState('')
+  const [savedSha256, setSavedSha256] = useState('')
   const [designMeta, setDesignMeta] = useState(null)
   const [previewData, setPreviewData] = useState(null)
   const [previewHtml, setPreviewHtml] = useState(null)
@@ -332,11 +335,16 @@ export default function OverlayEditor({ designId }) {
   const [lastCommandLabel, setLastCommandLabel] = useState(null)
   const [rightSidebarWidth, setRightSidebarWidth] = useLocalStorage('lrs:overlay:editorRightSidebarWidth', 380)
   const [isRightSidebarDragging, setIsRightSidebarDragging] = useState(false)
+  const [revisions, setRevisions] = useState([])
+  const [revisionsLoading, setRevisionsLoading] = useState(false)
+  const [externalConflict, setExternalConflict] = useState(null)
+  const [externalDiffPreview, setExternalDiffPreview] = useState('')
 
   const editorRef = useRef(null)
   const previewTimerRef = useRef(null)
   const aiSnapshotsRef = useRef({})
   const aiConversationRef = useRef(null)
+  const isDirtyRef = useRef(false)
 
   const htmlElementIndex = useMemo(() => buildHtmlElementIndex(htmlContent), [htmlContent])
 
@@ -392,6 +400,50 @@ export default function OverlayEditor({ designId }) {
     return unsub
   }, [])
 
+  const refreshRevisions = useCallback(async () => {
+    if (!designId) return
+    setRevisionsLoading(true)
+    try {
+      const result = await listRevisions(designId)
+      setRevisions(Array.isArray(result?.revisions) ? result.revisions : [])
+    } finally {
+      setRevisionsLoading(false)
+    }
+  }, [designId, listRevisions])
+
+  const applyHtmlRecordToEditor = useCallback((record) => {
+    if (record?.html_content == null) return
+    setHtmlContent(record.html_content)
+    setSavedContent(record.html_content)
+    setSavedSha256(record.sha256 || '')
+    setExternalConflict(null)
+    setExternalDiffPreview('')
+    if (editorRef.current) {
+      editorRef.current.setValue(record.html_content)
+    }
+  }, [])
+
+  useEffect(() => {
+    const unsub = wsClient.subscribe('overlay:template_updated', async (data) => {
+      if (!data || data.preset_id !== designId || data.source !== 'mcp') return
+
+      if (isDirtyRef.current) {
+        setExternalConflict(data)
+        setExternalDiffPreview('')
+        addToast('Codex updated this overlay. Your unsaved edits are still in the editor.', 'warning')
+        return
+      }
+
+      const record = await getHtmlRecord(designId)
+      if (record?.html_content != null) {
+        applyHtmlRecordToEditor(record)
+        refreshRevisions()
+        addToast('Codex overlay update loaded', 'success')
+      }
+    })
+    return unsub
+  }, [addToast, applyHtmlRecordToEditor, designId, getHtmlRecord, refreshRevisions])
+
   const FALLBACK_FRAME_DATA = {
     section: 'race',
     series_name: 'iRacing Series',
@@ -421,12 +473,13 @@ export default function OverlayEditor({ designId }) {
       }
 
       // Load design HTML content
-      const html = await getHtmlContent(designId)
+      const htmlRecord = await getHtmlRecord(designId)
       if (cancelled) return
 
-      if (html != null) {
-        setHtmlContent(html)
-        setSavedContent(html)
+      if (htmlRecord?.html_content != null) {
+        setHtmlContent(htmlRecord.html_content)
+        setSavedContent(htmlRecord.html_content)
+        setSavedSha256(htmlRecord.sha256 || '')
         setDesignMeta(selectedPreset)
       }
 
@@ -438,11 +491,12 @@ export default function OverlayEditor({ designId }) {
       }
 
       setLoading(false)
+      refreshRevisions()
     }
 
     load()
     return () => { cancelled = true }
-  }, [activeProject?.id, designId, getHtmlContent, getDataContext, engineStatus.engine_initialized, initEngine, selectedPreset])
+  }, [activeProject?.id, designId, getHtmlRecord, getDataContext, engineStatus.engine_initialized, initEngine, selectedPreset, refreshRevisions])
 
   useEffect(() => {
     aiSnapshotsRef.current = {}
@@ -595,7 +649,9 @@ export default function OverlayEditor({ designId }) {
 
   // ── Track dirty state ────────────────────────────────────────────────────
   useEffect(() => {
-    setIsDirty(htmlContent !== savedContent)
+    const dirty = htmlContent !== savedContent
+    setIsDirty(dirty)
+    isDirtyRef.current = dirty
   }, [htmlContent, savedContent])
 
   // ── Editor change handler ────────────────────────────────────────────────
@@ -731,10 +787,19 @@ export default function OverlayEditor({ designId }) {
   const handleSave = useCallback(async () => {
     if (!designMeta) return
 
-    const result = await updateHtmlContent(designId, htmlContent)
+    const result = await updateHtmlContent(designId, htmlContent, {
+      expectedSha256: savedSha256 || null,
+      source: 'ui',
+      author: 'user',
+      summary: 'Build editor save',
+    })
 
     if (result?.success) {
       setSavedContent(htmlContent)
+      setSavedSha256(result.sha256 || '')
+      setExternalConflict(null)
+      setExternalDiffPreview('')
+      refreshRevisions()
       if (aiActiveTurnId && aiSnapshotsRef.current[aiActiveTurnId]) {
         setAiActiveTurnId(null)
         setAiPreviewMode('after')
@@ -743,9 +808,12 @@ export default function OverlayEditor({ designId }) {
         addToast('Design saved', 'success')
       }
     } else {
-      addToast(result?.error || 'Save failed', 'error')
+      const staleMessage = result?.status === 409
+        ? 'Save blocked because the overlay changed externally. Review the conflict before saving.'
+        : (result?.error || 'Save failed')
+      addToast(staleMessage, 'error')
     }
-  }, [designId, designMeta, htmlContent, updateHtmlContent, addToast, aiActiveTurnId])
+  }, [designId, designMeta, htmlContent, savedSha256, updateHtmlContent, addToast, aiActiveTurnId, refreshRevisions])
 
   // ── Revert handler ───────────────────────────────────────────────────────
   const handleRevert = useCallback(() => {
@@ -755,6 +823,47 @@ export default function OverlayEditor({ designId }) {
     }
     addToast('Reverted to last saved state', 'info')
   }, [savedContent, addToast])
+
+  const handleReloadExternalUpdate = useCallback(async () => {
+    const record = await getHtmlRecord(designId)
+    if (record?.html_content != null) {
+      applyHtmlRecordToEditor(record)
+      refreshRevisions()
+      addToast('Loaded external overlay update', 'success')
+    }
+  }, [addToast, applyHtmlRecordToEditor, designId, getHtmlRecord, refreshRevisions])
+
+  const handleKeepLocalEdits = useCallback(() => {
+    setExternalConflict(null)
+    setExternalDiffPreview('')
+    addToast('Keeping local editor changes', 'info')
+  }, [addToast])
+
+  const handleCompareExternalUpdate = useCallback(async () => {
+    const record = await getHtmlRecord(designId)
+    if (record?.html_content == null) return
+    setExternalDiffPreview(createDiffPreview(htmlContent, record.html_content, 80))
+  }, [designId, getHtmlRecord, htmlContent])
+
+  const handleRestoreRevision = useCallback(async (revision) => {
+    if (!revision?.revision_id) return
+    const result = await restoreRevision(designId, revision.revision_id, {
+      expectedSha256: savedSha256 || null,
+      source: 'ui',
+      author: 'user',
+      summary: `Restore ${revision.revision_id}`,
+    })
+    if (!result?.success) {
+      addToast(result?.status === 409 ? 'Restore blocked because the overlay changed externally.' : (result?.error || 'Restore failed'), 'error')
+      return
+    }
+    const record = await getHtmlRecord(designId)
+    if (record?.html_content != null) {
+      applyHtmlRecordToEditor(record)
+    }
+    refreshRevisions()
+    addToast('Revision restored', 'success')
+  }, [addToast, applyHtmlRecordToEditor, designId, getHtmlRecord, refreshRevisions, restoreRevision, savedSha256])
 
   // ── Insert text at cursor ────────────────────────────────────────────────
   const insertAtCursor = useCallback((text) => {
@@ -1039,6 +1148,46 @@ export default function OverlayEditor({ designId }) {
       rightClassName="h-full min-h-0 overflow-hidden"
       left={(
         <div className="h-full min-h-0 flex flex-col overflow-hidden bg-bg-primary">
+          {externalConflict && (
+            <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-3 py-2">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-[11px] font-semibold text-amber-200">External overlay update available</div>
+                  <div className="truncate text-[10px] text-amber-100/80">
+                    {toDisplayText(externalConflict.summary, 'Codex edited this design')} · {toDisplayText(externalConflict.sha256, '').slice(0, 10)}
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={handleReloadExternalUpdate}
+                    className="rounded border border-amber-400/40 bg-amber-500/15 px-2 py-1 text-[10px] font-medium text-amber-100 hover:bg-amber-500/25"
+                  >
+                    Reload
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleKeepLocalEdits}
+                    className="rounded border border-border px-2 py-1 text-[10px] text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+                  >
+                    Keep Mine
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCompareExternalUpdate}
+                    className="rounded border border-border px-2 py-1 text-[10px] text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+                  >
+                    Compare
+                  </button>
+                </div>
+              </div>
+              {externalDiffPreview && (
+                <pre className="mt-2 max-h-32 overflow-auto rounded border border-amber-500/20 bg-black/40 p-2 text-[10px] leading-4 text-amber-100 whitespace-pre-wrap">
+                  {externalDiffPreview}
+                </pre>
+              )}
+            </div>
+          )}
           <div className="flex-1 min-h-0 overflow-hidden">
             <Editor
               height="100%"
@@ -1165,6 +1314,7 @@ export default function OverlayEditor({ designId }) {
   const rightSidebarTabs = [
     { id: 'context', label: 'Variables', icon: BookOpen },
     { id: 'animations', label: 'Animations', icon: Sparkles },
+    { id: 'history', label: 'History', icon: History },
     { id: 'ai', label: 'AI Designer', icon: Bot },
   ]
 
@@ -1187,6 +1337,56 @@ export default function OverlayEditor({ designId }) {
     />
   ) : rightSidebarActiveTab === 'animations' ? (
     <AnimationPicker onInsertAnimation={handleInsertAnimation} />
+  ) : rightSidebarActiveTab === 'history' ? (
+    <div className="flex h-full min-h-0 flex-col bg-bg-primary">
+      <div className="shrink-0 border-b border-border bg-bg-secondary/40 p-3">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <div className="text-xs font-semibold text-text-secondary">Revision History</div>
+            <div className="text-[10px] text-text-tertiary">{revisions.length} rollback points</div>
+          </div>
+          <button
+            type="button"
+            onClick={refreshRevisions}
+            className="rounded border border-border p-1.5 text-text-tertiary hover:bg-bg-hover hover:text-text-primary"
+            title="Refresh revision history"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${revisionsLoading ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
+      </div>
+      <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
+        {revisions.length === 0 && (
+          <div className="rounded border border-border bg-bg-secondary/40 p-3 text-xs text-text-tertiary">
+            No revisions yet. Saves and Codex edits will appear here.
+          </div>
+        )}
+        {revisions.map((revision) => (
+          <div key={revision.revision_id} className="rounded border border-border bg-bg-secondary/40 p-2.5">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="truncate text-[11px] font-medium text-text-secondary">
+                  {toDisplayText(revision.summary, 'Overlay save') || 'Overlay save'}
+                </div>
+                <div className="mt-0.5 text-[10px] text-text-tertiary">
+                  {new Date(revision.created_at).toLocaleString()} · {toDisplayText(revision.source, 'ui')} · {toDisplayText(revision.author, 'user')}
+                </div>
+                <div className="mt-1 font-mono text-[10px] text-text-disabled">
+                  {toDisplayText(revision.base_sha256, '').slice(0, 10)} → {toDisplayText(revision.result_sha256, '').slice(0, 10)}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleRestoreRevision(revision)}
+                className="shrink-0 rounded border border-border px-2 py-1 text-[10px] text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+              >
+                Restore
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
   ) : (
     <div className="flex h-full min-h-0 flex-col bg-bg-primary">
       <div className="shrink-0 border-b border-border bg-bg-secondary/40 p-2 space-y-2">

@@ -20,6 +20,7 @@ GET    /api/replays/discover                  — auto-discover .rpy files
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from mimetypes import guess_type
 from typing import Any, Optional
 
@@ -117,8 +118,62 @@ class FileDeleteRequest(BaseModel):
 
 
 class FromActiveSessionRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=200, description="Project name")
+    name: str = Field("", max_length=200, description="Optional project name; auto-generated when omitted")
     replay_file: str = Field("", description="Optional explicit replay file path")
+
+
+def _first_non_empty(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _first_positive_int(*values: Any) -> int | None:
+    for value in values:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            return number
+    return None
+
+
+def build_auto_project_name(active_session: dict[str, Any] | None, race_details: dict[str, Any] | None = None) -> tuple[str, str]:
+    """Build the same style of auto project name used by the New Project UI."""
+    active_session = active_session or {}
+    race_details = race_details or {}
+    series = _first_non_empty(
+        race_details.get("series"),
+        active_session.get("series"),
+        active_session.get("series_name"),
+        active_session.get("session_type"),
+    )
+    race_num = _first_positive_int(
+        race_details.get("race_number"),
+        race_details.get("race_num"),
+        active_session.get("race_number"),
+        active_session.get("race_num"),
+        race_details.get("week_number"),
+        active_session.get("week_number"),
+        active_session.get("race_week"),
+    )
+    track = _first_non_empty(
+        race_details.get("track_name"),
+        active_session.get("track_name"),
+    )
+
+    if series and race_num and track:
+        return f"{series} Week {race_num} - {track}", "race_details_series_week_track"
+    if series and track:
+        return f"{series} - {track}", "series_track"
+    if track:
+        return track, "track"
+    return f"iRacing Replay {datetime.now().strftime('%Y-%m-%d %H%M')}", "fallback_timestamp"
 
 
 # ── Project CRUD ──────────────────────────────────────────────────────────────
@@ -164,22 +219,33 @@ async def create_project_from_active_session(data: FromActiveSessionRequest) -> 
     track_name = ""
     session_type = ""
     num_drivers = 0
+    active_session: dict[str, Any] = {}
 
     if bridge.is_connected and bridge.session_data:
         sd = bridge.session_data
+        active_session = dict(sd)
         track_name = sd.get("track_name", "")
         session_type = sd.get("session_type", "")
         drivers = sd.get("drivers", [])
         num_drivers = len(drivers) if isinstance(drivers, list) else 0
 
+    project_name = data.name.strip()
+    auto_name_source = "provided"
+    if not project_name:
+        project_name, auto_name_source = build_auto_project_name(active_session)
+
     try:
         project = project_service.create_project(
-            name=data.name,
+            name=project_name,
             replay_file=data.replay_file,
             track_name=track_name,
             session_type=session_type,
             num_drivers=num_drivers,
         )
+        project["auto_name_source"] = auto_name_source
+        if active_session.get("subsession_id") is not None:
+            project["subsession_id"] = active_session.get("subsession_id")
+            project_service.save_project_metadata(project["id"], {"subsession_id": active_session.get("subsession_id")})
         return project
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))

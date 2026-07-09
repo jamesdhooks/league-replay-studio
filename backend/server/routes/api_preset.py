@@ -30,16 +30,19 @@ Endpoints:
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import re
-import hashlib
-import base64
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import FileResponse
+from jinja2 import Environment, TemplateSyntaxError
 from pydantic import BaseModel
 
+from server.events import EventType, make_event
+from server.services.overlay_revision_service import html_sha256, overlay_revision_service
 from server.services.preset_service import preset_service, VIDEO_SECTIONS
 
 logger = logging.getLogger(__name__)
@@ -47,6 +50,22 @@ logger = logging.getLogger(__name__)
 MAX_ASSET_SIZE_BYTES = 10 * 1024 * 1024      # 10 MB
 MAX_VIDEO_SIZE_BYTES = 500 * 1024 * 1024      # 500 MB
 router = APIRouter(prefix="/api/presets", tags=["presets"])
+_broadcast_fn: Any = None
+
+
+def set_broadcast_fn(fn: Any) -> None:
+    """Set the WebSocket broadcast function (called from app.py)."""
+    global _broadcast_fn
+    _broadcast_fn = fn
+
+
+def _broadcast_overlay_template(event_type: str, data: dict[str, Any]) -> None:
+    if _broadcast_fn is None:
+        return
+    try:
+        _broadcast_fn(make_event(event_type, data))
+    except Exception as exc:
+        logger.debug("[Preset API] Broadcast error: %s", exc)
 
 
 # ── Request models ──────────────────────────────────────────────────────────
@@ -97,6 +116,28 @@ class RenderPreviewRequest(BaseModel):
     render_screenshot: bool = True
     include_debug: bool = False
     prefer_html_content: bool = False
+
+
+class UpdateHtmlContentRequest(BaseModel):
+    html_content: str
+    summary: str = ""
+    author: str = "user"
+    source: str = "ui"
+    expected_sha256: str | None = None
+
+
+class RestoreRevisionRequest(BaseModel):
+    summary: str = ""
+    author: str = "user"
+    source: str = "ui"
+    expected_sha256: str | None = None
+
+
+class ValidateHtmlRequest(BaseModel):
+    html_content: str
+    project_id: int | None = None
+    frame_data: dict[str, Any] | None = None
+    render_screenshot: bool = False
 
 
 class AssetScopeUpdateRequest(BaseModel):
@@ -284,6 +325,88 @@ def _decorate_variable_bindings(
 
 def _inject_asset_variables(frame_data: dict[str, Any], preset_id: str, project_id: int | None) -> None:
     frame_data["assets"] = preset_service.get_asset_variable_urls(preset_id, project_id)
+
+
+def _clean_short_text(value: str | None, fallback: str, limit: int) -> str:
+    text = (value or fallback).strip()
+    return text[:limit] if text else fallback
+
+
+def _assert_expected_sha(current_html: str, expected_sha256: str | None) -> str:
+    current_sha = html_sha256(current_html)
+    if expected_sha256 and expected_sha256.lower() != current_sha:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "stale_overlay_html",
+                "message": "Overlay HTML has changed since it was read.",
+                "current_sha256": current_sha,
+                "expected_sha256": expected_sha256,
+            },
+        )
+    return current_sha
+
+
+def _save_html_with_revision(
+    preset_id: str,
+    html_content: str,
+    *,
+    summary: str,
+    author: str,
+    source: str,
+    expected_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Save design HTML through the revisioned overlay write path."""
+    current_html = preset_service.get_html_content(preset_id)
+    if current_html is None:
+        raise HTTPException(status_code=404, detail="Preset not found")
+
+    _assert_expected_sha(current_html, expected_sha256)
+    normalized_html = _ensure_local_tailwind_runtime(html_content)
+    result_sha = html_sha256(normalized_html)
+    clean_author = _clean_short_text(author, "user", 80)
+    clean_source = _clean_short_text(source, "ui", 40)
+    clean_summary = (summary or "").strip()[:300]
+
+    editable = preset_service.ensure_editable_preset(preset_id)
+    if not editable:
+        raise HTTPException(status_code=404, detail="Preset not found")
+
+    revision = overlay_revision_service.create_revision(
+        preset_id,
+        previous_html=current_html,
+        result_html=normalized_html,
+        author=clean_author,
+        source=clean_source,
+        summary=clean_summary,
+    )
+
+    if not preset_service.update_html_content(preset_id, normalized_html):
+        raise HTTPException(status_code=404, detail="Preset not found")
+
+    preset = preset_service.get_preset(preset_id) or {}
+    event_payload = {
+        "preset_id": preset_id,
+        "revision_id": revision["revision_id"],
+        "version": preset.get("version", ""),
+        "sha256": result_sha,
+        "source": clean_source,
+        "summary": clean_summary,
+    }
+    _broadcast_overlay_template(EventType.OVERLAY_TEMPLATE_REVISION_CREATED, {
+        **event_payload,
+        "base_sha256": revision.get("base_sha256", ""),
+        "result_sha256": revision.get("result_sha256", ""),
+    })
+    _broadcast_overlay_template(EventType.OVERLAY_TEMPLATE_UPDATED, event_payload)
+
+    return {
+        "success": True,
+        "preset_id": preset_id,
+        "version": preset.get("version", ""),
+        "sha256": result_sha,
+        "revision": revision,
+    }
 
 
 async def _enrich_with_plugin_data(frame_data: dict[str, Any], project_id: int | None = None) -> dict[str, Any]:
@@ -594,18 +717,128 @@ async def get_html_content(preset_id: str):
     html = preset_service.get_html_content(preset_id)
     if html is None:
         raise HTTPException(status_code=404, detail="Preset not found")
-    return {"html_content": html, "preset_id": preset_id}
+    return {"html_content": html, "preset_id": preset_id, "sha256": html_sha256(html)}
 
 
 @router.put("/{preset_id}/html")
-async def update_html_content(preset_id: str, body: dict[str, Any]):
-    """Update overlay HTML content for a custom design."""
-    html_content = body.get("html_content")
-    if html_content is None:
-        raise HTTPException(status_code=400, detail="html_content is required")
-    if not preset_service.update_html_content(preset_id, html_content):
+async def update_html_content(preset_id: str, body: UpdateHtmlContentRequest):
+    """Update overlay HTML content with revision history and optimistic locking."""
+    return _save_html_with_revision(
+        preset_id,
+        body.html_content,
+        summary=body.summary,
+        author=body.author,
+        source=body.source,
+        expected_sha256=body.expected_sha256,
+    )
+
+
+@router.get("/{preset_id}/revisions")
+async def list_overlay_revisions(preset_id: str):
+    """List saved HTML revision snapshots for a design."""
+    if not preset_service.get_preset(preset_id):
         raise HTTPException(status_code=404, detail="Preset not found")
-    return {"success": True, "preset_id": preset_id}
+    revisions = overlay_revision_service.list_revisions(preset_id)
+    return {"preset_id": preset_id, "revisions": revisions, "count": len(revisions)}
+
+
+@router.get("/{preset_id}/revisions/{revision_id}")
+async def get_overlay_revision(preset_id: str, revision_id: str):
+    """Get one saved HTML revision snapshot."""
+    if not preset_service.get_preset(preset_id):
+        raise HTTPException(status_code=404, detail="Preset not found")
+    revision = overlay_revision_service.get_revision(preset_id, revision_id)
+    if not revision:
+        raise HTTPException(status_code=404, detail="Revision not found")
+    return revision
+
+
+@router.post("/{preset_id}/revisions/{revision_id}/restore")
+async def restore_overlay_revision(preset_id: str, revision_id: str, body: RestoreRevisionRequest):
+    """Restore a saved revision, creating a new rollback point first."""
+    revision = overlay_revision_service.get_revision(preset_id, revision_id)
+    if not revision:
+        raise HTTPException(status_code=404, detail="Revision not found")
+
+    restored_html = revision.get("html_content")
+    if not isinstance(restored_html, str):
+        raise HTTPException(status_code=500, detail="Revision is missing HTML content")
+
+    summary = body.summary or f"Restore {revision_id}"
+    result = _save_html_with_revision(
+        preset_id,
+        restored_html,
+        summary=summary,
+        author=body.author,
+        source=body.source,
+        expected_sha256=body.expected_sha256,
+    )
+    result["restored_revision_id"] = revision_id
+    return result
+
+
+@router.post("/{preset_id}/validate-html")
+async def validate_overlay_html(preset_id: str, body: ValidateHtmlRequest):
+    """Validate overlay HTML syntax and render it without saving."""
+    from server.services.overlay_service import overlay_service, SAMPLE_FRAME_DATA
+    from server.utils.overlay_engine import overlay_engine
+
+    preset = preset_service.get_preset(preset_id)
+    if not preset:
+        raise HTTPException(status_code=404, detail="Preset not found")
+
+    try:
+        Environment().parse(body.html_content)
+    except TemplateSyntaxError as exc:
+        return {
+            "success": False,
+            "valid": False,
+            "stage": "jinja_parse",
+            "error": str(exc),
+            "line": exc.lineno,
+            "sha256": html_sha256(body.html_content),
+        }
+
+    frame_data = _merge_preview_frame_data(SAMPLE_FRAME_DATA, body.frame_data)
+    frame_data = await _enrich_with_plugin_data(frame_data, body.project_id)
+    _inject_asset_variables(frame_data, preset_id, body.project_id)
+
+    try:
+        if not overlay_engine.initialized:
+            init_result = await overlay_service.initialize()
+            if not init_result.get("success"):
+                return {
+                    "success": False,
+                    "valid": False,
+                    "stage": "engine_init",
+                    "error": init_result.get("error", "Overlay engine initialization failed"),
+                    "sha256": html_sha256(body.html_content),
+                }
+
+        runtime_html = _inject_preset_css_variables(_ensure_local_tailwind_runtime(body.html_content), preset)
+        result = await overlay_engine.render_raw_html(
+            runtime_html,
+            frame_data,
+            analyze_animations=False,
+            include_rendered_html=False,
+            render_screenshot=body.render_screenshot,
+        )
+        return {
+            "success": bool(result.get("success", True)),
+            "valid": bool(result.get("success", True)),
+            "stage": "render",
+            "sha256": html_sha256(body.html_content),
+            "render_result": result,
+        }
+    except Exception as exc:
+        logger.exception("[Preset] HTML validation failed for %s", preset_id)
+        return {
+            "success": False,
+            "valid": False,
+            "stage": "render",
+            "error": str(exc),
+            "sha256": html_sha256(body.html_content),
+        }
 
 
 class EditorPreviewRequest(BaseModel):
