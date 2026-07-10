@@ -1,0 +1,8 @@
+{
+  "name": "league-replay-studio-root",
+  "private": true,
+  "scripts": {
+    "dev:backend": "node scripts/dev-server.mjs backend",
+    "dev:frontend": "node scripts/dev-server.mjs frontend"
+  }
+}

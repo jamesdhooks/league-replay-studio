@@ -1,19 +1,29 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef } from 'react'
 import { Loader2 } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext'
 import { useAnalysis } from '../../context/AnalysisContext'
 import { usePipeline } from '../../context/PipelineContext'
 import { useIRacing } from '../../context/IRacingContext'
-import AnalysisPanel from '../analysis/AnalysisPanel'
-import HighlightPanel from '../highlights/HighlightPanel'
-import OverlayStudio from '../overlay/OverlayStudio'
-import CapturePanel from '../capture/CapturePanel'
-import EncodingPanel from '../encoding/EncodingPanel'
-import CompositionPanel from '../encoding/CompositionPanel'
-import YouTubePanel from '../youtube/YouTubePanel'
-import PipelineAutoView from '../pipeline/PipelineAutoView'
 import StepGate from '../common/StepGate'
 import { useHighlight } from '../../context/HighlightContext'
+
+const AnalysisPanel = lazy(() => import('../analysis/AnalysisPanel'))
+const HighlightPanel = lazy(() => import('../highlights/HighlightPanel'))
+const OverlayStudio = lazy(() => import('../overlay/OverlayStudio'))
+const CapturePanel = lazy(() => import('../capture/CapturePanel'))
+const EncodingPanel = lazy(() => import('../encoding/EncodingPanel'))
+const CompositionPanel = lazy(() => import('../encoding/CompositionPanel'))
+const YouTubePanel = lazy(() => import('../youtube/YouTubePanel'))
+const PipelineAutoView = lazy(() => import('../pipeline/PipelineAutoView'))
+
+function StepContentFallback() {
+  return (
+    <div className="flex flex-1 items-center justify-center gap-2 text-xs text-text-tertiary">
+      <Loader2 className="h-4 w-4 animate-spin" />
+      Loading step…
+    </div>
+  )
+}
 
 /**
  * Project view — shown when a project is open.
@@ -170,12 +180,16 @@ function ProjectView({ project, isLoading, pipelineAdvancedMode = false }) {
     <div className="flex flex-1 w-full min-w-0 overflow-hidden flex-col">
       {/* Step content */}
       <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-        {renderStepContent()}
+        <Suspense fallback={<StepContentFallback />}>
+          {renderStepContent()}
+        </Suspense>
       </div>
 
       {/* Advanced mode: dock the same automated pipeline surface under tab content */}
       {pipelineAdvancedMode && project.current_step !== 'pipeline' && (
-        <PipelineAutoView docked />
+        <Suspense fallback={null}>
+          <PipelineAutoView docked />
+        </Suspense>
       )}
     </div>
   )

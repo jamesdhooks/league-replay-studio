@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
@@ -440,10 +441,51 @@ def get_video_fps(ffprobe_path: str, input_file: str) -> Optional[float]:
     return None
 
 
+def _find_ffmpeg_for_validation(ffprobe_path: str) -> Optional[str]:
+    """Locate FFmpeg, preferring the binary installed next to ffprobe."""
+    probe = Path(ffprobe_path)
+    sibling = probe.with_name(f"ffmpeg{probe.suffix}")
+    if sibling.is_file():
+        return str(sibling)
+    return shutil.which("ffmpeg")
+
+
+def _decode_output_file(ffmpeg_path: str, file_path: str, duration_seconds: float) -> Optional[str]:
+    """Return a decode failure message, or ``None`` when every stream decodes."""
+    timeout_seconds = min(900, max(120, int(duration_seconds * 4) + 30))
+    try:
+        completed = subprocess.run(
+            [
+                ffmpeg_path,
+                "-v", "error",
+                "-xerror",
+                "-i", file_path,
+                "-map", "0:v:0",
+                "-map", "0:a?",
+                "-f", "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return f"FFmpeg decode timed out after {timeout_seconds} seconds"
+    except OSError as exc:
+        return f"Could not start FFmpeg decode: {exc}"
+
+    if completed.returncode == 0:
+        return None
+    detail = (completed.stderr or completed.stdout or "unknown decode error").strip()
+    return f"FFmpeg could not decode the clip: {detail[:500]}"
+
+
 def validate_output_file(file_path: str, ffprobe_path: Optional[str] = None) -> dict[str, Any]:
     """Validate an encoded output file.
 
-    Checks: file exists, non-zero size, valid container (via ffprobe if available).
+    Checks: file exists, non-zero size, readable container, and a strict full
+    FFmpeg video/audio decode. Metadata alone is not enough: a truncated MP4
+    can still report a plausible duration through ffprobe.
 
     Returns:
         Validation result dict.
@@ -454,6 +496,8 @@ def validate_output_file(file_path: str, ffprobe_path: Optional[str] = None) -> 
         "size_bytes": 0,
         "duration_seconds": None,
         "errors": [],
+        "decode_checked": False,
+        "ffmpeg_path": None,
     }
 
     try:
@@ -478,12 +522,21 @@ def validate_output_file(file_path: str, ffprobe_path: Optional[str] = None) -> 
             duration = get_video_duration(ffprobe_path, file_path)
             if duration is not None and duration > 0:
                 result["duration_seconds"] = round(duration, 2)
-                result["valid"] = True
+                ffmpeg_path = _find_ffmpeg_for_validation(ffprobe_path)
+                result["ffmpeg_path"] = ffmpeg_path
+                if not ffmpeg_path:
+                    result["errors"].append("FFmpeg not found; cannot validate decoded frames")
+                    return result
+                result["decode_checked"] = True
+                decode_error = _decode_output_file(ffmpeg_path, file_path, duration)
+                if decode_error:
+                    result["errors"].append(decode_error)
+                else:
+                    result["valid"] = True
             else:
                 result["errors"].append("Could not read duration from output file")
         else:
-            # Without ffprobe, trust that a non-empty MP4 is valid
-            result["valid"] = True
+            result["errors"].append("ffprobe not found; cannot validate the clip")
 
     except Exception as exc:
         result["errors"].append(f"Validation error: {exc}")

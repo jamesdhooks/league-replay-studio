@@ -1,26 +1,13 @@
-import { Trash2 } from 'lucide-react'
-import UnifiedLogList from '../ui/UnifiedLogList'
+import LogViewer from '../ui/LogViewer'
 import { normalizeAnalysisLogEntries } from '../../utils/logEntries'
 
-export default function LogTabContent({ isAnalyzing, progress, analysisLog, onClearLog }) {
+export default function LogTabContent({ isAnalyzing, progress, analysisLog }) {
   const entries = normalizeAnalysisLogEntries(analysisLog)
 
   return (
-    <div className="font-mono">
-      {analysisLog.length > 0 && !isAnalyzing && (
-        <div className="flex justify-end px-2 pt-1.5 pb-1 border-b border-border-subtle sticky top-0 bg-bg-secondary z-10">
-          <button
-            onClick={onClearLog}
-            className="flex items-center gap-1 px-2 py-0.5 rounded text-xxs text-text-disabled hover:text-danger hover:bg-danger/10 transition-colors"
-            title="Clear log"
-          >
-            <Trash2 size={10} />
-            Clear
-          </button>
-        </div>
-      )}
+    <div className="h-full min-h-0 flex flex-col font-mono">
       {isAnalyzing && progress && (
-        <div className="px-3 pt-2 pb-1.5 border-b border-border-subtle sticky top-0 bg-bg-secondary z-10">
+        <div className="px-3 pt-2 pb-1.5 border-b border-border-subtle bg-bg-secondary shrink-0">
           <div className="h-1 bg-bg-tertiary rounded-full overflow-hidden">
             <div
               className="h-full bg-accent/70 rounded-full transition-all duration-500"
@@ -32,13 +19,18 @@ export default function LogTabContent({ isAnalyzing, progress, analysisLog, onCl
           </span>
         </div>
       )}
-      <UnifiedLogList
+      <LogViewer
+        title="Analysis Log"
         entries={entries}
+        rawEntries={analysisLog}
+        schema="league-replay-studio.analysis-log"
         emptyMessage="No log entries yet"
         loadingMessage="Initializing..."
         isLoading={isAnalyzing}
         maxHeightClass="max-h-none"
-        className="bg-transparent"
+        className="flex-1 min-h-0 bg-transparent"
+        bodyClassName="bg-transparent"
+        headerClassName="bg-bg-secondary"
         showStep={false}
       />
     </div>

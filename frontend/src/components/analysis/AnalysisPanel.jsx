@@ -34,7 +34,7 @@ export default memo(function AnalysisPanel() {
     analysisLog, discoveredEvents, hasTelemetry, hasEvents, analysisStatus,
     startAnalysis, startRescan, cancelAnalysis, clearAnalysis, clearTelemetry, clearEvents,
     fetchEvents, fetchEventSummary, fetchAnalysisStatus,
-    loadAnalysisLog, clearDiscoveredEvents, clearLog,
+    loadAnalysisLog, clearDiscoveredEvents,
   } = useAnalysis()
   const { activeProject, advanceStep } = useProject()
   const {
@@ -583,7 +583,6 @@ export default memo(function AnalysisPanel() {
                   isAnalyzing={effectiveIsAnalyzing}
                   progress={effectiveProgress}
                   analysisLog={analysisLog}
-                  onClearLog={clearLog}
                 />
               ),
             },

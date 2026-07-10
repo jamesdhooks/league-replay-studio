@@ -19,6 +19,7 @@ GET    /api/replays/discover                  — auto-discover .rpy files
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import datetime
 from mimetypes import guess_type
@@ -316,9 +317,9 @@ async def update_step(project_id: int, data: StepUpdate) -> dict:
     """Set or advance the project step."""
     try:
         if data.action == "advance":
-            project = project_service.advance_step(project_id)
+            project = await asyncio.to_thread(project_service.advance_step, project_id)
         elif data.step:
-            project = project_service.set_step(project_id, data.step)
+            project = await asyncio.to_thread(project_service.set_step, project_id, data.step)
         else:
             raise HTTPException(
                 status_code=422,

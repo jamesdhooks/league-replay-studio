@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, useMemo } from 'react'
+import { createContext, useContext, useState, useCallback, useMemo, useRef } from 'react'
 import { apiGet, apiPost, apiPut, apiDelete } from '../services/api'
 
 /**
@@ -25,6 +25,7 @@ export function ProjectProvider({ children }) {
   const [projects, setProjects] = useState([])
   const [activeProject, setActiveProject] = useState(null)
   const [loading, setLoading] = useState(false)
+  const stepWriteVersionsRef = useRef(new Map())
 
   // ── Fetch all projects ──────────────────────────────────────────────────
 
@@ -105,12 +106,45 @@ export function ProjectProvider({ children }) {
   }, [])
 
   const setStep = useCallback(async (projectId, step) => {
-    const updated = await apiPut(`/projects/${projectId}/step`, { step })
-    if (activeProject?.id === projectId) {
-      setActiveProject(updated)
+    const previousActiveProject = activeProject?.id === projectId ? activeProject : null
+    const writeVersion = (stepWriteVersionsRef.current.get(projectId) || 0) + 1
+    stepWriteVersionsRef.current.set(projectId, writeVersion)
+
+    // Step navigation is local UI state first. Persist it in the background so
+    // a busy backend never leaves the workflow tray looking unresponsive.
+    setActiveProject(current => (
+      current?.id === projectId ? { ...current, current_step: step } : current
+    ))
+    setProjects(current => current.map(project => (
+      project.id === projectId ? { ...project, current_step: step } : project
+    )))
+
+    try {
+      const updated = await apiPut(`/projects/${projectId}/step`, { step })
+      if (stepWriteVersionsRef.current.get(projectId) === writeVersion) {
+        setActiveProject(current => (
+          current?.id === projectId ? { ...current, ...updated } : current
+        ))
+        setProjects(current => current.map(project => (
+          project.id === projectId ? { ...project, ...updated } : project
+        )))
+      }
+      return updated
+    } catch (error) {
+      if (stepWriteVersionsRef.current.get(projectId) === writeVersion) {
+        setActiveProject(current => (
+          current?.id === projectId && previousActiveProject ? previousActiveProject : current
+        ))
+        if (previousActiveProject) {
+          setProjects(current => current.map(project => (
+            project.id === projectId
+              ? { ...project, current_step: previousActiveProject.current_step }
+              : project
+          )))
+        }
+      }
+      throw error
     }
-    setProjects(prev => prev.map(p => p.id === projectId ? updated : p))
-    return updated
   }, [activeProject])
 
   const advanceStep = useCallback(async (projectId) => {

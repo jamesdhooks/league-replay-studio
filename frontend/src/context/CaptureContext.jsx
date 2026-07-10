@@ -16,6 +16,7 @@ export function CaptureProvider({ children }) {
   const [activeSoftware, setActiveSoftware] = useState(null)
   const [hotkeys, setHotkeys] = useState({ start: '', stop: '' })
   const [watchDir, setWatchDir] = useState(null)
+  const [obsControl, setObsControl] = useState(null)
 
   const [captureState, setCaptureState] = useState('idle')  // idle/testing/ready/capturing/validating/completed/error
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
@@ -36,6 +37,7 @@ export function CaptureProvider({ children }) {
       setActiveSoftware(data.active_software)
       setHotkeys(data.hotkeys || { start: '', stop: '' })
       setWatchDir(data.watch_directory)
+      setObsControl(data.obs_control ?? null)
       return data
     } catch (err) {
       console.error('[Capture] Detection failed:', err)
@@ -179,6 +181,9 @@ export function CaptureProvider({ children }) {
         segment_ids: options.segmentIds ?? null,
         time_range: options.timeRange ?? null,
         capture_resolution: options.captureResolution ?? '1080p',
+        validate_clips: options.validateClips ?? true,
+        retry_failed_clip_validation: options.retryFailedClipValidation ?? false,
+        clip_validation_retry_limit: options.clipValidationRetryLimit ?? 1,
       })
       return result
     } catch (err) {
@@ -202,6 +207,18 @@ export function CaptureProvider({ children }) {
       console.error('[Capture] Script cancel error:', err)
     }
   }, [])
+
+  const startCapturedClipValidation = useCallback(async (projectId) => (
+    apiPost('/capture/script-capture/validate', { project_id: projectId })
+  ), [])
+
+  const getCapturedClipValidationStatus = useCallback(async (projectId) => (
+    apiGet(`/capture/script-capture/validate/status?project_id=${encodeURIComponent(projectId)}`)
+  ), [])
+
+  const startCorruptCapturedClipRecovery = useCallback(async (projectId) => (
+    apiPost('/capture/script-capture/validate/recover', { project_id: projectId })
+  ), [])
 
   // Keep software readiness fresh for toolbar chips and capture controls.
   useEffect(() => {
@@ -367,6 +384,7 @@ export function CaptureProvider({ children }) {
     activeSoftware,
     hotkeys,
     watchDir,
+    obsControl,
     captureState,
     elapsedSeconds,
     filePath,
@@ -395,14 +413,18 @@ export function CaptureProvider({ children }) {
     resetCapture,
     startScriptCapture,
     cancelScriptCapture,
+    startCapturedClipValidation,
+    getCapturedClipValidationStatus,
+    startCorruptCapturedClipRecovery,
   }), [
-    software, activeSoftware, hotkeys, watchDir,
+    software, activeSoftware, hotkeys, watchDir, obsControl,
     captureState, elapsedSeconds, filePath, fileSize, error, testResult, loading,
     scriptCaptureRunning, scriptCaptureProgress, scriptCaptureClips, scriptCompiledPath, scriptCaptureError,
     scriptCaptureCancelling,
     scriptCaptureLog, scriptCaptureStrategies, scriptCurrentSegment,
     detectSoftware, fetchStatus, testHotkey, startCapture, stopCapture, resetCapture,
     startScriptCapture, cancelScriptCapture,
+    startCapturedClipValidation, getCapturedClipValidationStatus, startCorruptCapturedClipRecovery,
   ])
 
   return (

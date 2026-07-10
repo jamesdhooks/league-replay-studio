@@ -156,11 +156,14 @@ def test_generic_mcp_tools_route_auto_pipeline_and_project_calls(monkeypatch):
     run_async(mcp_lrs_server.monitor_auto_pipeline(run_id="run-1"))
     run_async(mcp_lrs_server.control_workflow_step(12, "pipeline", "restart", preset_id="fast"))
     run_async(mcp_lrs_server.validate_replay_project(12, scope="upload"))
+    run_async(mcp_lrs_server.validate_capture_clips(12, delete_and_reset_corrupt=True))
+    run_async(mcp_lrs_server.get_capture_clip_validation_status(12))
+    run_async(mcp_lrs_server.clear_capture_clips(12))
     run_async(mcp_lrs_server.list_project_files(12))
     run_async(mcp_lrs_server.read_project_file(12, "project.json"))
     run_async(mcp_lrs_server.start_youtube_upload("C:/out.mp4", "Title", privacy="unlisted", project_id=12))
 
-    assert calls[:9] == [
+    assert calls[:12] == [
         ("GET", "/agent/capabilities", None),
         (
             "POST",
@@ -187,10 +190,17 @@ def test_generic_mcp_tools_route_auto_pipeline_and_project_calls(monkeypatch):
             {"action": "restart", "preset_id": "fast", "config": {}, "run_id": None},
         ),
         ("GET", "/agent/projects/12/validate?scope=upload", None),
+        (
+            "POST",
+            "/agent/projects/12/capture/validate-clips",
+            {"recover_corrupt": True},
+        ),
+        ("GET", "/agent/projects/12/capture/validate-clips/status", None),
+        ("POST", "/script-state/12/clear-captures", {}),
         ("GET", "/agent/projects/12/files", None),
         ("GET", "/agent/projects/12/files/read?path=project.json", None),
     ]
-    assert calls[9] == (
+    assert calls[12] == (
         "POST",
         "/agent/youtube/upload/start",
         {

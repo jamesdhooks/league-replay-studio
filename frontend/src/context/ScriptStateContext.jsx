@@ -169,13 +169,26 @@ export function ScriptStateProvider({ children }) {
 
   const invalidateSegment = useCallback(async (projectId, segmentId, reason = 'manual') => {
     try {
-      await apiPost(`/script-state/${projectId}/invalidate`, { segment_id: segmentId, reason })
+      const result = await apiPost(`/script-state/${projectId}/invalidate`, { segment_id: segmentId, reason })
       // Refresh state
       await fetchState(projectId)
+      return result
     } catch (err) {
       setError(err.message)
+      throw err
     }
   }, [fetchState])
+
+  const clearAllCaptures = useCallback(async (projectId) => {
+    try {
+      const result = await apiPost(`/script-state/${projectId}/clear-captures`)
+      if (result.state) _applyState(result.state)
+      return result
+    } catch (err) {
+      setError(err.message)
+      throw err
+    }
+  }, [_applyState])
 
   const markCaptured = useCallback(async (projectId, segmentId, clipPath) => {
     try {
@@ -361,7 +374,7 @@ export function ScriptStateProvider({ children }) {
     summary, loading, error,
     // Actions
     fetchState, lockScript, unlockScript, compareScript,
-    setCaptureRange: setCaptureRangeApi, invalidateSegment, markCaptured,
+    setCaptureRange: setCaptureRangeApi, invalidateSegment, clearAllCaptures, markCaptured,
     fetchTrash, emptyTrash, restoreFromTrash,
     fetchPipConfig, updatePipConfig,
     fetchOverlayUiConfig, updateOverlayUiConfig,
@@ -373,7 +386,7 @@ export function ScriptStateProvider({ children }) {
     compositionConfig,
     summary, loading, error,
     fetchState, lockScript, unlockScript, compareScript,
-    setCaptureRangeApi, invalidateSegment, markCaptured,
+    setCaptureRangeApi, invalidateSegment, clearAllCaptures, markCaptured,
     fetchTrash, emptyTrash, restoreFromTrash,
     fetchPipConfig, updatePipConfig,
     fetchOverlayUiConfig, updateOverlayUiConfig,

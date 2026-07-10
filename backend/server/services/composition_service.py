@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from server.events import EventType, make_event
+from server.services.run_log_file_service import run_log_file_service
 from server.utils.ffmpeg_builder import (
     get_video_duration,
     validate_output_file,
@@ -132,6 +133,7 @@ class CompositionJob:
         self.error: str | None = None
         self.output_file: str | None = None
         self.log_entries: list[CompositionLogEntry] = []
+        self.log_file_path: str | None = None
         self.progress_pct: float = 0.0
 
         # Intermediate artefacts (cleaned up on completion)
@@ -155,6 +157,7 @@ class CompositionJob:
             "output_file": self.output_file,
             "error": self.error,
             "log_entries": [e.to_dict() for e in self.log_entries[-50:]],
+            "log_file_path": self.log_file_path,
             "clip_count": len(self.clips_manifest),
             "preset_id": self.preset_id,
             "gap_policy": self.gap_policy,
@@ -345,6 +348,18 @@ class CompositionService:
             output_dir=str(out_resolved),
             preset_id=preset_id,
             gap_policy=gap_policy if gap_policy in {GAP_POLICY_COMPRESS, GAP_POLICY_FILL_BLACK, GAP_POLICY_FADE} else GAP_POLICY_COMPRESS,
+        )
+        job.log_file_path = run_log_file_service.start_run(
+            scope="compose",
+            run_id=job_id,
+            project_id=project_id,
+            project_dir=enriched_project_dir or project_dir,
+            metadata={
+                "output_dir": str(out_resolved),
+                "preset_id": preset_id,
+                "gap_policy": job.gap_policy,
+                "clip_count": len(clips_manifest),
+            },
         )
 
         self._jobs[job_id] = job
@@ -579,12 +594,17 @@ class CompositionService:
             safe_id = _sanitise_id(seg_id)
             trimmed_path = str(out_dir / f"{safe_id}_trimmed.mp4")
 
+            # Stream-copy trims snap to keyframes and can produce zero-length
+            # outputs for short iRacing capture clips. Re-encode exact ranges so
+            # the manifest duration survives into the final composition.
+            trim_duration = max(0.1, trim_to - trim_ss)
             cmd = [
                 ffmpeg_path, "-hide_banner", "-loglevel", "warning", "-y",
                 "-i", clip_path,
                 "-ss", f"{trim_ss:.3f}",
-                "-to", f"{trim_to:.3f}",
-                "-c", "copy",
+                "-t", f"{trim_duration:.3f}",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
                 trimmed_path,
             ]
 
@@ -1406,31 +1426,25 @@ class CompositionService:
             self._fail(job, f"Invalid output path: {exc}")
             return None
 
-        # Prefer stream-copy stitching so composition keeps source dimensions/quality.
+        # Regenerate timestamps during concat.  Unlike the concat filter this
+        # accepts captures that do not all expose an audio stream.
+        self._log(job, "stitch", f"Re-encoding {len(clip_list)} files via concat demuxer to normalize timestamps")
         cmd = [
             ffmpeg_path, "-hide_banner", "-loglevel", "warning", "-y",
-            "-f", "concat", "-safe", "0",
-            "-i", str(concat_list_path),
-            "-c", "copy",
+            "-f", "concat", "-safe", "0", "-i", str(concat_list_path),
+            "-c:v", "libx264", "-preset", "medium", "-crf", "16",
+            "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart",
             safe_output,
         ]
-
-        self._log(job, "stitch", f"Stitching {len(clip_list)} files (native quality/source size)")
-
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)  # noqa: S603
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)  # noqa: S603
             if result.returncode != 0:
-                logger.warning(
-                    "[Composition] Concat demuxer copy failed (rc=%d), falling back to concat filter re-encode: %s",
-                    result.returncode, result.stderr[:300],
-                )
-                # Fallback: concat filter re-encode while preserving source geometry.
-                output_file = self._stitch_reencode(job, clip_list, ffmpeg_path, safe_output)
-                if not output_file:
-                    return None
+                self._fail(job, f"Re-encode stitch failed: {result.stderr[:300]}")
+                return None
         except subprocess.TimeoutExpired:
-            self._fail(job, "Stitch timed out (10 min limit)")
+            self._fail(job, "Re-encode stitch timed out (15 min limit)")
             return None
+        output_file = safe_output
 
         # Clean up concat list
         try:
@@ -1546,6 +1560,17 @@ class CompositionService:
             extra=extra or {},
         )
         job.log_entries.append(entry)
+        run_log_file_service.append_entry(
+            job.log_file_path,
+            entry.to_dict(),
+            latest_path=run_log_file_service.latest_path_for(job.log_file_path),
+            metadata={
+                "output_file": job.output_file,
+                "progress_pct": round(job.progress_pct, 1),
+            },
+            state=job.state,
+            error=job.error,
+        )
         logger.info("[Composition] [%s] %s (seg=%s ok=%s)", step_name, detail, segment_id, success)
 
     # ── Event emission ──────────────────────────────────────────────────────

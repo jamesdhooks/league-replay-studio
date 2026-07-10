@@ -35,6 +35,7 @@ from server.services.analysis_db import (
 )
 from server.services.detectors import ALL_DETECTORS
 from server.services.iracing_bridge import bridge as iracing_bridge
+from server.services.run_log_file_service import run_log_file_service
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +292,7 @@ class ReplayAnalyzer:
         self._raw_on_progress = on_progress or (lambda *a: None)
         self._cancelled = False
         self._log_entries: list[dict] = []
+        self._log_file_path: str | None = None
         # Build car_idx → driver_name map for real-time event streaming
         self._driver_map: dict[int, str] = {}
         for d in self.session_info.get("drivers", []):
@@ -298,33 +300,54 @@ class ReplayAnalyzer:
             if idx is not None:
                 self._driver_map[idx] = d.get("user_name", f"#{d.get('car_number', idx)}")
 
+    def _start_analysis_log(self, run_id: int, phase: str) -> None:
+        """Create a timestamped analysis run log before progress starts."""
+        self._log_file_path = run_log_file_service.start_run(
+            scope="analysis",
+            run_id=f"analysis-{run_id}",
+            project_id=self.project_id,
+            project_dir=self.project_dir,
+            metadata={
+                "phase": phase,
+                "session_info": self.session_info,
+            },
+        )
+
     def on_progress(self, event_type: str, data: dict) -> None:
         """Forward progress event and record it for the analysis log file."""
-        self._log_entries.append({
+        entry = {
             "event": event_type,
             "ts": time.time(),
             **data,
-        })
+        }
+        self._log_entries.append(entry)
+        run_log_file_service.append_entry(
+            self._log_file_path,
+            entry,
+            latest_path=run_log_file_service.latest_path_for(self._log_file_path),
+            metadata={
+                "phase": data.get("phase"),
+                "stage": data.get("stage"),
+                "progress_percent": data.get("progress_percent"),
+            },
+            state=event_type,
+            error=data.get("message") if event_type == "error" else None,
+        )
         self._raw_on_progress(event_type, data)
 
     def _save_analysis_log(self) -> None:
-        """Persist the full analysis log to a JSON file in the project directory.
-
-        Loads any existing log entries first so re-runs append rather than overwrite.
-        """
+        """Persist the full analysis run log and latest UI-visible copy."""
         try:
+            run_log_file_service.write_snapshot(
+                self._log_file_path,
+                self._log_entries,
+                latest_path=run_log_file_service.latest_path_for(self._log_file_path),
+                metadata={"final_entry_count": len(self._log_entries)},
+                state=self._log_entries[-1].get("event") if self._log_entries else None,
+            )
             log_path = Path(self.project_dir) / "analysis_log.json"
-            existing: list[dict] = []
-            if log_path.exists():
-                try:
-                    existing = json.loads(log_path.read_text())
-                    if not isinstance(existing, list):
-                        existing = []
-                except Exception:
-                    existing = []
-            combined = existing + self._log_entries
-            log_path.write_text(json.dumps(combined, indent=2, default=str))
-            logger.info("[Analysis] Saved analysis log to %s (%d entries)", log_path, len(combined))
+            log_path.write_text(json.dumps(self._log_entries, indent=2, default=str))
+            logger.info("[Analysis] Saved analysis log to %s (%d entries)", log_path, len(self._log_entries))
         except Exception as exc:
             logger.warning("[Analysis] Failed to save analysis log: %s", exc)
 
@@ -362,6 +385,7 @@ class ReplayAnalyzer:
         )
         run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.commit()
+        self._start_analysis_log(run_id, "scan")
 
         try:
             self.on_progress("started", {
@@ -441,6 +465,7 @@ class ReplayAnalyzer:
         )
         run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.commit()
+        self._start_analysis_log(run_id, "analyze")
 
         try:
             # Emit start event

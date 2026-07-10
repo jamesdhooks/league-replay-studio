@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react'
 import { useCapture } from '../../context/CaptureContext'
-import { useScriptState, CAPTURE_MODES } from '../../context/ScriptStateContext'
+import { useScriptState, CAPTURE_MODES, CAPTURE_STATES } from '../../context/ScriptStateContext'
 import { useToast } from '../../context/ToastContext'
 import { useSettings } from '../../context/SettingsContext'
+import { useModal } from '../../context/ModalContext'
 import CollapsibleControlsHeader from '../ui/CollapsibleControlsHeader'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { apiGet } from '../../services/api'
@@ -10,11 +11,14 @@ import {
   Video, Play, Square, RotateCcw, CheckCircle2, XCircle,
   AlertTriangle, Monitor, Keyboard, FolderOpen, Clock,
   HardDrive, Zap, RefreshCw, FileVideo, ScrollText, Maximize2, Filter, Crosshair,
+  ShieldCheck, Trash2, BookOpen,
 } from 'lucide-react'
 import ClipsPanel from './ClipsPanel'
 import ScriptLockBanner from './ScriptLockBanner'
 import CaptureRangeSelector from './CaptureRangeSelector'
 import TrashBin from './TrashBin'
+import ClipValidationReportModal from './ClipValidationReportModal'
+import ObsSetupGuide from './ObsSetupGuide'
 import ResizableSidebar from '../layout/ResizableSidebar'
 import ResizableRowPane from '../ui/ResizableRowPane'
 import CollapsibleSection from '../ui/CollapsibleSection'
@@ -80,16 +84,20 @@ function writeCachedCaptureMode(projectId, mode) {
  */
 export default function CapturePanel({ projectId, script, totalDuration }) {
   const {
-    software, activeSoftware, hotkeys, watchDir,
+    software, activeSoftware, hotkeys, watchDir, obsControl,
     captureState, elapsedSeconds, filePath, fileSize, error, testResult, loading,
     detectSoftware, testHotkey, stopCapture, resetCapture,
     startScriptCapture, cancelScriptCapture, scriptCaptureRunning, scriptCaptureProgress, scriptCaptureCancelling,
     scriptCaptureStrategies,
     scriptCaptureLog,
     scriptCurrentSegment,
+    startCapturedClipValidation,
+    getCapturedClipValidationStatus,
+    startCorruptCapturedClipRecovery,
   } = useCapture()
-  const { scriptLocked, preferredSegmentIds, fetchState, fetchCaptureMode, updateCaptureMode, updateCaptureSelection } = useScriptState()
-  const { showSuccess, showError } = useToast()
+  const { scriptLocked, segments, preferredSegmentIds, fetchState, fetchCaptureMode, updateCaptureMode, updateCaptureSelection, clearAllCaptures } = useScriptState()
+  const { showSuccess, showError, showWarning } = useToast()
+  const { openModal, openContentModal } = useModal()
   const { settings, updateSetting } = useSettings()
   // Use settings as the immediate source of truth for selected software
   const selectedSoftwareId = settings?.capture_software ?? activeSoftware
@@ -99,6 +107,7 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
   const [captureTimeRange, setCaptureTimeRange] = useState(null)
   const [previewPlaying, setPreviewPlaying] = useState(false)
   const [replaySessionTime, setReplaySessionTime] = useState(null)
+  const [clipValidationStatus, setClipValidationStatus] = useState(null)
   const [controlsCollapsed, setControlsCollapsed] = useLocalStorage('lrs:capture:controlsCollapsed', false)
   const [controlsWidth, setControlsWidth] = useLocalStorage('lrs:capture:controlsWidth', 320)
   const [logsWidth, setLogsWidth] = useLocalStorage('lrs:capture:logsWidth', 520)
@@ -244,6 +253,32 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
   const captureResolution = isCaptureResolutionId(settings?.capture_resolution)
     ? settings.capture_resolution
     : DEFAULT_CAPTURE_RESOLUTION_ID
+  const obsCaptureControl = settings?.obs_capture_control || 'websocket'
+  const validateClips = settings?.capture_validate_clips !== false
+  const retryFailedClipValidation = Boolean(settings?.capture_retry_failed_clip_validation)
+  const clipValidationRetryLimit = Number.isInteger(settings?.capture_clip_validation_retry_limit)
+    ? Math.max(0, Math.min(5, settings.capture_clip_validation_retry_limit))
+    : 1
+  const uncapturedCaptureSegmentCount = useMemo(() => (
+    (script || []).filter((segment) => {
+      if (!segment || segment.type === 'transition' || segment.type === 'bridge') return false
+      const segmentId = String(segment.id || segment.segment_id || '')
+      const captureState = segments?.[segmentId]?.capture_state ?? CAPTURE_STATES.UNCAPTURED
+      return [CAPTURE_STATES.UNCAPTURED, CAPTURE_STATES.INVALIDATED, CAPTURE_STATES.CAPTURING].includes(captureState)
+    }).length
+  ), [script, segments])
+  const capturedCaptureSegmentCount = useMemo(() => (
+    (script || []).filter((segment) => {
+      if (!segment || segment.type === 'transition' || segment.type === 'bridge') return false
+      const segmentId = String(segment.id || segment.segment_id || '')
+      return segments?.[segmentId]?.capture_state === CAPTURE_STATES.CAPTURED
+    }).length
+  ), [script, segments])
+  const noUncapturedCaptureWork = captureMode === CAPTURE_MODES.UNCAPTURED_ONLY
+    && Array.isArray(script)
+    && script.some((segment) => segment?.type !== 'transition' && segment?.type !== 'bridge')
+    && uncapturedCaptureSegmentCount === 0
+  const noUncapturedCaptureWorkMessage = 'All events are captured. Choose Capture All or validate/reset clips to recapture.'
 
   // ── Handlers ──────────────────────────────────────────────────────────
 
@@ -256,7 +291,7 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
     }
   }
 
-  const handleStart = async () => {
+  const beginCapture = async () => {
     if (!projectId || !Array.isArray(script) || script.length === 0) {
       showError('No script available for scripted capture')
       return
@@ -267,11 +302,19 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
       return
     }
 
+    if (noUncapturedCaptureWork) {
+      showWarning(noUncapturedCaptureWorkMessage)
+      return
+    }
+
     const options = {
       captureMode,
       segmentIds: captureMode === 'specific_segments' ? selectedSegmentIds : null,
       timeRange: captureMode === 'time_range' ? captureTimeRange : null,
       captureResolution,
+      validateClips,
+      retryFailedClipValidation,
+      clipValidationRetryLimit,
     }
 
     const result = await startScriptCapture(projectId, script, options)
@@ -281,6 +324,36 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
     }
 
     showError(result?.error || 'Failed to start script capture')
+  }
+
+  const handleStart = () => {
+    if (captureMode === CAPTURE_MODES.ALL && capturedCaptureSegmentCount > 0) {
+      openModal('capture-all-recapture', 'confirm', {
+        title: 'Recapture Every Clip?',
+        message: `${capturedCaptureSegmentCount} existing captured event${capturedCaptureSegmentCount === 1 ? '' : 's'} will be archived to the project Trash Bin, then Capture All will record a fresh set. Nothing is permanently deleted.`,
+        danger: true,
+        confirmText: 'Archive and Recapture',
+        onConfirm: beginCapture,
+      })
+      return
+    }
+    beginCapture()
+  }
+
+  const handleClearAllCaptures = () => {
+    if (!projectId || capturedCaptureSegmentCount === 0) return
+    openModal('clear-captured-clips', 'confirm', {
+      title: 'Clear Captured Clips?',
+      message: `${capturedCaptureSegmentCount} captured event${capturedCaptureSegmentCount === 1 ? '' : 's'} will be archived to the project Trash Bin and marked uncaptured. This does not permanently delete the video files.`,
+      danger: true,
+      confirmText: 'Archive and Clear',
+      onConfirm: async () => {
+        const result = await clearAllCaptures(projectId)
+        const archived = result?.archived_clip_count || 0
+        const reset = result?.reset_segment_ids?.length || 0
+        showSuccess(`Archived ${archived} clip${archived === 1 ? '' : 's'} and reset ${reset} event${reset === 1 ? '' : 's'}`)
+      },
+    })
   }
 
   const handleStop = async () => {
@@ -327,6 +400,95 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
       showSuccess(`Capture resolution set to ${preset?.label ?? resolutionId}`)
     } catch (err) {
       showError(err.message || 'Failed to update capture resolution')
+    }
+  }
+
+  const handleObsCaptureControlChange = async (control) => {
+    try {
+      await updateSetting('obs_capture_control', control)
+      await detectSoftware()
+    } catch (err) {
+      showError(err.message || 'Failed to update OBS control method')
+    }
+  }
+
+  const handleOpenObsSetupGuide = () => {
+    openContentModal({
+      title: 'OBS Setup Guide',
+      wide: true,
+      content: <ObsSetupGuide outputDirectory={watchDir} captureResolution={captureResolution} />,
+    })
+  }
+
+  const handleValidationToggle = async (key, value) => {
+    try {
+      await updateSetting(key, value)
+    } catch (err) {
+      showError(err.message || 'Failed to update clip validation setting')
+    }
+  }
+
+  const handleValidationRetryLimitChange = async (value) => {
+    const next = Math.max(0, Math.min(5, Number.parseInt(value, 10) || 0))
+    try {
+      await updateSetting('capture_clip_validation_retry_limit', next)
+    } catch (err) {
+      showError(err.message || 'Failed to update retry limit')
+    }
+  }
+
+  useEffect(() => {
+    if (!clipValidationStatus?.running || !clipValidationStatus.job_id) return undefined
+    let active = true
+    const poll = async () => {
+      try {
+        const status = await getCapturedClipValidationStatus(projectId)
+        if (!active || status.job_id !== clipValidationStatus.job_id) return
+        setClipValidationStatus(status)
+        if (!status.running) {
+          if (status.report?.recovery) await fetchState(projectId)
+          if (status.error) showError(status.error)
+          else if (status.report?.recovery) {
+            const resetCount = status.report.recovery.reset_segment_ids?.length || 0
+            showSuccess(`Deleted corrupt clips and reset ${resetCount} event${resetCount === 1 ? '' : 's'} for recapture`)
+          } else if (status.report?.failed?.length) {
+            showError(`${status.report.failed.length} corrupt clip${status.report.failed.length === 1 ? '' : 's'} detected`)
+          } else if (status.report?.missing_events?.length) {
+            showWarning(`${status.report.missing_events.length} event${status.report.missing_events.length === 1 ? '' : 's'} still need capture`)
+          } else {
+            showSuccess(`Validated ${status.report?.passed || 0} captured clip${status.report?.passed === 1 ? '' : 's'}`)
+          }
+        }
+      } catch (err) {
+        if (active) {
+          setClipValidationStatus((current) => current ? { ...current, running: false, error: err.message } : current)
+          showError(err.message || 'Failed to read clip validation progress')
+        }
+      }
+    }
+    poll()
+    const intervalId = setInterval(poll, 500)
+    return () => {
+      active = false
+      clearInterval(intervalId)
+    }
+  }, [clipValidationStatus?.job_id, clipValidationStatus?.running, fetchState, getCapturedClipValidationStatus, projectId, showError, showSuccess, showWarning])
+
+  const handleManualClipValidation = async () => {
+    if (!projectId) return
+    try {
+      setClipValidationStatus(await startCapturedClipValidation(projectId))
+    } catch (err) {
+      showError(err.message || 'Failed to validate captured clips')
+    }
+  }
+
+  const handleRecoverCorruptClips = async () => {
+    if (!projectId) return
+    try {
+      setClipValidationStatus(await startCorruptCapturedClipRecovery(projectId))
+    } catch (err) {
+      showError(err.message || 'Failed to recover corrupt clips')
     }
   }
 
@@ -406,10 +568,13 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
       label: 'Start Capture',
       icon: Play,
       onClick: handleStart,
-      disabled: loading || captureState === 'testing',
-      className: 'bg-accent/12 text-accent border-accent/30 hover:bg-accent/18',
+      disabled: loading || captureState === 'testing' || noUncapturedCaptureWork,
+      title: noUncapturedCaptureWork ? noUncapturedCaptureWorkMessage : 'Start scripted capture',
+      className: noUncapturedCaptureWork
+        ? 'bg-bg-primary text-text-disabled border-border'
+        : 'bg-accent/12 text-accent border-accent/30 hover:bg-accent/18',
     }
-  }, [scriptCaptureRunning, scriptCaptureCancelling, cancelScriptCapture, captureState, loading, handleStop, handleReset, handleStart])
+  }, [scriptCaptureRunning, scriptCaptureCancelling, cancelScriptCapture, captureState, loading, handleStop, handleReset, handleStart, noUncapturedCaptureWork, noUncapturedCaptureWorkMessage])
 
   const captureStatusBadge = useMemo(() => {
     const config = {
@@ -429,7 +594,7 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
   const setupOptionsDisabled = isCaptureMode
 
   const scriptSidebarContent = (
-    <div className="h-full p-3 bg-bg-primary">
+    <div className="h-full min-h-0 overflow-y-auto overscroll-contain p-3 bg-bg-primary">
       <ScriptLockBanner
         projectId={projectId}
         script={script}
@@ -462,14 +627,16 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
             <span className={`inline-flex items-center justify-center rounded-md border px-3 py-2.5 text-sm font-semibold whitespace-nowrap ${captureStatusBadge.className}`}>
               {captureStatusBadge.label}
             </span>
-            <button
-              onClick={previewTopbarAction.onClick}
-              disabled={previewTopbarAction.disabled}
-              className={`flex-1 inline-flex items-center justify-center gap-2 rounded-md border px-3 py-2.5 text-sm font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${previewTopbarAction.className}`}
-            >
-              <PreviewTopbarActionIcon className="w-4 h-4" />
-              {previewTopbarAction.label}
-            </button>
+            <span className="flex-1" title={previewTopbarAction.title}>
+              <button
+                onClick={previewTopbarAction.onClick}
+                disabled={previewTopbarAction.disabled}
+                className={`w-full inline-flex items-center justify-center gap-2 rounded-md border px-3 py-2.5 text-sm font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${previewTopbarAction.className}`}
+              >
+                <PreviewTopbarActionIcon className="w-4 h-4" />
+                {previewTopbarAction.label}
+              </button>
+            </span>
           </div>
         </div>
       </div>
@@ -497,7 +664,14 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
                     >
                       <Icon className={`w-4 h-4 shrink-0 ${isSelected ? 'text-accent' : 'text-text-tertiary'}`} />
                       <div className="flex-1 min-w-0">
-                        <div className="text-xs font-medium text-text-primary">{meta.label}</div>
+                        <div className="flex items-center gap-1.5 text-xs font-medium text-text-primary">
+                          <span>{meta.label}</span>
+                          {modeKey === CAPTURE_MODES.UNCAPTURED_ONLY && (
+                            <span className="shrink-0 border border-border bg-bg-secondary px-1.5 py-0.5 text-xxs text-text-secondary">
+                              {uncapturedCaptureSegmentCount}
+                            </span>
+                          )}
+                        </div>
                         <div className="text-xxs text-text-tertiary truncate">{meta.desc}</div>
                       </div>
                       {isSelected && <span className="text-xxs font-medium text-accent">Active</span>}
@@ -519,6 +693,17 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
                     disabled={setupOptionsDisabled}
                   />
                 </div>
+
+                <button
+                  type="button"
+                  onClick={handleClearAllCaptures}
+                  disabled={setupOptionsDisabled || capturedCaptureSegmentCount === 0}
+                  title={capturedCaptureSegmentCount === 0 ? 'No captured clips to clear' : 'Archive captured clips and mark their events uncaptured'}
+                  className="mt-1.5 inline-flex w-full items-center justify-center gap-1.5 border border-danger/30 bg-danger/8 px-2.5 py-1.5 text-xxs font-medium text-danger transition-colors hover:bg-danger/15 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Clear captured clips
+                </button>
               </>
             )}
           </div>
@@ -549,10 +734,104 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
         </div>
       </Section>
 
+      <Section icon={ShieldCheck} title="Clip Validation">
+        <div className="space-y-2">
+          <button
+            type="button"
+            onClick={handleManualClipValidation}
+            disabled={setupOptionsDisabled || clipValidationStatus?.running}
+            className="flex w-full items-center justify-center gap-2 border border-border bg-bg-primary px-2.5 py-2 text-xs font-medium text-text-primary transition-colors hover:bg-bg-hover disabled:cursor-wait disabled:opacity-50"
+          >
+            <ShieldCheck className="h-3.5 w-3.5" />
+            {clipValidationStatus?.running ? 'Validating clips...' : 'Run clip validation'}
+          </button>
+
+          <label className={`flex items-start gap-2 rounded-md border border-border-subtle bg-bg-primary px-2.5 py-2 ${setupOptionsDisabled ? 'opacity-60' : ''}`}>
+            <input
+              type="checkbox"
+              checked={validateClips}
+              disabled={setupOptionsDisabled}
+              onChange={(event) => handleValidationToggle('capture_validate_clips', event.target.checked)}
+              className="mt-0.5 accent-accent"
+            />
+            <span className="min-w-0">
+              <span className="block text-xs font-medium text-text-primary">Validate clip playback</span>
+              <span className="block text-xxs text-text-tertiary">After this capture pass finishes, read metadata and decode every saved video/audio stream.</span>
+            </span>
+          </label>
+
+          <label className={`flex items-start gap-2 rounded-md border border-border-subtle bg-bg-primary px-2.5 py-2 ${setupOptionsDisabled || !validateClips ? 'opacity-60' : ''}`}>
+            <input
+              type="checkbox"
+              checked={retryFailedClipValidation}
+              disabled={setupOptionsDisabled || !validateClips}
+              onChange={(event) => handleValidationToggle('capture_retry_failed_clip_validation', event.target.checked)}
+              className="mt-0.5 accent-accent"
+            />
+            <span className="min-w-0">
+              <span className="block text-xs font-medium text-text-primary">Retry invalid clips</span>
+              <span className="block text-xxs text-text-tertiary">After final validation fails, delete failed clips and recapture only their segments.</span>
+            </span>
+          </label>
+
+          <div className={`flex items-center justify-between gap-2 rounded-md border border-border-subtle bg-bg-primary px-2.5 py-2 ${setupOptionsDisabled || !validateClips || !retryFailedClipValidation ? 'opacity-60' : ''}`}>
+            <div className="min-w-0">
+              <div className="text-xs font-medium text-text-primary">Retry limit</div>
+              <div className="text-xxs text-text-tertiary">Additional recapture passes</div>
+            </div>
+            <input
+              type="number"
+              min="0"
+              max="5"
+              step="1"
+              value={clipValidationRetryLimit}
+              disabled={setupOptionsDisabled || !validateClips || !retryFailedClipValidation}
+              onChange={(event) => handleValidationRetryLimitChange(event.target.value)}
+              className="w-16 rounded-md border border-border bg-bg-secondary px-2 py-1 text-xs text-text-primary text-right focus:outline-none focus:ring-1 focus:ring-accent disabled:cursor-not-allowed"
+            />
+          </div>
+        </div>
+      </Section>
+
       <TrashBin projectId={projectId} />
 
       <Section icon={Monitor} title="Capture Software">
             <div className="space-y-2">
+              {selectedSoftwareId === 'obs' && obsControl && (
+                <div className="space-y-1.5 border border-border-subtle bg-bg-primary px-2.5 py-2">
+                  <div className={`text-xxs ${obsControl.available ? 'text-success' : 'text-danger'}`}>
+                    {obsControl.available
+                      ? `OBS WebSocket available on ${obsControl.host}:${obsControl.port}`
+                      : `OBS WebSocket unavailable: ${obsControl.reason}`}
+                  </div>
+                  <div className="grid grid-cols-2 gap-1">
+                    <button
+                      type="button"
+                      onClick={() => handleObsCaptureControlChange('websocket')}
+                      disabled={setupOptionsDisabled}
+                      className={`border px-2 py-1 text-xxs font-medium ${obsCaptureControl === 'websocket' ? 'border-accent/50 bg-accent/10 text-accent' : 'border-border text-text-secondary hover:bg-bg-hover'}`}
+                    >
+                      WebSocket
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleObsCaptureControlChange('hotkey')}
+                      disabled={setupOptionsDisabled}
+                      className={`border px-2 py-1 text-xxs font-medium ${obsCaptureControl === 'hotkey' ? 'border-accent/50 bg-accent/10 text-accent' : 'border-border text-text-secondary hover:bg-bg-hover'}`}
+                    >
+                      Hotkeys
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleOpenObsSetupGuide}
+                    className="inline-flex items-center gap-1 text-xxs font-medium text-accent hover:text-accent-hover"
+                  >
+                    <BookOpen className="h-3 w-3" />
+                    OBS setup guide
+                  </button>
+                </div>
+              )}
               {software.length > 0 ? (
                 software.map(sw => {
                   const isSelected = sw.id === selectedSoftwareId
@@ -606,15 +885,31 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
             </div>
       </Section>
 
-      <Section icon={Keyboard} title="Hotkey Configuration">
-            <div className="space-y-2">
-              <KeyDisplay label="Start Recording" value={hotkeys.start} />
-              <KeyDisplay label="Stop Recording" value={hotkeys.stop || hotkeys.start || '(same as start)'} />
-              <p className="text-xxs text-text-tertiary">
-                Configure hotkeys in Settings → Capture tab.
-              </p>
-            </div>
-          </Section>
+      {!(selectedSoftwareId === 'obs' && obsCaptureControl === 'websocket') && (
+      <Section icon={Keyboard} title="Hotkey Controls">
+        <div className="space-y-2">
+          <KeyDisplay label="Start Recording" value={hotkeys.start} />
+          <KeyDisplay label="Stop Recording" value={hotkeys.stop || hotkeys.start || '(same as start)'} />
+          <p className="text-xxs text-text-tertiary">Configure hotkeys in Settings → Capture tab.</p>
+          <div className="border-t border-border-subtle pt-2">
+            <button
+              onClick={handleTest}
+              disabled={setupOptionsDisabled || loading || captureState === 'testing'}
+              className={`w-full flex items-center justify-center gap-2 px-2.5 py-1.5 rounded-md text-xxs
+                font-medium transition-colors
+                ${setupOptionsDisabled || loading || captureState === 'testing'
+                  ? 'bg-bg-primary text-text-disabled cursor-wait border border-border'
+                  : 'bg-bg-primary text-text-primary hover:bg-bg-hover border border-border'
+                }`}
+            >
+              <Zap className="w-3.5 h-3.5" />
+              {captureState === 'testing' ? 'Testing…' : 'Test Hotkey'}
+            </button>
+          </div>
+          {testResult && <TestResultDisplay result={testResult} />}
+        </div>
+      </Section>
+      )}
 
       <Section icon={FolderOpen} title="Output Directory">
             <div className="text-xs text-text-secondary font-mono truncate" title={watchDir || 'Not configured'}>
@@ -622,31 +917,6 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
             </div>
       </Section>
 
-      <Section icon={Zap} title="Hotkey Validation">
-            <div className="space-y-2">
-              <p className="text-xxs text-text-tertiary">
-                Test sends the start hotkey, checks for a new recording file, then sends stop.
-                Make sure your capture software is running first.
-              </p>
-              <button
-                onClick={handleTest}
-                disabled={setupOptionsDisabled || loading || captureState === 'testing'}
-                className={`w-full flex items-center justify-center gap-2 px-2.5 py-1.5 rounded-md text-xxs
-                  font-medium transition-colors
-                  ${setupOptionsDisabled || loading || captureState === 'testing'
-                    ? 'bg-bg-primary text-text-disabled cursor-wait border border-border'
-                    : 'bg-bg-primary text-text-primary hover:bg-bg-hover border border-border'
-                  }`}
-              >
-                <Zap className="w-3.5 h-3.5" />
-                {captureState === 'testing' ? 'Testing…' : 'Test Hotkey'}
-              </button>
-
-              {testResult && (
-                <TestResultDisplay result={testResult} />
-              )}
-            </div>
-      </Section>
     </div>
   )
 
@@ -784,6 +1054,13 @@ export default function CapturePanel({ projectId, script, totalDuration }) {
           </div>
         </div>
       </div>
+      {clipValidationStatus && (
+        <ClipValidationReportModal
+          status={clipValidationStatus}
+          onClose={() => setClipValidationStatus(null)}
+          onRecover={handleRecoverCorruptClips}
+        />
+      )}
     </div>
   )
 }

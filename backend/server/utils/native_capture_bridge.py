@@ -300,7 +300,7 @@ class NativeCaptureBridge:
         Returns a BGR24 numpy array, or None if no new frame is available.
         Logs a throttled status line (~every 5 seconds).
         """
-        if not self._running or self._shm_mmap is None:
+        if not self.is_running or self._shm_mmap is None:
             return None
 
         self._grab_calls += 1
@@ -335,7 +335,7 @@ class NativeCaptureBridge:
                 logger.info(
                     "[NativeCapture] status: running=%s proc_alive=%s "
                     "calls=%d frames=%d frame_id=%d shm=(%dx%d sz=%d stride=%d fmt=%d)",
-                    self._running, proc_alive,
+                    self.is_running, proc_alive,
                     self._grab_calls, self._grab_frames,
                     frame_id, width, height, data_size, stride, pixel_format,
                 )

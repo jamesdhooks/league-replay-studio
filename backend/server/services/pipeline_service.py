@@ -32,6 +32,7 @@ from typing import Any, Callable, Optional
 
 from server.config import DATA_DIR
 from server.events import EventType, make_event
+from server.services.run_log_file_service import run_log_file_service
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,7 @@ class PipelineRun:
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
     error: Optional[str] = None
+    log_file_path: Optional[str] = None
 
     def __post_init__(self):
         """Initialise default steps if empty."""
@@ -163,6 +165,7 @@ class PipelineRun:
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "error": self.error,
+            "log_file_path": self.log_file_path,
         }
 
     @classmethod
@@ -183,6 +186,7 @@ class PipelineRun:
             started_at=data.get("started_at"),
             completed_at=data.get("completed_at"),
             error=data.get("error"),
+            log_file_path=data.get("log_file_path"),
         )
 
 
@@ -672,6 +676,19 @@ class PipelineService:
             "message": message,
             "detail": detail,
         }
+        run_log_file_service.append_entry(
+            self._current_run.log_file_path if self._current_run else None,
+            entry,
+            latest_path=run_log_file_service.latest_path_for(
+                self._current_run.log_file_path if self._current_run else None
+            ),
+            metadata={
+                "current_step": self._current_run.current_step.value
+                if self._current_run and self._current_run.current_step else None,
+            },
+            state=self._current_run.state.value if self._current_run else None,
+            error=self._current_run.error if self._current_run else None,
+        )
 
         # Persist
         try:
@@ -1285,6 +1302,24 @@ class PipelineService:
                 state=PipelineState.RUNNING,
                 config=run_config,
                 started_at=time.time(),
+            )
+            project_dir = None
+            try:
+                from server.services.project_service import project_service
+                project = project_service.get_project(project_id)
+                project_dir = project.get("project_dir") if project else None
+            except Exception:
+                project_dir = None
+            run.log_file_path = run_log_file_service.start_run(
+                scope="pipeline",
+                run_id=run.run_id,
+                project_id=project_id,
+                project_dir=project_dir,
+                metadata={
+                    "preset_id": preset_id,
+                    "resolved_preset_id": run_config.get("resolved_preset_id"),
+                    "config": run_config,
+                },
             )
 
             # Configure step initial states based on config
@@ -1903,6 +1938,9 @@ class PipelineService:
         project_dir = project.get("project_dir", "")
         clips_dir = str(Path(project_dir) / "clips")
         clip_padding = config.get("clip_padding", 0.5)
+        validate_clips = bool(config.get("validate_clips", True))
+        retry_failed_clip_validation = bool(config.get("retry_failed_clip_validation", False))
+        clip_validation_retry_limit = max(0, min(5, int(config.get("clip_validation_retry_limit", 1) or 0)))
 
         self._update_step_progress(StepName.CAPTURE, 5.0, {
             "message": "Starting script-based capture...",
@@ -1924,6 +1962,10 @@ class PipelineService:
                 pct = 10.0 + (seg_idx / seg_total) * 80.0
             elif step == "strategy_computed":
                 pct = 8.0
+            elif step == "clip_validation":
+                pct = 90.0
+            elif step in {"clip_validation_retry", "clip_validation_complete"}:
+                pct = 91.0
             self._update_step_progress(StepName.CAPTURE, pct, data)
 
         try:
@@ -1933,6 +1975,9 @@ class PipelineService:
                 clip_padding_after=config.get("clip_padding_after", 1.0),
                 progress_callback=progress_cb,
                 contiguous_gap_threshold=config.get("contiguous_gap_threshold", 1.0),
+                validate_clips=validate_clips,
+                retry_failed_clip_validation=retry_failed_clip_validation,
+                clip_validation_retry_limit=clip_validation_retry_limit,
             )
 
             clips = engine.capture_script(
@@ -2237,19 +2282,36 @@ class PipelineService:
         if not project:
             raise ValueError(f"Project {project_id} not found")
 
-        # Get input file
-        input_file = project.get("replay_file", "")
-        if not input_file or not Path(input_file).exists():
-            raise ValueError("No video file to export")
+        # Export the composed video, never the source .rpy replay file.
+        compose_step = self._current_run.steps[StepName.COMPOSE] if self._current_run else None
+        input_file = compose_step.output.get("output_file") if compose_step else None
+        if not input_file or not Path(input_file).is_file():
+            # Recovery path: a completed compose can survive a server restart even
+            # when the in-memory pipeline run does not. Use the newest composed MP4.
+            project_dir = Path(project.get("project_dir") or "")
+            composed_files = sorted(
+                project_dir.glob("composed_*.mp4"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            ) if project_dir.is_dir() else []
+            input_file = str(composed_files[0]) if composed_files else None
+        if not input_file or not Path(input_file).is_file():
+            raise ValueError("No composed video file to export")
 
-        # Start encoding
-        export_preset = config.get("export_preset", "1080p")
-        job_id = encoding_service.start_job(
+        # Submit to the supported encoder queue. `submit_job` owns output naming,
+        # validation, GPU selection, and the asynchronous encoding lifecycle.
+        export_preset = config.get("export_preset") or "1080p"
+        output_dir = str(Path(project.get("project_dir") or "") / "Encoded")
+        result = encoding_service.submit_job(
             project_id=project_id,
             input_file=input_file,
+            output_dir=output_dir,
             preset_id=export_preset,
-            job_type="highlight",
+            job_type="full",
         )
+        if not result.get("success"):
+            raise RuntimeError(result.get("error", "Export job failed to start"))
+        job_id = result["job"]["job_id"]
 
         # Monitor progress
         while True:

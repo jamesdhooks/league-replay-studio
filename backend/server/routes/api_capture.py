@@ -12,6 +12,8 @@ REST endpoints for video capture (OBS / ShadowPlay / ReLive).
   POST /api/capture/script-capture — Script-based per-segment capture (async)
   GET  /api/capture/script-capture/status — Status of running script capture
   GET  /api/capture/script-capture/log   — Structured capture log
+  POST /api/capture/script-capture/validate — Validate persisted clips with FFmpeg
+  POST /api/capture/script-capture/validate/recover — Delete/reset corrupt clips
 """
 
 from __future__ import annotations
@@ -21,9 +23,10 @@ import json
 import logging
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -62,8 +65,29 @@ _script_capture_state: dict = {
 _script_capture_lock = threading.Lock()
 _script_capture_engine: Optional[object] = None
 
+_clip_validation_state: dict[str, Any] = {
+    "running": False,
+    "job_id": None,
+    "project_id": None,
+    "mode": None,
+    "checked": 0,
+    "total": 0,
+    "percentage": 0,
+    "message": "Idle",
+    "logs": [],
+    "report": None,
+    "error": None,
+    "started_at": None,
+    "completed_at": None,
+}
+_clip_validation_lock = threading.Lock()
 
-def _persist_script_capture_log(project_dir: str, payload: dict[str, Any]) -> Optional[str]:
+
+def _persist_script_capture_log(
+    project_dir: str,
+    payload: dict[str, Any],
+    existing_path: str | None = None,
+) -> Optional[str]:
     """Write script capture audit log to project-local JSON files.
 
     Stores a timestamped immutable record and updates a stable "latest" file
@@ -73,8 +97,11 @@ def _persist_script_capture_log(project_dir: str, payload: dict[str, Any]) -> Op
         logs_dir = Path(project_dir) / "capture_logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
 
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        run_path = logs_dir / f"script_capture_{stamp}.json"
+        if existing_path:
+            run_path = Path(existing_path)
+        else:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            run_path = logs_dir / f"script_capture_{stamp}.json"
         latest_path = logs_dir / "latest_script_capture.json"
 
         serialized = json.dumps(payload, indent=2, ensure_ascii=True)
@@ -84,6 +111,428 @@ def _persist_script_capture_log(project_dir: str, payload: dict[str, Any]) -> Op
     except Exception as exc:
         logger.error("[Capture API] Failed to persist script capture log: %s", exc)
         return None
+
+
+def _script_capture_log_payload(
+    project_id: int,
+    *,
+    success: bool | None = None,
+    cancelled: bool = False,
+    error: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    with _script_capture_lock:
+        payload = {
+            "schema": "league-replay-studio.capture-log",
+            "schema_version": 1,
+            "project_id": project_id,
+            "success": success,
+            "cancelled": cancelled,
+            "error": error,
+            "started_at": _script_capture_state.get("started_at"),
+            "updated_at": time.time(),
+            "total_segments": _script_capture_state.get("total_segments", 0),
+            "completed_segments": _script_capture_state.get("completed_segments", 0),
+            "compiled_path": _script_capture_state.get("compiled_path"),
+            "clips": list(_script_capture_state.get("clips", [])),
+            "strategies": list(_script_capture_state.get("strategies", [])),
+            "capture_log": list(_script_capture_state.get("capture_log", [])),
+            "capture_mode": _script_capture_state.get("capture_mode"),
+            "capture_resolution": _script_capture_state.get("capture_resolution"),
+            "capture_transport": _script_capture_state.get("capture_transport"),
+            "validate_clips": _script_capture_state.get("validate_clips"),
+            "retry_failed_clip_validation": _script_capture_state.get("retry_failed_clip_validation"),
+            "clip_validation_retry_limit": _script_capture_state.get("clip_validation_retry_limit"),
+        }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _update_script_capture_log_file(project_dir: str, project_id: int, **kwargs: Any) -> None:
+    with _script_capture_lock:
+        existing_path = _script_capture_state.get("log_file_path")
+    log_file_path = _persist_script_capture_log(
+        project_dir,
+        _script_capture_log_payload(project_id, **kwargs),
+        existing_path=existing_path,
+    )
+    if log_file_path and log_file_path != existing_path:
+        with _script_capture_lock:
+            _script_capture_state["log_file_path"] = log_file_path
+
+
+def _persist_clip_validation_report(project_dir: str, payload: dict[str, Any], prefix: str = "clip_validation") -> Optional[str]:
+    """Persist standalone clip validation runs independently of capture runs."""
+    try:
+        logs_dir = Path(project_dir) / "capture_logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        report_path = logs_dir / f"{prefix}_{stamp}.json"
+        latest_path = logs_dir / "latest_clip_validation.json"
+        serialized = json.dumps(payload, indent=2, ensure_ascii=True)
+        report_path.write_text(serialized, encoding="utf-8")
+        latest_path.write_text(serialized, encoding="utf-8")
+        return str(report_path)
+    except Exception as exc:
+        logger.error("[Capture API] Failed to persist clip validation report: %s", exc)
+        return None
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_persisted_capture_clips(
+    project_id: int,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    """Validate each currently captured project clip and persist its report."""
+    from server.services.project_service import project_service
+    from server.services.script_state_service import CAPTURE_CAPTURED, CAPTURE_UNCAPTURED, script_state_service
+    from server.utils.script_capture import find_capture_ffmpeg, find_capture_ffprobe, validate_capture_clip_file
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project_dir = str(project.get("project_dir") or "")
+    if not project_dir:
+        raise HTTPException(status_code=400, detail="Project directory is not set")
+
+    clips_root = (Path(project_dir) / "clips").resolve(strict=False)
+    clips_by_path: dict[str, list[str]] = {}
+    missing_events: list[dict[str, Any]] = []
+    segment_states = script_state_service.get_segment_states(project_dir)
+    non_capturable_segment_ids = {
+        str(segment.get("id") or segment.get("segment_id") or "")
+        for segment in (project.get("script") or [])
+        if isinstance(segment, dict) and segment.get("type") in {"transition", "bridge"}
+    }
+    for segment_id, segment in segment_states.items():
+        if (
+            str(segment_id) in non_capturable_segment_ids
+            or segment.get("segment_type") in {"transition", "bridge"}
+        ):
+            continue
+        capture_state = str(segment.get("capture_state") or "")
+        clip_path = str(segment.get("clip_path") or "").strip()
+        if capture_state == CAPTURE_UNCAPTURED or not clip_path:
+            missing_events.append({
+                "segment_id": str(segment_id),
+                "capture_state": capture_state or "uncaptured",
+                "section": segment.get("section", ""),
+                "event_type": segment.get("event_type", ""),
+                "start_time": segment.get("start_time"),
+                "end_time": segment.get("end_time"),
+            })
+        if capture_state != CAPTURE_CAPTURED or not clip_path:
+            continue
+        if clip_path:
+            clips_by_path.setdefault(str(Path(clip_path).resolve(strict=False)), []).append(str(segment_id))
+
+    ffprobe_path = find_capture_ffprobe()
+    ffmpeg_path = find_capture_ffmpeg(ffprobe_path)
+    validator_available = bool(ffprobe_path and ffmpeg_path)
+    results: list[dict[str, Any]] = []
+    progress_log: list[dict[str, Any]] = []
+
+    def _emit_progress(data: dict[str, Any]) -> None:
+        progress_log.append({
+            "timestamp": time.time(),
+            "level": data.get("level", "info"),
+            "message": data.get("message", ""),
+        })
+        if progress_callback:
+            progress_callback(data)
+
+    sorted_clips = sorted(clips_by_path.items())
+    total = len(sorted_clips)
+    _emit_progress({
+        "checked": 0,
+        "total": total,
+        "percentage": 0,
+        "message": f"Preparing ffprobe for {total} captured clip(s)",
+        "level": "info",
+    })
+    if missing_events:
+        _emit_progress({
+            "checked": 0,
+            "total": total,
+            "percentage": 0,
+            "message": f"Capture audit found {len(missing_events)} event(s) awaiting capture",
+            "level": "warning",
+        })
+    for index, (clip_path, segment_ids) in enumerate(sorted_clips, start=1):
+        path = Path(clip_path)
+        if not _path_is_within(path, clips_root):
+            result = {
+                "path": str(path),
+                "valid": False,
+                "size_bytes": path.stat().st_size if path.exists() else 0,
+                "duration_seconds": None,
+                "errors": ["Clip path is outside the project clips directory"],
+                "segment_ids": segment_ids,
+                "ffprobe_path": ffprobe_path,
+                "safe_to_delete": False,
+            }
+        else:
+            result = validate_capture_clip_file(str(path), segment_ids)
+            result["safe_to_delete"] = validator_available
+        results.append(result)
+        _emit_progress({
+            "checked": index,
+            "total": total,
+            "percentage": round(index / total * 100) if total else 100,
+            "message": f"{Path(clip_path).name}: {'passed' if result.get('valid') else 'failed'}",
+            "level": "success" if result.get("valid") else "error",
+        })
+
+    failed = [result for result in results if not result.get("valid")]
+    report: dict[str, Any] = {
+        "schema": "league-replay-studio.clip-validation-report",
+        "schema_version": 1,
+        "project_id": project_id,
+        "validated_at": datetime.now(timezone.utc).isoformat(),
+        "validator": "ffprobe+ffmpeg-decode",
+        "validator_available": validator_available,
+        "ffprobe_path": ffprobe_path,
+        "ffmpeg_path": ffmpeg_path,
+        "checked": len(results),
+        "passed": len(results) - len(failed),
+        "failed": failed,
+        "results": results,
+        "missing_events": missing_events,
+        "capture_audit": {
+            "total_event_count": sum(
+                1 for segment_id, segment in segment_states.items()
+                if str(segment_id) not in non_capturable_segment_ids
+                and segment.get("segment_type") not in {"transition", "bridge"}
+            ),
+            "captured_event_count": sum(
+                1 for segment_id, segment in segment_states.items()
+                if str(segment_id) not in non_capturable_segment_ids
+                and segment.get("segment_type") not in {"transition", "bridge"}
+                and segment.get("capture_state") == CAPTURE_CAPTURED
+                and segment.get("clip_path")
+            ),
+            "missing_event_count": len(missing_events),
+        },
+        "progress_log": progress_log,
+    }
+    report["log_file_path"] = _persist_clip_validation_report(project_dir, report)
+    command_log.record(
+        "capture-clip-validation",
+        {"project_id": project_id, "checked": report["checked"], "failed": len(failed), "missing": len(missing_events)},
+        result="error" if failed else "warning" if missing_events else "ok",
+        source="api_capture",
+    )
+    return report, project_dir, project
+
+
+def _remove_capture_manifest_entries(project_id: int, project: dict[str, Any], paths: set[str], segment_ids: set[str]) -> None:
+    """Remove obsolete clip paths or segment IDs from composition manifests."""
+    from server.services.project_service import project_service
+
+    updates: dict[str, list[dict[str, Any]]] = {}
+    for key in ("clips_manifest", "capture_manifest"):
+        manifest = project.get(key)
+        if not isinstance(manifest, list):
+            continue
+        filtered = [
+            entry for entry in manifest
+            if str(Path(str(entry.get("path") or "")).resolve(strict=False)) not in paths
+            and str(entry.get("id") or entry.get("source_clip_id") or "") not in segment_ids
+        ]
+        if len(filtered) != len(manifest):
+            updates[key] = filtered
+    if updates:
+        project_service.save_project_metadata(project_id, updates)
+
+
+def _remove_invalid_capture_manifest_entries(project_id: int, project: dict[str, Any], failed_paths: set[str], failed_segment_ids: set[str]) -> None:
+    """Remove deleted corrupt clips from the project composition manifests."""
+    _remove_capture_manifest_entries(project_id, project, failed_paths, failed_segment_ids)
+
+
+def _recover_corrupt_persisted_capture_clips(
+    project_id: int,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Delete decode-failed clips and reset their linked events for recapture."""
+    from server.services.script_state_service import script_state_service
+
+    report, project_dir, project = _validate_persisted_capture_clips(project_id, progress_callback)
+    if not report["validator_available"]:
+        raise HTTPException(status_code=409, detail="FFmpeg validation is unavailable; corrupt clips cannot be safely recovered")
+
+    if progress_callback:
+        progress_callback({
+            "checked": report["checked"],
+            "total": report["checked"],
+            "percentage": 100,
+            "message": "Deleting confirmed corrupt clips and resetting events",
+            "level": "info",
+        })
+
+    deleted_paths: set[str] = set()
+    failed_segment_ids: set[str] = set()
+    delete_errors: list[dict[str, str]] = []
+    for failed in report["failed"]:
+        if not failed.get("safe_to_delete"):
+            continue
+        path = Path(str(failed.get("path") or ""))
+        try:
+            path.unlink(missing_ok=True)
+            deleted_paths.add(str(path.resolve(strict=False)))
+            failed_segment_ids.update(str(segment_id) for segment_id in failed.get("segment_ids") or [] if segment_id)
+        except OSError as exc:
+            delete_errors.append({"path": str(path), "error": str(exc)})
+
+    reset_segment_ids = script_state_service.reset_corrupt_capture_segments(project_dir, sorted(failed_segment_ids))
+    _remove_invalid_capture_manifest_entries(project_id, project, deleted_paths, set(reset_segment_ids))
+    recovery = {
+        "deleted_clip_count": len(deleted_paths),
+        "reset_segment_ids": reset_segment_ids,
+        "delete_errors": delete_errors,
+    }
+    report["recovery"] = recovery
+    report["recovery_log_file_path"] = _persist_clip_validation_report(
+        project_dir,
+        report,
+        prefix="clip_validation_recovery",
+    )
+    command_log.record(
+        "capture-clip-validation-recovery",
+        {"project_id": project_id, **recovery},
+        result="ok" if not delete_errors else "error",
+        source="api_capture",
+    )
+    return report
+
+
+def _start_persisted_clip_validation(project_id: int, mode: str) -> dict[str, Any]:
+    """Start a non-blocking clip validation or recovery job."""
+    with _script_capture_lock:
+        if _script_capture_state["running"]:
+            raise HTTPException(status_code=409, detail="Stop the active script capture before validating clips")
+    with _clip_validation_lock:
+        if _clip_validation_state["running"]:
+            raise HTTPException(status_code=409, detail="A clip validation is already in progress")
+        job_id = uuid.uuid4().hex
+        _clip_validation_state.update({
+            "running": True,
+            "job_id": job_id,
+            "project_id": project_id,
+            "mode": mode,
+            "checked": 0,
+            "total": 0,
+            "percentage": 0,
+            "message": "Starting clip validation",
+            "logs": [],
+            "report": None,
+            "error": None,
+            "started_at": time.time(),
+            "completed_at": None,
+        })
+
+    def _progress(data: dict[str, Any]) -> None:
+        log_entry = {
+            "timestamp": time.time(),
+            "level": data.get("level", "info"),
+            "message": data.get("message", ""),
+        }
+        with _clip_validation_lock:
+            if _clip_validation_state.get("job_id") != job_id:
+                return
+            _clip_validation_state.update({
+                "checked": data.get("checked", _clip_validation_state["checked"]),
+                "total": data.get("total", _clip_validation_state["total"]),
+                "percentage": data.get("percentage", _clip_validation_state["percentage"]),
+                "message": data.get("message", _clip_validation_state["message"]),
+            })
+            _clip_validation_state["logs"].append(log_entry)
+
+    def _run() -> None:
+        try:
+            report = (
+                _recover_corrupt_persisted_capture_clips(project_id, _progress)
+                if mode == "recover"
+                else _validate_persisted_capture_clips(project_id, _progress)[0]
+            )
+            with _clip_validation_lock:
+                _clip_validation_state.update({
+                    "running": False,
+                    "checked": report.get("checked", 0),
+                    "total": report.get("checked", 0),
+                    "percentage": 100,
+                    "message": "Recovery complete" if mode == "recover" else "Validation complete",
+                    "report": report,
+                    "completed_at": time.time(),
+                })
+        except Exception as exc:
+            logger.exception("[Capture API] Clip validation job failed: %s", exc)
+            with _clip_validation_lock:
+                _clip_validation_state.update({
+                    "running": False,
+                    "message": "Validation failed",
+                    "error": str(exc),
+                    "completed_at": time.time(),
+                })
+
+    threading.Thread(target=_run, daemon=True, name="clip-validation").start()
+    return {
+        "accepted": True,
+        "running": True,
+        "job_id": job_id,
+        "project_id": project_id,
+        "mode": mode,
+        "checked": 0,
+        "total": 0,
+        "percentage": 0,
+        "message": "Starting clip validation",
+        "logs": [],
+        "report": None,
+        "error": None,
+    }
+
+
+def _restore_persisted_clip_validation_status(project_id: int) -> dict[str, Any] | None:
+    """Reload the latest report when a development reload cleared job memory."""
+    from server.services.project_service import project_service
+
+    project = project_service.get_project(project_id)
+    project_dir = str((project or {}).get("project_dir") or "")
+    if not project_dir:
+        return None
+
+    report_path = Path(project_dir) / "capture_logs" / "latest_clip_validation.json"
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if int(report.get("project_id") or -1) != project_id:
+        return None
+
+    progress_log = report.get("progress_log") or []
+    return {
+        "running": False,
+        "job_id": None,
+        "project_id": project_id,
+        "mode": "recover" if report.get("recovery") else "validate",
+        "checked": report.get("checked", 0),
+        "total": report.get("checked", 0),
+        "percentage": 100,
+        "message": "Validation report restored from disk",
+        "logs": progress_log[-4:],
+        "report": report,
+        "error": None,
+        "started_at": None,
+        "completed_at": report_path.stat().st_mtime,
+    }
 
 
 # ── Software detection ──────────────────────────────────────────────────────
@@ -99,12 +548,23 @@ async def get_capture_software():
         active = capture_service.get_active_software()
         hotkeys = capture_service.get_hotkeys()
         watch_dir = capture_service.get_watch_directory()
+        obs_control = None
+        if active == "obs":
+            from server.services.settings_service import settings_service
+            from server.utils.obs_websocket import probe_obs_websocket
+            obs_control = probe_obs_websocket(
+                host=str(settings_service.get("obs_websocket_host", "127.0.0.1")),
+                port=int(settings_service.get("obs_websocket_port", 4455) or 4455),
+                password=str(settings_service.get("obs_websocket_password", "")),
+            )
+            obs_control["selected_transport"] = str(settings_service.get("obs_capture_control", "websocket"))
 
         return {
             "software": software,
             "active_software": active,
             "hotkeys": hotkeys,
             "watch_directory": watch_dir,
+            "obs_control": obs_control,
         }
     except Exception as exc:
         logger.error("[Capture API] Software detection error: %s", exc)
@@ -198,6 +658,14 @@ class ScriptCaptureRequest(BaseModel):
     segment_ids: list[str] | None = None  # for specific_segments mode
     time_range: dict | None = None        # {start, end} for time_range mode
     capture_resolution: str = "1080p"     # target iRacing client resolution
+    validate_clips: bool = True           # final metadata-and-decode validation pass
+    retry_failed_clip_validation: bool = False
+    clip_validation_retry_limit: int = 1
+
+
+class PersistedClipValidationRequest(BaseModel):
+    """Request a validation report for clips already captured to a project."""
+    project_id: int
 
 
 @router.post("/script-capture", status_code=202)
@@ -258,6 +726,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
 
     # ── Preflight checks (fail fast before background worker starts) ──────
     software = settings_service.get("capture_software") or "native"
+    obs_capture_control = str(settings_service.get("obs_capture_control", "websocket"))
     capture_resolution, capture_width, capture_height = resolve_capture_resolution(body.capture_resolution)
 
     # Manual mode cannot run automated scripted capture.
@@ -274,7 +743,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
         hotkeys = capture_service.get_hotkeys()
         watch_dir = capture_service.get_watch_directory()
 
-        if not hotkeys.get("start"):
+        if (software != "obs" or obs_capture_control == "hotkey") and not hotkeys.get("start"):
             raise HTTPException(
                 status_code=400,
                 detail=f"No start hotkey configured for '{software}' mode",
@@ -313,11 +782,43 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 ),
             ) from exc
 
+        if software == "obs" and obs_capture_control == "websocket":
+            from server.utils.obs_websocket import probe_obs_websocket
+            obs_control = probe_obs_websocket(
+                host=str(settings_service.get("obs_websocket_host", "127.0.0.1")),
+                port=int(settings_service.get("obs_websocket_port", 4455) or 4455),
+                password=str(settings_service.get("obs_websocket_password", "")),
+            )
+            if not obs_control["available"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "OBS direct control is unavailable. In OBS, enable Tools > WebSocket Server Settings, "
+                        "then configure its host, port, and password in Settings > Camera Defaults. "
+                        f"Details: {obs_control['reason']}"
+                    ),
+                )
+            if obs_control["recording"]:
+                raise HTTPException(status_code=409, detail="OBS is already recording; stop it before scripted capture")
+
     # Size the game window before replay/capture automation starts so the
     # recorder sees the intended client resolution from the first frame.
     from server.utils.window_capture import resize_capture_target
 
-    resize_result = resize_capture_target(capture_width, capture_height)
+    try:
+        resize_result = await asyncio.wait_for(
+            asyncio.to_thread(resize_capture_target, capture_width, capture_height),
+            timeout=10.0,
+        )
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                "Timed out while resizing the iRacing capture window. "
+                "Close blocking iRacing dialogs and retry Capture."
+            ),
+        ) from exc
+
     command_log.record(
         "capture-window-resize",
         {
@@ -460,6 +961,32 @@ async def start_script_capture(body: ScriptCaptureRequest):
 
     contiguous_gap = body.contiguous_gap_threshold
     capture_mode = body.capture_mode
+    validate_clips = bool(body.validate_clips)
+    retry_failed_clip_validation = bool(body.retry_failed_clip_validation)
+    clip_validation_retry_limit = max(0, min(5, int(body.clip_validation_retry_limit or 0)))
+
+    # Capture All is an explicit full replacement pass.  Archive the current
+    # set first so deterministic recorder filenames cannot silently overwrite
+    # it, and let the next run rebuild a complete manifest from fresh clips.
+    recapture_reset = {"reset_segment_ids": [], "archived_clip_count": 0}
+    if capture_mode == "all":
+        recapture_reset = script_state_service.clear_all_captures(
+            project_dir,
+            reason="capture_all_requested",
+        )
+        if recapture_reset["reset_segment_ids"]:
+            _remove_capture_manifest_entries(
+                body.project_id,
+                project,
+                set(),
+                set(recapture_reset["reset_segment_ids"]),
+            )
+        command_log.record(
+            "capture-all-reset",
+            {"project_id": body.project_id, **recapture_reset},
+            result="ok",
+            source="api_capture",
+        )
 
     # Now init state after filtering is done
     with _script_capture_lock:
@@ -482,7 +1009,13 @@ async def start_script_capture(body: ScriptCaptureRequest):
             "abort_reason": None,
             "capture_mode": capture_mode,
             "capture_resolution": capture_resolution,
+            "capture_transport": "obs-websocket" if software == "obs" and obs_capture_control == "websocket" else "hotkey",
+            "validate_clips": validate_clips,
+            "retry_failed_clip_validation": retry_failed_clip_validation,
+            "clip_validation_retry_limit": clip_validation_retry_limit,
+            "recapture_reset": recapture_reset,
         })
+    _update_script_capture_log_file(project_dir, body.project_id)
 
     def _progress_cb(data: dict) -> None:
         """Called by ScriptCaptureEngine on progress updates."""
@@ -490,6 +1023,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
         if step == "strategy_computed":
             with _script_capture_lock:
                 _script_capture_state["strategies"] = data.get("strategies", [])
+            _update_script_capture_log_file(project_dir, body.project_id)
             _do_broadcast(EventType.CAPTURE_SCRIPT_PROGRESS, {
                 **data,
                 "project_id": body.project_id,
@@ -504,6 +1038,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
                     "segment_type": data.get("segment_type"),
                     "strategy": data.get("strategy"),
                 }
+            _update_script_capture_log_file(project_dir, body.project_id)
             # Track per-segment capture state
             if seg_id and project_dir:
                 script_state_service.mark_capturing(project_dir, seg_id)
@@ -515,6 +1050,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
             log_entry = data.get("log_entry", {})
             with _script_capture_lock:
                 _script_capture_state["capture_log"].append(log_entry)
+            _update_script_capture_log_file(project_dir, body.project_id)
             _do_broadcast(EventType.CAPTURE_SCRIPT_PROGRESS, {
                 "step": "log_entry",
                 "log_entry": log_entry,
@@ -538,6 +1074,22 @@ async def start_script_capture(body: ScriptCaptureRequest):
             with _script_capture_lock:
                 _script_capture_state["completed_segments"] = data.get("clips_captured", 0)
                 _script_capture_state["capture_log"] = data.get("capture_log", [])
+            _update_script_capture_log_file(project_dir, body.project_id)
+        elif step in ("final_clip_validation", "final_clip_validation_complete", "clip_validation_retry"):
+            failed_segment_ids = list(data.get("failed_segment_ids") or [])
+            for failed_item in data.get("failed") or []:
+                failed_segment_ids.extend(failed_item.get("segment_ids") or [])
+            if step == "clip_validation_retry" and failed_segment_ids:
+                for failed_segment_id in sorted({str(s) for s in failed_segment_ids if s}):
+                    script_state_service.mark_uncaptured(
+                        project_dir,
+                        failed_segment_id,
+                    )
+            _update_script_capture_log_file(project_dir, body.project_id)
+            _do_broadcast(EventType.CAPTURE_SCRIPT_PROGRESS, {
+                **data,
+                "project_id": body.project_id,
+            })
         elif step in ("compiling", "compile_complete"):
             _do_broadcast(EventType.CAPTURE_SCRIPT_PROGRESS, {
                 **data,
@@ -564,7 +1116,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
         # • anything else — Hotkey-based capture (OBS / ShadowPlay / ReLive /
         #               manual).  HotkeyRecorderAdapter sends hotkeys and polls
         #               the capture software's output folder for the new file.
-        from server.utils.script_capture import CaptureAbortError, ScriptCaptureEngine, HotkeyRecorderAdapter
+        from server.utils.script_capture import CaptureAbortError, ObsWebSocketRecorderAdapter, ScriptCaptureEngine, HotkeyRecorderAdapter
 
         native_engine = None
         started_native = False
@@ -589,20 +1141,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 return
             recorder = native_engine
         else:
-            hotkeys = capture_service.get_hotkeys()
             watch_dir = capture_service.get_watch_directory()
-
-            if not hotkeys.get("start"):
-                err = f"No start hotkey configured for '{software}' mode"
-                logger.error("[Capture API] %s", err)
-                with _script_capture_lock:
-                    _script_capture_state["error"] = err
-                    _script_capture_state["running"] = False
-                _do_broadcast(EventType.CAPTURE_SCRIPT_ERROR, {
-                    "project_id": body.project_id,
-                    "error": err,
-                })
-                return
 
             if not watch_dir:
                 err = (
@@ -619,12 +1158,24 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 })
                 return
 
-            recorder = HotkeyRecorderAdapter(
-                watch_folder=watch_dir,
-                start_hotkey=hotkeys["start"],
-                stop_hotkey=hotkeys.get("stop") or hotkeys["start"],
-                cancelled_fn=lambda: _script_capture_state.get("cancelled", False),
-            )
+            if software == "obs" and obs_capture_control == "websocket":
+                recorder = ObsWebSocketRecorderAdapter(
+                    watch_folder=watch_dir,
+                    host=str(settings_service.get("obs_websocket_host", "127.0.0.1")),
+                    port=int(settings_service.get("obs_websocket_port", 4455) or 4455),
+                    password=str(settings_service.get("obs_websocket_password", "")),
+                    cancelled_fn=lambda: _script_capture_state.get("cancelled", False),
+                )
+            else:
+                hotkeys = capture_service.get_hotkeys()
+                if not hotkeys.get("start"):
+                    raise RuntimeError(f"No start hotkey configured for '{software}' mode")
+                recorder = HotkeyRecorderAdapter(
+                    watch_folder=watch_dir,
+                    start_hotkey=hotkeys["start"],
+                    stop_hotkey=hotkeys.get("stop") or hotkeys["start"],
+                    cancelled_fn=lambda: _script_capture_state.get("cancelled", False),
+                )
 
         try:
             engine = ScriptCaptureEngine(
@@ -634,6 +1185,9 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 progress_callback=_progress_cb,
                 contiguous_gap_threshold=contiguous_gap,
                 capture_mode=software,
+                validate_clips=validate_clips,
+                retry_failed_clip_validation=retry_failed_clip_validation,
+                clip_validation_retry_limit=clip_validation_retry_limit,
             )
 
             with _script_capture_lock:
@@ -662,6 +1216,9 @@ async def start_script_capture(body: ScriptCaptureRequest):
                     "capture_software": software,
                     "capture_mode": capture_mode,
                     "capture_resolution": capture_resolution,
+                    "validate_clips": validate_clips,
+                    "retry_failed_clip_validation": retry_failed_clip_validation,
+                    "clip_validation_retry_limit": clip_validation_retry_limit,
                     "success": False,
                     "cancelled": True,
                     "error": "Script capture cancelled by user",
@@ -673,7 +1230,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
                     "clips": clips,
                     "strategies": engine.segment_strategies,
                     "capture_log": engine.capture_log,
-                })
+                }, existing_path=_script_capture_state.get("log_file_path"))
 
                 with _script_capture_lock:
                     _script_capture_state["log_file_path"] = log_file_path
@@ -698,9 +1255,29 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 _script_capture_state["capture_log"] = engine.capture_log
 
             # Persist captured clip manifest for the Compose step.
+            # Preserve clips produced by earlier partial/scripted runs. A
+            # specific-segment retry should replace only the matching manifest
+            # entries, never discard the rest of the project's captured clips.
+            existing_project = project_service.get_project(body.project_id) or {}
+            existing_manifest = existing_project.get("clips_manifest") or []
+            merged_by_id = {
+                str(entry.get("id") or entry.get("source_clip_id") or ""): entry
+                for entry in existing_manifest
+                if isinstance(entry, dict) and (entry.get("id") or entry.get("source_clip_id"))
+            }
+            for entry in engine.composition_manifest:
+                if not isinstance(entry, dict):
+                    continue
+                entry_id = str(entry.get("id") or entry.get("source_clip_id") or "")
+                if entry_id:
+                    merged_by_id[entry_id] = entry
+            merged_manifest = sorted(
+                merged_by_id.values(),
+                key=lambda entry: (int(entry.get("order", 0)), str(entry.get("id", ""))),
+            )
             project_service.save_project_metadata(body.project_id, {
-                "clips_manifest": engine.composition_manifest,
-                "capture_manifest": engine.composition_manifest,
+                "clips_manifest": merged_manifest,
+                "capture_manifest": merged_manifest,
             })
 
             with _script_capture_lock:
@@ -713,6 +1290,9 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 "capture_software": software,
                 "capture_mode": capture_mode,
                 "capture_resolution": capture_resolution,
+                "validate_clips": validate_clips,
+                "retry_failed_clip_validation": retry_failed_clip_validation,
+                "clip_validation_retry_limit": clip_validation_retry_limit,
                 "success": True,
                 "error": None,
                 "started_at": _script_capture_state.get("started_at"),
@@ -723,7 +1303,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 "clips": clips,
                 "strategies": engine.segment_strategies,
                 "capture_log": engine.capture_log,
-            })
+            }, existing_path=_script_capture_state.get("log_file_path"))
 
             with _script_capture_lock:
                 _script_capture_state["log_file_path"] = log_file_path
@@ -747,6 +1327,16 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 abort_segment_id = exc.segment_id
                 abort_action = exc.action
                 abort_reason = exc.reason
+                if abort_action == "clip_validation":
+                    failed_segment_ids = []
+                    for failed_item in exc.extra.get("failed") or []:
+                        failed_segment_ids.extend(failed_item.get("segment_ids") or [])
+                    for failed_segment_id in sorted({str(s) for s in failed_segment_ids if s}):
+                        script_state_service.invalidate_segment(
+                            project_dir,
+                            failed_segment_id,
+                            reason="capture_validation_failed",
+                        )
 
             command_log.record(
                 "capture-worker-error",
@@ -774,6 +1364,9 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 "capture_software": software,
                 "capture_mode": capture_mode,
                 "capture_resolution": capture_resolution,
+                "validate_clips": validate_clips,
+                "retry_failed_clip_validation": retry_failed_clip_validation,
+                "clip_validation_retry_limit": clip_validation_retry_limit,
                 "success": False,
                 "error": str(exc),
                 "abort_segment_id": abort_segment_id,
@@ -801,6 +1394,8 @@ async def start_script_capture(body: ScriptCaptureRequest):
                 "log_file_path": log_file_path,
             })
         finally:
+            if software == "obs" and obs_capture_control == "websocket" and hasattr(recorder, "close"):
+                recorder.close()
             if started_native and native_engine is not None:
                 native_engine.stop()
             with _script_capture_lock:
@@ -814,6 +1409,10 @@ async def start_script_capture(body: ScriptCaptureRequest):
         "project_id": body.project_id,
         "total_segments": _script_capture_state["total_segments"],
         "capture_resolution": capture_resolution,
+        "validate_clips": validate_clips,
+        "retry_failed_clip_validation": retry_failed_clip_validation,
+        "clip_validation_retry_limit": clip_validation_retry_limit,
+        "recapture_reset": recapture_reset,
         "message": "Script capture started — follow progress via WebSocket",
     }
 
@@ -871,3 +1470,27 @@ async def get_script_capture_log():
             "current_segment": _script_capture_state.get("current_segment"),
             "log_file_path": _script_capture_state.get("log_file_path"),
         }
+
+
+@router.post("/script-capture/validate")
+async def validate_persisted_script_capture(body: PersistedClipValidationRequest):
+    """Start a non-blocking FFmpeg validation job for captured project clips."""
+    return _start_persisted_clip_validation(body.project_id, "validate")
+
+
+@router.get("/script-capture/validate/status")
+async def get_persisted_clip_validation_status(project_id: int | None = None):
+    """Return current validation progress and the completed report when ready."""
+    with _clip_validation_lock:
+        status = dict(_clip_validation_state)
+    if status.get("running") or not project_id:
+        return status
+    if status.get("project_id") == project_id and status.get("report"):
+        return status
+    return _restore_persisted_clip_validation_status(project_id) or status
+
+
+@router.post("/script-capture/validate/recover")
+async def recover_corrupt_persisted_script_capture(body: PersistedClipValidationRequest):
+    """Start non-blocking corrupt clip deletion and event reset recovery."""
+    return _start_persisted_clip_validation(body.project_id, "recover")

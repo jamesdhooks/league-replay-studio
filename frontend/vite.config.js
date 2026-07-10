@@ -2,6 +2,9 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { fileURLToPath, URL } from 'node:url'
 
+const apiTarget = process.env.LRS_API_TARGET || 'http://127.0.0.1:6369'
+const websocketTarget = apiTarget.replace(/^http/, 'ws')
+
 export default defineConfig({
   plugins: [react()],
   server: {
@@ -14,11 +17,11 @@ export default defineConfig({
     },
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:6369',
+        target: apiTarget,
         changeOrigin: true,
       },
       '/ws': {
-        target: 'ws://127.0.0.1:6369',
+        target: websocketTarget,
         ws: true,
       },
     },

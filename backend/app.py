@@ -264,7 +264,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(update_service.startup_check(delay=10.0))
     asyncio.create_task(tailwind_startup_refresh())
 
-    logger.info("[App] Startup complete — v%s", __version__)
+    logger.info("[App] Startup complete - v%s", __version__)
     yield
 
     # ── Shutdown ────────────────────────────────────────────────────────────
@@ -579,6 +579,10 @@ def main() -> None:
     argv = sys.argv[1:]
     web_only = (os.environ.get("WEB_ONLY", "0") == "1") or ("--web" in argv)
     reload_requested = (os.environ.get("LRS_RELOAD", "0") == "1") or ("--reload" in argv)
+    # Keep server lifecycle separate from browser lifecycle. Repeated dev-server
+    # restarts must not create a new tab each time; opt in when a fresh browser
+    # launch is explicitly desired.
+    open_browser = (os.environ.get("LRS_OPEN_BROWSER", "0") == "1") or ("--open-browser" in argv)
 
     # Reload is intended for browser/web mode only.
     reload_enabled = reload_requested and web_only
@@ -592,8 +596,9 @@ def main() -> None:
         logger.info("[App] Launching in browser with hot reload (%s)", frontend_url)
         import webbrowser
 
-        # Open browser shortly after server boot starts.
-        threading.Timer(1.0, lambda: webbrowser.open(frontend_url)).start()
+        # Browser launch is opt-in so a dev-server restart reuses the existing tab.
+        if open_browser:
+            threading.Timer(1.0, lambda: webbrowser.open(frontend_url)).start()
         start_server(port=port, reload_enabled=True)
         return
 
@@ -602,9 +607,12 @@ def main() -> None:
     server_thread.start()
 
     if web_only:
-        logger.info("[App] Launching in browser (web-only mode)")
-        import webbrowser
-        webbrowser.open(url)
+        if open_browser:
+            logger.info("[App] Launching browser (web-only mode; explicitly requested)")
+            import webbrowser
+            webbrowser.open(url)
+        else:
+            logger.info("[App] Web-only server ready at %s (reusing existing browser tab)", url)
         try:
             threading.Event().wait()
         except KeyboardInterrupt:

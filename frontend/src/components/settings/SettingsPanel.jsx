@@ -14,15 +14,18 @@ import {
   Youtube,
   Wand2,
   Sparkles,
+  BookOpen,
   Eye,
   EyeOff,
 } from 'lucide-react'
 import { useSettings } from '../../context/SettingsContext'
 import { useToast } from '../../context/ToastContext'
+import { useModal } from '../../context/ModalContext'
 import { apiGet, apiPost } from '../../services/api'
 import YouTubeSettings from '../youtube/YouTubeSettings'
 import SetupWizard from '../wizard/SetupWizard'
 import DataPluginsPanel from '../overlay/DataPluginsPanel'
+import ObsSetupGuide from '../capture/ObsSetupGuide'
 import { NumberInput, TextInput, BrowseInput, Select, Toggle, SettingGroup } from '../ui/inputs'
 
 /**
@@ -234,6 +237,7 @@ function GeneralSettings({ value, onChange }) {
 
 function CameraSettings({ value, onChange }) {
   const [caps, setCaps] = useState(null)
+  const { openContentModal } = useModal()
 
   useEffect(() => {
     apiGet('/iracing/stream/capabilities')
@@ -270,6 +274,48 @@ function CameraSettings({ value, onChange }) {
           </div>
         )}
       </SettingGroup>
+
+      {value('capture_software') === 'obs' && (
+        <>
+          <SectionSubHeader title="OBS Direct Control" />
+          <button
+            type="button"
+            onClick={() => openContentModal({
+              title: 'OBS Setup Guide',
+              wide: true,
+              content: <ObsSetupGuide captureResolution={value('capture_resolution')} />,
+            })}
+            className="inline-flex items-center gap-1.5 border border-accent/30 bg-accent/10 px-3 py-2 text-xs font-medium text-accent hover:bg-accent/15"
+          >
+            <BookOpen className="h-3.5 w-3.5" />
+            OBS setup guide
+          </button>
+          <SettingGroup label="OBS Control Method" description="Select verified WebSocket control or keyboard hotkeys.">
+            <Select
+              value={value('obs_capture_control') || 'websocket'}
+              onChange={(v) => onChange('obs_capture_control', v)}
+              options={[
+                { value: 'websocket', label: 'WebSocket (verified)' },
+                { value: 'hotkey', label: 'Keyboard hotkeys' },
+              ]}
+            />
+          </SettingGroup>
+          <SettingGroup label="OBS WebSocket Host" description="OBS WebSocket server address.">
+            <TextInput value={value('obs_websocket_host') || '127.0.0.1'} onChange={(v) => onChange('obs_websocket_host', v)} placeholder="127.0.0.1" />
+          </SettingGroup>
+          <SettingGroup label="OBS WebSocket Port" description="OBS WebSocket server port.">
+            <NumberInput value={value('obs_websocket_port') ?? 4455} onChange={(v) => onChange('obs_websocket_port', v)} min={1} max={65535} />
+          </SettingGroup>
+          <SettingGroup label="OBS WebSocket Password" description="Leave blank when OBS authentication is disabled.">
+            <input
+              type="password"
+              value={String(value('obs_websocket_password') || '').startsWith('obf:') ? '' : (value('obs_websocket_password') || '')}
+              onChange={(event) => onChange('obs_websocket_password', event.target.value)}
+              className="w-full border border-border bg-bg-primary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent"
+            />
+          </SettingGroup>
+        </>
+      )}
     </div>
   )
 }

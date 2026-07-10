@@ -56,10 +56,10 @@ function AppShell() {
   const [pipelineAdvancedMode, setPipelineAdvancedMode] = useState(() => {
     try {
       const saved = localStorage.getItem('lrs_pipeline_advanced_mode')
-      if (saved == null) return true
+      if (saved == null) return false
       return saved === '1'
     } catch {
-      return true
+      return false
     }
   })
   const fallbackPreviewRef = useRef(null)
@@ -96,10 +96,9 @@ function AppShell() {
     }
   }, [openProject, startTransition])
 
-  const handleStepClick = useCallback(async (stepId) => {
-    if (activeProject) {
-      try { await setStep(activeProject.id, stepId) } catch {}
-    }
+  const handleStepClick = useCallback((stepId) => {
+    if (!activeProject || activeProject.current_step === stepId) return
+    setStep(activeProject.id, stepId).catch(() => {})
   }, [activeProject, setStep])
 
   const togglePipelineAdvancedMode = useCallback(() => {

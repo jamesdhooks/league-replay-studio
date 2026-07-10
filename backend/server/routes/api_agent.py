@@ -62,6 +62,10 @@ class UploadStartRequest(BaseModel):
     confirm_public: bool = False
 
 
+class CaptureClipValidationRequest(BaseModel):
+    recover_corrupt: bool = False
+
+
 def _session_summary() -> dict[str, Any]:
     session = dict(iracing_bridge.session_data or {}) if iracing_bridge.is_connected else {}
     return {
@@ -197,6 +201,31 @@ async def get_agent_capabilities() -> dict[str, Any]:
             "overlay_editing": True,
             "overlay_preview_artifacts": True,
             "manual_step_control": True,
+            "capture_decode_validation": True,
+            "capture_validation_retry": True,
+            "manual_capture_clip_validation": True,
+            "capture_reset_with_trash": True,
+            "obs_websocket_control": True,
+        },
+        "capture": {
+            "clip_validation": {
+                "validator": "ffprobe+ffmpeg-decode",
+                "default_validate_clips": True,
+                "default_retry_failed_clip_validation": False,
+                "default_clip_validation_retry_limit": 1,
+                "max_clip_validation_retry_limit": 5,
+                "config_keys": [
+                    "validate_clips",
+                    "retry_failed_clip_validation",
+                    "clip_validation_retry_limit",
+                ],
+                "manual_actions": ["validate", "delete_and_reset_corrupt"],
+                "status_endpoint": "/agent/projects/{project_id}/capture/validate-clips/status",
+            },
+            "recapture": {
+                "capture_all_archives_existing": True,
+                "clear_captures_endpoint": "/script-state/{project_id}/clear-captures",
+            },
         },
     }
 
@@ -271,6 +300,31 @@ async def get_agent_project_summary(
     }
 
 
+@router.post("/projects/{project_id}/capture/validate-clips")
+async def validate_agent_capture_clips(project_id: int, req: CaptureClipValidationRequest) -> dict[str, Any]:
+    """Validate captured clips, optionally deleting/resetting confirmed corrupt events."""
+    from server.routes.api_capture import (
+        PersistedClipValidationRequest,
+        recover_corrupt_persisted_script_capture,
+        validate_persisted_script_capture,
+    )
+
+    _project_or_404(project_id)
+    request = PersistedClipValidationRequest(project_id=project_id)
+    if req.recover_corrupt:
+        return await recover_corrupt_persisted_script_capture(request)
+    return await validate_persisted_script_capture(request)
+
+
+@router.get("/projects/{project_id}/capture/validate-clips/status")
+async def get_agent_capture_clip_validation_status(project_id: int) -> dict[str, Any]:
+    """Return progress and the final report for a manual capture validation job."""
+    from server.routes.api_capture import get_persisted_clip_validation_status
+
+    _project_or_404(project_id)
+    return await get_persisted_clip_validation_status(project_id)
+
+
 @router.post("/projects/{project_id}/steps/{step}/control")
 async def control_agent_step(project_id: int, step: str, req: StepControlRequest) -> dict[str, Any]:
     _project_or_404(project_id)
@@ -319,6 +373,65 @@ async def control_agent_step(project_id: int, step: str, req: StepControlRequest
             "overrides": state.get("overrides") or {},
             "controls": controls,
         })
+
+    if step == "capture" and action == "start":
+        # Script capture is the real per-segment capture engine.  The generic
+        # workflow facade used to report that individual capture start was not
+        # available, even though this engine already exists behind
+        # /api/capture/script-capture.  Delegate to it rather than maintaining
+        # a parallel capture implementation.
+        from server.routes.api_capture import ScriptCaptureRequest, start_script_capture
+
+        project = _project_or_404(project_id)
+        script = project.get("script") or []
+        if not script:
+            raise HTTPException(
+                status_code=400,
+                detail="No composition script is stored on this project; run Editing before Capture.",
+            )
+
+        config = req.config or {}
+        capture_mode = str(config.get("capture_mode") or "uncaptured_only")
+        if capture_mode not in {"all", "uncaptured_only", "specific_segments", "time_range"}:
+            raise HTTPException(
+                status_code=400,
+                detail="capture_mode must be all, uncaptured_only, specific_segments, or time_range",
+            )
+        if capture_mode == "specific_segments" and not config.get("segment_ids"):
+            raise HTTPException(
+                status_code=400,
+                detail="segment_ids is required when capture_mode=specific_segments",
+            )
+        if capture_mode == "time_range" and not config.get("time_range"):
+            raise HTTPException(
+                status_code=400,
+                detail="time_range is required when capture_mode=time_range",
+            )
+
+        result = await start_script_capture(
+            ScriptCaptureRequest(
+                project_id=project_id,
+                script=script,
+                clip_padding=float(config.get("clip_padding", 2.0)),
+                clip_padding_after=float(config.get("clip_padding_after", 1.0)),
+                output_filename=str(config.get("output_filename") or "highlight_compiled.mp4"),
+                contiguous_gap_threshold=float(config.get("contiguous_gap_threshold", 1.0)),
+                capture_mode=capture_mode,
+                segment_ids=config.get("segment_ids"),
+                time_range=config.get("time_range"),
+                capture_resolution=str(config.get("capture_resolution") or "1080p"),
+                validate_clips=bool(config.get("validate_clips", True)),
+                retry_failed_clip_validation=bool(config.get("retry_failed_clip_validation", False)),
+                clip_validation_retry_limit=int(config.get("clip_validation_retry_limit", 1) or 0),
+            )
+        )
+        return {
+            "success": True,
+            "step": "capture",
+            "action": "start",
+            "engine": "script_capture",
+            "result": result,
+        }
 
     return {
         "success": False,

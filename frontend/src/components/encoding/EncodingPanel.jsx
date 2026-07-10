@@ -18,6 +18,8 @@ import CollapsibleSection from '../ui/CollapsibleSection'
 import CollapsiblePanelHeader from '../ui/CollapsiblePanelHeader'
 import ResizableRowPane from '../ui/ResizableRowPane'
 import ProjectFileBrowser from '../projects/ProjectFileBrowser'
+import LogViewer from '../ui/LogViewer'
+import { normalizeEncodingLogEntries } from '../../utils/logEntries'
 import {
   Cpu, Play, Square, CheckCircle2, XCircle, AlertTriangle,
   Settings2, Film, Power, FolderOpen, Link2, List, FileVideo, HardDrive,
@@ -817,46 +819,20 @@ function StepBadge({ step }) {
 }
 
 function EncoderLogPanel({ job }) {
-  const entries = Array.isArray(job?.log_entries) ? job.log_entries : []
-
-  if (!entries.length) {
-    return (
-      <div className="h-full flex items-center justify-center px-4 text-center text-xs text-text-tertiary bg-bg-primary">
-        No encoder logs yet. Start an encoding job to stream detailed activity here.
-      </div>
-    )
-  }
+  const rawEntries = Array.isArray(job?.log_entries) ? job.log_entries : []
+  const entries = normalizeEncodingLogEntries(rawEntries)
 
   return (
-    <div className="h-full min-h-0 overflow-y-auto font-mono bg-bg-primary">
-      {entries.map((entry, idx) => {
-        const level = String(entry.level || 'info').toLowerCase()
-        const levelClass = level === 'error'
-          ? 'text-danger'
-          : level === 'command'
-            ? 'text-accent'
-            : level === 'success'
-              ? 'text-success'
-              : level === 'ffmpeg'
-                ? 'text-warning'
-                : 'text-text-secondary'
-
-        return (
-          <div key={`${entry.ts || 0}-${idx}`} className="px-3 py-2 border-b border-border-subtle/40">
-            <div className="flex items-center gap-2 text-xxs">
-              <span className="text-text-disabled">
-                {entry.ts ? new Date(entry.ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '--:--:--'}
-              </span>
-              <span className={`uppercase tracking-wide ${levelClass}`}>{level}</span>
-              <span className="text-text-primary truncate">{entry.message || ''}</span>
-            </div>
-            {entry.detail && (
-              <pre className="mt-1 whitespace-pre-wrap break-words text-xxs text-text-tertiary">{entry.detail}</pre>
-            )}
-          </div>
-        )
-      })}
-    </div>
+    <LogViewer
+      title="Export Log"
+      entries={entries}
+      rawEntries={rawEntries}
+      schema="league-replay-studio.export-log"
+      emptyMessage="No encoder logs yet. Start an encoding job to stream detailed activity here."
+      maxHeightClass="max-h-none"
+      className="h-full min-h-0 font-mono bg-bg-primary"
+      bodyClassName="bg-bg-primary"
+    />
   )
 }
 

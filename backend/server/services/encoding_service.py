@@ -29,6 +29,7 @@ from typing import Any, Callable, Optional
 
 from server.events import EventType, make_event
 from server.services.project_service import project_service
+from server.services.run_log_file_service import run_log_file_service
 from server.utils.gpu_detection import (
     detect_gpus,
     find_ffmpeg,
@@ -103,6 +104,7 @@ class EncodingJob:
         self.process: Optional[subprocess.Popen] = None
         self.current_step: str = "queued"
         self.log_entries: list[dict[str, Any]] = []
+        self.log_file_path: str | None = None
 
     def add_log(self, level: str, message: str, detail: Optional[str] = None) -> dict[str, Any]:
         """Append a structured log entry and cap history size."""
@@ -115,6 +117,19 @@ class EncodingJob:
         self.log_entries.append(entry)
         if len(self.log_entries) > 600:
             self.log_entries = self.log_entries[-600:]
+        run_log_file_service.append_entry(
+            self.log_file_path,
+            entry,
+            latest_path=run_log_file_service.latest_path_for(self.log_file_path),
+            metadata={
+                "input_file": self.input_file,
+                "output_file": self.output_file,
+                "current_step": self.current_step,
+                "progress": self.progress,
+            },
+            state=self.state,
+            error=self.error,
+        )
         return entry
 
     def to_dict(self) -> dict[str, Any]:
@@ -152,6 +167,7 @@ class EncodingJob:
             "output_size_bytes": self.output_size_bytes,
             "error": self.error,
             "log_entries": self.log_entries,
+            "log_file_path": self.log_file_path,
         }
 
 
@@ -473,6 +489,19 @@ class EncodingService:
             encoder=encoder,
             edl=edl,
             job_type=job_type,
+        )
+        job.log_file_path = run_log_file_service.start_run(
+            scope="export",
+            run_id=job_id,
+            project_id=project_id,
+            project_dir=project_dir,
+            metadata={
+                "input_file": input_file,
+                "output_file": output_file,
+                "preset_id": preset.get("id"),
+                "encoder": encoder.get("label"),
+                "job_type": job_type,
+            },
         )
 
         self._jobs[job_id] = job

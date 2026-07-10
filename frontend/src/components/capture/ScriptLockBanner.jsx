@@ -8,9 +8,12 @@
 
 import { useMemo, useState } from 'react'
 import { useScriptState, CAPTURE_STATES } from '../../context/ScriptStateContext'
+import { useModal } from '../../context/ModalContext'
+import FileViewerModal from '../ui/FileViewer'
 import {
   Lock, Unlock, AlertTriangle, CheckCircle2, Circle, Loader2,
-  Trash2, RotateCcw, Clock, Camera, Repeat, ArrowRight,
+  Trash2, RotateCcw, Clock, Camera, Repeat, ArrowRight, Play,
+  Link2,
 } from 'lucide-react'
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -60,16 +63,16 @@ const SECTION_META = {
 
 function SegmentLogFeed({ entries, isExecuting, isCurrent, isCaptured }) {
   if (!entries?.length) {
+    if (isCaptured) {
+      return <div className="text-[10px] text-success">Captured clip is ready</div>
+    }
+
     if (!isExecuting) {
       return <div className="text-[10px] text-text-disabled">No capture activity</div>
     }
 
     if (isCurrent) {
       return <div className="text-[10px] text-text-disabled">Capture activity will appear here</div>
-    }
-
-    if (isCaptured) {
-      return <div className="text-[10px] text-text-disabled">Capture complete</div>
     }
 
     return <div className="text-[10px] text-text-disabled">Awaiting segment turn</div>
@@ -87,7 +90,32 @@ function SegmentLogFeed({ entries, isExecuting, isCurrent, isCaptured }) {
   )
 }
 
-function SegmentCard({ segment, currentSegmentId, captureLog, isExecuting }) {
+function CapturedClipViewer({ file, projectId, segment }) {
+  const linkedSegments = segment.shared_segment_ids || []
+  const isShared = linkedSegments.length > 1
+
+  return (
+    <div>
+      <div className="border-b border-border bg-bg-primary px-4 py-3">
+        <div className="text-xs font-medium text-text-primary">
+          {isShared ? `Shared recording for ${linkedSegments.length} script events` : 'Recording for this script event'}
+        </div>
+        {isShared && (
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {linkedSegments.map((segmentId) => (
+              <span key={segmentId} className="border border-accent/25 bg-accent/8 px-1.5 py-0.5 font-mono text-[10px] text-accent">
+                {segmentId}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+      <FileViewerModal file={file} projectId={projectId} />
+    </div>
+  )
+}
+
+function SegmentCard({ segment, currentSegmentId, captureLog, isExecuting, onOpenClip, onTrashClip, grouped = false }) {
   const segId = segment.segment_id || segment.id
   const state = segment.capture_state
   const logs = useMemo(
@@ -179,9 +207,9 @@ function SegmentCard({ segment, currentSegmentId, captureLog, isExecuting }) {
   const fillClass = isCaptured ? 'bg-success/5' : isInvalidated ? 'bg-warning/15' : meta.fill
 
   return (
-    <div className={`relative overflow-hidden rounded-lg border ${borderClass}`}>
+    <div className={`relative overflow-hidden ${grouped ? '' : `rounded-lg border ${borderClass}`}`}>
       <div className={`absolute inset-y-0 left-0 ${fillClass}`} style={{ width: `${Math.max(0, Math.min(100, progressPct))}%` }} />
-      <div className="relative grid grid-cols-[minmax(0,1fr)_150px] gap-3 px-3 py-2.5 min-w-0">
+      <div className={`relative grid grid-cols-[minmax(0,1fr)_150px] gap-3 px-3 py-2.5 min-w-0 ${grouped ? 'border-x border-border/70' : ''}`}>
         <div className="min-w-0 space-y-1.5">
           <div className="flex items-center gap-2 min-w-0">
             {isCurrent ? (
@@ -208,13 +236,94 @@ function SegmentCard({ segment, currentSegmentId, captureLog, isExecuting }) {
             {segment.has_camera_schedule && (
               <span className="inline-flex items-center gap-0.5"><Repeat className="w-2.5 h-2.5" /> sched.</span>
             )}
+            {!grouped && segment.shared_segment_ids?.length > 1 && (
+              <span className="text-accent/80">shared recording ({segment.shared_segment_ids.length})</span>
+            )}
           </div>
         </div>
         <div className="min-w-0 border-l border-border/60 pl-3">
           <SegmentLogFeed entries={logs} isExecuting={isExecuting} isCurrent={isCurrent} isCaptured={isCaptured} />
+          {isCaptured && segment.clip_path && !grouped && (
+            <button
+              type="button"
+              onClick={() => onOpenClip(segment)}
+              className="mt-1 inline-flex items-center gap-1 text-[10px] font-medium text-accent hover:text-accent-hover"
+              title="Open captured clip"
+            >
+              <Play className="h-3 w-3" />
+              {segment.shared_segment_ids?.length > 1 ? 'Open shared clip' : 'Open clip'}
+            </button>
+          )}
+          {isCaptured && segment.clip_path && !grouped && (
+            <button
+              type="button"
+              onClick={() => onTrashClip(segment)}
+              disabled={isExecuting}
+              className="mt-1 inline-flex items-center gap-1 text-[10px] font-medium text-danger hover:text-danger/80 disabled:cursor-not-allowed disabled:opacity-50"
+              title="Move this recording to trash and mark its events uncaptured"
+            >
+              <Trash2 className="h-3 w-3" />
+              Trash clip
+            </button>
+          )}
         </div>
       </div>
     </div>
+  )
+}
+
+function SharedRecordingGroup({ segments, currentSegmentId, captureLog, isExecuting, onOpenClip, onTrashClip }) {
+  const leadSegment = segments[0]
+  const filename = String(leadSegment.clip_path || '').replaceAll('\\', '/').split('/').pop() || 'Captured recording'
+
+  return (
+    <section className="overflow-hidden rounded-lg border border-accent/30 bg-bg-secondary/35">
+      <div className="flex items-center justify-between gap-3 border-b border-accent/20 bg-accent/8 px-3 py-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="flex h-5 w-5 shrink-0 items-center justify-center border border-accent/30 bg-accent/10 text-accent">
+            <Link2 className="h-3 w-3" />
+          </span>
+          <div className="min-w-0">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-accent">One shared recording</div>
+            <div className="truncate text-[10px] text-text-secondary" title={filename}>{segments.length} script events use {filename}</div>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            onClick={() => onOpenClip(leadSegment)}
+            className="inline-flex h-6 w-6 items-center justify-center text-accent hover:bg-accent/15 hover:text-accent-hover"
+            title="Open shared recording"
+          >
+            <Play className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => onTrashClip(leadSegment)}
+            disabled={isExecuting}
+            className="inline-flex h-6 w-6 items-center justify-center text-danger hover:bg-danger/10 hover:text-danger/80 disabled:cursor-not-allowed disabled:opacity-50"
+            title="Trash shared recording and recapture its events"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+      <div className="border-l-2 border-accent/35">
+        {segments.map((segment, index) => (
+          <div key={segment.segment_id || segment.id} className={index > 0 ? 'border-t border-border/70' : ''}>
+            <SegmentCard
+              segment={segment}
+              currentSegmentId={currentSegmentId}
+              captureLog={captureLog}
+              isExecuting={isExecuting}
+              onOpenClip={onOpenClip}
+              onTrashClip={onTrashClip}
+              grouped
+            />
+          </div>
+        ))}
+      </div>
+    </section>
   )
 }
 
@@ -222,37 +331,105 @@ export default function ScriptLockBanner({ projectId, script, onLock, onUnlock, 
   const {
     scriptLocked, segments, summary, trash,
     lockScript, unlockScript, compareScript,
-    emptyTrash, loading,
+    emptyTrash, invalidateSegment, loading,
   } = useScriptState()
+  const { openContentModal, openModal } = useModal()
 
   const [showUnlockConfirm, setShowUnlockConfirm] = useState(false)
   const [compareResult, setCompareResult] = useState(null)
   const activeCurrentSegmentId = isExecuting ? currentSegmentId : null
 
   const segmentCards = useMemo(() => {
-    if (Array.isArray(strategies) && strategies.length > 0) {
-      return strategies
+    const capturableScriptById = new Map(
+      (script || [])
+        .filter((segment) => segment?.type !== 'transition' && segment?.type !== 'bridge')
+        .map((segment) => [String(segment.id || segment.segment_id || ''), segment]),
+    )
+    const strategyBySegmentId = new Map(
+      (strategies || [])
         .filter((strategy) => {
           const type = String(strategy?.type || '').toLowerCase()
-          return type !== 'transition' && type !== 'bridge'
+          return strategy?.segment_id && type !== 'transition' && type !== 'bridge'
         })
-        .map((strategy) => ({
-        ...strategy,
-        id: strategy.segment_id,
-        capture_state: segments?.[strategy.segment_id]?.capture_state ?? CAPTURE_STATES.UNCAPTURED,
-        }))
-    }
+        .map((strategy) => [String(strategy.segment_id), strategy]),
+    )
 
-    return Object.entries(segments || {}).map(([segId, info]) => ({
+    const sharedSegmentIdsByPath = new Map()
+    Object.entries(segments || {}).forEach(([segId, info]) => {
+      const clipPath = String(info?.clip_path || '')
+      if (info?.capture_state !== CAPTURE_STATES.CAPTURED || !clipPath) return
+      const ids = sharedSegmentIdsByPath.get(clipPath) || []
+      ids.push(segId)
+      sharedSegmentIdsByPath.set(clipPath, ids)
+    })
+
+    return Object.entries(segments || {}).flatMap(([segId, info]) => {
+      const scriptSegment = capturableScriptById.get(String(segId))
+      if (!scriptSegment) return []
+      const strategy = strategyBySegmentId.get(String(segId)) || {}
+      const startTime = Number(info.start_time ?? strategy.start_time_seconds)
+      const endTime = Number(info.end_time ?? strategy.end_time_seconds)
+      const persistedDuration = Number.isFinite(startTime) && Number.isFinite(endTime)
+        ? Math.max(0, endTime - startTime)
+        : null
+
+      return {
+      ...strategy,
       id: segId,
       segment_id: segId,
-      section: info.section,
-      event_type: info.event_type,
-      type: info.segment_type,
-      duration: info.duration_seconds,
+      section: info.section || strategy.section || scriptSegment.section,
+      event_type: info.event_type || strategy.event_type || scriptSegment.event_type,
+      type: strategy.type || info.segment_type || scriptSegment.type,
+      duration: persistedDuration ?? strategy.duration ?? info.duration_seconds ?? 0,
       capture_state: info.capture_state,
-    }))
-  }, [segments, strategies])
+      clip_path: info.clip_path || null,
+      shared_segment_ids: sharedSegmentIdsByPath.get(String(info.clip_path || '')) || [],
+      }
+    })
+  }, [script, segments, strategies])
+
+  const captureSummary = useMemo(() => {
+    const captured = segmentCards.filter((segment) => segment.capture_state === CAPTURE_STATES.CAPTURED).length
+    const uncaptured = segmentCards.filter((segment) => segment.capture_state === CAPTURE_STATES.UNCAPTURED).length
+    const invalidated = segmentCards.filter((segment) => segment.capture_state === CAPTURE_STATES.INVALIDATED).length
+    const capturing = segmentCards.filter((segment) => segment.capture_state === CAPTURE_STATES.CAPTURING).length
+    return { total: segmentCards.length, captured, uncaptured, invalidated, capturing }
+  }, [segmentCards])
+
+  const scriptRows = useMemo(() => {
+    const rows = []
+
+    for (let index = 0; index < segmentCards.length;) {
+      const segment = segmentCards[index]
+      const canGroup = segment.capture_state === CAPTURE_STATES.CAPTURED
+        && Boolean(segment.clip_path)
+        && (segment.shared_segment_ids?.length || 0) > 1
+
+      if (!canGroup) {
+        rows.push({ type: 'segment', segment })
+        index += 1
+        continue
+      }
+
+      const sharedPath = segment.clip_path
+      const groupedSegments = [segment]
+      let nextIndex = index + 1
+      while (nextIndex < segmentCards.length && segmentCards[nextIndex].clip_path === sharedPath) {
+        groupedSegments.push(segmentCards[nextIndex])
+        nextIndex += 1
+      }
+
+      if (groupedSegments.length > 1) {
+        rows.push({ type: 'shared-recording', key: sharedPath, segments: groupedSegments })
+        index = nextIndex
+      } else {
+        rows.push({ type: 'segment', segment })
+        index += 1
+      }
+    }
+
+    return rows
+  }, [segmentCards])
   const handleLock = async () => {
     if (!script?.length) return
     try {
@@ -302,6 +479,45 @@ export default function ScriptLockBanner({ projectId, script, onLock, onUnlock, 
     handleLock()
   }
 
+  const handleOpenCapturedClip = (segment) => {
+    const clipPath = String(segment?.clip_path || '')
+    if (!clipPath) return
+    const normalizedPath = clipPath.replaceAll('\\', '/')
+    const clipsIndex = normalizedPath.lastIndexOf('/clips/')
+    const relativePath = clipsIndex >= 0
+      ? normalizedPath.slice(clipsIndex + 1)
+      : `clips/${normalizedPath.split('/').pop()}`
+    const filename = relativePath.split('/').pop() || 'Captured clip.mp4'
+
+    const isShared = (segment.shared_segment_ids?.length || 0) > 1
+    openContentModal({
+      title: isShared ? `Shared recording - ${segment.shared_segment_ids.length} events` : filename,
+      wide: true,
+      content: (
+        <CapturedClipViewer
+          file={{ name: filename, path: relativePath, size_bytes: 0 }}
+          projectId={projectId}
+          segment={segment}
+        />
+      ),
+    })
+  }
+
+  const handleTrashCapturedClip = (segment) => {
+    const sharedCount = segment.shared_segment_ids?.length || 1
+    openModal(`trash-capture-${segment.segment_id}`, 'confirm', {
+      title: sharedCount > 1 ? 'Trash Shared Recording?' : 'Trash Captured Clip?',
+      message: sharedCount > 1
+        ? `This recording is shared by ${sharedCount} script events. It will move to the project Trash Bin and all ${sharedCount} events will become eligible for Uncaptured Only.`
+        : 'This clip will move to the project Trash Bin and become eligible for Uncaptured Only.',
+      danger: true,
+      confirmText: 'Trash and Recapture',
+      onConfirm: async () => {
+        await invalidateSegment(projectId, segment.segment_id, 'manual_recapture')
+      },
+    })
+  }
+
   // ── Locked State ────────────────────────────────────────────────────────
   if (scriptLocked) {
     return (
@@ -322,16 +538,28 @@ export default function ScriptLockBanner({ projectId, script, onLock, onUnlock, 
           </button>
         </div>
 
-        <ProgressBar captured={summary.captured} total={summary.total} />
+        <ProgressBar captured={captureSummary.captured} total={captureSummary.total} />
 
         <div className="space-y-2 mt-2 mb-2">
-          {segmentCards.map((segment) => (
-            <SegmentCard
-              key={segment.segment_id || segment.id}
-              segment={segment}
+          {scriptRows.map((row) => row.type === 'shared-recording' ? (
+            <SharedRecordingGroup
+              key={row.key}
+              segments={row.segments}
               currentSegmentId={activeCurrentSegmentId}
               captureLog={captureLog}
               isExecuting={isExecuting}
+              onOpenClip={handleOpenCapturedClip}
+              onTrashClip={handleTrashCapturedClip}
+            />
+          ) : (
+            <SegmentCard
+              key={row.segment.segment_id || row.segment.id}
+              segment={row.segment}
+              currentSegmentId={activeCurrentSegmentId}
+              captureLog={captureLog}
+              isExecuting={isExecuting}
+              onOpenClip={handleOpenCapturedClip}
+              onTrashClip={handleTrashCapturedClip}
             />
           ))}
         </div>

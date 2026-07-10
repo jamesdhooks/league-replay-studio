@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 _SENSITIVE_KEYS_ENV = {
     "llm_api_key": "LRS_LLM_API_KEY",
     "youtube_api_key": "LRS_YOUTUBE_API_KEY",
+    "obs_websocket_password": "LRS_OBS_WEBSOCKET_PASSWORD",
 }
 
 # Simple XOR key for obfuscation (NOT cryptographic security — prevents
@@ -137,6 +138,30 @@ def _validate_native_capture_fps(value: Any) -> tuple[bool, str]:
     return True, ""
 
 
+def _validate_obs_websocket_host(value: Any) -> tuple[bool, str]:
+    if not isinstance(value, str) or not value.strip():
+        return False, "obs_websocket_host must be a non-empty string"
+    return True, ""
+
+
+def _validate_obs_websocket_port(value: Any) -> tuple[bool, str]:
+    if not isinstance(value, int) or not 1 <= value <= 65535:
+        return False, "obs_websocket_port must be an integer from 1 to 65535"
+    return True, ""
+
+
+def _validate_obs_capture_control(value: Any) -> tuple[bool, str]:
+    if value not in {"websocket", "hotkey"}:
+        return False, "obs_capture_control must be websocket or hotkey"
+    return True, ""
+
+
+def _validate_capture_validation_retry_limit(value: Any) -> tuple[bool, str]:
+    if not isinstance(value, int) or value < 0 or value > 5:
+        return False, "capture_clip_validation_retry_limit must be an integer 0-5"
+    return True, ""
+
+
 def _validate_privacy(value: Any) -> tuple[bool, str]:
     if value not in VALID_PRIVACY:
         return False, f"youtube_default_privacy must be one of {sorted(VALID_PRIVACY)}"
@@ -177,8 +202,15 @@ VALIDATORS: dict[str, Any] = {
     "theme": _validate_theme,
     "capture_software": _validate_capture_software,
     "capture_resolution": _validate_capture_resolution,
+    "capture_validate_clips": _validate_bool,
+    "capture_retry_failed_clip_validation": _validate_bool,
+    "capture_clip_validation_retry_limit": _validate_capture_validation_retry_limit,
     "capture_hotkey_start": _validate_hotkey,
     "capture_hotkey_stop": _validate_hotkey,
+    "obs_websocket_host": _validate_obs_websocket_host,
+    "obs_websocket_port": _validate_obs_websocket_port,
+    "obs_websocket_password": _validate_string_or_empty,
+    "obs_capture_control": _validate_obs_capture_control,
     "encoding_preset": _validate_encoding_preset,
     "preferred_gpu": _validate_gpu,
     "preview_backend": _validate_preview_backend,

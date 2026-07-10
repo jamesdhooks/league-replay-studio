@@ -18,7 +18,7 @@ import RangeSlider from '../ui/RangeSlider'
 import PlaybackControls from '../ui/PlaybackControls'
 import IsolatedHtmlPreview from '../ui/IsolatedHtmlPreview'
 import ProjectFileBrowser from '../projects/ProjectFileBrowser'
-import UnifiedLogList from '../ui/UnifiedLogList'
+import LogViewer from '../ui/LogViewer'
 import { normalizeCompositionLogEntries } from '../../utils/logEntries'
 import {
   Film, Play, Square, Settings2, Scissors, Palette,
@@ -1721,15 +1721,16 @@ function CompositionLogList({ logEntries }) {
 
   return (
     <div className="flex-1 min-h-0 flex flex-col">
-      <div className="px-3 py-2 border-b border-border-subtle">
-        <p className="text-[11px] font-semibold uppercase tracking-wider text-text-tertiary">Compose Log</p>
-      </div>
-
-      <UnifiedLogList
-        entries={entries.slice(-120)}
+      <LogViewer
+        title="Compose Log"
+        entries={entries}
+        rawEntries={logEntries}
+        schema="league-replay-studio.compose-log"
         emptyMessage="No compose log entries yet."
+        maxVisible={120}
         maxHeightClass="max-h-none"
         className="flex-1 min-h-0"
+        headerClassName="bg-bg-secondary/85"
       />
     </div>
   )

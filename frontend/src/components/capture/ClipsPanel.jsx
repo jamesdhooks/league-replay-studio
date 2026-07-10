@@ -5,14 +5,13 @@ import { useTimelineViewport } from '../../hooks/useTimelineViewport'
 import CollapsiblePanelHeader from '../ui/CollapsiblePanelHeader'
 import ConfigurableTimelineTracks from '../ui/ConfigurableTimelineTracks'
 import RangeSlider from '../ui/RangeSlider'
-import UnifiedLogList from '../ui/UnifiedLogList'
+import LogViewer from '../ui/LogViewer'
 import { normalizeCaptureLogEntries } from '../../utils/logEntries'
 import {
   Film, Loader2, CheckCircle2, XCircle,
   Clapperboard, Trophy, Flag, Star, FileVideo,
   ChevronDown, ChevronRight, AlertTriangle,
   Radio, Camera, Repeat, Clock, ArrowRight, Circle,
-  Copy, Check,
 } from 'lucide-react'
 
 // ── Section metadata ──────────────────────────────────────────────────────
@@ -295,109 +294,53 @@ function ScriptTimeline({ strategies, currentSegmentId, completedIndex, totalSeg
 
 // ── Capture Action Log ────────────────────────────────────────────────────
 
-function buildStructuredCaptureLog(rawLog, entries) {
-  const rawEntries = Array.isArray(rawLog) ? rawLog : []
-  const failures = rawEntries.filter(entry => entry?.success === false)
-  const retries = rawEntries.filter(entry => entry?.action === 'retry')
+function buildStructuredCaptureLog({ rawEntries, entries, visibleEntries, clearedCount }) {
+  const rawLog = Array.isArray(rawEntries) ? rawEntries : []
+  const failures = rawLog.filter(entry => entry?.success === false)
+  const retries = rawLog.filter(entry => entry?.action === 'retry')
   const latestFailure = failures[failures.length - 1] || null
 
   return {
     schema: 'league-replay-studio.capture-log',
     schema_version: 1,
     copied_at: new Date().toISOString(),
-    entry_count: rawEntries.length,
+    raw_entry_count: rawLog.length,
+    display_entry_count: entries.length,
+    visible_entry_count: visibleEntries.length,
+    cleared_visible_count: clearedCount,
     failure_count: failures.length,
     retry_count: retries.length,
     latest_failure: latestFailure,
-    entries: rawEntries,
+    raw_entries: rawLog,
     display_entries: entries,
+    visible_entries: visibleEntries,
   }
-}
-
-async function copyTextToClipboard(text) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text)
-    return
-  }
-
-  const textarea = document.createElement('textarea')
-  textarea.value = text
-  textarea.setAttribute('readonly', '')
-  textarea.style.position = 'fixed'
-  textarea.style.opacity = '0'
-  document.body.appendChild(textarea)
-  textarea.select()
-  document.execCommand('copy')
-  document.body.removeChild(textarea)
 }
 
 function CaptureActionLog({ log, maxVisible = 50, expandedByDefault = false, maxHeightClass = 'max-h-48', variant = 'card' }) {
-  const [expanded, setExpanded] = useState(expandedByDefault)
-  const [copied, setCopied] = useState(false)
-  const scrollRef = useRef(null)
-  const prevCountRef = useRef(0)
   const isSidebar = variant === 'sidebar'
   const entries = normalizeCaptureLogEntries(log)
-
-  // Keep most recent entries anchored at the top on updates.
-  useEffect(() => {
-    if (expanded && entries.length > prevCountRef.current && scrollRef.current) {
-      scrollRef.current.scrollTop = 0
-    }
-    prevCountRef.current = entries.length
-  }, [expanded, entries.length])
-
-  const displayLog = expanded ? entries : entries.slice(-maxVisible)
-  const handleCopy = useCallback(async () => {
-    const payload = JSON.stringify(buildStructuredCaptureLog(log, entries), null, 2)
-    await copyTextToClipboard(payload)
-    setCopied(true)
-    window.setTimeout(() => setCopied(false), 1400)
-  }, [entries, log])
 
   if (!entries.length) return null
 
   return (
-    <div className={`h-full min-h-0 flex flex-col ${isSidebar ? 'gap-0' : 'gap-1'}`}>
-      <div className={`flex items-center gap-1 ${isSidebar ? 'px-3 py-2 border-b border-border text-text-secondary' : 'text-text-tertiary'}`}>
-        <button
-          onClick={() => setExpanded(prev => !prev)}
-          aria-label={expanded ? 'Collapse capture log' : 'Expand capture log'}
-          className="min-w-0 flex-1 flex items-center gap-1.5 text-xxs font-semibold uppercase tracking-wider hover:text-text-secondary transition-colors text-left"
-        >
-          {expanded ? <ChevronDown className="w-3 h-3 shrink-0" /> : <ChevronRight className="w-3 h-3 shrink-0" />}
-          <Radio className="w-3 h-3 shrink-0" />
-          <span className="truncate">Capture Log ({entries.length} entries)</span>
-        </button>
-        <button
-          type="button"
-          onClick={handleCopy}
-          aria-label="Copy structured capture log"
-          title={copied ? 'Copied' : 'Copy structured capture log'}
-          className={`h-6 w-6 shrink-0 inline-flex items-center justify-center rounded-md border transition-colors ${
-            copied
-              ? 'border-success/30 bg-success/10 text-success'
-              : 'border-border text-text-tertiary hover:text-text-primary hover:bg-bg-hover'
-          }`}
-        >
-          {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-        </button>
-      </div>
-
-      {expanded && (
-        <div
-          ref={scrollRef}
-          className={`${maxHeightClass} flex-1 min-h-0 overflow-y-auto ${isSidebar ? 'bg-transparent' : 'bg-bg-primary border border-border rounded-md'}`}
-        >
-          <UnifiedLogList
-            entries={displayLog}
-            emptyMessage="No capture log entries yet"
-            maxHeightClass="max-h-none"
-            className="h-full"
-          />
-        </div>
-      )}
-    </div>
+    <LogViewer
+      title="Capture Log"
+      entries={entries}
+      rawEntries={log}
+      schema="league-replay-studio.capture-log"
+      emptyMessage="No capture log entries yet"
+      maxVisible={expandedByDefault ? null : maxVisible}
+      maxHeightClass={maxHeightClass}
+      className={`h-full min-h-0 ${isSidebar ? '' : 'border border-border bg-bg-primary'}`}
+      headerClassName={isSidebar ? '' : 'bg-transparent'}
+      bodyClassName={isSidebar ? 'bg-transparent' : 'bg-bg-primary'}
+      collapsible
+      defaultExpanded={expandedByDefault}
+      buildPayload={buildStructuredCaptureLog}
+    >
+      <Radio className="w-3 h-3 shrink-0 text-text-tertiary" />
+    </LogViewer>
   )
 }
 

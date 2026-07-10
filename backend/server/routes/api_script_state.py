@@ -12,6 +12,7 @@ capture range, and PiP configuration.
   POST /api/script-state/{project_id}/capture-range  — Set capture range
     PUT  /api/script-state/{project_id}/capture-selection — Set preferred specific-segment selection
   POST /api/script-state/{project_id}/invalidate    — Invalidate a segment
+  POST /api/script-state/{project_id}/clear-captures — Archive and reset every captured clip
   POST /api/script-state/{project_id}/mark-captured — Mark segment as captured
   GET  /api/script-state/{project_id}/trash         — Get trash bin contents
   POST /api/script-state/{project_id}/trash/empty   — Empty trash
@@ -293,8 +294,48 @@ async def set_capture_selection(project_id: int, body: CaptureSelectionRequest):
 async def invalidate_segment(project_id: int, body: InvalidateRequest):
     """Invalidate a segment's capture (moves clip to trash)."""
     project_dir = _get_project_dir(project_id)
-    script_state_service.invalidate_segment(project_dir, body.segment_id, body.reason)
-    return {"success": True}
+    invalidated = script_state_service.invalidate_segment(project_dir, body.segment_id, body.reason)
+    return {"success": True, "invalidated_segment_ids": invalidated}
+
+
+@router.post("/{project_id}/clear-captures")
+async def clear_captures(project_id: int):
+    """Archive all project captures and reset every capturable segment.
+
+    Archived files remain available through the project Trash Bin.  This does
+    not permanently delete video files.
+    """
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project.get("project_dir", "")
+    if not project_dir:
+        raise HTTPException(status_code=400, detail="Project directory not set")
+
+    result = script_state_service.clear_all_captures(project_dir)
+    reset_ids = set(result["reset_segment_ids"])
+    updates: dict[str, list[dict[str, Any]]] = {}
+    for key in ("clips_manifest", "capture_manifest"):
+        manifest = project.get(key)
+        if not isinstance(manifest, list):
+            continue
+        filtered = [
+            entry for entry in manifest
+            if str(entry.get("id") or entry.get("source_clip_id") or "") not in reset_ids
+        ]
+        if len(filtered) != len(manifest):
+            updates[key] = filtered
+    if updates:
+        project_service.save_project_metadata(project_id, updates)
+
+    logger.info(
+        "[ScriptState API] Cleared captures project=%s segments=%d archived_clips=%d",
+        project_id,
+        len(result["reset_segment_ids"]),
+        result["archived_clip_count"],
+    )
+    return {"success": True, **result, "state": script_state_service.load_state(project_dir)}
 
 
 @router.post("/{project_id}/mark-captured")

@@ -40,6 +40,8 @@ export default function UnifiedLogList({
   maxHeightClass = 'max-h-48',
   className = '',
   rowClassName = '',
+  listRef = null,
+  footerRef = null,
   showStep = true,
   showDivider = true,
   compact = false,
@@ -65,7 +67,7 @@ export default function UnifiedLogList({
   }
 
   return (
-    <div className={`${maxHeightClass} overflow-y-auto font-mono ${showDivider ? 'divide-y divide-border-subtle/30' : ''} ${className}`}>
+    <div ref={listRef} className={`${maxHeightClass} overflow-y-auto font-mono ${showDivider ? 'divide-y divide-border-subtle/30' : ''} ${className}`}>
       {displayEntries.map((entry, idx) => {
         const meta = levelMeta(entry.level)
         const Icon = meta.Icon
@@ -92,6 +94,7 @@ export default function UnifiedLogList({
           </div>
         )
       })}
+      {footerRef ? <div ref={footerRef} /> : null}
     </div>
   )
 }

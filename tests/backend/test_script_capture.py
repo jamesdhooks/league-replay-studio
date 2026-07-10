@@ -79,21 +79,44 @@ def make_engine(clock: FakeClock | None = None, **kwargs) -> ScriptCaptureEngine
 def make_iracing_bridge(session_time=100.0, cam_group=5, cam_car_idx=3):
     """Create a mock IRacingBridge with configurable telemetry readback."""
     bridge = MagicMock()
+    state = {
+        "session_time": session_time,
+        "replay_session_num": 2,
+        "replay_speed": 0,
+        "cam_group_num": cam_group,
+        "cam_car_idx": cam_car_idx,
+    }
+    bridge.session_data = {"sessions": []}
     bridge.get_replay_session_num.return_value = 2
-    bridge.replay_search_session_time.return_value = True
-    bridge.set_replay_speed.return_value = True
-    bridge.cam_switch_car.return_value = True
-    bridge.cam_switch_position.return_value = True
+
+    def replay_search_session_time(session_num, target_ms):
+        state["replay_session_num"] = session_num
+        state["session_time"] = target_ms / 1000
+        return True
+
+    def set_replay_speed(speed):
+        state["replay_speed"] = speed
+        return True
+
+    def cam_switch_car(car_idx, group_num):
+        state["cam_car_idx"] = car_idx
+        state["cam_group_num"] = group_num
+        return True
+
+    def cam_switch_position(_position, group_num):
+        state["cam_group_num"] = group_num
+        return True
+
+    bridge.replay_search_session_time.side_effect = replay_search_session_time
+    bridge.set_replay_speed.side_effect = set_replay_speed
+    bridge.cam_switch_car.side_effect = cam_switch_car
+    bridge.cam_switch_position.side_effect = cam_switch_position
     bridge.cameras = [
         {"group_name": "TV1", "group_num": 1},
         {"group_name": "Cockpit", "group_num": 2},
         {"group_name": "TV Scenic", "group_num": 5},
     ]
-    bridge.capture_snapshot.return_value = {
-        "session_time": session_time,
-        "cam_group_num": cam_group,
-        "cam_car_idx": cam_car_idx,
-    }
+    bridge.capture_snapshot.side_effect = lambda: dict(state)
     return bridge
 
 
@@ -307,26 +330,28 @@ class TestValidatedSeek:
         assert any(e["action"] == "seek" for e in log)
         assert any(e["action"] == "validate" and e["success"] for e in log)
 
-    def test_seek_retries_on_drift(self):
+    def test_seek_waits_for_telemetry_to_settle(self):
         engine = make_engine()
         bridge = make_iracing_bridge()
 
         # First snapshot returns wrong time, second is correct
         bridge.capture_snapshot.side_effect = [
-            {"session_time": 50.0, "cam_group_num": 5, "cam_car_idx": 3},  # wrong
-            {"session_time": 98.0, "cam_group_num": 5, "cam_car_idx": 3},  # correct
+            {"session_time": 50.0, "replay_session_num": 2, "cam_group_num": 5, "cam_car_idx": 3},
+            {"session_time": 98.0, "replay_session_num": 2, "cam_group_num": 5, "cam_car_idx": 3},
         ]
 
         result = engine._validated_seek("seg_001", bridge, 98.0)
 
         assert result is True
-        assert bridge.replay_search_session_time.call_count == 2
-        retries = [e for e in engine.capture_log if e["action"] == "retry"]
-        assert len(retries) >= 1
+        assert bridge.replay_search_session_time.call_count == 1
+        validations = [e for e in engine.capture_log if e["action"] == "validate"]
+        assert len(validations) == 1
+        assert validations[0]["success"] is True
 
     def test_seek_fails_after_max_retries(self):
         engine = make_engine()
         bridge = make_iracing_bridge(session_time=0.0)
+        bridge.capture_snapshot.side_effect = None
         bridge.capture_snapshot.return_value = {"session_time": 0.0}
 
         result = engine._validated_seek("seg_001", bridge, 98.0)
@@ -421,10 +446,10 @@ class TestCaptureScript:
         assert [entry["id"] for entry in manifest] == ["a", "b"]
         assert manifest[0]["path"] == clips[0]["path"]
         assert manifest[1]["path"] == clips[0]["path"]
-        assert manifest[0]["source_offset_start_seconds"] == pytest.approx(0.5, abs=1e-6)
-        assert manifest[0]["source_offset_end_seconds"] == pytest.approx(10.5, abs=1e-6)
-        assert manifest[1]["source_offset_start_seconds"] == pytest.approx(11.0, abs=1e-6)
-        assert manifest[1]["source_offset_end_seconds"] == pytest.approx(20.5, abs=1e-6)
+        assert manifest[0]["source_offset_start_seconds"] == pytest.approx(2.0, abs=1e-6)
+        assert manifest[0]["source_offset_end_seconds"] == pytest.approx(12.0, abs=1e-6)
+        assert manifest[1]["source_offset_start_seconds"] == pytest.approx(12.5, abs=1e-6)
+        assert manifest[1]["source_offset_end_seconds"] == pytest.approx(22.0, abs=1e-6)
 
     def test_skips_transitions_and_zero_duration(self):
         engine = make_engine()
@@ -539,6 +564,78 @@ class TestCaptureScript:
         first_info = next(e for e in engine.capture_log if e["action"] == "info")
         assert "obs" in first_info["detail"]
 
+    def test_final_validation_retry_recaptures_failed_clip(self, monkeypatch):
+        engine = make_engine(
+            validate_clips=True,
+            retry_failed_clip_validation=True,
+            clip_validation_retry_limit=1,
+        )
+        bridge = make_iracing_bridge(session_time=98.0)
+        capture_eng = make_capture_engine()
+        calls = []
+
+        def fake_validate(clip_path, segment_ids):
+            calls.append((clip_path, list(segment_ids)))
+            if len(calls) == 1:
+                return {
+                    "path": clip_path,
+                    "valid": False,
+                    "size_bytes": 0,
+                    "duration_seconds": None,
+                    "errors": ["simulated corrupt clip"],
+                    "segment_ids": list(segment_ids),
+                }
+            return {
+                "path": clip_path,
+                "valid": True,
+                "size_bytes": 4096,
+                "duration_seconds": 12.0,
+                "errors": [],
+                "segment_ids": list(segment_ids),
+            }
+
+        monkeypatch.setattr(engine, "_validate_clip_file", fake_validate)
+
+        clips = engine.capture_script(
+            script=make_script()[:1],
+            iracing_bridge=bridge,
+            capture_engine=capture_eng,
+        )
+
+        assert len(clips) == 1
+        assert capture_eng.start_recording.call_count == 2
+        assert len(calls) == 2
+        assert any(e["action"] == "delete" for e in engine.capture_log)
+        assert engine.composition_manifest[0]["path"] == clips[0]["path"]
+
+    def test_final_validation_waits_until_the_full_capture_pass_completes(self, monkeypatch):
+        engine = make_engine(validate_clips=True)
+        bridge = make_iracing_bridge(session_time=98.0)
+        capture_eng = make_capture_engine()
+        stop_counts_when_validated = []
+
+        def fake_validate(clip_path, segment_ids):
+            stop_counts_when_validated.append(capture_eng.stop_recording.call_count)
+            return {
+                "path": clip_path,
+                "valid": True,
+                "size_bytes": 4096,
+                "duration_seconds": 12.0,
+                "errors": [],
+                "segment_ids": list(segment_ids),
+            }
+
+        monkeypatch.setattr(engine, "_validate_clip_file", fake_validate)
+
+        engine.capture_script(
+            script=make_script()[:2],
+            iracing_bridge=bridge,
+            capture_engine=capture_eng,
+        )
+
+        assert capture_eng.stop_recording.call_count == 2
+        assert stop_counts_when_validated == [2, 2]
+
 
 class TestCameraScheduleTiming:
     """Verify that camera_schedule entries fire at their offset during playback,
@@ -646,6 +743,7 @@ class TestCameraScheduleTiming:
                 "start_time_seconds": 10.0,
                 "end_time_seconds": 20.0,
                 "camera_preferences": ["TV1"],
+                "involved_drivers": [3],
             },
             {
                 "id": "s2",
@@ -654,6 +752,7 @@ class TestCameraScheduleTiming:
                 "start_time_seconds": 20.5,
                 "end_time_seconds": 30.5,  # duration=10s
                 "camera_preferences": ["TV1"],
+                "involved_drivers": [3],
                 "camera_schedule": [
                     {"offset_seconds": 2.0, "camera_name": "TV1"},
                 ],
@@ -662,7 +761,7 @@ class TestCameraScheduleTiming:
 
         time_before_s2 = [0.0]
 
-        orig_switch_car = bridge.cam_switch_car
+        orig_switch_car = bridge.cam_switch_car.side_effect
 
         def track_contiguous_start(car, group):
             # The contiguous camera switch fires first; record clock after

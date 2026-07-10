@@ -16,7 +16,8 @@ For each segment in the script, the engine:
      - **Contiguous**: keeps recording, sends camera/driver switch only
      - **Gap**: stops recording, validates clip file, catalogues it with
        a descriptive name linked to the script segment(s)
-  9. After capture: validates each clip and records the mapping in the output log
+  9. After every requested clip is captured: runs one final validation audit,
+     then deletes and recaptures only failed clips when retries are enabled
 
 After all segments are captured, clips are compiled using FFmpeg concat.
 
@@ -53,6 +54,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from server.utils.command_log import command_log
+from server.utils.ffmpeg_builder import validate_output_file
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +133,56 @@ def _find_ffmpeg() -> Optional[str]:
         return find_ffmpeg()
     except Exception:
         return shutil.which("ffmpeg")
+
+
+def _find_ffprobe() -> Optional[str]:
+    """Locate the ffprobe binary."""
+    try:
+        from server.utils.gpu_detection import find_ffprobe
+        return find_ffprobe()
+    except Exception:
+        return shutil.which("ffprobe")
+
+
+def find_capture_ffprobe() -> Optional[str]:
+    """Return the ffprobe path used by capture validation."""
+    return _find_ffprobe()
+
+
+def find_capture_ffmpeg(ffprobe_path: Optional[str] = None) -> Optional[str]:
+    """Return the FFmpeg path required for strict capture clip decoding."""
+    if ffprobe_path:
+        probe = Path(ffprobe_path)
+        sibling = probe.with_name(f"ffmpeg{probe.suffix}")
+        if sibling.is_file():
+            return str(sibling)
+    try:
+        from server.utils.gpu_detection import find_ffmpeg
+        return find_ffmpeg()
+    except Exception:
+        return shutil.which("ffmpeg")
+
+
+def validate_capture_clip_file(clip_path: str, segment_ids: list[str] | None = None) -> dict[str, Any]:
+    """Validate one captured clip with ffprobe for capture and recovery flows."""
+    path = Path(clip_path)
+    ffprobe = _find_ffprobe()
+    normalized_segment_ids = [str(segment_id) for segment_id in (segment_ids or []) if segment_id]
+    if not ffprobe:
+        return {
+            "path": str(path),
+            "valid": False,
+            "size_bytes": path.stat().st_size if path.exists() else 0,
+            "duration_seconds": None,
+            "errors": ["ffprobe not found"],
+            "segment_ids": normalized_segment_ids,
+            "ffprobe_path": None,
+        }
+
+    result = validate_output_file(str(path), ffprobe_path=ffprobe)
+    result["segment_ids"] = normalized_segment_ids
+    result["ffprobe_path"] = ffprobe
+    return result
 
 
 def _sanitize_filename(name: str) -> str:
@@ -224,6 +276,7 @@ class HotkeyRecorderAdapter:
         self._wall_time = _wall_time
         self._target_path: Optional[str] = None
         self._recording_started_at: float = 0.0
+        self.last_error: str | None = None
 
     # -- CaptureEngine-compatible interface ----------------------------------
 
@@ -235,23 +288,22 @@ class HotkeyRecorderAdapter:
             from server.utils.obs_integration import send_hotkey
             sent = send_hotkey(self._start_hotkey)
             if not sent:
-                logger.warning(
-                    "[HotkeyRecorder] Start hotkey '%s' may not have been sent",
-                    self._start_hotkey,
-                )
+                raise RuntimeError(f"Start hotkey '{self._start_hotkey}' could not be sent")
         else:
             logger.info(
                 "[HotkeyRecorder] (non-Windows) Would send start hotkey: %s",
                 self._start_hotkey,
             )
 
-    def stop_recording(self) -> None:
+    def stop_recording(self) -> bool:
         """Send the stop hotkey, then poll the watch folder for the output file
         and move it to the target path that was set by :meth:`start_recording`.
         """
         if platform.system() == "Windows":
             from server.utils.obs_integration import send_hotkey
-            send_hotkey(self._stop_hotkey)
+            if not send_hotkey(self._stop_hotkey):
+                self.last_error = f"Stop hotkey '{self._stop_hotkey}' could not be sent"
+                return False
         else:
             logger.info(
                 "[HotkeyRecorder] (non-Windows) Would send stop hotkey: %s",
@@ -264,12 +316,14 @@ class HotkeyRecorderAdapter:
                 if self._cancelled_fn():
                     logger.info("[HotkeyRecorder] Poll cancelled by user")
                 else:
+                    self.last_error = f"No completed recording appeared in {self._poll_timeout:g}s after stop hotkey"
                     logger.error(
-                        "[HotkeyRecorder] Timed out — clip may not have been saved to %s",
+                        "[HotkeyRecorder] Timed out - clip may not have been saved to %s",
                         self._target_path,
                     )
+            return ok
+        return True
 
-    # -- Internal polling logic ---------------------------------------------
 
     def _poll_and_move(self, target_path: str) -> bool:
         """Poll *watch_folder* for a new stable video file and move it.
@@ -288,7 +342,7 @@ class HotkeyRecorderAdapter:
         stable_count: dict[str, int] = {}
 
         logger.info(
-            "[HotkeyRecorder] Polling '%s' for new clip (timeout=%gs)…",
+            "[HotkeyRecorder] Polling '%s' for new clip (timeout=%gs)...",
             self._watch_folder,
             self._poll_timeout,
         )
@@ -316,12 +370,12 @@ class HotkeyRecorderAdapter:
                 if size > 0 and size == prev:
                     stable_count[path] = stable_count.get(path, 0) + 1
                     if stable_count[path] >= self._stable_checks:
-                        # File is fully written — move to target
+                        # File is fully written - move to target
                         try:
                             Path(target_path).parent.mkdir(parents=True, exist_ok=True)
                             shutil.move(path, target_path)
                             logger.info(
-                                "[HotkeyRecorder] Clip ready: %s → %s",
+                                "[HotkeyRecorder] Clip ready: %s -> %s",
                                 Path(path).name, target_path,
                             )
                             return True
@@ -338,6 +392,98 @@ class HotkeyRecorderAdapter:
             "[HotkeyRecorder] Timed out (%gs) waiting for clip in '%s'",
             self._poll_timeout, self._watch_folder,
         )
+        return False
+
+
+class ObsWebSocketRecorderAdapter(HotkeyRecorderAdapter):
+    """OBS recorder that verifies recording state through OBS WebSocket v5."""
+
+    def __init__(self, watch_folder: str, host: str, port: int, password: str, **kwargs: Any) -> None:
+        super().__init__(watch_folder=watch_folder, start_hotkey="", stop_hotkey="", **kwargs)
+        from server.utils.obs_websocket import ObsWebSocketClient
+
+        self._obs = ObsWebSocketClient(host=host, port=port, password=password)
+
+    def start_recording(self, target_path: str, **_kwargs) -> None:
+        self._target_path = target_path
+        self._recording_started_at = self._wall_time()
+        status = self._obs.get_record_status()
+        if status.get("outputActive"):
+            raise RuntimeError("OBS is already recording; stop it before scripted capture")
+        self._obs.request("StartRecord")
+        if not self._obs.wait_for_recording_state(True):
+            raise RuntimeError("OBS did not confirm that recording started")
+
+    def stop_recording(self) -> bool:
+        try:
+            status = self._obs.get_record_status()
+            if not status.get("outputActive"):
+                self.last_error = "OBS reported that recording was already stopped"
+                return False
+            stop_response = self._obs.request("StopRecord")
+            if not self._obs.wait_for_recording_state(False):
+                self.last_error = "OBS did not confirm that recording stopped"
+                return False
+            if not self._target_path:
+                self.last_error = "No target path was set for the OBS recording"
+                return False
+            output_path = str(stop_response.get("outputPath") or "").strip()
+            if output_path:
+                logger.info("[ObsWebSocketRecorder] OBS reported completed output: %s", output_path)
+                ok = self._wait_for_output_and_move(output_path, self._target_path)
+            else:
+                logger.warning(
+                    "[ObsWebSocketRecorder] OBS StopRecord returned no outputPath; "
+                    "falling back to watch-folder scan"
+                )
+                ok = self._poll_and_move(self._target_path)
+            if not ok:
+                source = output_path or self._watch_folder
+                self.last_error = (
+                    f"OBS stopped but output did not stabilize within {self._poll_timeout:g}s: {source}"
+                )
+            return ok
+        except Exception as exc:
+            self.last_error = str(exc)
+            return False
+
+    def close(self) -> None:
+        self._obs.close()
+
+    def _wait_for_output_and_move(self, source_path: str, target_path: str) -> bool:
+        """Wait for OBS's authoritative output path to finish writing, then move it."""
+        source = Path(source_path)
+        deadline = self._wall_time() + self._poll_timeout
+        last_size = -1
+        stable_count = 0
+
+        while self._wall_time() < deadline:
+            if self._cancelled_fn():
+                return False
+            if source.exists() and source.is_file():
+                try:
+                    size = source.stat().st_size
+                except OSError:
+                    size = 0
+                if size > 0 and size == last_size:
+                    stable_count += 1
+                    if stable_count >= self._stable_checks:
+                        try:
+                            Path(target_path).parent.mkdir(parents=True, exist_ok=True)
+                            shutil.move(str(source), target_path)
+                            logger.info(
+                                "[ObsWebSocketRecorder] Clip ready: %s -> %s",
+                                source.name,
+                                target_path,
+                            )
+                            return True
+                        except OSError as exc:
+                            self.last_error = f"Failed to move OBS output: {exc}"
+                            return False
+                else:
+                    last_size = size
+                    stable_count = 0
+            self._sleep(OBS_POLL_INTERVAL)
         return False
 
 
@@ -386,6 +532,9 @@ class ScriptCaptureEngine:
         compile_timeout: int = 0,
         contiguous_gap_threshold: float = CONTIGUOUS_GAP_THRESHOLD,
         capture_mode: str = "native",
+        validate_clips: bool = False,
+        retry_failed_clip_validation: bool = False,
+        clip_validation_retry_limit: int = 0,
         _now: Optional[Callable[[], float]] = None,
         _sleep: Optional[Callable[[float], None]] = None,
     ) -> None:
@@ -404,6 +553,12 @@ class ScriptCaptureEngine:
                 ``"relive"``, or ``"manual"``.  Only affects log messages; the
                 actual backend is determined by whichever recorder object is
                 passed to :meth:`capture_script`.
+            validate_clips: Run one final metadata-and-decode validation audit
+                after the requested capture pass completes.
+            retry_failed_clip_validation: Delete invalid clips and recapture
+                their segments when validation fails.
+            clip_validation_retry_limit: Number of validation-recapture passes
+                allowed after the first capture pass.
             _now: Monotonic clock function.  Defaults to ``time.monotonic``.
                 Inject a fake for unit tests (see :class:`FakeClock`).
             _sleep: Sleep function.  Defaults to ``time.sleep``.  Inject a
@@ -417,6 +572,9 @@ class ScriptCaptureEngine:
         self._compile_timeout = compile_timeout
         self._contiguous_gap_threshold = contiguous_gap_threshold
         self._capture_mode = capture_mode
+        self._validate_clips = bool(validate_clips)
+        self._retry_failed_clip_validation = bool(retry_failed_clip_validation)
+        self._clip_validation_retry_limit = max(0, int(clip_validation_retry_limit or 0))
         self._now: Callable[[], float] = _now or time.monotonic
         self._sleep: Callable[[float], None] = _sleep or time.sleep
         self._clips: list[dict] = []
@@ -498,7 +656,97 @@ class ScriptCaptureEngine:
             f"Starting script capture: {total} segments "
             f"[mode={self._capture_mode}]")
 
-        # Cache camera groups
+        retry_pass = 0
+        segments_for_pass = active_segments
+
+        while segments_for_pass and not self._cancelled:
+            self._capture_segment_pass(
+                segments_for_pass,
+                iracing_bridge,
+                capture_engine,
+                available_cameras=available_cameras,
+                pass_index=retry_pass,
+            )
+
+            if not self._validate_clips or self._cancelled:
+                break
+
+            validation = self._validate_all_clips()
+            failed = validation.get("failed") or []
+            if not failed:
+                break
+
+            failed_segment_ids: list[str] = []
+            for item in failed:
+                failed_segment_ids.extend(str(s) for s in item.get("segment_ids", []) if s)
+
+            if (
+                not self._retry_failed_clip_validation
+                or retry_pass >= self._clip_validation_retry_limit
+            ):
+                self._fail_capture(
+                    ",".join(failed_segment_ids[:3]),
+                    "clip_validation",
+                    (
+                        f"Final validation failed for {len(failed)} clip(s); "
+                        "capture retry is disabled or retry limit was reached"
+                    ),
+                    {
+                        "failed": failed,
+                        "retry_enabled": self._retry_failed_clip_validation,
+                        "retry_limit": self._clip_validation_retry_limit,
+                        "retry_pass": retry_pass,
+                    },
+                )
+
+            retry_pass += 1
+            self._remove_failed_validation_outputs(failed)
+            seen: set[str] = set()
+            segments_for_pass = []
+            for seg_id in failed_segment_ids:
+                if seg_id in seen:
+                    continue
+                seen.add(seg_id)
+                segment = self._segment_lookup.get(seg_id)
+                if segment:
+                    segments_for_pass.append(segment)
+
+            self._emit_progress({
+                "step": "clip_validation_retry",
+                "failed": failed,
+                "failed_segment_ids": list(seen),
+                "retry_pass": retry_pass,
+                "retry_limit": self._clip_validation_retry_limit,
+                "message": (
+                    f"Recapturing {len(segments_for_pass)} segment(s) after "
+                    "final validation failure"
+                ),
+            })
+
+        # Final progress
+        self._emit_progress({
+            "step": "capture_complete",
+            "clips_captured": len(self._clips),
+            "message": f"Captured {len(self._clips)} clips from {total} segments",
+            "capture_log": self.capture_log,
+        })
+
+        return list(self._clips)
+
+    def _capture_segment_pass(
+        self,
+        active_segments: list[dict],
+        iracing_bridge: Any,
+        capture_engine: Any,
+        *,
+        available_cameras: Optional[list[dict]] = None,
+        pass_index: int = 0,
+    ) -> None:
+        """Capture one pass of segments using the gap-aware recording loop."""
+        total = len(active_segments)
+        if total == 0:
+            return
+
         if available_cameras is None:
             available_cameras = getattr(iracing_bridge, "cameras", []) or []
 
@@ -507,19 +755,28 @@ class ScriptCaptureEngine:
             for c in available_cameras
         }
 
-        # Pre-compute strategies: determine which segments are contiguous
         strategies = self._compute_strategies(active_segments)
-        self._segment_strategies = strategies
+        if pass_index == 0:
+            self._segment_strategies = strategies
+        else:
+            self._segment_strategies.extend({
+                **strategy,
+                "validation_retry_pass": pass_index,
+            } for strategy in strategies)
 
         self._emit_progress({
             "step": "strategy_computed",
-            "strategies": strategies,
+            "strategies": self._segment_strategies,
             "total_segments": total,
             "capture_mode": self._capture_mode,
-            "message": f"Computed capture strategy for {total} segments",
+            "validation_retry_pass": pass_index,
+            "message": (
+                f"Computed capture strategy for {total} segment(s)"
+                if pass_index == 0
+                else f"Computed validation-retry capture strategy for {total} segment(s)"
+            ),
         })
 
-        # Process segments using gap-aware recording
         recording = False
         current_clip_path: Optional[str] = None
         current_clip_segments: list[str] = []
@@ -551,14 +808,14 @@ class ScriptCaptureEngine:
                 "section": section,
                 "segment_type": seg_type,
                 "strategy": strategy,
+                "validation_retry_pass": pass_index,
                 "percentage": pct,
                 "message": f"Segment {idx + 1}/{total}: {section}/{seg_id}",
             })
 
             if is_contiguous_with_prev and recording:
-                # ── Contiguous: just switch camera/driver, keep recording ──
                 self._log_entry(seg_id, "info",
-                    "Contiguous with previous — continuing recording")
+                    "Contiguous with previous - continuing recording")
 
                 self._apply_camera_and_driver(
                     segment, iracing_bridge, cam_name_to_num, available_cameras
@@ -566,8 +823,6 @@ class ScriptCaptureEngine:
                 current_clip_segments.append(seg_id)
                 current_clip_segment_defs.append(segment)
 
-                # Wait for segment duration, firing any schedule at their offsets.
-                # pre_roll=0 because replay is already at this segment's start.
                 self._log_entry(seg_id, "info",
                     f"Waiting {duration:.1f}s for segment duration")
                 self._wait_with_schedule(
@@ -575,9 +830,6 @@ class ScriptCaptureEngine:
                 )
 
             else:
-                # ── New recording pass (gap detected or first segment) ──
-
-                # If we were recording, stop and save the clip
                 if recording:
                     recording = self._stop_and_save_clip(
                         capture_engine, iracing_bridge, current_clip_path,
@@ -586,14 +838,10 @@ class ScriptCaptureEngine:
                         section
                     )
 
-                # 1. Prime replay motion before session-time seek.
-                # iRacing can ignore replay_search_session_time when replay is paused
-                # or parked at an ended frame; seek while moving is more reliable.
-                self._log_entry(seg_id, "seek", "Priming replay at 1× for seek")
+                self._log_entry(seg_id, "seek", "Priming replay at 1x for seek")
                 iracing_bridge.set_replay_speed(1)
                 self._sleep(0.35)
 
-                # 2. Seek to start time minus padding buffer
                 padding = segment.get("clip_padding", self._clip_padding)
                 seek_target_s = max(0, start - padding)
                 seek_ok = self._validated_seek(
@@ -610,46 +858,36 @@ class ScriptCaptureEngine:
                         },
                     )
 
-                # 3. Pause replay after seek so camera setup and recorder start
-                # happen from a stable frame before playback resumes.
                 self._log_entry(seg_id, "seek", "Pausing replay after seek")
                 iracing_bridge.set_replay_speed(0)
                 self._sleep(0.2)
 
-                # 4. Switch camera and driver focus with validation
                 self._apply_camera_and_driver(
                     segment, iracing_bridge, cam_name_to_num, available_cameras
                 )
 
-                # 5. Build clip filename
-                clip_name = self._build_clip_name(seg_id, section, seg_type, segment, idx)
+                order_idx = self._segment_order_lookup.get(str(seg_id), idx)
+                clip_name = self._build_clip_name(seg_id, section, seg_type, segment, order_idx)
+                if pass_index > 0:
+                    clip_name = f"{clip_name}_retry{pass_index}"
                 current_clip_path = str(self._output_dir / f"{clip_name}.mp4")
                 current_clip_segments = [seg_id]
                 current_clip_segment_defs = [segment]
                 clip_start_time = start
                 clip_capture_start_time = seek_target_s
 
-                # 6. Start recording
                 try:
                     capture_engine.start_recording(current_clip_path, mode="auto")
                     self._log_entry(seg_id, "record_start",
-                        f"Recording started [{self._capture_mode}] → "
+                        f"Recording started [{self._capture_mode}] -> "
                         f"{Path(current_clip_path).name}")
                     recording = True
                 except Exception as exc:
-                    self._log_entry(seg_id, "error",
-                        f"Recording start failed: {exc}", success=False)
-                    continue
+                    self._fail_capture(seg_id, "record_start", f"Recording start failed: {exc}")
 
-                # 7. Resume replay at 1×
                 iracing_bridge.set_replay_speed(1)
-                self._log_entry(seg_id, "info", "Replay resumed at 1×")
+                self._log_entry(seg_id, "info", "Replay resumed at 1x")
 
-                # 8. Wait for (pre-roll padding + segment duration), firing any
-                #    scheduled camera switches at their exact offsets.
-                #    pre_roll=padding so offset_seconds is relative to segment start.
-                #    Recording padding is intentionally uniform across all segments;
-                #    compose later trims to exact segment boundaries.
                 padding = self._clip_padding
                 wait_seconds = duration + padding
                 self._log_entry(seg_id, "info",
@@ -659,10 +897,8 @@ class ScriptCaptureEngine:
                     wait_seconds, padding, segment, iracing_bridge, cam_name_to_num
                 )
 
-            # If next is NOT contiguous or this is the last segment, stop recording
             if not is_contiguous_with_next or idx == total - 1:
                 if recording:
-                    # Wait for post-padding
                     post_padding = self._clip_padding_after
                     if post_padding > 0:
                         self._log_entry(seg_id, "info",
@@ -672,21 +908,12 @@ class ScriptCaptureEngine:
                             _now=self._now, _sleep=self._sleep,
                         )
 
+                    order_idx = self._segment_order_lookup.get(str(seg_id), idx)
                     recording = self._stop_and_save_clip(
                         capture_engine, iracing_bridge, current_clip_path,
                         current_clip_segments, current_clip_segment_defs,
-                        clip_start_time, clip_capture_start_time, idx, section
+                        clip_start_time, clip_capture_start_time, order_idx, section
                     )
-
-        # Final progress
-        self._emit_progress({
-            "step": "capture_complete",
-            "clips_captured": len(self._clips),
-            "message": f"Captured {len(self._clips)} clips from {total} segments",
-            "capture_log": self.capture_log,
-        })
-
-        return list(self._clips)
 
     def _fail_capture(
         self,
@@ -726,7 +953,7 @@ class ScriptCaptureEngine:
             "message": "Compiling clips into final video...",
         })
         self._log_entry("", "info",
-            f"Compiling {len(self._clips)} clips → {Path(output_path).name}")
+            f"Compiling {len(self._clips)} clips -> {Path(output_path).name}")
 
         sorted_clips = sorted(self._clips, key=lambda c: c["order"])
 
@@ -766,7 +993,7 @@ class ScriptCaptureEngine:
             pass
 
         self._log_entry("", "info",
-            f"Compiled {len(sorted_clips)} clips → {output_path}")
+            f"Compiled {len(sorted_clips)} clips -> {output_path}")
 
         self._emit_progress({
             "step": "compile_complete",
@@ -927,7 +1154,7 @@ class ScriptCaptureEngine:
         
         if not available_sessions:
             self._log_entry(seg_id, "seek",
-                "No available sessions in replay — defaulting to session 0")
+                "No available sessions in replay - defaulting to session 0")
             return 0
         
         best_session = 0
@@ -994,7 +1221,7 @@ class ScriptCaptureEngine:
         
         if best_drift == float('inf'):
             self._log_entry(seg_id, "seek",
-                "Session probe found no in-tolerance session — defaulting to 0",
+                "Session probe found no in-tolerance session - defaulting to 0",
                 extra={
                     "closest_session": closest_session,
                     "closest_drift": closest_drift if closest_drift != float('inf') else None,
@@ -1054,7 +1281,7 @@ class ScriptCaptureEngine:
             session_num = iracing_bridge.get_replay_session_num()
             if session_num < 0:
                 self._log_entry(seg_id, "seek",
-                    "Replay session num unavailable — probing available sessions...")
+                    "Replay session num unavailable - probing available sessions...")
                 session_num = self._find_best_session_for_target(seg_id, iracing_bridge, target_time_s)
 
         resolved_session_once = False
@@ -1538,7 +1765,15 @@ class ScriptCaptureEngine:
             return False
 
         iracing_bridge.set_replay_speed(0)
-        capture_engine.stop_recording()
+        stop_result = capture_engine.stop_recording()
+        if stop_result is False:
+            detail = str(getattr(capture_engine, "last_error", "") or "Recorder did not produce a confirmed clip")
+            self._fail_capture(
+                segment_ids[-1] if segment_ids else "",
+                "record_stop",
+                detail,
+                {"clip_path": clip_path, "segment_ids": list(segment_ids)},
+            )
         self._sleep(0.3)
 
         seg_label = ", ".join(segment_ids[:3])
@@ -1553,14 +1788,15 @@ class ScriptCaptureEngine:
                 "segment_ids": list(segment_ids),
             })
 
-        # Validate the clip file exists
+        # This is only a file-presence check. Full FFmpeg validation runs once
+        # after every requested clip has been captured.
         clip_verified = False
         file_size = 0
         if Path(clip_path).exists():
             file_size = Path(clip_path).stat().st_size
             clip_verified = True
-            self._log_entry("", "validate",
-                f"Clip file verified: {Path(clip_path).name} ({file_size:,} bytes)",
+            self._log_entry("", "file_ready",
+                f"Capture file saved: {Path(clip_path).name} ({file_size:,} bytes)",
                 extra={
                     "file_size": file_size,
                     "clip_path": clip_path,
@@ -1621,13 +1857,125 @@ class ScriptCaptureEngine:
             })
 
         logger.info(
-            "[ScriptCapture] Saved clip %s → %s [%d segments]",
+            "[ScriptCapture] Saved clip %s -> %s [%d segments]",
             segment_ids[0] if segment_ids else "?",
             clip_path,
             len(segment_ids),
         )
 
         return False
+
+
+    def _validate_clip_file(self, clip_path: str, segment_ids: list[str]) -> dict[str, Any]:
+        """Validate a captured clip during the final capture audit."""
+        return validate_capture_clip_file(clip_path, segment_ids)
+
+    def _validate_all_clips(self) -> dict[str, Any]:
+        """Run one final metadata-and-decode audit over the completed capture pass."""
+        self._emit_progress({
+            "step": "final_clip_validation",
+            "phase": "final",
+            "message": f"Starting final validation for {len(self._clips)} captured clip(s)...",
+            "clip_count": len(self._clips),
+        })
+
+        results: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        seen_paths: set[str] = set()
+
+        for clip in self._clips:
+            clip_path = str(clip.get("path") or "")
+            if not clip_path or clip_path in seen_paths:
+                continue
+            seen_paths.add(clip_path)
+
+            segment_ids = [str(s) for s in (clip.get("segments") or []) if s]
+            result = self._validate_clip_file(clip_path, segment_ids)
+            results.append(result)
+
+            valid = bool(result.get("valid"))
+            if valid:
+                clip["duration"] = result.get("duration_seconds") or clip.get("duration") or 0
+                self._log_entry(
+                    segment_ids[0] if segment_ids else "",
+                    "validate",
+                    (
+                        f"Final validation passed: {Path(clip_path).name} "
+                        f"({result.get('duration_seconds')}s)"
+                    ),
+                    extra=result,
+                )
+            else:
+                failed.append(result)
+                self._log_entry(
+                    segment_ids[0] if segment_ids else "",
+                    "validate",
+                    f"Final validation failed: {Path(clip_path).name}",
+                    success=False,
+                    extra=result,
+                )
+
+        summary = {
+            "checked": len(results),
+            "passed": len(results) - len(failed),
+            "failed": failed,
+            "results": results,
+        }
+        self._emit_progress({
+            "step": "final_clip_validation_complete",
+            "phase": "final",
+            "message": (
+                f"Final validation passed for {summary['passed']}/{summary['checked']} clip(s)"
+                if not failed else f"Final validation failed for {len(failed)} clip(s)"
+            ),
+            **summary,
+        })
+        return summary
+
+    def _remove_failed_validation_outputs(self, failed: list[dict[str, Any]]) -> None:
+        """Delete invalid clip files and remove their manifest entries."""
+        failed_paths = {str(item.get("path") or "") for item in failed if item.get("path")}
+        failed_segment_ids = {
+            str(segment_id)
+            for item in failed
+            for segment_id in (item.get("segment_ids") or [])
+            if segment_id
+        }
+
+        for clip_path in sorted(failed_paths):
+            try:
+                Path(clip_path).unlink(missing_ok=True)
+                self._log_entry(
+                    "",
+                    "delete",
+                    f"Deleted invalid clip before recapture: {Path(clip_path).name}",
+                    extra={"clip_path": clip_path},
+                )
+                command_log.record(
+                    "capture-delete-invalid-clip",
+                    {"clip_path": clip_path},
+                    result="ok",
+                    source="script_capture",
+                )
+            except Exception as exc:
+                self._log_entry(
+                    "",
+                    "delete",
+                    f"Failed to delete invalid clip {clip_path}: {exc}",
+                    success=False,
+                    extra={"clip_path": clip_path, "error": str(exc)},
+                )
+
+        self._clips = [
+            clip for clip in self._clips
+            if str(clip.get("path") or "") not in failed_paths
+            and not (set(map(str, clip.get("segments") or [])) & failed_segment_ids)
+        ]
+        self._composition_manifest = [
+            entry for entry in self._composition_manifest
+            if str(entry.get("path") or "") not in failed_paths
+            and str(entry.get("id") or "") not in failed_segment_ids
+        ]
 
     def _build_clip_name(
         self, seg_id: str, section: str, seg_type: str,

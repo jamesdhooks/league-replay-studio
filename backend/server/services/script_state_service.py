@@ -177,7 +177,7 @@ class ScriptStateService:
         state = self.load_state(project_dir)
         segments = {}
         for seg in script:
-            if seg.get("type") == "transition":
+            if seg.get("type") in {"transition", "bridge"}:
                 continue
             seg_id = seg.get("id", seg.get("segment_id", ""))
             if not seg_id:
@@ -196,6 +196,7 @@ class ScriptStateService:
                     "start_time": seg.get("start_time_seconds", 0),
                     "end_time": seg.get("end_time_seconds", 0),
                     "event_type": seg.get("event_type", seg.get("type", "")),
+                    "segment_type": seg.get("type", ""),
                     "is_pip": bool(seg.get("pip")),
                 }
 
@@ -248,7 +249,7 @@ class ScriptStateService:
         # Build new segment map
         new_ids = set()
         for seg in new_script:
-            if seg.get("type") == "transition":
+            if seg.get("type") in {"transition", "bridge"}:
                 continue
             seg_id = seg.get("id", seg.get("segment_id", ""))
             if not seg_id:
@@ -272,6 +273,7 @@ class ScriptStateService:
                     "start_time": seg.get("start_time_seconds", 0),
                     "end_time": seg.get("end_time_seconds", 0),
                     "event_type": seg.get("event_type", seg.get("type", "")),
+                    "segment_type": seg.get("type", ""),
                     "is_pip": bool(seg.get("pip")),
                 }
                 invalidated += 1
@@ -285,6 +287,7 @@ class ScriptStateService:
                     "start_time": seg.get("start_time_seconds", 0),
                     "end_time": seg.get("end_time_seconds", 0),
                     "event_type": seg.get("event_type", seg.get("type", "")),
+                    "segment_type": seg.get("type", ""),
                     "is_pip": bool(seg.get("pip")),
                 }
                 new_count += 1
@@ -340,15 +343,86 @@ class ScriptStateService:
             state["segments"][segment_id]["clip_path"] = None
             self.save_state(project_dir, state)
 
-    def invalidate_segment(self, project_dir: str, segment_id: str, reason: str = "manual") -> None:
-        """Invalidate a segment's capture (e.g. camera/driver change in editing)."""
+    def reset_corrupt_capture_segments(self, project_dir: str, segment_ids: list[str]) -> list[str]:
+        """Clear corrupt clip references after the files have been deleted."""
+        state = self.load_state(project_dir)
+        reset: list[str] = []
+        for segment_id in sorted({str(value) for value in segment_ids if value}):
+            segment = state.get("segments", {}).get(segment_id)
+            if not segment:
+                continue
+            segment["capture_state"] = CAPTURE_UNCAPTURED
+            segment["clip_path"] = None
+            segment["corrupt_capture_reset_at"] = time.time()
+            reset.append(segment_id)
+        if reset:
+            self.save_state(project_dir, state)
+        return reset
+
+    def clear_all_captures(self, project_dir: str, reason: str = "clear_all_requested") -> dict:
+        """Archive every captured clip and return all capturable segments to uncaptured.
+
+        This is used both for an explicit user-requested clear and before a
+        Capture All pass.  Files are moved into the project trash rather than
+        overwritten or deleted, so the prior capture set remains recoverable.
+        """
+        state = self.load_state(project_dir)
+        segment_states = state.get("segments", {})
+        reset_ids: list[str] = []
+        archived_paths: set[str] = set()
+
+        for segment_id, segment in segment_states.items():
+            if segment.get("segment_type") in {"transition", "bridge"}:
+                continue
+
+            reset_ids.append(str(segment_id))
+            clip_path = str(segment.get("clip_path") or "").strip()
+            if clip_path and clip_path not in archived_paths:
+                if self._trash_clip(project_dir, state, str(segment_id), segment, reason):
+                    archived_paths.add(clip_path)
+
+            segment["capture_state"] = CAPTURE_UNCAPTURED
+            segment["clip_path"] = None
+            segment["cleared_for_recapture_at"] = time.time()
+
+        if reset_ids:
+            self.save_state(project_dir, state)
+
+        result = {
+            "reset_segment_ids": sorted(reset_ids),
+            "archived_clip_count": len(archived_paths),
+        }
+        logger.info(
+            "[ScriptState] Cleared captures: segments=%d archived_clips=%d reason=%s",
+            len(result["reset_segment_ids"]),
+            result["archived_clip_count"],
+            reason,
+        )
+        return result
+
+    def invalidate_segment(self, project_dir: str, segment_id: str, reason: str = "manual") -> list[str]:
+        """Archive a segment's source clip and reset every event sharing it."""
         state = self.load_state(project_dir)
         seg_info = state.get("segments", {}).get(segment_id)
-        if seg_info and seg_info.get("capture_state") == CAPTURE_CAPTURED:
-            self._trash_clip(project_dir, state, segment_id, seg_info, reason)
-            seg_info["capture_state"] = CAPTURE_UNCAPTURED
-            seg_info["clip_path"] = None
-            self.save_state(project_dir, state)
+        if not seg_info or seg_info.get("capture_state") != CAPTURE_CAPTURED:
+            return []
+
+        clip_path = str(seg_info.get("clip_path") or "")
+        linked_segment_ids = [
+            str(existing_id)
+            for existing_id, existing_info in state.get("segments", {}).items()
+            if existing_info.get("capture_state") == CAPTURE_CAPTURED
+            and str(existing_info.get("clip_path") or "") == clip_path
+        ]
+        self._trash_clip(project_dir, state, segment_id, seg_info, reason)
+        for linked_id in linked_segment_ids:
+            linked = state["segments"][linked_id]
+            linked["capture_state"] = CAPTURE_UNCAPTURED
+            linked["clip_path"] = None
+            linked["invalidated_at"] = time.time()
+            linked["invalidation_reason"] = reason
+        self.save_state(project_dir, state)
+        return sorted(linked_segment_ids)
 
     def get_segment_states(self, project_dir: str) -> dict:
         """Return all segment capture states."""
@@ -477,7 +551,11 @@ class ScriptStateService:
             if mode == MODE_ALL:
                 result.append(seg)
             elif mode == MODE_UNCAPTURED:
-                if seg_state in (CAPTURE_UNCAPTURED, CAPTURE_INVALIDATED):
+                # A prior interrupted run can leave a segment marked
+                # ``capturing`` even though no capture worker remains. The
+                # route rejects concurrent runs, so it is safe to recover it
+                # in the next uncaptured-only pass.
+                if seg_state in (CAPTURE_UNCAPTURED, CAPTURE_INVALIDATED, CAPTURE_CAPTURING):
                     result.append(seg)
             elif mode == MODE_SPECIFIC:
                 if str(seg_id).strip() in selected_ids:
@@ -619,16 +697,16 @@ class ScriptStateService:
 
     # ── Trash Bin ───────────────────────────────────────────────────────────
 
-    def _trash_clip(self, project_dir: str, state: dict, segment_id: str, seg_info: dict, reason: str) -> None:
+    def _trash_clip(self, project_dir: str, state: dict, segment_id: str, seg_info: dict, reason: str) -> bool:
         """Move a clip to the trash directory."""
         clip_path = seg_info.get("clip_path")
         if not clip_path:
-            return
+            return False
 
         src = Path(clip_path)
         if not src.exists():
             logger.debug("[ScriptState] Clip not found for trash: %s", clip_path)
-            return
+            return False
 
         trash_dir = self._trash_dir(project_dir)
         trash_dir.mkdir(parents=True, exist_ok=True)
@@ -652,8 +730,10 @@ class ScriptStateService:
                 "event_type": seg_info.get("event_type", ""),
             })
             logger.info("[ScriptState] Trashed clip %s → %s (reason: %s)", src.name, dest, reason)
+            return True
         except OSError as exc:
             logger.warning("[ScriptState] Failed to trash %s: %s", clip_path, exc)
+            return False
 
     def get_trash(self, project_dir: str) -> list[dict]:
         """Return the trash bin contents."""

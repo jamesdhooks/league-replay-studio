@@ -87,29 +87,29 @@ function StepIndicator({
             <div className="flex flex-col items-stretch">
               <button
                 onClick={() => onStepClick?.(step.id)}
-                title={`${step.label}${status === 'completed' ? ' ✓' : status === 'active' ? ' (current)' : ''}`}
+                title={`${step.label}${status === 'completed' ? ' ✓' : ''}${isCurrent ? ' (current)' : ''}`}
                 className={`
                   relative overflow-hidden flex items-center gap-1.5 rounded-lg font-medium transition-all duration-150 cursor-pointer
                   ${compact ? 'px-1.5 py-1' : 'px-3 py-1.5'}
                   ${step.id === 'pipeline'
-                    ? status === 'active'
+                    ? isCurrent
                       ? 'bg-accent/20 text-accent ring-1 ring-accent/30'
                       : 'text-accent/70 hover:bg-accent/10 hover:text-accent'
+                    : isCurrent
+                      ? 'bg-gradient-to-r from-gradient-from/20 via-gradient-via/15 to-gradient-to/20 text-accent ring-1 ring-accent/20'
                     : status === 'background-running'
                       ? 'bg-violet-500/8 text-violet-300 ring-1 ring-violet-400/20'
                     : status === 'failed'
                       ? 'bg-danger/10 text-danger ring-1 ring-danger/30'
                     : status === 'completed'
                       ? 'text-success hover:bg-success/10'
-                      : status === 'active'
-                        ? 'bg-gradient-to-r from-gradient-from/20 via-gradient-via/15 to-gradient-to/20 text-accent ring-1 ring-accent/20'
-                        : 'text-text-secondary hover:bg-bg-hover'
+                    : 'text-text-secondary hover:bg-bg-hover'
                   }
                 `}
               >
                 {showProgressFill && (
                   <div
-                    className={`absolute inset-y-0 left-0 pointer-events-none ${status === 'active' ? 'bg-accent/24' : 'bg-accent/12'}`}
+                    className={`absolute inset-y-0 left-0 pointer-events-none ${isCurrent ? 'bg-accent/24' : 'bg-accent/12'}`}
                     style={{ width: `${normalizedProgress}%` }}
                     aria-hidden="true"
                   />

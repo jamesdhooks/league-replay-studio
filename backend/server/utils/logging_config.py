@@ -67,6 +67,14 @@ def setup_logging(log_dir: Path, level: int = logging.INFO) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "app.log"
 
+    # Windows consoles often use cp1252. Keep console diagnostics alive even
+    # when an upstream library emits a non-ASCII character.
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(errors="backslashreplace")
+        except (AttributeError, OSError):
+            pass
+
     # Truncate log if too large (> 1 MB) — keep last 50 KB
     max_bytes = 1_000_000
     if log_path.exists() and log_path.stat().st_size > max_bytes:

@@ -343,6 +343,28 @@ async def validate_replay_project(project_id: int, scope: str = "all") -> dict[s
     return await _request("GET", f"/agent/projects/{project_id}/validate?scope={scope}")
 
 
+@mcp.tool()
+async def validate_capture_clips(project_id: int, delete_and_reset_corrupt: bool = False) -> dict[str, Any]:
+    """Run ffprobe on captured clips; optionally delete/reset confirmed corrupt events."""
+    return await _request(
+        "POST",
+        f"/agent/projects/{project_id}/capture/validate-clips",
+        {"recover_corrupt": delete_and_reset_corrupt},
+    )
+
+
+@mcp.tool()
+async def get_capture_clip_validation_status(project_id: int) -> dict[str, Any]:
+    """Monitor an in-progress manual capture clip validation or recovery job."""
+    return await _request("GET", f"/agent/projects/{project_id}/capture/validate-clips/status")
+
+
+@mcp.tool()
+async def clear_capture_clips(project_id: int) -> dict[str, Any]:
+    """Archive all captured clips to project trash and reset them for a fresh capture pass."""
+    return await _request("POST", f"/script-state/{project_id}/clear-captures", {})
+
+
 # ── Project Files ──────────────────────────────────────────────────────────
 
 @mcp.tool()

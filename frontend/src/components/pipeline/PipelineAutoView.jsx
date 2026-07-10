@@ -28,7 +28,7 @@ import { useCapture } from '../../context/CaptureContext'
 import { useComposition } from '../../context/CompositionContext'
 import { useEncoding } from '../../context/EncodingContext'
 import { useYouTube } from '../../context/YouTubeContext'
-import UnifiedLogList from '../ui/UnifiedLogList'
+import LogViewer from '../ui/LogViewer'
 import {
   normalizeAnalysisLogEntries,
   normalizeCaptureLogEntries,
@@ -1050,34 +1050,27 @@ export default function PipelineAutoView({ docked = false }) {
 
               {/* ── Log panel ─────────────────────────────────────────── */}
               <div className="rounded-xl border border-border overflow-hidden">
-                <div className="flex items-center justify-between px-3 py-2
-                                bg-bg-secondary border-b border-border">
-                  <span className="text-xxs font-semibold text-text-secondary uppercase tracking-wider">
-                    Activity Log
-                  </span>
-                  <span className="text-[10px] text-text-disabled uppercase tracking-wider">
-                    {dynamicLogSource.label} feed
-                  </span>
-                  {isRunning && lastLog && (
+                <LogViewer
+                  title="Activity Log"
+                  subtitle={`${dynamicLogSource.label} feed`}
+                  entries={activityLogEntries}
+                  rawEntries={logEntries}
+                  schema="league-replay-studio.activity-log"
+                  emptyMessage={isRunning ? 'Waiting for log entries...' : 'No log entries yet'}
+                  maxHeightClass="max-h-48"
+                  className="bg-bg-primary"
+                  bodyClassName="bg-bg-primary"
+                  headerClassName="border-border"
+                  compact
+                  listRef={logContainerRef}
+                  footerRef={logEndRef}
+                >
+                  {isRunning && lastLog ? (
                     <span className="text-xxs text-text-disabled truncate ml-2 max-w-[200px]">
                       {lastLog.message}
                     </span>
-                  )}
-                </div>
-                <div
-                  ref={logContainerRef}
-                  className="max-h-48 overflow-y-auto bg-bg-primary py-1"
-                  style={{ scrollbarWidth: 'thin' }}
-                >
-                  <UnifiedLogList
-                    entries={activityLogEntries}
-                    emptyMessage={isRunning ? 'Waiting for log entries…' : 'No log entries yet'}
-                    maxHeightClass="max-h-none"
-                    className="bg-bg-primary py-1"
-                    compact
-                  />
-                  <div ref={logEndRef} />
-                </div>
+                  ) : null}
+                </LogViewer>
               </div>
 
               {/* ── Created files panel ────────────────────────────────── */}
@@ -1115,4 +1108,3 @@ export default function PipelineAutoView({ docked = false }) {
     </div>
   )
 }
-

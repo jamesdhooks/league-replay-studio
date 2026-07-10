@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -64,6 +65,7 @@ from server.services.analysis_db import (
 )
 from server.services.detectors import ALL_DETECTORS
 from server.services.replay_analysis import ReplayAnalyzer
+from server.services.run_log_file_service import run_log_file_service
 
 logger = logging.getLogger(__name__)
 
@@ -162,10 +164,24 @@ def _build_session_info_from_body(body) -> dict:
     return info
 
 
-def _append_redetect_log(project_dir: str, log_entries: list[dict]) -> None:
-    """Append redetect log entries to the project's analysis_log.json file."""
+def _append_redetect_log(project_id: int, project_dir: str, log_entries: list[dict]) -> None:
+    """Append redetect entries to the UI log and timestamped run-log archive."""
     try:
         from pathlib import Path
+        log_file_path = run_log_file_service.start_run(
+            scope="analysis",
+            run_id=f"redetect-{int(time.time())}",
+            project_id=project_id,
+            project_dir=project_dir,
+            metadata={"phase": "redetect"},
+        )
+        run_log_file_service.write_snapshot(
+            log_file_path,
+            log_entries,
+            latest_path=run_log_file_service.latest_path_for(log_file_path),
+            metadata={"phase": "redetect", "final_entry_count": len(log_entries)},
+            state=log_entries[-1].get("event") if log_entries else None,
+        )
         log_path = Path(project_dir) / "analysis_log.json"
         existing: list[dict] = []
         if log_path.exists():
@@ -188,7 +204,6 @@ def _run_redetect_sync(project_id: int, project_dir: str, session_info: dict) ->
     All _on_progress calls are thread-safe because _analysis_broadcast uses
     run_coroutine_threadsafe internally.
     """
-    import time
     conn = get_project_db(project_dir)
     redetect_log: list[dict] = []
     try:
@@ -290,7 +305,7 @@ def _run_redetect_sync(project_id: int, project_dir: str, session_info: dict) ->
             "description": f"Re-detection complete — {total} events found",
         })
 
-        _append_redetect_log(project_dir, redetect_log)
+        _append_redetect_log(project_id, project_dir, redetect_log)
         return total
     finally:
         conn.close()

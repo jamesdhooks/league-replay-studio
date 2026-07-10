@@ -134,7 +134,7 @@ class TestScriptLock:
     def test_lock_creates_state(self, svc, project_dir, sample_script):
         state = svc.lock_script(project_dir, sample_script)
         assert state["script_locked"] is True
-        # Transitions are excluded
+        # Transitions and composition bridges are excluded.
         assert "seg_3" not in state["segments"]
         # Non-transitions included (including pip)
         assert "seg_1" in state["segments"]
@@ -142,6 +142,19 @@ class TestScriptLock:
         assert "seg_4" in state["segments"]
         assert state["segments"]["seg_1"]["capture_state"] == CAPTURE_UNCAPTURED
         assert state["segments"]["seg_4"]["is_pip"] is True
+
+    def test_lock_excludes_bridge_segments(self, svc, project_dir, sample_script):
+        bridge = {
+            "id": "bridge_1",
+            "type": "bridge",
+            "section": "race",
+            "start_time_seconds": 25,
+            "end_time_seconds": 30,
+        }
+
+        state = svc.lock_script(project_dir, [*sample_script, bridge])
+
+        assert "bridge_1" not in state["segments"]
 
     def test_unlock(self, svc, project_dir, sample_script):
         svc.lock_script(project_dir, sample_script)
@@ -188,7 +201,53 @@ class TestCaptureState:
         svc.mark_uncaptured(project_dir, "seg_1")
         states = svc.get_segment_states(project_dir)
         assert states["seg_1"]["capture_state"] == CAPTURE_UNCAPTURED
+
+    def test_reset_corrupt_capture_segments_clears_clip_without_trashing(self, svc, project_dir, sample_script):
+        svc.lock_script(project_dir, sample_script)
+        clip_path = os.path.join(project_dir, "clips", "seg_1.mp4")
+        open(clip_path, "w").close()
+        svc.mark_captured(project_dir, "seg_1", clip_path)
+
+        reset = svc.reset_corrupt_capture_segments(project_dir, ["seg_1", "unknown"])
+        states = svc.get_segment_states(project_dir)
+
+        assert reset == ["seg_1"]
+        assert states["seg_1"]["capture_state"] == CAPTURE_UNCAPTURED
         assert states["seg_1"]["clip_path"] is None
+        assert os.path.exists(clip_path)
+        assert svc.get_trash(project_dir) == []
+        assert states["seg_1"]["clip_path"] is None
+
+    def test_clear_all_captures_archives_clips_and_resets_only_capturable_segments(self, svc, project_dir, sample_script):
+        bridge = {"id": "bridge_1", "type": "bridge", "section": "race", "start_time_seconds": 5, "end_time_seconds": 6}
+        svc.lock_script(project_dir, [*sample_script, bridge])
+        first_clip = os.path.join(project_dir, "clips", "seg_1.mp4")
+        second_clip = os.path.join(project_dir, "clips", "seg_2.mp4")
+        os.makedirs(os.path.dirname(first_clip), exist_ok=True)
+        open(first_clip, "w").close()
+        open(second_clip, "w").close()
+        svc.mark_captured(project_dir, "seg_1", first_clip)
+        svc.mark_captured(project_dir, "seg_2", second_clip)
+
+        state = svc.load_state(project_dir)
+        state["segments"]["bridge_1"] = {"capture_state": CAPTURE_CAPTURED, "segment_type": "bridge", "clip_path": "bridge.mp4"}
+        svc.save_state(project_dir, state)
+
+        result = svc.clear_all_captures(project_dir)
+        states = svc.get_segment_states(project_dir)
+
+        assert result["archived_clip_count"] == 2
+        assert set(result["reset_segment_ids"]) == {
+            segment["id"] for segment in sample_script
+            if segment.get("type") not in {"transition", "bridge"}
+        }
+        assert states["seg_1"]["capture_state"] == CAPTURE_UNCAPTURED
+        assert states["seg_1"]["clip_path"] is None
+        assert states["seg_2"]["capture_state"] == CAPTURE_UNCAPTURED
+        assert not os.path.exists(first_clip)
+        assert not os.path.exists(second_clip)
+        assert len(svc.get_trash(project_dir)) == 2
+        assert states["bridge_1"]["capture_state"] == CAPTURE_CAPTURED
 
     def test_capture_summary(self, svc, project_dir, sample_script):
         svc.lock_script(project_dir, sample_script)
@@ -277,6 +336,14 @@ class TestCaptureRange:
         assert "seg_1" not in ids
         assert "seg_2" in ids
         assert "seg_4" in ids
+
+    def test_filter_uncaptured_recovers_stale_capturing_segments(self, svc, project_dir, sample_script):
+        svc.lock_script(project_dir, sample_script)
+        svc.mark_capturing(project_dir, "seg_2")
+
+        result = svc.filter_segments_by_mode(project_dir, sample_script, MODE_UNCAPTURED)
+
+        assert "seg_2" in [segment["id"] for segment in result]
 
     def test_filter_specific(self, svc, project_dir, sample_script):
         svc.lock_script(project_dir, sample_script)
@@ -390,3 +457,20 @@ class TestRelockPreserves:
         modified[0]["driver_name"] = "Lando"
         state = svc.lock_script(project_dir, modified)
         assert state["segments"]["seg_1"]["capture_state"] == CAPTURE_UNCAPTURED
+
+    def test_invalidate_segment_resets_every_event_sharing_its_clip(self, svc, project_dir, sample_script):
+        svc.lock_script(project_dir, sample_script)
+        clip_path = os.path.join(project_dir, "clips", "shared.mp4")
+        open(clip_path, "w").close()
+        svc.mark_captured(project_dir, "seg_1", clip_path)
+        svc.mark_captured(project_dir, "seg_2", clip_path)
+
+        invalidated = svc.invalidate_segment(project_dir, "seg_1", "manual_recapture")
+        state = svc.get_segment_states(project_dir)
+
+        assert invalidated == ["seg_1", "seg_2"]
+        assert state["seg_1"]["capture_state"] == CAPTURE_UNCAPTURED
+        assert state["seg_2"]["capture_state"] == CAPTURE_UNCAPTURED
+        assert state["seg_1"]["clip_path"] is None
+        assert state["seg_2"]["clip_path"] is None
+        assert len(svc.get_trash(project_dir)) == 1
