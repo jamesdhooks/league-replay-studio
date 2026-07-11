@@ -69,6 +69,7 @@ const DEFAULT_PARAMS = {
   paddingBefore: 2.0,           // Default seconds before event start to include in each clip
   paddingAfter: 5.0,            // Default seconds after event end to include in each clip
   paddingByType: {},            // Per event-type padding overrides: { type: { before, after } }
+  continuityPreference: 0,      // 0 = cut-focused, 100 = prefer uninterrupted race sequences
   cameraWeights: {},            // Per-camera weight overrides: { group_name: 0–100 } — empty = all equal (50)
   cameraRecencyPenalty: 0.5,    // 0 = no recency penalty, 1 = maximum penalty for recently-used cameras
   cameraRecencyDecay: 30.0,     // Seconds for recency penalty to decay back to zero
@@ -135,6 +136,7 @@ export function HighlightProvider({ children }) {
     const SECTION_CONFIG_KEY = 'lrs:highlights:sectionConfig'
     const CLIP_PADDING_KEY = 'lrs:highlights:clipPadding'
     const [params, setParams] = useLocalStorage(PARAMS_KEY, { ...DEFAULT_PARAMS })
+  const [sectionConfig, setSectionConfig] = useLocalStorage(SECTION_CONFIG_KEY, {})
   const [replayMode, setReplayMode] = useLocalStorage('lrs:highlights:replayMode', 'highlights')
 
   // ── One-time version migration: merge any new default keys into stored objects ──
@@ -186,10 +188,19 @@ export function HighlightProvider({ children }) {
   // React 19: Use transition for heavy reprocessing operations
   const [isReprocessing, startReprocessTransition] = useTransition()
 
+  const fixedSectionDuration = useMemo(() => (
+    Number(sectionConfig?.intro?.duration ?? 10)
+    + Number(sectionConfig?.qualifying_results?.duration ?? 15)
+    + Number(sectionConfig?.race_results?.duration ?? 20)
+  ), [sectionConfig])
+  const raceTargetDuration = targetDuration == null
+    ? null
+    : Math.max(0.001, targetDuration - fixedSectionDuration)
+
   // ── Computed selection (memoised, <100ms) ───────────────────────────────
   const selection = useMemo(
     () => {
-      const result = computeHighlightSelection(events, weights, targetDuration, minSeverity, overrides, raceDuration, drivers, params)
+      const result = computeHighlightSelection(events, weights, raceTargetDuration, minSeverity, overrides, raceDuration, drivers, params)
       if (replayMode === 'full') {
         return {
           ...result,
@@ -198,13 +209,13 @@ export function HighlightProvider({ children }) {
       }
       return result
     },
-    [replayMode, events, weights, targetDuration, minSeverity, overrides, raceDuration, drivers, params],
+    [replayMode, events, weights, raceTargetDuration, minSeverity, overrides, raceDuration, drivers, params],
   )
 
   // ── Production timeline (overlap-aware, memoised) ─────────────────────
   const productionTimeline = useMemo(
-    () => buildProductionTimeline(selection, targetDuration, params, raceDuration, replayMode),
-    [selection, targetDuration, params, raceDuration, replayMode],
+    () => buildProductionTimeline(selection, raceTargetDuration, params, raceDuration, replayMode),
+    [selection, raceTargetDuration, params, raceDuration, replayMode],
   )
 
   // ── Sorted & filtered event list ───────────────────────────────────────
@@ -344,7 +355,6 @@ export function HighlightProvider({ children }) {
   const setVideoSections = useCallback((sections) => {
     _setVideoSections(sections)
   }, [])
-  const [sectionConfig, setSectionConfig] = useLocalStorage(SECTION_CONFIG_KEY, {})  // Per-section overrides
   const [clipPadding, setClipPadding] = useLocalStorage(CLIP_PADDING_KEY, 0.5)       // Seconds of pre-roll
   // ── Script execution action log ────────────────────────────────────────
   // Each entry: { id, ts, eventType, section, cameraLabel, driverName, raceTime }
@@ -416,6 +426,7 @@ export function HighlightProvider({ children }) {
           new_driver_boost: params.newDriverBoost ?? 1.40,
           repeat_driver_penalty: params.repeatDriverPenalty ?? 0.25,
           target_unique_driver_share: params.targetUniqueDriverShare ?? 0.60,
+          continuity_preference: params.continuityPreference ?? 0,
         },
         tuning: {
           normalizationMode: params.normalizationMode ?? 'cross_type',
@@ -488,6 +499,7 @@ export function HighlightProvider({ children }) {
           new_driver_boost: params.newDriverBoost ?? 1.40,
           repeat_driver_penalty: params.repeatDriverPenalty ?? 0.25,
           target_unique_driver_share: params.targetUniqueDriverShare ?? 0.60,
+          continuity_preference: params.continuityPreference ?? 0,
         },
         tuning: {
           normalizationMode: params.normalizationMode ?? 'cross_type',
@@ -694,11 +706,11 @@ export function HighlightProvider({ children }) {
 
   // ── A/B compare ───────────────────────────────────────────────────────
   const startABCompare = useCallback(() => {
-    setConfigA({ weights: { ...weights }, targetDuration, minSeverity, overrides: { ...overrides } })
-    setConfigB({ weights: { ...weights }, targetDuration, minSeverity, overrides: { ...overrides } })
+    setConfigA({ weights: { ...weights }, targetDuration, minSeverity, overrides: { ...overrides }, params: { ...params }, sectionConfig: { ...sectionConfig } })
+    setConfigB({ weights: { ...weights }, targetDuration, minSeverity, overrides: { ...overrides }, params: { ...params }, sectionConfig: { ...sectionConfig } })
     setActiveConfig('A')
     setAbMode(true)
-  }, [weights, targetDuration, minSeverity, overrides])
+  }, [weights, targetDuration, minSeverity, overrides, params, sectionConfig])
 
   const stopABCompare = useCallback(() => {
     setAbMode(false)
@@ -708,7 +720,7 @@ export function HighlightProvider({ children }) {
 
   const switchABConfig = useCallback((which) => {
     // Save current state to current config slot
-    const currentState = { weights: { ...weights }, targetDuration, minSeverity, overrides: { ...overrides } }
+    const currentState = { weights: { ...weights }, targetDuration, minSeverity, overrides: { ...overrides }, params: { ...params }, sectionConfig: { ...sectionConfig } }
     if (activeConfig === 'A') {
       setConfigA(currentState)
     } else {
@@ -722,9 +734,11 @@ export function HighlightProvider({ children }) {
       setTargetDuration(target.targetDuration)
       setMinSeverity(target.minSeverity)
       setOverrides(target.overrides)
+      if (target.params) setParams(target.params)
+      if (target.sectionConfig) setSectionConfig(target.sectionConfig)
     }
     setActiveConfig(which)
-  }, [activeConfig, configA, configB, weights, targetDuration, minSeverity, overrides])
+  }, [activeConfig, configA, configB, weights, targetDuration, minSeverity, overrides, params, sectionConfig, setParams, setSectionConfig])
 
   // ── Presets ────────────────────────────────────────────────────────────
   const loadPresets = useCallback(async () => {
@@ -894,6 +908,8 @@ export function HighlightProvider({ children }) {
     selection,
     productionTimeline,
     productionMetrics: productionTimeline?.metrics || {},
+    fixedSectionDuration,
+    raceTargetDuration,
     filteredEvents,
     metrics: selection.metrics,
 
@@ -959,7 +975,7 @@ export function HighlightProvider({ children }) {
     weights, setWeight, targetDuration, minSeverity,
     params,
     overrides, toggleOverride, setOverrideValue,
-    selection, productionTimeline, filteredEvents,
+    selection, productionTimeline, filteredEvents, fixedSectionDuration, raceTargetDuration,
     loadConfig, saveConfig, applyHighlights, loadDrivers, autoBalance, jumpToEvent,
     reprocessHighlights, generateVideoScript, updateSectionConfig,
     serverScoring, serverScoredEvents, serverMetrics,

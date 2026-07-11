@@ -16,6 +16,7 @@ export default function LabeledSlider({
   max,
   step,
   format = v => v,
+  tickFormat = format,
   onChange,
   labelWidth = '5.5rem',
 }) {
@@ -68,7 +69,7 @@ export default function LabeledSlider({
                 <div key={v} className="absolute flex flex-col items-center"
                      style={{ left: `calc(${pct} * (100% - 16px) + 8px)`, transform: 'translateX(-50%)' }}>
                   <div className="w-px h-1 bg-text-disabled/40" />
-                  <span className="text-[8px] text-text-disabled font-mono leading-none mt-px">{format(v)}</span>
+                  <span className="text-[8px] text-text-disabled font-mono leading-none mt-px">{tickFormat(v)}</span>
                 </div>
               )
             })}

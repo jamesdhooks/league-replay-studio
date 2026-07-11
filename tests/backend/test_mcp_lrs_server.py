@@ -214,3 +214,27 @@ def test_generic_mcp_tools_route_auto_pipeline_and_project_calls(monkeypatch):
             "confirm_public": False,
         },
     )
+
+
+def test_mcp_generate_highlight_script_routes_continuity_payload(monkeypatch):
+    calls = []
+
+    async def fake_request(method, path, json_body=None):
+        calls.append((method, path, json_body))
+        return {"script": []}
+
+    monkeypatch.setattr(mcp_lrs_server, "_request", fake_request)
+    run_async(mcp_lrs_server.generate_highlight_script(7, target_duration=300, continuity_preference=75))
+
+    assert calls == [(
+        "POST",
+        "/agent/projects/7/highlights/generate-script",
+        {
+            "target_duration": 300,
+            "continuity_preference": 75,
+            "weights": {},
+            "min_severity": 0,
+            "overrides": {},
+            "section_config": {},
+        },
+    )]

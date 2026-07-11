@@ -13,14 +13,14 @@ import CollapsibleSection from '../ui/CollapsibleSection'
  * Updates within 100ms of any parameter change (computed in HighlightContext).
  */
 export default memo(function HighlightMetrics() {
-  const { metrics, targetDuration, videoScript, params } = useHighlight()
+  const { metrics, productionMetrics, targetDuration, videoScript, params, fixedSectionDuration } = useHighlight()
   const { raceDuration } = useTimeline()
   const [metricsExpanded, setMetricsExpanded] = useLocalStorage('lrs:editing:metrics:expanded', true)
 
   // Full production video duration: sum all edit segments (includes intro/outro sections).
   // This matches the "X total" shown in the race script timeline.
   const videoDuration = useMemo(() => {
-    if (!videoScript?.length) return metrics.duration
+    if (!videoScript?.length) return (productionMetrics.duration || metrics.duration || 0) + (fixedSectionDuration || 0)
     return videoScript
       .filter(s => s.type !== 'transition')
       .reduce((acc, s) => {
@@ -31,7 +31,7 @@ export default memo(function HighlightMetrics() {
         if (s.type === 'bridge') return acc
         return acc + Math.max(1, rawDur + padBef + padAft)
       }, 0)
-  }, [videoScript, metrics.duration])
+  }, [videoScript, metrics.duration, productionMetrics.duration, fixedSectionDuration])
 
   const overTarget = targetDuration && videoDuration > targetDuration
   const underTarget = targetDuration && videoDuration < targetDuration * 0.9
@@ -54,6 +54,24 @@ export default memo(function HighlightMetrics() {
             warning={overTarget ? 'Over target' : underTarget ? 'Under target' : null}
             warningColor={overTarget ? 'text-danger' : 'text-warning'}
           />
+
+          {(params?.continuityPreference ?? 0) > 0 && (
+            <>
+              <MetricRow
+                icon={Activity}
+                label="Sequences"
+                tooltip="Uninterrupted race sequences after continuity optimization"
+                value={`${productionMetrics.continuitySequenceCount || 0}`}
+                suffix={` / ${productionMetrics.hardCutCount || 0} cuts`}
+              />
+              <MetricRow
+                icon={Clock}
+                label="Retained flow"
+                tooltip="Race footage kept between nearby events; this time counts toward the target"
+                value={formatDuration(productionMetrics.continuityDuration || 0)}
+              />
+            </>
+          )}
 
           {/* Event count */}
           <MetricRow

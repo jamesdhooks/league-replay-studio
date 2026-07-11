@@ -31,7 +31,7 @@ import LabeledSlider from '../ui/LabeledSlider'
  * @param {number} props.projectId - Active project ID
  */
 export default function HighlightPanel({ projectId }) {
-  const { loadConfig, loadDrivers, loadPresets, replayMode, setReplayMode, videoSections, sectionConfig, updateSectionConfig, metrics, targetDuration, setTargetDuration } = useHighlight()
+  const { loadConfig, loadDrivers, loadPresets, replayMode, setReplayMode, videoSections, sectionConfig, updateSectionConfig, metrics, targetDuration, setTargetDuration, params, setParams } = useHighlight()
   const { loadRaceDuration } = useTimeline()
   const { fetchEvents, events } = useAnalysis()
   const { history } = useUndoRedo()
@@ -222,7 +222,24 @@ export default function HighlightPanel({ projectId }) {
                   value={targetDuration ? Math.round(targetDuration / 60) : 0}
                   min={0} max={30} step={1}
                   format={v => v === 0 ? 'No limit' : `${v} min`}
+                  tickFormat={v => v === 0 ? 'Off' : `${v}m`}
                   onChange={v => setTargetDuration(v === 0 ? null : v * 60)}
+                  labelWidth="7rem"
+                />
+                <LabeledSlider
+                  label="Continuity"
+                  tooltip="Prefer nearby events as uninterrupted race sequences. Retained gap footage counts toward the target duration."
+                  value={params.continuityPreference ?? 0}
+                  min={0} max={100} step={5}
+                  format={v => {
+                    if (v === 0) return 'Cut-focused'
+                    if (v <= 25) return 'Light flow'
+                    if (v <= 60) return 'Balanced'
+                    if (v <= 85) return 'Continuous'
+                    return 'Long takes'
+                  }}
+                  tickFormat={v => v}
+                  onChange={v => setParams(current => ({ ...current, continuityPreference: v }))}
                   labelWidth="7rem"
                 />
               </div>

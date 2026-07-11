@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
-from server.routes import api_agent, api_capture
+from server.routes import api_agent, api_analysis, api_capture
 from server.routes.api_agent import StepControlRequest, UploadStartRequest, start_agent_youtube_upload
 from server.routes.api_projects import build_auto_project_name
 
@@ -92,11 +92,35 @@ def test_agent_capabilities_include_capture_validation_controls():
     assert capabilities["features"]["manual_capture_clip_validation"] is True
     assert capabilities["features"]["capture_reset_with_trash"] is True
     assert capabilities["features"]["obs_websocket_control"] is True
+    assert capabilities["features"]["continuity_aware_script_generation"] is True
+    assert capabilities["highlights"]["target_duration_scope"] == "final_video"
+    assert capabilities["highlights"]["continuity"]["config_path"].endswith("continuityPreference")
+    assert capabilities["highlights"]["continuity"]["retained_gaps_count_toward_target"] is True
     assert validation["validator"] == "ffprobe+ffmpeg-decode"
     assert "retry_failed_clip_validation" in validation["config_keys"]
     assert validation["manual_actions"] == ["validate", "delete_and_reset_corrupt"]
     assert validation["status_endpoint"].endswith("/capture/validate-clips/status")
     assert capabilities["capture"]["recapture"]["capture_all_archives_existing"] is True
+
+
+def test_agent_highlight_generation_clamps_and_delegates(monkeypatch):
+    received = {}
+
+    async def fake_generate(project_id, request):
+        received["project_id"] = project_id
+        received["request"] = request
+        return {"script": [{"id": "prod_1"}]}
+
+    monkeypatch.setattr(api_analysis, "generate_video_script_endpoint", fake_generate)
+    result = asyncio.run(api_agent.generate_agent_highlight_script(
+        7,
+        api_agent.HighlightScriptRequest(target_duration=300, continuity_preference=140),
+    ))
+
+    assert result["script"][0]["id"] == "prod_1"
+    assert received["project_id"] == 7
+    assert received["request"].constraints["continuity_preference"] == 100
+
 
 
 def test_agent_manual_capture_validation_delegates_to_capture_route(monkeypatch):

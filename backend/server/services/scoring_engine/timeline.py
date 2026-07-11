@@ -160,6 +160,68 @@ def _evt_selection_duration(event: dict, constraints: Optional[dict] = None) -> 
     return core + before + after
 
 
+def _evt_window(event: dict, constraints: Optional[dict] = None) -> tuple[float, float]:
+    constraints = constraints or {}
+    metadata = event.get("metadata") or {}
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (json.JSONDecodeError, TypeError):
+            metadata = {}
+    event_type = event.get("event_type")
+    type_cfg = (constraints.get("padding_by_type") or {}).get(event_type) or {}
+    before = max(0.0, float(metadata.get("padding_before", type_cfg.get("before", constraints.get("padding_before", 0))) or 0))
+    after = max(0.0, float(metadata.get("padding_after", type_cfg.get("after", constraints.get("padding_after", 0))) or 0))
+    start = max(0.0, float(event.get("start_time_seconds", 0)) - before)
+    end = max(start, float(event.get("end_time_seconds", start)) + after)
+    return start, end
+
+
+def _continuity_settings(constraints: Optional[dict] = None) -> dict:
+    preference = max(0.0, min(100.0, float((constraints or {}).get("continuity_preference", 0) or 0)))
+    scale = preference / 100.0
+    return {
+        "preference": preference,
+        "scale": scale,
+        "enabled": preference > 0,
+        "max_gap": 1.0 + 14.0 * (scale ** 1.5),
+        "max_sequence_duration": 45.0 + 135.0 * scale,
+    }
+
+
+def _add_coverage_window(intervals: list[tuple[float, float]], window: tuple[float, float], settings: dict) -> dict:
+    before = sum(end - start for start, end in intervals)
+    connected = False
+    quality = 0.0
+    for interval_start, interval_end in intervals:
+        if window[1] < interval_start:
+            gap = interval_start - window[1]
+        elif interval_end < window[0]:
+            gap = window[0] - interval_end
+        else:
+            gap = 0.0
+        span = max(interval_end, window[1]) - min(interval_start, window[0])
+        if gap <= settings["max_gap"] and span <= settings["max_sequence_duration"]:
+            connected = True
+            quality = max(quality, 1.0 - gap / max(settings["max_gap"], 0.001))
+    merged = sorted([*intervals, window])
+    result: list[list[float]] = []
+    for start, end in merged:
+        if not result:
+            result.append([start, end])
+            continue
+        previous = result[-1]
+        gap = max(0.0, start - previous[1])
+        combined_end = max(previous[1], end)
+        if gap <= settings["max_gap"] and combined_end - previous[0] <= settings["max_sequence_duration"]:
+            previous[1] = combined_end
+        else:
+            result.append([start, end])
+    normalized = [(start, end) for start, end in result]
+    after = sum(end - start for start, end in normalized)
+    return {"intervals": normalized, "delta": max(0.0, after - before), "connected": connected, "quality": quality}
+
+
 def _find_overlap(seg: dict, resolved: list[dict]) -> Optional[dict]:
     """Find any segment in resolved that overlaps with seg."""
     s_start = seg.get("start_time_seconds", 0)
@@ -410,6 +472,7 @@ def allocate_timeline(
     pip_threshold = constraints.get("pip_threshold", DEFAULT_PIP_THRESHOLD)
     max_driver_exposure = constraints.get("max_driver_exposure", 0.25)
     min_severity = constraints.get("min_severity", 0)
+    continuity = _continuity_settings(constraints)
 
     # ── Diversity / mix-balancing constraints (Balanced Selection v3) ──────
     # All optional. When diversity_strength == 0 every diversity term collapses
@@ -460,6 +523,15 @@ def allocate_timeline(
 
     timeline = list(must_have)
     used_duration = sum(_evt_selection_duration(e, constraints) for e in timeline)
+    coverage_intervals: list[tuple[float, float]] = []
+    if continuity["enabled"]:
+        for event in sorted(timeline, key=lambda item: item.get("start_time_seconds", 0)):
+            coverage_intervals = _add_coverage_window(
+                coverage_intervals, _evt_window(event, constraints), continuity
+            )["intervals"]
+        used_duration = sum(end - start for start, end in coverage_intervals)
+    positive_scores = sorted(float(event.get("score", 0) or 0) for event in candidates if event.get("score", 0) > 0)
+    score_reference = positive_scores[len(positive_scores) // 2] if positive_scores else 1.0
 
     # Pass 2 — Bucket fill (with optional diversity/quota balancing)
     bucket_budgets = {
@@ -485,7 +557,7 @@ def allocate_timeline(
     remaining_pool = list(remaining)
     target = max(target_duration, 1.0)
 
-    def _effective_score(evt: dict) -> float:
+    def _effective_score(evt: dict, coverage: Optional[dict] = None) -> float:
         """Score after applying diversity/quota/bucket/driver-coverage factors. <=0 means skip."""
         t = evt.get("event_type", "unknown")
         b = evt.get("bucket", "mid")
@@ -498,7 +570,13 @@ def allocate_timeline(
         dcov = _driver_coverage_factor(
             _get_drivers(evt), seen_drivers, new_driver_boost, repeat_driver_penalty, driver_scale
         )
-        return max(0.0, evt.get("score", 0)) * q * decay * bdiv * dcov
+        result = max(0.0, evt.get("score", 0)) * q * decay * bdiv * dcov
+        if coverage is not None:
+            if coverage["connected"]:
+                result += score_reference * continuity["scale"] * coverage["quality"]
+            else:
+                result -= score_reference * 0.5 * continuity["scale"]
+        return result
 
     # Marginal-utility greedy: re-rank remaining each iteration so diversity
     # terms (which depend on already-selected counts) update correctly.
@@ -506,6 +584,7 @@ def allocate_timeline(
         best_idx = -1
         best_eff = -1.0
         best_evt = None
+        best_coverage = None
         for i, evt in enumerate(remaining_pool):
             if id(evt) in selected_ids:
                 continue
@@ -513,7 +592,14 @@ def allocate_timeline(
             budget = bucket_budgets.get(b, target_duration * 0.3)
             if bucket_used[b] >= budget:
                 continue
-            eff = _effective_score(evt)
+            coverage = (
+                _add_coverage_window(coverage_intervals, _evt_window(evt, constraints), continuity)
+                if continuity["enabled"] else None
+            )
+            incremental_duration = coverage["delta"] if coverage is not None else _evt_selection_duration(evt, constraints)
+            if target_duration > 0 and used_duration + incremental_duration > target_duration:
+                continue
+            eff = _effective_score(evt, coverage)
             # Tier still acts as a strong tie-breaker so S/A events outrank C even with decay.
             tier_bonus = _tier_priority(evt.get("tier", "C")) * 0.001
             eff_total = eff + tier_bonus
@@ -521,14 +607,17 @@ def allocate_timeline(
                 best_eff = eff_total
                 best_idx = i
                 best_evt = evt
+                best_coverage = coverage
         if best_evt is None:
             break
-        evt_dur = _evt_selection_duration(best_evt, constraints)
+        evt_dur = best_coverage["delta"] if best_coverage is not None else _evt_selection_duration(best_evt, constraints)
         b = best_evt.get("bucket", "mid")
         t = best_evt.get("event_type", "unknown")
         timeline.append(best_evt)
         selected_ids.add(id(best_evt))
         used_duration += evt_dur
+        if best_coverage is not None:
+            coverage_intervals = best_coverage["intervals"]
         bucket_used[b] += evt_dur
         type_count[t] += 1
         type_used_duration[t] += evt_dur
@@ -549,10 +638,19 @@ def allocate_timeline(
             if cap is not None and (type_used_duration[t] / target) >= float(cap):
                 continue
             evt_dur = _evt_selection_duration(evt, constraints)
+            coverage = (
+                _add_coverage_window(coverage_intervals, _evt_window(evt, constraints), continuity)
+                if continuity["enabled"] else None
+            )
+            evt_dur = coverage["delta"] if coverage is not None else evt_dur
+            if target_duration > 0 and used_duration + evt_dur > target_duration:
+                continue
             b = evt.get("bucket", "mid")
             timeline.append(evt)
             selected_ids.add(id(evt))
             used_duration += evt_dur
+            if coverage is not None:
+                coverage_intervals = coverage["intervals"]
             bucket_used[b] += evt_dur
             type_count[t] += 1
             type_used_duration[t] += evt_dur
@@ -755,6 +853,9 @@ def allocate_timeline(
         "swaps": diagnostics_swaps,
         "total_duration": total_dur,
         "target_duration": target_duration,
+        "continuity_preference": continuity["preference"],
+        "continuity_max_gap": round(continuity["max_gap"], 2),
+        "continuity_max_sequence_duration": round(continuity["max_sequence_duration"], 1),
         # Driver coverage diagnostics
         "driver_coverage_strength": driver_coverage_strength,
         "driver_unique_count": _final_unique_drivers,
@@ -805,6 +906,65 @@ def resolve_conflicts(timeline: list[dict], pip_threshold: float = DEFAULT_PIP_T
             _replace_in_list(resolved, conflict, winner)
 
     return resolved
+
+
+def insert_continuity(timeline: list[dict], constraints: Optional[dict] = None) -> list[dict]:
+    """Bake padded windows and retain short gaps selected by continuity preference."""
+    settings = _continuity_settings(constraints)
+    if not settings["enabled"] or not timeline:
+        return list(timeline)
+
+    expanded = []
+    for segment in sorted(timeline, key=lambda item: item.get("start_time_seconds", 0)):
+        start, end = _evt_window(segment, constraints)
+        expanded.append({
+            **segment,
+            "start_time_seconds": start,
+            "end_time_seconds": end,
+            "duration": end - start,
+            "padding_baked": True,
+        })
+
+    result: list[dict] = []
+    group_index = 1
+    group_start = expanded[0]["start_time_seconds"]
+    target_duration = float((constraints or {}).get("target_duration", 0) or 0)
+    base_duration = sum(segment["end_time_seconds"] - segment["start_time_seconds"] for segment in expanded)
+    budget_remaining = max(0.0, target_duration - base_duration) if target_duration > 0 else math.inf
+    for index, segment in enumerate(expanded):
+        if index > 0:
+            previous = expanded[index - 1]
+            gap = segment["start_time_seconds"] - previous["end_time_seconds"]
+            proposed_duration = segment["end_time_seconds"] - group_start
+            if (
+                0 < gap <= settings["max_gap"]
+                and proposed_duration <= settings["max_sequence_duration"]
+                and gap <= budget_remaining
+            ):
+                result.append({
+                    "id": f"continuity_{group_index}_{index}",
+                    "type": "continuity",
+                    "event_type": None,
+                    "start_time_seconds": previous["end_time_seconds"],
+                    "end_time_seconds": segment["start_time_seconds"],
+                    "duration": gap,
+                    "score": 0,
+                    "tier": None,
+                    "involved_drivers": previous.get("involved_drivers", []),
+                    "driver_names": previous.get("driver_names", []),
+                    "continuity_group_id": f"continuity_group_{group_index}",
+                    "from_segment_id": previous.get("id"),
+                    "to_segment_id": segment.get("id"),
+                    "padding_baked": True,
+                    "resolution": "continuity-gap",
+                })
+                budget_remaining -= gap
+            elif gap > 0:
+                group_index += 1
+                group_start = segment["start_time_seconds"]
+        segment["continuity_group_id"] = f"continuity_group_{group_index}"
+        result.append(segment)
+    return result
 
 
 def insert_transitions(timeline: list[dict]) -> list[dict]:

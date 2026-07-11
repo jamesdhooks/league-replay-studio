@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from backend.server.services.scoring_engine import (
     score_events,
     allocate_timeline,
+    insert_continuity,
     BASE_SCORES,
     MANDATORY_TYPES,
     TIER_S_THRESHOLD,
@@ -219,3 +220,54 @@ class TestTimelineAllocation:
         # first_lap is mandatory — should always be in timeline
         types_in_timeline = [e["event_type"] for e in timeline]
         assert "first_lap" in types_in_timeline
+
+
+class TestContinuityPlanning:
+    def test_insert_continuity_retains_short_gap(self):
+        timeline = [
+            {**make_event("battle", start_time=10, end_time=15), "id": 1},
+            {**make_event("overtake", start_time=20, end_time=25), "id": 2},
+        ]
+        result = insert_continuity(timeline, {
+            "continuity_preference": 100,
+            "padding_before": 0,
+            "padding_after": 0,
+        })
+
+        continuity = [segment for segment in result if segment.get("type") == "continuity"]
+        assert len(continuity) == 1
+        assert continuity[0]["duration"] == 5
+        assert result[0]["continuity_group_id"] == result[-1]["continuity_group_id"]
+
+    def test_insert_continuity_respects_remaining_target_budget(self):
+        timeline = [
+            {**make_event("battle", start_time=10, end_time=15), "id": 1},
+            {**make_event("overtake", start_time=20, end_time=25), "id": 2},
+        ]
+        result = insert_continuity(timeline, {
+            "continuity_preference": 100,
+            "padding_before": 0,
+            "padding_after": 0,
+            "target_duration": 12,
+        })
+
+        assert not any(segment.get("type") == "continuity" for segment in result)
+
+    def test_allocator_prefers_adjacent_candidate_within_target(self):
+        anchor = {**make_event("leader_change", start_time=0, end_time=20), "id": 1,
+                  "score": 10, "tier": "S", "bucket": "intro", "force_included": True}
+        isolated = {**make_event("overtake", start_time=70, end_time=130), "id": 3,
+                    "score": 5, "tier": "B", "bucket": "late"}
+        adjacent = {**make_event("overtake", start_time=25, end_time=85), "id": 2,
+                    "score": 5, "tier": "B", "bucket": "early"}
+
+        result = allocate_timeline([anchor, isolated, adjacent], 100, {
+            "continuity_preference": 100,
+            "padding_before": 0,
+            "padding_after": 0,
+            "diversity_strength": 0,
+            "driver_coverage_strength": 0,
+        })
+
+        selected_ids = {event["id"] for event in result}
+        assert selected_ids == {1, 2}

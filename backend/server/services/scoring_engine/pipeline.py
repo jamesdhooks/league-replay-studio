@@ -26,6 +26,7 @@ from .timeline import (
     _compute_metrics,
     allocate_timeline,
     insert_broll,
+    insert_continuity,
     insert_transitions,
     resolve_conflicts,
 )
@@ -79,6 +80,7 @@ def generate_highlights(
     # Stage 3: Allocate timeline (mutates constraints with "_diagnostics")
     alloc_constraints = dict(constraints)
     alloc_constraints.setdefault("num_drivers", num_drivers)  # needed for driver coverage rebalance
+    alloc_constraints["target_duration"] = target_duration
     timeline = allocate_timeline(scored, target_duration, alloc_constraints)
     selection_diagnostics = alloc_constraints.get("_diagnostics", {})
 
@@ -88,6 +90,9 @@ def generate_highlights(
 
     # Stage 5: Insert contextual bridge fillers for gaps
     timeline = insert_broll(timeline, gap_threshold=0.05, contextual_events=scored, target_duration=target_duration)
+
+    # Stage 5b: Retain target-budgeted short gaps as uninterrupted race footage.
+    timeline = insert_continuity(timeline, alloc_constraints)
 
     # Stage 6: Insert transitions
     timeline = insert_transitions(timeline)
@@ -145,7 +150,7 @@ def generate_video_script(
 
     Args:
         events: Raw race events from the database.
-        target_duration: Target *race* highlight duration in seconds.
+        target_duration: Target final-video duration in seconds.
         weights: Per-event-type weight overrides (0–100).
         constraints: max_driver_exposure, pip_threshold, min_severity.
         overrides: Manual overrides {event_id: action}.
@@ -164,6 +169,15 @@ def generate_video_script(
     padding_by_type = padding_by_type or {}
     overrides = overrides or {}
     race_duration = race_info.get("duration", 0)
+    fixed_section_duration = sum(
+        float(section_config.get(name, {}).get("duration", DEFAULT_SECTION_DURATIONS.get(name, 0.0)))
+        for name in VIDEO_SECTIONS
+        if name != "race"
+    )
+    race_target_duration = (
+        max(0.0, float(target_duration) - fixed_section_duration)
+        if target_duration else target_duration
+    )
 
     # If highlights were already applied to DB, honor those flags when building
     # the final script so selected events are not dropped by a fresh re-allocation.
@@ -215,6 +229,10 @@ def generate_video_script(
                 "segment_type": seg.get("type", "event"),
                 "resolution": seg.get("resolution", "placed"),
                 "source_event_ids": [e.get("id") for e in (seg.get("sourceEvents") or []) if e.get("id")],
+                "continuity_group_id": seg.get("continuityGroupId") or seg.get("continuity_group_id"),
+                "from_segment_id": seg.get("fromSegmentId") or seg.get("from_segment_id"),
+                "to_segment_id": seg.get("toSegmentId") or seg.get("to_segment_id"),
+                "padding_baked": seg_type == "continuity",
                 # Preserve PIP info
                 **({"pip": seg["pip"]} if seg.get("pip") else {}),
             })
@@ -227,7 +245,7 @@ def generate_video_script(
     else:
         hl_result = generate_highlights(
             events=events,
-            target_duration=target_duration,
+            target_duration=race_target_duration,
             weights=weights,
             constraints=script_constraints,
             overrides=effective_overrides,
@@ -443,7 +461,7 @@ def generate_video_script(
             for seg in camera_timeline:
                 _is_filler = seg.get("type") in ("bridge", "broll", "context")
                 # When using production timeline, padding is already baked into clipStart/clipEnd
-                if _from_production_tl or _is_filler:
+                if _from_production_tl or _is_filler or seg.get("padding_baked"):
                     _pad_before = 0
                     _pad_after = 0
                 else:
@@ -465,7 +483,15 @@ def generate_video_script(
                     _is_new_event = _last_base_id is not None and _base_id != _last_base_id
                     _last_base_id = _base_id
 
-                    if "camera_schedule" in seg_entry:
+                    if seg.get("type") == "continuity" and _cam_last_chosen in _cam_names:
+                        others = sorted(
+                            (camera for camera in _cam_names if camera != _cam_last_chosen),
+                            key=lambda camera: camera_weights.get(camera, 0),
+                            reverse=True,
+                        )
+                        seg_entry["camera_preferences"] = [_cam_last_chosen, *others]
+                        seg_entry["hold_camera"] = True
+                    elif "camera_schedule" in seg_entry:
                         # ── Per-window camera + driver assignment ──────────────
                         involved_drivers_raw = seg.get("involved_drivers") or []
                         if isinstance(involved_drivers_raw, str):

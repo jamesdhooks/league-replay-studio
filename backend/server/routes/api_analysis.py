@@ -1832,6 +1832,11 @@ async def generate_video_script_endpoint(project_id: int, body: VideoScriptReque
     """
     from server.services.scoring_engine import generate_video_script
 
+    body.constraints = dict(body.constraints or {})
+    body.constraints["continuity_preference"] = max(
+        0.0,
+        min(100.0, float(body.constraints.get("continuity_preference", 0) or 0)),
+    )
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")

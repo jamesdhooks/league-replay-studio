@@ -31,7 +31,7 @@ from .constants import (
 )
 from .pipeline import generate_highlights, generate_video_script
 from .scoring import score_events
-from .timeline import allocate_timeline, insert_broll, insert_transitions, resolve_conflicts
+from .timeline import allocate_timeline, insert_broll, insert_continuity, insert_transitions, resolve_conflicts
 
 __all__ = [
     # Constants
@@ -56,6 +56,7 @@ __all__ = [
     "resolve_conflicts",
     "insert_transitions",
     "insert_broll",
+    "insert_continuity",
     "generate_highlights",
     "generate_video_script",
 ]

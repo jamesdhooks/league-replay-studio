@@ -223,7 +223,7 @@ async def start_auto_pipeline(
     timeout_seconds: float = 3600,
     poll_interval_seconds: float = 5,
 ) -> dict[str, Any]:
-    """Start the existing LRS Auto pipeline and optionally monitor until terminal."""
+    """Start LRS Auto and optionally monitor it; continuity lives at highlight_config.params.continuityPreference."""
     result = await _request(
         "POST",
         "/pipeline/start",
@@ -350,6 +350,31 @@ async def validate_capture_clips(project_id: int, delete_and_reset_corrupt: bool
         "POST",
         f"/agent/projects/{project_id}/capture/validate-clips",
         {"recover_corrupt": delete_and_reset_corrupt},
+    )
+
+
+@mcp.tool()
+async def generate_highlight_script(
+    project_id: int,
+    target_duration: float = 720,
+    continuity_preference: int = 0,
+    weights: dict[str, int] | None = None,
+    min_severity: int = 0,
+    overrides: dict[str, str] | None = None,
+    section_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Generate and persist a target-aware highlight script with 0-100 continuity preference."""
+    return await _request(
+        "POST",
+        f"/agent/projects/{project_id}/highlights/generate-script",
+        {
+            "target_duration": target_duration,
+            "continuity_preference": continuity_preference,
+            "weights": weights or {},
+            "min_severity": min_severity,
+            "overrides": overrides or {},
+            "section_config": section_config or {},
+        },
     )
 
 
