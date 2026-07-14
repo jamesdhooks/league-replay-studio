@@ -1103,7 +1103,7 @@ function SectionCameraSelect({ label, cameras, isConnected, value, onChange }) {
       </button>
 
       {open && cameras.length > 0 && (
-        <div className="absolute left-22 top-full mt-1 z-50 min-w-[160px] bg-bg-elevated border border-border rounded shadow-lg py-1
+        <div className="absolute left-22 top-full mt-1 z-50 min-w-[160px] bg-bg-secondary border border-border rounded shadow-lg py-1
                         max-h-48 overflow-y-auto"
           style={{ left: '5.5rem' }}
         >
