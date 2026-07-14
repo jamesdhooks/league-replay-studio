@@ -9,6 +9,8 @@
 import { useMemo, useState } from 'react'
 import { useScriptState, CAPTURE_STATES } from '../../context/ScriptStateContext'
 import { useModal } from '../../context/ModalContext'
+import { buildCaptureRecordingRows } from '../../utils/capture-recording-groups'
+import { formatDuration } from '../../utils/time'
 import FileViewerModal from '../ui/FileViewer'
 import {
   Lock, Unlock, AlertTriangle, CheckCircle2, Circle, Loader2,
@@ -228,11 +230,11 @@ function SegmentCard({ segment, currentSegmentId, captureLog, isExecuting, onOpe
             <span>{segment.event_type || segment.type || 'segment'}</span>
             <span>·</span>
             <span>{Math.round(segment.duration || 0)}s</span>
-            {segment.strategy === 'continue' ? (
+            {!grouped && (segment.strategy === 'continue' ? (
               <span className="inline-flex items-center gap-0.5 text-accent/70"><ArrowRight className="w-2.5 h-2.5" /> cont.</span>
             ) : (
               <span className="inline-flex items-center gap-0.5"><Camera className="w-2.5 h-2.5" /> new rec.</span>
-            )}
+            ))}
             {segment.has_camera_schedule && (
               <span className="inline-flex items-center gap-0.5"><Repeat className="w-2.5 h-2.5" /> sched.</span>
             )}
@@ -272,9 +274,15 @@ function SegmentCard({ segment, currentSegmentId, captureLog, isExecuting, onOpe
   )
 }
 
-function SharedRecordingGroup({ segments, currentSegmentId, captureLog, isExecuting, onOpenClip, onTrashClip }) {
+function RecordingGroup({ segments, currentSegmentId, captureLog, isExecuting, onOpenClip, onTrashClip }) {
   const leadSegment = segments[0]
-  const filename = String(leadSegment.clip_path || '').replaceAll('\\', '/').split('/').pop() || 'Captured recording'
+  const clipPaths = new Set(segments.map((segment) => String(segment.clip_path || '')).filter(Boolean))
+  const isCompleted = segments.every((segment) => segment.capture_state === CAPTURE_STATES.CAPTURED)
+    && clipPaths.size === 1
+  const filename = isCompleted
+    ? String(leadSegment.clip_path).replaceAll('\\', '/').split('/').pop()
+    : null
+  const totalDuration = segments.reduce((total, segment) => total + Math.max(0, Number(segment.duration) || 0), 0)
 
   return (
     <section className="overflow-hidden rounded-lg border border-accent/30 bg-bg-secondary/35">
@@ -284,11 +292,13 @@ function SharedRecordingGroup({ segments, currentSegmentId, captureLog, isExecut
             <Link2 className="h-3 w-3" />
           </span>
           <div className="min-w-0">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-accent">One shared recording</div>
-            <div className="truncate text-[10px] text-text-secondary" title={filename}>{segments.length} script events use {filename}</div>
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-accent">Continuous take</div>
+            <div className="truncate text-[10px] text-text-secondary" title={filename || undefined}>
+              {segments.length} script events · {filename || formatDuration(totalDuration)}
+            </div>
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+        {isCompleted && <div className="flex shrink-0 items-center gap-1">
           <button
             type="button"
             onClick={() => onOpenClip(leadSegment)}
@@ -306,7 +316,7 @@ function SharedRecordingGroup({ segments, currentSegmentId, captureLog, isExecut
           >
             <Trash2 className="h-3.5 w-3.5" />
           </button>
-        </div>
+        </div>}
       </div>
       <div className="border-l-2 border-accent/35">
         {segments.map((segment, index) => (
@@ -381,6 +391,7 @@ export default function ScriptLockBanner({ projectId, script, onLock, onUnlock, 
       event_type: info.event_type || strategy.event_type || scriptSegment.event_type,
       type: strategy.type || info.segment_type || scriptSegment.type,
       duration: persistedDuration ?? strategy.duration ?? info.duration_seconds ?? 0,
+      continuity_group_id: strategy.continuity_group_id || scriptSegment.continuity_group_id || null,
       capture_state: info.capture_state,
       clip_path: info.clip_path || null,
       shared_segment_ids: sharedSegmentIdsByPath.get(String(info.clip_path || '')) || [],
@@ -396,40 +407,10 @@ export default function ScriptLockBanner({ projectId, script, onLock, onUnlock, 
     return { total: segmentCards.length, captured, uncaptured, invalidated, capturing }
   }, [segmentCards])
 
-  const scriptRows = useMemo(() => {
-    const rows = []
-
-    for (let index = 0; index < segmentCards.length;) {
-      const segment = segmentCards[index]
-      const canGroup = segment.capture_state === CAPTURE_STATES.CAPTURED
-        && Boolean(segment.clip_path)
-        && (segment.shared_segment_ids?.length || 0) > 1
-
-      if (!canGroup) {
-        rows.push({ type: 'segment', segment })
-        index += 1
-        continue
-      }
-
-      const sharedPath = segment.clip_path
-      const groupedSegments = [segment]
-      let nextIndex = index + 1
-      while (nextIndex < segmentCards.length && segmentCards[nextIndex].clip_path === sharedPath) {
-        groupedSegments.push(segmentCards[nextIndex])
-        nextIndex += 1
-      }
-
-      if (groupedSegments.length > 1) {
-        rows.push({ type: 'shared-recording', key: sharedPath, segments: groupedSegments })
-        index = nextIndex
-      } else {
-        rows.push({ type: 'segment', segment })
-        index += 1
-      }
-    }
-
-    return rows
-  }, [segmentCards])
+  const scriptRows = useMemo(
+    () => buildCaptureRecordingRows(segmentCards),
+    [segmentCards],
+  )
   const handleLock = async () => {
     if (!script?.length) return
     try {
@@ -541,8 +522,8 @@ export default function ScriptLockBanner({ projectId, script, onLock, onUnlock, 
         <ProgressBar captured={captureSummary.captured} total={captureSummary.total} />
 
         <div className="space-y-2 mt-2 mb-2">
-          {scriptRows.map((row) => row.type === 'shared-recording' ? (
-            <SharedRecordingGroup
+          {scriptRows.map((row) => row.type === 'recording-group' ? (
+            <RecordingGroup
               key={row.key}
               segments={row.segments}
               currentSegmentId={activeCurrentSegmentId}
