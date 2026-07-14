@@ -8,7 +8,7 @@ import { Layers, Merge, Film } from 'lucide-react'
 function segColor(seg) {
   if (seg.type === 'bridge') return '#374151'  // gray-700
   if (seg.type === 'context') return '#4b5563'  // gray-600
-  if (seg.type === 'continuity') return '#0f766e'  // teal-700
+  if (seg.type === 'sequence') return '#0f766e'  // teal-700
   return EVENT_COLORS[seg.event_type] || '#6b7280'
 }
 
@@ -65,9 +65,9 @@ export default function ProductionColumn({
         if (seg.type === 'bridge') {
           tipLines.push('B-roll / Bridge')
           tipLines.push(`${formatDuration(seg.clipDuration)}`)
-        } else if (seg.type === 'continuity') {
-          tipLines.push('Retained continuity')
-          tipLines.push(`${formatDuration(seg.clipDuration)} between nearby events`)
+        } else if (seg.type === 'sequence') {
+          tipLines.push('Continuity sequence')
+          tipLines.push(`${formatDuration(seg.clipDuration)} uninterrupted`)
         } else {
           tipLines.push(EVENT_TYPE_LABELS[seg.event_type] || seg.event_type || seg.type)
           tipLines.push(`Score: ${seg.score?.toFixed?.(1) ?? '?'} | Tier: ${seg.tier || '?'}`)
@@ -112,7 +112,7 @@ export default function ProductionColumn({
               <span className="text-white/90 font-medium truncate">
                 {seg.type === 'bridge'
                   ? 'B-roll'
-                  : seg.type === 'continuity'
+                  : seg.type === 'sequence'
                     ? 'flow'
                   : seg.type === 'context'
                     ? `ctx: ${EVENT_TYPE_LABELS[seg.event_type] || '?'}`

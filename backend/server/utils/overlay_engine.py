@@ -519,6 +519,17 @@ class OverlayEngine:
         if not self._initialized or not self._page:
             return {"success": False, "error": "Engine not initialized"}
 
+        # The compositor calls this engine directly, while preview routes may
+        # supply only timing/section metadata. Normalize at this lowest shared
+        # rendering boundary so every Jinja template always receives the full
+        # frame schema (including standings and related optional collections).
+        from server.utils.frame_data_builder import _empty_frame_data
+
+        supplied_frame_data = dict(frame_data) if isinstance(frame_data, dict) else {}
+        section = str(supplied_frame_data.get("section") or "race")
+        frame_data = _empty_frame_data(section)
+        frame_data.update(supplied_frame_data)
+
         start = time.perf_counter()
 
         try:

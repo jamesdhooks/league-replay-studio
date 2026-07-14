@@ -24,6 +24,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import base64
 import logging
 import re
 from typing import Any, Optional
@@ -77,6 +78,8 @@ class FrameDataRequest(BaseModel):
     focused_car_idx: Optional[int] = None
     series_name: str = ""
     track_name: str = ""
+    result_session_num: Optional[int] = None
+    replay_session_num: Optional[int] = None
 
 
 def _apply_section_standings_fallback(frame_data: dict[str, Any], section: str) -> None:
@@ -88,7 +91,7 @@ def _apply_section_standings_fallback(frame_data: dict[str, Any], section: str) 
         qualifying = frame_data.get("qualifying_standings")
         if isinstance(qualifying, list) and qualifying:
             frame_data["standings"] = qualifying
-    elif section in {"results", "race_results"}:
+    elif section in {"results", "race_results", "heat_results"}:
         final_results = frame_data.get("final_standings")
         if isinstance(final_results, list) and final_results:
             frame_data["standings"] = final_results
@@ -172,7 +175,15 @@ async def shutdown_engine():
 async def render_frame(body: RenderRequest):
     """Render a single overlay frame as transparent PNG."""
     try:
-        frame_data = dict(body.frame_data or {})
+        # UI previews often supply only timing/section metadata.  Merge that
+        # partial object into the canonical frame schema before Jinja renders,
+        # so built-in templates can safely read optional keys (e.g. standings).
+        from server.utils.frame_data_builder import _empty_frame_data
+
+        supplied_frame_data = dict(body.frame_data or {})
+        section = str(supplied_frame_data.get("section") or "race")
+        frame_data = _empty_frame_data(section)
+        frame_data.update(supplied_frame_data)
         if body.project_id is not None:
             try:
                 from server.services.project_service import project_service
@@ -197,6 +208,11 @@ async def render_frame(body: RenderRequest):
             project_id=body.project_id,
             analyze_animations=body.analyze_animations,
         )
+        # Playwright returns raw PNG bytes. JSON responses must carry them as
+        # base64, consistent with the editor raw-HTML preview endpoint.
+        png_bytes = result.pop("png_bytes", None)
+        if isinstance(png_bytes, bytes):
+            result["png_base64"] = base64.b64encode(png_bytes).decode("ascii")
         return result
     except Exception as exc:
         logger.error("[Overlay API] Render failed: %s", exc)
@@ -357,6 +373,8 @@ async def build_frame_data_endpoint(project_id: int, body: FrameDataRequest):
             focused_car_idx=body.focused_car_idx,
             series_name=series_name,
             track_name=track_name,
+            result_session_num=body.result_session_num,
+            replay_session_num=body.replay_session_num,
         )
         _apply_section_standings_fallback(frame_data, body.section)
 

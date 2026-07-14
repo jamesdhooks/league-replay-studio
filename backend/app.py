@@ -559,6 +559,7 @@ def start_server(port: int = 6369, reload_enabled: bool = False) -> None:
             port=port,
             log_level="warning",
             reload=True,
+            reload_dirs=[str(APP_DIR / "server")],
             loop="none",
         )
     else:

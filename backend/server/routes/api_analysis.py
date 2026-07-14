@@ -1821,6 +1821,7 @@ class VideoScriptRequest(BaseModel):
     camera_recency_penalty: float = 0.5  # 0 = none, 1 = maximum recency penalty
     camera_recency_decay: float = 30.0   # Seconds for recency penalty to decay to zero
     production_timeline: list = []   # Pre-built production timeline from frontend (skips backend allocation)
+    persist: bool = True              # False returns a dry-run script without replacing project state
 
 
 @router.post("/projects/{project_id}/highlights/video-script")
@@ -2020,14 +2021,37 @@ async def generate_video_script_endpoint(project_id: int, body: VideoScriptReque
                 production_timeline=body.production_timeline,
             )
 
-            # Add session_num context to each segment for capture phase
+            # Materialize the authoritative ladder after Feature highlight selection.
+            # The Feature remains event-driven; Heat stages use only measured green
+            # anchors collected during analysis, never Feature telemetry timestamps.
+            try:
+                session_plan = json.loads(_meta_val("session_plan", "{}"))
+                session_anchors = json.loads(_meta_val("session_anchors", "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise HTTPException(status_code=500, detail=f"Invalid persisted session plan: {exc}")
+            if session_plan.get("format") == "heat":
+                from server.services.heat_session_plan import materialize_heat_script
+                result["script"] = materialize_heat_script(
+                    session_plan=session_plan,
+                    feature_segments=result.get("script", []),
+                    session_anchors=session_anchors,
+                )
+                ordered_sections: list[dict] = []
+                for stage in session_plan.get("stages", []):
+                    section_name = stage["section"]
+                    matching = [s for s in result["script"] if s.get("section") == section_name]
+                    ordered_sections.append({
+                        "name": section_name,
+                        "segment_count": len(matching),
+                        "duration": round(sum(float(s.get("duration", 0) or 0) for s in matching), 1),
+                        "editable": section_name not in {"race", "heat"},
+                    })
+                result["sections"] = ordered_sections
+
+            # Preserve explicit planned session identity. Legacy Feature-only
+            # scripts still receive the selected final race session by default.
             race_session_num = int(_meta_val("race_session_num", 0))
             for segment in result.get("script", []):
-                # Generated scripts use race-session time coordinates unless a
-                # segment explicitly overrides the replay session. B-roll/intro
-                # sections are placed on the production timeline, so defaulting
-                # them to practice/qualifying makes iRacing ignore or misland
-                # replay_search_session_time() during capture.
                 if "session_num" not in segment:
                     segment["session_num"] = race_session_num
 
@@ -2040,16 +2064,18 @@ async def generate_video_script_endpoint(project_id: int, body: VideoScriptReque
                 race_session_num,
             )
 
-            # Persist the generated script so downstream steps (overlay/capture/export)
-            # can load it from project metadata even after refresh/restart.
-            project_service.save_project_metadata(project_id, {
-                "script": result.get("script", []),
-                "script_sections": result.get("sections", []),
-                "script_generated_at": datetime.now(timezone.utc).isoformat(),
-            })
+            # Persist only committed scripts. Dry-runs must remain inspectable
+            # without replacing a known-good capture plan.
+            if body.persist:
+                project_service.save_project_metadata(project_id, {
+                    "script": result.get("script", []),
+                    "script_sections": result.get("sections", []),
+                    "script_generated_at": datetime.now(timezone.utc).isoformat(),
+                })
 
             return {
                 "project_id": project_id,
+                "dry_run": not body.persist,
                 **result,
             }
         finally:
@@ -2147,7 +2173,6 @@ async def list_presets():
             for name, data in presets.items()
         ]
     }
-
 
 @router.post("/highlights/presets")
 async def save_preset(body: PresetSaveRequest):

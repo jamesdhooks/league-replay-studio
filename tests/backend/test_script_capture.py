@@ -261,9 +261,14 @@ class TestHelpers:
         assert _sanitize_filename("") == "clip"
         assert _sanitize_filename(None) == "clip"
 
+    def test_sanitize_filename_accepts_numeric_segment_id(self):
+        """Numeric event IDs must be safe to use in capture clip filenames."""
+        assert _sanitize_filename(777) == "777"
+
     def test_format_race_time(self):
         assert _format_race_time(0) == "0:00"
         assert _format_race_time(65) == "1:05"
+        assert _format_race_time(201.213) == "3:21"
         assert _format_race_time(3661) == "1:01:01"
 
 
@@ -395,6 +400,31 @@ class TestValidatedCameraSwitch:
 
         assert result is True
         bridge.cam_switch_position.assert_called_once_with(0, 1)
+
+    def test_broll_uses_next_camera_preference_when_primary_is_unavailable(self):
+        engine = make_engine()
+        bridge = make_iracing_bridge(cam_group=10)
+        bridge.cameras = [
+            {"group_name": "TV Static", "group_num": 14},
+            {"group_name": "Scenic", "group_num": 10},
+        ]
+
+        def switch_position(_position, group_num):
+            if group_num == 10:
+                bridge.capture_snapshot.return_value = {
+                    "session_time": 100.0, "cam_group_num": 10, "cam_car_idx": 3,
+                }
+        bridge.cam_switch_position.side_effect = switch_position
+
+        engine._apply_camera_and_driver(
+            {"id": "broll", "type": "broll", "camera_preferences": ["TV Static", "Scenic"]},
+            bridge,
+            {"TV Static": 14, "Scenic": 10},
+            bridge.cameras,
+        )
+
+        assert bridge.cam_switch_position.call_args_list[-1].args == (0, 10)
+        assert any(e["action"] == "camera_preference_fallback" for e in engine.capture_log)
 
 
 class TestCaptureScript:

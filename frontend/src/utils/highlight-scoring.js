@@ -65,15 +65,51 @@ export const REFERENCE_SPEED_MS = 70.0
 /** Allow 10% overshoot on target duration before excluding events */
 export const TARGET_DURATION_TOLERANCE = 1.1
 
+function continuityCurve(scale, points) {
+  const clamped = Math.max(0, Math.min(1, scale))
+  for (let index = 1; index < points.length; index++) {
+    const [rightScale, rightValue] = points[index]
+    if (clamped > rightScale) continue
+    const [leftScale, leftValue] = points[index - 1]
+    const progress = (clamped - leftScale) / Math.max(rightScale - leftScale, 0.001)
+    return leftValue + (rightValue - leftValue) * progress
+  }
+  return points[points.length - 1][1]
+}
+
 export function getContinuitySettings(params = {}) {
   const preference = Math.max(0, Math.min(100, Number(params.continuityPreference ?? 0)))
   const scale = preference / 100
+  const automaticSequences = Math.round(continuityCurve(scale, [
+    [0, 18], [0.25, 13], [0.55, 12], [0.7, 8], [0.85, 5], [1, 3],
+  ]))
+  const preferredSequences = Number(params.continuityBlockCount) > 0
+    ? Math.max(3, Math.round(Number(params.continuityBlockCount)))
+    : automaticSequences
+  const automaticPreferredDuration = continuityCurve(scale, [
+    [0, 30], [0.25, 43], [0.55, 60], [0.7, 105], [0.85, 190], [1, 300],
+  ])
+  const preferredSequenceDuration = Number(params.continuityBlockDuration) > 0
+    ? Math.max(15, Number(params.continuityBlockDuration))
+    : automaticPreferredDuration
+  const automaticMaxDuration = continuityCurve(scale, [
+    [0, 45], [0.25, 58], [0.55, 81], [0.7, 142], [0.85, 257], [1, 420],
+  ])
   return {
     preference,
     scale,
     enabled: preference > 0,
-    maxGap: 1 + 14 * Math.pow(scale, 1.5),
-    maxSequenceDuration: 45 + 135 * scale,
+    maxGap: Number(params.continuityGapReach) > 0
+      ? Math.max(1, Number(params.continuityGapReach))
+      : continuityCurve(scale, [
+        [0, 1], [0.25, 12], [0.55, 25], [0.7, 60], [0.85, 115], [1, 180],
+      ]),
+    preferredSequenceDuration,
+    maxSequenceDuration: Number(params.continuityBlockDuration) > 0
+      ? Math.max(preferredSequenceDuration, preferredSequenceDuration * 1.35)
+      : automaticMaxDuration,
+    preferredSequences,
+    maxSequences: preferredSequences + (scale < 1 ? 2 : 0),
   }
 }
 
@@ -114,7 +150,16 @@ function addCoverageWindow(intervals, window, settings) {
   }
 
   const after = result.reduce((sum, interval) => sum + interval.end - interval.start, 0)
-  return { intervals: result, delta: Math.max(0, after - before), connected, connectionQuality: bestConnectionQuality }
+  const resultingRun = result.find(interval => (
+    interval.start <= window.clipStart && interval.end >= window.clipEnd
+  ))
+  return {
+    intervals: result,
+    delta: Math.max(0, after - before),
+    connected,
+    connectionQuality: bestConnectionQuality,
+    resultingRunDuration: resultingRun ? resultingRun.end - resultingRun.start : window.clipEnd - window.clipStart,
+  }
 }
 
 /** Tier color map (S/A/B/C) */
@@ -565,7 +610,7 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
 
   // Driver coverage params
   const driverCoverageStrength = Math.max(0, Math.min(100, Number(params.driverCoverageStrength ?? 35)))
-  const driverScale = driverCoverageStrength / 100
+  const driverScale = (driverCoverageStrength / 100) * (1 - continuity.scale)
   const newDriverBoost = Math.max(1.0, Number(params.newDriverBoost ?? 1.40))
   const repeatDriverPenalty = Math.max(0, Math.min(1.0, Number(params.repeatDriverPenalty ?? 0.25)))
 
@@ -625,7 +670,8 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
       excludedIds.add(evt.id)
       continue
     }
-    if (evt.severity < minSeverity) {
+    const continuityContextOnly = evt.severity < minSeverity
+    if (continuityContextOnly && !continuity.enabled) {
       excludedIds.add(evt.id)
       continue
     }
@@ -646,7 +692,7 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
       excludedIds.add(evt.id)
       continue
     }
-    eligible.push(evt)
+    eligible.push({ ...evt, continuityContextOnly })
   }
 
   const tierPriMap = { S: 4, A: 3, B: 2, C: 1 }
@@ -656,9 +702,11 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     ? positiveScores[Math.floor(positiveScores.length / 2)]
     : 1
   let coverageIntervals = []
+  const continuitySelected = []
   if (continuity.enabled) {
     for (const event of scored.filter(candidate => highlightIds.has(candidate.id)).sort((a, b) => a.start_time_seconds - b.start_time_seconds)) {
       coverageIntervals = addCoverageWindow(coverageIntervals, computeClipWindow(event, params), continuity).intervals
+      continuitySelected.push(event)
     }
     highlightDuration = coverageIntervals.reduce((sum, interval) => sum + interval.end - interval.start, 0)
   }
@@ -669,28 +717,87 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
   while (true) {
     if (targetDuration && highlightDuration >= targetDuration) break
     let bestEvt = null
-    let bestEff = -1
+    let bestEff = Number.NEGATIVE_INFINITY
     let bestCoverage = null
     for (const evt of eligible) {
       if (placed.has(evt.id)) continue
       const t = evt.event_type
       const b = evt.bucket || 'mid'
-      const budget = bucketBudgets[b] || (targetDuration || 300) * 0.3
+      const budget = (bucketBudgets[b] || (targetDuration || 300) * 0.3)
+        + (targetDuration || 300) * continuity.scale * 0.2
       if ((bucketUsed[b] || 0) >= budget) continue
       const coverage = continuity.enabled
         ? addCoverageWindow(coverageIntervals, computeClipWindow(evt, params), continuity)
         : null
+      if (evt.continuityContextOnly && !coverage?.connected) continue
       const incrementalDuration = coverage ? coverage.delta : evt.selectionDuration
       if (targetDuration > 0 && highlightDuration + incrementalDuration > targetDuration) continue
+      if (coverage && !coverage.connected && coverageIntervals.length >= continuity.maxSequences) continue
       const q = quotaPressure(t)
       if (q <= 0) continue
       let eff = evt.score * q * typeDecayFactor(typeCount[t] || 0) * bucketDivFactor(b, t)
         * driverCoverageFactor(evt)
         + (tierPriMap[evt.tier] || 0) * 0.001
       if (coverage) {
-        eff += coverage.connected
-          ? scoreReference * continuity.scale * coverage.connectionQuality
-          : -scoreReference * 0.5 * continuity.scale
+        if (coverage.connected) {
+          const evtWindow = computeClipWindow(evt, params)
+          const connectedAnchors = continuitySelected.filter(anchor => {
+            const anchorWindow = computeClipWindow(anchor, params)
+            const gap = evtWindow.clipEnd < anchorWindow.clipStart
+              ? anchorWindow.clipStart - evtWindow.clipEnd
+              : anchorWindow.clipEnd < evtWindow.clipStart
+                ? evtWindow.clipStart - anchorWindow.clipEnd
+                : 0
+            const span = Math.max(evtWindow.clipEnd, anchorWindow.clipEnd)
+              - Math.min(evtWindow.clipStart, anchorWindow.clipStart)
+            return gap <= continuity.maxGap && span <= continuity.maxSequenceDuration
+          })
+          const anchorPeak = connectedAnchors.reduce(
+            (peak, anchor) => Math.max(peak, Number(anchor.score || 0)),
+            0,
+          )
+          const anchorLift = Math.max(0, anchorPeak - Number(evt.score || 0))
+            * continuity.scale * (0.75 + 0.75 * coverage.connectionQuality)
+          const runSaturation = Math.max(
+            0,
+            1 - coverage.resultingRunDuration / Math.max(continuity.preferredSequenceDuration, 1),
+          )
+          const runOverage = Math.max(
+            0,
+            (coverage.resultingRunDuration - continuity.preferredSequenceDuration)
+              / Math.max(continuity.preferredSequenceDuration, 1),
+          )
+          const sequenceMomentum = scoreReference * continuity.scale
+            * Math.min(1.5, Math.log2(1 + connectedAnchors.length) / 2)
+            * runSaturation
+          eff += scoreReference * 2 * continuity.scale * coverage.connectionQuality
+            + anchorLift
+            + sequenceMomentum
+            - scoreReference * 2 * continuity.scale * runOverage
+        } else {
+          const eventCenter = (Number(evt.start_time_seconds || 0) + Number(evt.end_time_seconds || 0)) / 2
+          const cellDuration = raceDuration / Math.max(continuity.preferredSequences, 1)
+          const eventCell = Math.min(
+            continuity.preferredSequences - 1,
+            Math.max(0, Math.floor(eventCenter / Math.max(cellDuration, 1))),
+          )
+          const occupiedCells = new Set(coverageIntervals.map(interval => Math.min(
+            continuity.preferredSequences - 1,
+            Math.max(0, Math.floor(((interval.start + interval.end) / 2) / Math.max(cellDuration, 1))),
+          )))
+          if (!occupiedCells.has(eventCell)) {
+            const nearestCenterDistance = coverageIntervals.length
+              ? Math.min(...coverageIntervals.map(interval => (
+                Math.abs(eventCenter - (interval.start + interval.end) / 2)
+              )))
+              : raceDuration
+            const desiredSpacing = raceDuration / Math.max(continuity.preferredSequences, 1)
+            const distributionQuality = Math.min(1, nearestCenterDistance / Math.max(desiredSpacing, 1))
+            eff += scoreReference * 6 * continuity.scale * (0.5 + distributionQuality)
+          } else {
+            eff -= scoreReference * 4 * continuity.scale
+          }
+        }
       }
       if (eff > bestEff) {
         bestEff = eff
@@ -706,6 +813,7 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     if (bestCoverage) {
       highlightDuration += bestCoverage.delta
       coverageIntervals = bestCoverage.intervals
+      continuitySelected.push(bestEvt)
     } else {
       highlightDuration += bestEvt.selectionDuration
     }
@@ -880,6 +988,7 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     continuityPreference: continuity.preference,
     continuityMaxGap: Math.round(continuity.maxGap * 100) / 100,
     continuityMaxSequenceDuration: Math.round(continuity.maxSequenceDuration * 10) / 10,
+    continuityMaxSequences: continuity.maxSequences,
   }
 
   // Tier distribution
@@ -919,8 +1028,8 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
 
 // ── Production Timeline Builder ──────────────────────────────────────────
 
-/** Minimum clip duration (seconds) after trimming — shorter clips are demoted */
-const MIN_CLIP_DURATION = 2.0
+/** Hard floor for every generated race clip. Shorter fragments are extended or demoted. */
+export const MIN_CLIP_DURATION = 6.0
 
 /** Minimum gap (seconds) to mark as bridge-needed */
 const MIN_BRIDGE_DURATION = 3.0
@@ -945,7 +1054,7 @@ function computeClipWindow(evt, params) {
   const before = Math.max(0, meta.padding_before ?? typeBefore ?? params?.paddingBefore ?? 2.0)
   const after = Math.max(0, meta.padding_after ?? typeAfter ?? params?.paddingAfter ?? 5.0)
   const clipStart = Math.max(0, start - before)
-  const clipEnd = end + after
+  const clipEnd = Math.max(end + after, clipStart + MIN_CLIP_DURATION)
   return { clipStart, clipEnd, clipDuration: clipEnd - clipStart }
 }
 
@@ -1053,6 +1162,12 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
 
   // Full race mode or no target duration → no budget cap; otherwise honour targetDuration * tolerance
   const budgetCap = (replayMode === 'full' || !targetDuration) ? Infinity : targetDuration
+  const continuityReserve = Number.isFinite(budgetCap)
+    ? budgetCap * 0.5 * Math.pow(continuity.scale, 1.5)
+    : 0
+  const placementBudgetCap = Number.isFinite(budgetCap)
+    ? Math.max(MIN_CLIP_DURATION, budgetCap - continuityReserve)
+    : budgetCap
 
   // Start with events already classified by computeHighlightSelection
   const highlights = selection.scoredEvents
@@ -1143,7 +1258,7 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
 
     if (overlaps.length === 0) {
       // Clean placement
-      if (usedBudget + window.clipDuration <= budgetCap || MANDATORY_TYPES.has(evt.event_type)) {
+      if (usedBudget + window.clipDuration <= placementBudgetCap || MANDATORY_TYPES.has(evt.event_type)) {
         const seg = makeSegment('event', evt, window, 'placed')
         timeline.push(seg)
         usedBudget += window.clipDuration
@@ -1160,7 +1275,7 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
         // MERGE: same drivers, extend window
         const merged = unionWindows(existing, window)
         const durationDelta = merged.clipDuration - existing.clipDuration
-        if (usedBudget + durationDelta <= budgetCap || MANDATORY_TYPES.has(evt.event_type)) {
+        if (usedBudget + durationDelta <= placementBudgetCap || MANDATORY_TYPES.has(evt.event_type)) {
           const allSources = [...(existing.sourceEvents || []), evt]
           const allDrivers = [...new Set([...(existing.involved_drivers || []), ...(evt.involved_drivers || [])])]
           const allDriverNames = [...new Set([...(existing.driver_names || []), ...(evt.driver_names || [])])]
@@ -1193,7 +1308,7 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
         // PIP: both high-value, different drivers
         const pipWindow = unionWindows(existing, window)
         const durationDelta = pipWindow.clipDuration - existing.clipDuration
-        if (usedBudget + durationDelta <= budgetCap) {
+        if (usedBudget + durationDelta <= placementBudgetCap) {
           const primary = existing.score >= evt.score ? existing : evt
           const secondary = existing.score >= evt.score ? evt : existing
           const allSources = [...(existing.sourceEvents || []), evt]
@@ -1228,7 +1343,7 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
       } else {
         // Try trimming
         const trimmed = trimWindow(window, evt, existing)
-        if (trimmed && usedBudget + trimmed.clipDuration <= budgetCap) {
+        if (trimmed && usedBudget + trimmed.clipDuration <= placementBudgetCap) {
           const seg = makeSegment('event', evt, trimmed, 'trimmed', {
             resolutionNote: `Trimmed to avoid overlap (${trimmed.clipDuration.toFixed(1)}s)`,
           })
@@ -1293,6 +1408,7 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
 
   let contextFillCount = 0
   const contextUsedIds = new Set()
+  const maxContextPerGap = Math.round(MAX_CONTEXT_PER_GAP * (1 - continuity.scale))
 
   // Find gaps and fill
   const gaps = []
@@ -1316,12 +1432,12 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
 
     for (const candidate of contextCandidates) {
       if (contextUsedIds.has(candidate.id)) continue
-      if (contextInThisGap >= MAX_CONTEXT_PER_GAP) break
-      if (usedBudget >= budgetCap) break
+      if (contextInThisGap >= maxContextPerGap) break
+      if (usedBudget >= placementBudgetCap) break
 
       const cw = computeClipWindow(candidate, params)
       // Candidate must fit within the gap
-      if (cw.clipStart >= gapStart && cw.clipEnd <= gapEnd && usedBudget + cw.clipDuration <= budgetCap) {
+      if (cw.clipStart >= gapStart && cw.clipEnd <= gapEnd && usedBudget + cw.clipDuration <= placementBudgetCap) {
         const seg = makeSegment('context', candidate, cw, 'context-fill', {
           resolutionNote: 'Context fill for gap',
         })
@@ -1340,59 +1456,98 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
   // Re-sort after inserts
   timeline.sort((a, b) => a.clipStart - b.clipStart)
 
-  // ── Phase 4: Mark remaining gaps as bridge segments ──────────────────
+  // ── Phase 4: Join adjacent event boundaries into continuity groups ──
+  // Events remain distinct editorial units. A continuity group is only a set
+  // of back-to-back clip windows that the capture engine records in one take.
   const finalTimeline = []
-  let continuityGroupIndex = 1
-  let continuityGroupStart = timeline[0]?.clipStart ?? 0
   let retainedContinuityDuration = 0
-  let hardCutCount = 0
   let continuityBudgetRemaining = targetDuration
     ? Math.max(0, targetDuration - timeline.reduce((sum, segment) => sum + segment.clipDuration, 0))
     : Infinity
-  for (let i = 0; i < timeline.length; i++) {
-    if (i > 0) {
-      const prevEnd = timeline[i - 1].clipEnd
-      const curStart = timeline[i].clipStart
-      const gapDur = curStart - prevEnd
-      const proposedSequenceDuration = timeline[i].clipEnd - continuityGroupStart
-      const keepContinuity = continuity.enabled
-        && gapDur > 0
-        && gapDur <= continuity.maxGap
-        && proposedSequenceDuration <= continuity.maxSequenceDuration
-        && gapDur <= continuityBudgetRemaining
-      if (keepContinuity) {
-        finalTimeline.push({
-          id: `continuity_${continuityGroupIndex}_${i}`,
-          type: 'continuity',
-          clipStart: prevEnd,
-          clipEnd: curStart,
-          clipDuration: gapDur,
-          coreStart: prevEnd,
-          coreEnd: curStart,
-          sourceEvents: [],
-          primaryEventId: null,
-          event_type: null,
-          score: 0,
-          tier: null,
-          involved_drivers: timeline[i - 1].involved_drivers || [],
-          driver_names: timeline[i - 1].driver_names || [],
-          continuityGroupId: `continuity_group_${continuityGroupIndex}`,
-          fromSegmentId: timeline[i - 1].id,
-          toSegmentId: timeline[i].id,
-          resolution: 'continuity-gap',
-          resolutionNote: `Retained ${gapDur.toFixed(1)}s for continuity`,
-        })
-        retainedContinuityDuration += gapDur
-        continuityBudgetRemaining -= gapDur
-      } else if (gapDur >= MIN_BRIDGE_DURATION) {
+  let groupingGapBudget = continuityBudgetRemaining
+  const clusters = timeline.map(segment => ({
+    segments: [{ ...segment }],
+    start: segment.clipStart,
+    end: segment.clipEnd,
+  }))
+
+  // Global agglomerative grouping avoids the left-to-right rich-get-richer
+  // behavior. Each iteration closes the best remaining adjacent gap.
+  while (continuity.enabled && clusters.length > 1) {
+    let bestIndex = -1
+    let bestPriority = Infinity
+    let bestGap = 0
+    for (let index = 0; index < clusters.length - 1; index++) {
+      const left = clusters[index]
+      const right = clusters[index + 1]
+      const gap = Math.max(0, right.start - left.end)
+      const combinedSpan = right.end - left.start
+      if (gap > continuity.maxGap || gap > continuityBudgetRemaining || gap > groupingGapBudget) continue
+      if (combinedSpan > continuity.maxSequenceDuration) continue
+      const overPreferred = Math.max(
+        0,
+        (combinedSpan - continuity.preferredSequenceDuration)
+          / Math.max(continuity.preferredSequenceDuration, 1),
+      )
+      const priority = gap / Math.max(continuity.maxGap, 0.001) + overPreferred * 2
+      if (priority < bestPriority) {
+        bestIndex = index
+        bestPriority = priority
+        bestGap = gap
+      }
+    }
+    if (bestIndex < 0) break
+    if (
+      clusters.length <= continuity.preferredSequences
+      && bestGap > continuity.maxGap * 0.2
+    ) break
+    const left = clusters[bestIndex]
+    const right = clusters[bestIndex + 1]
+    clusters.splice(bestIndex, 2, {
+      segments: [...left.segments, ...right.segments],
+      start: left.start,
+      end: right.end,
+    })
+    retainedContinuityDuration += bestGap
+    continuityBudgetRemaining -= bestGap
+    groupingGapBudget -= bestGap
+  }
+
+  clusters.forEach((cluster, clusterIndex) => {
+    const groupId = `continuity_group_${clusterIndex + 1}`
+    let previous = null
+    for (const rawSegment of cluster.segments) {
+      const segment = { ...rawSegment, continuityGroupId: groupId }
+      if (previous) {
+        const gap = Math.max(0, segment.clipStart - previous.clipEnd)
+        const extendPrevious = gap / 2
+        const extendSegment = gap - extendPrevious
+        previous.clipEnd += extendPrevious
+        previous.clipDuration += extendPrevious
+        previous.continuityFillAfter = (previous.continuityFillAfter || 0) + extendPrevious
+        previous.resolutionNote = 'Continues directly into the next event'
+        segment.clipStart -= extendSegment
+        segment.clipDuration += extendSegment
+        segment.continuityFillBefore = (segment.continuityFillBefore || 0) + extendSegment
+        segment.resolutionNote = 'Continues directly from the previous event'
+        finalTimeline.push(previous)
+      }
+      previous = segment
+    }
+    if (previous) finalTimeline.push(previous)
+
+    const following = clusters[clusterIndex + 1]
+    if (following && cluster.end < following.start) {
+      const gapDur = following.start - cluster.end
+      if (gapDur >= MIN_BRIDGE_DURATION) {
         finalTimeline.push({
           id: `bridge_${_nextSegId++}`,
           type: 'bridge',
-          clipStart: prevEnd,
-          clipEnd: curStart,
+          clipStart: cluster.end,
+          clipEnd: following.start,
           clipDuration: gapDur,
-          coreStart: prevEnd,
-          coreEnd: curStart,
+          coreStart: cluster.end,
+          coreEnd: following.start,
           sourceEvents: [],
           primaryEventId: null,
           event_type: null,
@@ -1405,17 +1560,106 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
           resolution: 'bridge',
           resolutionNote: `Cut point (${gapDur.toFixed(1)}s race gap)`,
         })
-        hardCutCount++
-        continuityGroupIndex++
-        continuityGroupStart = timeline[i].clipStart
-      } else if (gapDur > 0) {
-        hardCutCount++
-        continuityGroupIndex++
-        continuityGroupStart = timeline[i].clipStart
       }
     }
-    timeline[i].continuityGroupId = `continuity_group_${continuityGroupIndex}`
-    finalTimeline.push(timeline[i])
+  })
+  const continuityGroupIndex = clusters.length
+  const hardCutCount = Math.max(0, clusters.length - 1)
+
+  // ── Phase 4b: Fill the remaining target by extending chosen runs ─────
+  // Event scores choose the regions. When strong continuity pressure leaves
+  // unused budget, spend it as uninterrupted race footage around those regions
+  // instead of opening more cuts or returning a short script.
+  if (continuity.enabled && Number.isFinite(budgetCap) && raceDuration > 0) {
+    const contentSegments = finalTimeline.filter(segment => segment.type !== 'bridge')
+    const currentDuration = contentSegments.reduce((sum, segment) => sum + segment.clipDuration, 0)
+    let fillRemaining = Math.max(0, budgetCap - currentDuration)
+    const groupedRuns = []
+    for (const segment of contentSegments) {
+      const last = groupedRuns[groupedRuns.length - 1]
+      if (last?.groupId === segment.continuityGroupId) last.segments.push(segment)
+      else groupedRuns.push({ groupId: segment.continuityGroupId, segments: [segment] })
+    }
+    const territories = groupedRuns.map((run, index) => {
+      const previous = groupedRuns[index - 1]
+      const next = groupedRuns[index + 1]
+      const first = run.segments[0]
+      const last = run.segments[run.segments.length - 1]
+      return {
+        run,
+        left: previous
+          ? (previous.segments[previous.segments.length - 1].clipEnd + first.clipStart) / 2
+          : 0,
+        right: next ? (last.clipEnd + next.segments[0].clipStart) / 2 : raceDuration,
+      }
+    })
+
+    while (fillRemaining > 0.05) {
+      const expandable = territories.filter(({ run, left, right }) => {
+        const first = run.segments[0]
+        const last = run.segments[run.segments.length - 1]
+        const territorialRoom = Math.max(0, first.clipStart - left) + Math.max(0, right - last.clipEnd)
+        const lengthRoom = Math.max(0, continuity.maxSequenceDuration - (last.clipEnd - first.clipStart))
+        return Math.min(territorialRoom, lengthRoom) > 0.05
+      })
+      if (!expandable.length) break
+      expandable.sort((a, b) => {
+        const aSegments = a.run.segments
+        const bSegments = b.run.segments
+        const aSpan = aSegments[aSegments.length - 1].clipEnd - aSegments[0].clipStart
+        const bSpan = bSegments[bSegments.length - 1].clipEnd - bSegments[0].clipStart
+        return aSpan - bSpan
+      })
+      const shortest = expandable[0]
+      const nextShortest = expandable[1]
+      const shortestSegments = shortest.run.segments
+      const shortestSpan = shortestSegments[shortestSegments.length - 1].clipEnd - shortestSegments[0].clipStart
+      const nextSpan = nextShortest
+        ? nextShortest.run.segments[nextShortest.run.segments.length - 1].clipEnd
+          - nextShortest.run.segments[0].clipStart
+        : continuity.preferredSequenceDuration
+      const waterline = Math.min(continuity.preferredSequenceDuration, Math.max(shortestSpan + 1, nextSpan))
+      const share = Math.min(fillRemaining, Math.max(1, waterline - shortestSpan))
+      let addedThisRound = 0
+      for (const { run, left, right } of [shortest]) {
+        const first = run.segments[0]
+        const last = run.segments[run.segments.length - 1]
+        const leftRoom = Math.max(0, first.clipStart - left)
+        const rightRoom = Math.max(0, right - last.clipEnd)
+        const lengthRoom = Math.max(0, continuity.maxSequenceDuration - (last.clipEnd - first.clipStart))
+        const addition = Math.min(share, leftRoom + rightRoom, lengthRoom, fillRemaining)
+        if (addition <= 0) continue
+        const addLeft = Math.min(leftRoom, addition / 2)
+        const addRight = Math.min(rightRoom, addition - addLeft)
+        const leftover = addition - addLeft - addRight
+        const finalLeft = addLeft + Math.min(Math.max(0, leftRoom - addLeft), leftover)
+        const finalRight = addition - finalLeft
+        first.clipStart -= finalLeft
+        first.clipDuration += finalLeft
+        first.continuityFillBefore = (first.continuityFillBefore || 0) + finalLeft
+        last.clipEnd += finalRight
+        last.clipDuration += finalRight
+        last.continuityFillAfter = (last.continuityFillAfter || 0) + finalRight
+        retainedContinuityDuration += addition
+        fillRemaining -= addition
+        addedThisRound += addition
+      }
+      if (addedThisRound <= 0.05) break
+    }
+
+    for (let index = 0; index < finalTimeline.length; index++) {
+      const marker = finalTimeline[index]
+      if (marker.type !== 'bridge') continue
+      const previous = [...finalTimeline.slice(0, index)].reverse().find(segment => segment.type !== 'bridge')
+      const next = finalTimeline.slice(index + 1).find(segment => segment.type !== 'bridge')
+      if (previous && next) {
+        marker.clipStart = previous.clipEnd
+        marker.clipEnd = next.clipStart
+        marker.clipDuration = Math.max(0, marker.clipEnd - marker.clipStart)
+        marker.coreStart = marker.clipStart
+        marker.coreEnd = marker.clipEnd
+      }
+    }
   }
 
   // ── Full race mode: prepend/append bridges to cover 0 → raceDuration ─
@@ -1488,7 +1732,7 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
   ]
 
   // ── Compute metrics ──────────────────────────────────────────────────
-  const eventSegs = finalTimeline.filter(s => s.type === 'event' || s.type === 'merge' || s.type === 'pip')
+  const eventSegs = finalTimeline.filter(s => ['event', 'merge', 'pip', 'sequence'].includes(s.type))
   const totalContentDuration = eventSegs.reduce((sum, s) => sum + s.clipDuration, 0)
   const totalContextDuration = finalTimeline.filter(s => s.type === 'context').reduce((sum, s) => sum + s.clipDuration, 0)
   const bridgeCount = finalTimeline.filter(s => s.type === 'bridge').length

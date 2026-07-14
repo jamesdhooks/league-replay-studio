@@ -226,22 +226,6 @@ export default function HighlightPanel({ projectId }) {
                   onChange={v => setTargetDuration(v === 0 ? null : v * 60)}
                   labelWidth="7rem"
                 />
-                <LabeledSlider
-                  label="Continuity"
-                  tooltip="Prefer nearby events as uninterrupted race sequences. Retained gap footage counts toward the target duration."
-                  value={params.continuityPreference ?? 0}
-                  min={0} max={100} step={5}
-                  format={v => {
-                    if (v === 0) return 'Cut-focused'
-                    if (v <= 25) return 'Light flow'
-                    if (v <= 60) return 'Balanced'
-                    if (v <= 85) return 'Continuous'
-                    return 'Long takes'
-                  }}
-                  tickFormat={v => v}
-                  onChange={v => setParams(current => ({ ...current, continuityPreference: v }))}
-                  labelWidth="7rem"
-                />
               </div>
             )}
 

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from server.services.analysis_db import (
+    assign_event_replay_sessions,
     get_project_db,
     init_analysis_db,
     clear_analysis_data,
@@ -35,6 +36,11 @@ from server.services.analysis_db import (
 )
 from server.services.detectors import ALL_DETECTORS
 from server.services.iracing_bridge import bridge as iracing_bridge
+from server.services.heat_session_plan import (
+    build_session_plan,
+    requires_full_replay_scan,
+    update_session_anchor,
+)
 from server.services.run_log_file_service import run_log_file_service
 
 logger = logging.getLogger(__name__)
@@ -92,6 +98,7 @@ class TelemetryWriter:
         self._last_laps: dict[int, int] = {}  # car_idx → last known lap
         self._prev_lap_pct: dict[int, tuple[float, float]] = {}  # car_idx → (lap_pct, session_time)
         self._prev_incident_counts: dict[int, int] = {}  # car_idx → last known incident count
+        self._replay_session_num: int | None = None
 
     @property
     def total_ticks(self) -> int:
@@ -101,9 +108,18 @@ class TelemetryWriter:
         """Buffer one telemetry tick and its car states."""
         data = snapshot.get("data", snapshot)
 
+        replay_session_num = int(data.get("replay_session_num", 0) or 0)
+        if self._replay_session_num is not None and replay_session_num != self._replay_session_num:
+            # Session clocks reset between heats; never derive speed/lap deltas across them.
+            self._prev_lap_pct.clear()
+            self._last_laps.clear()
+            self._prev_incident_counts.clear()
+        self._replay_session_num = replay_session_num
+
         # Insert race_tick
         self._tick_batch.append((
             data.get("session_time", 0.0),
+            replay_session_num,
             data.get("replay_frame", 0),
             data.get("session_state", 0),
             data.get("race_laps", 0),
@@ -193,7 +209,7 @@ class TelemetryWriter:
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (car_idx, data.get("session_time", 0.0),
                      lap_for_car.get(car_idx, 0),
-                     f"+{delta}x", delta, 0, ""),
+                     f"+{delta}x", delta, replay_session_num, ""),
                 )
             self._prev_incident_counts[car_idx] = count
 
@@ -212,9 +228,9 @@ class TelemetryWriter:
         for tick_row in self._tick_batch:
             cursor = conn.execute(
                 """INSERT INTO race_ticks
-                   (session_time, replay_frame, session_state, race_laps, cam_car_idx, flags,
+                   (session_time, replay_session_num, replay_frame, session_state, race_laps, cam_car_idx, flags,
                     flag_yellow, flag_red, flag_checkered)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 tick_row,
             )
             tick_ids.append(cursor.lastrowid)  # type: ignore[arg-type]
@@ -769,7 +785,24 @@ class ReplayAnalyzer:
         race_session_num = session_data.get("race_session_num")
         all_sessions = session_data.get("sessions", [])
 
-        # ── Persist session fingerprint for later replay-validation ─────────
+        # Build and persist one authoritative plan that analysis, script generation,
+        # and capture will share.  Explicit Heat + Feature labels are required;
+        # generic multiple Race sessions deliberately remain standard format.
+        session_plan = build_session_plan(all_sessions)
+        conn.execute(
+            "INSERT OR REPLACE INTO analysis_meta (key, value) VALUES (?, ?)",
+            ("session_plan", json.dumps(session_plan)),
+        )
+        if session_plan["format"] == "heat":
+            race_session_num = session_plan["feature_session_num"]
+        conn.commit()
+        logger.info(
+            "[Analysis] Session plan: format=%s stages=%s anchors=%d final_session=%s",
+            session_plan["format"],
+            [stage["section"] for stage in session_plan["stages"]],
+            len(session_plan["race_anchors"]),
+            race_session_num,
+        )
         # Stored in analysis_meta so the frontend can later confirm the user
         # has the same replay loaded during review/editing phases.
         fingerprint = {
@@ -793,9 +826,7 @@ class ReplayAnalyzer:
         # iRacing's SessionLog.Messages is only populated during live sessions,
         # NOT in replay mode.  ResultsPositions.Incidents shows the race-end
         # total immediately and never increments as we scrub forward.
-        # Instead, we watch CarIdxIncidentCount per-frame inside write_tick():
-        # each time a car's count rises, a row is inserted into incident_log.
-        race_session_num = session_data.get("race_session_num")
+        # `race_session_num` is plan-selected above (Feature for heat ladders).
 
         if all_sessions:
             session_names = ", ".join(
@@ -804,8 +835,22 @@ class ReplayAnalyzer:
             )
             logger.info("[Analysis] Available sessions: %s", session_names)
 
-        jumped_to_race = False
-        if race_session_num is not None:
+        # Heat ladders must scan from replay start so every completed Heat can
+        # produce its own measured anchors.  Directly jumping to the final Feature
+        # would make earlier Heat footage impossible to validate or materialize.
+        # Standard-format replays keep the faster direct-race seek.
+        jumped_to_race = not requires_full_replay_scan(session_plan) and race_session_num is not None
+        if requires_full_replay_scan(session_plan):
+            jumped_to_race = False
+            logger.info(
+                "[Analysis] Heat ladder: scanning from replay start for planned sessions %s",
+                sorted(planned for planned in {
+                    int(anchor["session_num"])
+                    for anchor in session_plan.get("race_anchors", [])
+                    if anchor.get("session_num") is not None
+                }),
+            )
+        if jumped_to_race:
             self.on_progress("step_completed", {
                 "project_id": self.project_id,
                 "stage": "analysis_scan",
@@ -928,10 +973,18 @@ class ReplayAnalyzer:
             "progress_percent": 5,
         })
 
+        # Preserve session-local green anchors while scanning. In heat ladders
+        # the scan naturally passes completed Heats before the final Feature.
+        planned_race_sessions = {
+            int(anchor["session_num"])
+            for anchor in session_plan.get("race_anchors", [])
+            if anchor.get("event_type") == "race_start" and anchor.get("session_num") is not None
+        }
+        session_anchors: dict[str, dict[str, float | int]] = {}
         race_start_frame = 0
         race_start_session_time = 0.0
         race_start_found = False
-        # Generous scan limit in both cases; session-number validation prevents
+
         # false positives from practice/qualifying RACING states.  At 0.02 s/tick:
         #   jumped → 3000 ticks = 60 real-s window within the race session
         #   full scan → 18000 ticks = 6 min to traverse a multi-session replay
@@ -949,9 +1002,23 @@ class ReplayAnalyzer:
                 current_replay_sn = snapshot.get("replay_session_num", snapshot.get("session_num", 0))
                 current_state = snapshot.get("session_state", 0)
 
+                anchor_changed = update_session_anchor(
+                    session_anchors,
+                    snapshot,
+                    planned_race_sessions,
+                    racing_state=SESSION_STATE_RACING,
+                    checkered_state=SESSION_STATE_CHECKERED,
+                )
+                if anchor_changed:
+                    anchor = session_anchors[str(current_replay_sn)]
+                    logger.info(
+                        "[Analysis] Recorded session-local anchor: session=#%d state=%d data=%s",
+                        current_replay_sn,
+                        current_state,
+                        anchor,
+                    )
+
                 if current_state == SESSION_STATE_RACING:
-                    # Validate we are in the correct session.
-                    # Skip if race_session_num is known but we haven't reached it yet.
                     if race_session_num is not None and current_replay_sn != race_session_num:
                         if tick - last_skip_log >= 100:
                             last_skip_log = tick
@@ -1041,6 +1108,10 @@ class ReplayAnalyzer:
         })
 
         # Store for use during capture phase
+        conn.execute(
+            "INSERT OR REPLACE INTO analysis_meta (key, value) VALUES (?, ?)",
+            ("session_anchors", json.dumps(session_anchors)),
+        )
         conn.execute(
             "INSERT OR REPLACE INTO analysis_meta (key, value) VALUES (?, ?)",
             ("race_start_frame", str(race_start_frame)),
@@ -1134,6 +1205,13 @@ class ReplayAnalyzer:
                 continue
 
             writer.write_tick(snapshot)
+            update_session_anchor(
+                session_anchors,
+                snapshot,
+                planned_race_sessions,
+                racing_state=SESSION_STATE_RACING,
+                checkered_state=SESSION_STATE_CHECKERED,
+            )
 
             session_state = snapshot.get("session_state", 0)
             session_time = snapshot.get("session_time", 0.0)
@@ -1234,6 +1312,13 @@ class ReplayAnalyzer:
 
         # Flush remaining data
         writer.flush()
+        # Feature finish anchors are discovered during the main scan; rewrite the
+        # plan metadata so the durable map contains both Heat and Feature bounds.
+        conn.execute(
+            "INSERT OR REPLACE INTO analysis_meta (key, value) VALUES (?, ?)",
+            ("session_anchors", json.dumps(session_anchors)),
+        )
+        conn.commit()
 
         # Pause replay
         iracing_bridge.set_replay_speed(0)
@@ -1590,6 +1675,7 @@ class ReplayAnalyzer:
                                 detector_name, filtered_count,
                             )
                 if events:
+                    assign_event_replay_sessions(conn, events)
                     count = insert_events_batch(conn, events)
                     total_events += count
                     conn.commit()

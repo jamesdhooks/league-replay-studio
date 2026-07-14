@@ -185,24 +185,20 @@ def validate_capture_clip_file(clip_path: str, segment_ids: list[str] | None = N
     return result
 
 
-def _sanitize_filename(name: str) -> str:
-    """Sanitize a string for safe use as a filename component.
-
-    Strips path separators, special characters, and limits length to
-    prevent path traversal or command injection.
-    """
-    sanitized = _SAFE_FILENAME_RE.sub("_", name or "clip")
+def _sanitize_filename(name: Any) -> str:
+    """Sanitize a string-like value for safe use as a filename component."""
+    sanitized = _SAFE_FILENAME_RE.sub("_", str(name or "clip"))
     return (sanitized[:_MAX_FILENAME_LENGTH] or "clip")
 
 
 def _format_race_time(seconds: float) -> str:
     """Format seconds as M:SS or H:MM:SS."""
-    m, s = divmod(int(seconds), 60)
-    h, m = divmod(m, 60)
-    if h:
-        return f"{h}:{m:02d}:{s:02d}"
-    return f"{m}:{s:02d}"
-
+    total_seconds = max(0, int(seconds))
+    hours, remaining_seconds = divmod(total_seconds, 3600)
+    minutes, seconds_component = divmod(remaining_seconds, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds_component:02d}"
+    return f"{minutes}:{seconds_component:02d}"
 
 def _interruptible_sleep(
     seconds: float,
@@ -220,8 +216,11 @@ def _interruptible_sleep(
     while _now() < deadline:
         if cancelled_fn():
             break
-        remaining = deadline - _now()
-        _sleep(min(0.25, remaining))
+        # The clock can advance between the loop predicate and this read.
+        # Never leak a tiny negative remainder into time.sleep().
+        remaining = max(0.0, deadline - _now())
+        if remaining > 0:
+            _sleep(min(0.25, remaining))
 
 
 # ── Hotkey recorder adapter (OBS / ShadowPlay / ReLive) ─────────────────────
@@ -1025,13 +1024,19 @@ class ScriptCaptureEngine:
                 prev = segments[idx - 1]
                 prev_end = prev.get("end_time_seconds", 0)
                 gap = start - prev_end
-                contiguous_with_prev = gap <= self._contiguous_gap_threshold
+                contiguous_with_prev = (
+                    prev.get("session_num") == seg.get("session_num")
+                    and gap <= self._contiguous_gap_threshold
+                )
 
             if idx < len(segments) - 1:
                 nxt = segments[idx + 1]
                 nxt_start = nxt.get("start_time_seconds", 0)
                 gap = nxt_start - end
-                contiguous_with_next = gap <= self._contiguous_gap_threshold
+                contiguous_with_next = (
+                    nxt.get("session_num") == seg.get("session_num")
+                    and gap <= self._contiguous_gap_threshold
+                )
 
             has_camera_schedule = bool(seg.get("camera_schedule"))
 
@@ -1262,20 +1267,11 @@ class ScriptCaptureEngine:
             if segment:
                 section = str(segment.get("section", "")).lower()
                 seg_type = str(segment.get("type", "")).lower()
-                if seg_type in {"broll", "bridge"} and section in {"intro", "qualifying_results", "race_results"}:
-                    race_session_num = self._race_session_num(iracing_bridge)
-                    if race_session_num >= 0 and race_session_num != session_num:
-                        self._log_entry(
-                            seg_id,
-                            "seek",
-                            f"Using race session {race_session_num} for production b-roll section '{section}'",
-                            extra={
-                                "metadata_session_num": session_num,
-                                "race_session_num": race_session_num,
-                                "section": section,
-                            },
-                        )
-                        session_num = race_session_num
+                # A planned segment's session_num is authoritative.  In a
+                # heat ladder, result boards intentionally live in qualifying
+                # and heat sessions, not always the final Feature session.
+                # Legacy scripts without session_num use the fallback below,
+                # but a planned session assignment is never rewritten.
         else:
             # Fall back to current replay session
             session_num = iracing_bridge.get_replay_session_num()
@@ -1453,6 +1449,20 @@ class ScriptCaptureEngine:
 
                 if group_ok and driver_ok:
                     return True
+                # iRacing can report a telemetry camera-group ID different
+                # from the requested UI group even after it correctly focuses
+                # the requested car. The verified car is the critical visual
+                # target; retain the mismatch in the capture log but do not
+                # abort the entire workflow on that telemetry alias.
+                if target_car_idx is not None and driver_ok and attempt == MAX_CAMERA_RETRIES:
+                    self._log_entry(
+                        seg_id, "camera_group_alias",
+                        f"Camera group telemetry alias accepted: expected={target_group_num} actual={actual_group}; car_idx={target_car_idx}",
+                        success=True, attempt=attempt,
+                        expected={"group": target_group_num, "car_idx": target_car_idx},
+                        actual={"group": actual_group, "car_idx": actual_car},
+                    )
+                    return True
             else:
                 self._log_entry(seg_id, "validate",
                     "Could not read telemetry for camera validation",
@@ -1466,6 +1476,25 @@ class ScriptCaptureEngine:
                     CAMERA_COOLDOWN, lambda: self._cancelled,
                     _now=self._now, _sleep=self._sleep,
                 )
+
+        # Some replay camera groups accept the command but report a stale or
+        # unavailable car index. Preserve the requested group with a neutral
+        # leader-position fallback instead of aborting the complete capture.
+        if target_car_idx is not None and not self._cancelled:
+            self._log_entry(
+                seg_id, "camera_fallback",
+                f"Car focus did not validate; falling back to leader in group={target_group_num}",
+                success=False, extra={"group_num": target_group_num, "car_idx": target_car_idx},
+            )
+            iracing_bridge.cam_switch_position(0, target_group_num)
+            _interruptible_sleep(0.5, lambda: self._cancelled, _now=self._now, _sleep=self._sleep)
+            snapshot = iracing_bridge.capture_snapshot() or {}
+            actual_group = snapshot.get("cam_group_num", -1)
+            if actual_group == target_group_num:
+                self._log_entry(seg_id, "validate",
+                    f"Camera fallback validated: group expected={target_group_num} actual={actual_group}",
+                    success=True, actual={"group": actual_group})
+                return True
 
         return False
 
@@ -1567,9 +1596,49 @@ class ScriptCaptureEngine:
             )
 
         if target_group_num is not None:
-            ok = self._validated_camera_switch(
-                seg_id, iracing_bridge, target_group_num, target_car_idx
-            )
+            # A group can be listed in session metadata yet be unavailable at
+            # the requested replay instant (TV Static is a common example).
+            # Neutral b-roll may safely use its next ordered preference; an
+            # explicit numeric group remains strict because it was selected
+            # deliberately by the author.
+            camera_candidates = [target_group_num]
+            if target_car_idx is None and segment.get("camera_group") is None:
+                for name in segment.get("camera_preferences", []):
+                    candidate = cam_name_to_num.get(name)
+                    if candidate is not None and candidate not in camera_candidates:
+                        camera_candidates.append(candidate)
+
+            ok = False
+            attempted_groups: list[int] = []
+            for candidate in camera_candidates:
+                attempted_groups.append(candidate)
+                ok = self._validated_camera_switch(
+                    seg_id, iracing_bridge, candidate, target_car_idx
+                )
+                if ok:
+                    if candidate != target_group_num:
+                        self._log_entry(
+                            seg_id, "camera_preference_fallback",
+                            f"Camera preference fallback selected group={candidate} after group={target_group_num} failed",
+                            success=True,
+                            extra={"attempted_groups": attempted_groups, "selected_group": candidate},
+                        )
+                    target_group_num = candidate
+                    break
+            # Preserve preference fallback first. If every neutral b-roll
+            # preference reports a persistent telemetry alias, retain the
+            # final live camera rather than aborting a results/transition shot.
+            if not ok and target_car_idx is None and attempted_groups:
+                snapshot = iracing_bridge.capture_snapshot() or {}
+                actual_group = snapshot.get("cam_group_num", -1)
+                if actual_group != -1:
+                    self._log_entry(
+                        seg_id, "camera_group_alias",
+                        f"B-roll camera telemetry alias accepted after preferences exhausted: expected={attempted_groups} actual={actual_group}",
+                        success=True, expected={"groups": attempted_groups},
+                        actual={"group": actual_group},
+                    )
+                    ok = True
             if not ok:
                 self._fail_capture(
                     seg_id,
@@ -1579,6 +1648,7 @@ class ScriptCaptureEngine:
                         "target_group_num": target_group_num,
                         "target_car_idx": target_car_idx,
                         "max_camera_retries": MAX_CAMERA_RETRIES,
+                        "attempted_groups": attempted_groups,
                     },
                 )
         elif target_car_idx is not None:
@@ -1776,7 +1846,8 @@ class ScriptCaptureEngine:
             )
         self._sleep(0.3)
 
-        seg_label = ", ".join(segment_ids[:3])
+        # Event IDs can be integers; normalize at the human-readable log boundary.
+        seg_label = ", ".join(map(str, segment_ids[:3]))
         if len(segment_ids) > 3:
             seg_label += f" (+{len(segment_ids) - 3} more)"
 
@@ -1854,6 +1925,8 @@ class ScriptCaptureEngine:
                 "source_offset_end_seconds": source_offset_end,
                 "source_clip_id": segment_ids[0] if segment_ids else f"clip_{order_idx:03d}",
                 "source_segment_ids": list(segment_ids),
+                "session_num": seg.get("session_num"),
+                "result_session_num": seg.get("result_session_num"),
             })
 
         logger.info(

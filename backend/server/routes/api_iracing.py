@@ -489,6 +489,10 @@ async def replay_seek_time(body: SeekTimeRequest) -> dict:
         return values
 
     async def _seek_and_measure(session_num: int) -> tuple[bool, Optional[int], Optional[int], Optional[int]]:
+        # iRacing silently ignores session-time seeks while paused.  Wake it
+        # first, matching the validated analysis/capture seek path.
+        bridge.set_replay_speed(1)
+        await asyncio.sleep(0.2)
         ok = bridge.replay_search_session_time(session_num, body.session_time_ms)
         if not ok:
             return False, None, None, None
@@ -569,6 +573,14 @@ async def replay_seek_time(body: SeekTimeRequest) -> dict:
     success = best_ok
     if not success:
         raise HTTPException(status_code=500, detail="Failed to seek replay to time")
+    if best_drift is None or best_drift > _SEEK_VALIDATE_TOLERANCE_MS:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Replay seek did not settle within {_SEEK_VALIDATE_TOLERANCE_MS}ms "
+                f"(requested session {requested_session}, drift={best_drift}ms)"
+            ),
+        )
     command_log.record(
         "seek-time",
         {

@@ -317,7 +317,12 @@ class ScriptStateService:
     # ── Per-Segment Capture State ───────────────────────────────────────────
 
     def mark_captured(self, project_dir: str, segment_id: str, clip_path: str) -> None:
-        """Mark a segment as captured with its clip path."""
+        """Mark a segment as captured with its clip path.
+
+        Capture strategies preserve script IDs, which may be numeric. JSON state
+        keys are strings, so normalize at this durable boundary.
+        """
+        segment_id = str(segment_id)
         state = self.load_state(project_dir)
         if segment_id in state["segments"]:
             state["segments"][segment_id]["capture_state"] = CAPTURE_CAPTURED
@@ -327,6 +332,7 @@ class ScriptStateService:
 
     def mark_capturing(self, project_dir: str, segment_id: str) -> None:
         """Mark a segment as currently being captured."""
+        segment_id = str(segment_id)
         state = self.load_state(project_dir)
         if segment_id in state["segments"]:
             state["segments"][segment_id]["capture_state"] = CAPTURE_CAPTURING

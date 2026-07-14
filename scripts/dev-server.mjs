@@ -5,7 +5,14 @@ const targets = {
   backend: {
     port: 6369,
     command: resolve('backend/venv/Scripts/python.exe'),
-    args: ['-m', 'uvicorn', '--app-dir', 'backend', 'app:app', '--host', '127.0.0.1', '--port', '6369', '--reload'],
+    args: [resolve('backend/app.py'), '--web', '--reload'],
+    cwd: resolve('backend'),
+    env: {
+      ...process.env,
+      WEB_ONLY: '1',
+      LRS_PORT: '6369',
+      LRS_OPEN_BROWSER: '0',
+    },
   },
   frontend: {
     port: 5299,
@@ -40,5 +47,10 @@ for (const pid of listenerPids(target.port)) {
   spawnSync('taskkill.exe', ['/PID', pid, '/T', '/F'], { stdio: 'inherit' })
 }
 
-const child = spawn(target.command, target.args, { cwd: target.cwd, stdio: 'inherit', shell: false })
+const child = spawn(target.command, target.args, {
+  cwd: target.cwd,
+  env: target.env,
+  stdio: 'inherit',
+  shell: false,
+})
 child.on('exit', (code) => process.exit(code ?? 0))

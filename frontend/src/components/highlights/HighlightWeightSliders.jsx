@@ -467,6 +467,52 @@ export default function HighlightWeightSliders() {
           onToggle={() => toggle('direction')}
         >
           <div className="mt-2 space-y-2.5">
+            <ControlGroupLabel>Continuity rhythm</ControlGroupLabel>
+            <LabeledSlider
+              label="Continuity"
+              tooltip="Prefer nearby events as uninterrupted capture blocks. Retained gap footage counts toward the target duration."
+              value={params.continuityPreference ?? 0}
+              min={0} max={100} step={5}
+              format={v => {
+                if (v === 0) return 'Cut-focused'
+                if (v <= 25) return 'Light flow'
+                if (v <= 60) return 'Balanced'
+                if (v <= 85) return 'Continuous'
+                return 'Long takes'
+              }}
+              tickFormat={v => v}
+              onChange={v => setParams(current => ({ ...current, continuityPreference: v }))}
+              labelWidth="7rem"
+            />
+            <LabeledSlider
+              label="Block Length"
+              tooltip="Preferred duration for each continuity block. Auto follows the main Continuity slider."
+              value={params.continuityBlockDuration ?? 0}
+              min={0} max={300} step={15}
+              format={v => v === 0 ? 'Auto' : `${v}s`}
+              onChange={v => setParams(p => ({ ...p, continuityBlockDuration: v }))}
+              labelWidth="7rem"
+            />
+            <LabeledSlider
+              label="Block Count"
+              tooltip="Preferred number of continuity blocks distributed across the race. Auto follows the main Continuity slider."
+              value={params.continuityBlockCount ?? 0}
+              min={0} max={18} step={1}
+              format={v => v === 0 ? 'Auto' : `${v}`}
+              onChange={v => setParams(p => ({ ...p, continuityBlockCount: v }))}
+              labelWidth="7rem"
+            />
+            <LabeledSlider
+              label="Gap Reach"
+              tooltip="Largest race-time gap the planner may close inside one continuity block. Auto follows the main Continuity slider."
+              value={params.continuityGapReach ?? 0}
+              min={0} max={180} step={5}
+              format={v => v === 0 ? 'Auto' : `${v}s`}
+              onChange={v => setParams(p => ({ ...p, continuityGapReach: v }))}
+              labelWidth="7rem"
+            />
+
+            <ControlGroupLabel>Battle selection</ControlGroupLabel>
             {/* Battle sticky period */}
         <LabeledSlider
           label="Battle Hold"
@@ -500,6 +546,7 @@ export default function HighlightWeightSliders() {
           labelWidth="7rem"
         />
 
+        <ControlGroupLabel>Camera rhythm</ControlGroupLabel>
         {/* Camera sticky period */}
         <LabeledSlider
           label="Camera Hold"
@@ -553,6 +600,7 @@ export default function HighlightWeightSliders() {
           labelWidth="7rem"
         />
 
+        <ControlGroupLabel>Event emphasis</ControlGroupLabel>
         {/* Overtake boost */}
         <LabeledSlider
           label="Overtake Boost"
@@ -583,6 +631,7 @@ export default function HighlightWeightSliders() {
           onChange={v => setParams(p => ({ ...p, ignoreIncidentsDuringFirstLap: v }))}
         />
 
+        <ControlGroupLabel>Race phases</ControlGroupLabel>
         {/* Race phase boost — first lap */}
         <LabeledSlider
           label="First Lap Boost"
@@ -646,6 +695,7 @@ export default function HighlightWeightSliders() {
           labelWidth="7rem"
         />
 
+        <ControlGroupLabel>Driver focus</ControlGroupLabel>
         {/* Preferred driver boost */}
         <LabeledSlider
           label="Driver Boost"
@@ -987,6 +1037,14 @@ function ParamToggle({ label, tooltip, value, onChange }) {
  * Multi-select camera picker for a single non-race section (intro / qualifying / results).
  * Checkpoint boxes are shown in a collapsible dropdown panel.
  */
+function ControlGroupLabel({ children }) {
+  return (
+    <div className="pt-2 first:pt-0 border-t first:border-t-0 border-border-subtle">
+      <span className="text-xxs font-medium text-text-disabled uppercase tracking-wider">{children}</span>
+    </div>
+  )
+}
+
 function SectionCameraSelect({ label, cameras, isConnected, value, onChange }) {
   const [open, setOpen] = useState(false)
   const ref = useRef(null)

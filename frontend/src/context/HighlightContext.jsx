@@ -1,3 +1,5 @@
+/* global localStorage */
+
 import { createContext, useContext, useState, useCallback, useMemo, useEffect, useRef, useTransition } from 'react'
 import { apiGet, apiPut, apiPost, apiDelete } from '../services/api'
 import { useAnalysis } from './AnalysisContext'
@@ -70,6 +72,9 @@ const DEFAULT_PARAMS = {
   paddingAfter: 5.0,            // Default seconds after event end to include in each clip
   paddingByType: {},            // Per event-type padding overrides: { type: { before, after } }
   continuityPreference: 0,      // 0 = cut-focused, 100 = prefer uninterrupted race sequences
+  continuityBlockDuration: 0,   // Preferred block duration override in seconds (0 = auto)
+  continuityBlockCount: 0,      // Preferred block count override (0 = auto)
+  continuityGapReach: 0,        // Maximum closable gap override in seconds (0 = auto)
   cameraWeights: {},            // Per-camera weight overrides: { group_name: 0–100 } — empty = all equal (50)
   cameraRecencyPenalty: 0.5,    // 0 = no recency penalty, 1 = maximum penalty for recently-used cameras
   cameraRecencyDecay: 30.0,     // Seconds for recency penalty to decay back to zero
@@ -427,6 +432,9 @@ export function HighlightProvider({ children }) {
           repeat_driver_penalty: params.repeatDriverPenalty ?? 0.25,
           target_unique_driver_share: params.targetUniqueDriverShare ?? 0.60,
           continuity_preference: params.continuityPreference ?? 0,
+          continuity_block_duration: params.continuityBlockDuration ?? 0,
+          continuity_block_count: params.continuityBlockCount ?? 0,
+          continuity_gap_reach: params.continuityGapReach ?? 0,
         },
         tuning: {
           normalizationMode: params.normalizationMode ?? 'cross_type',
@@ -500,6 +508,9 @@ export function HighlightProvider({ children }) {
           repeat_driver_penalty: params.repeatDriverPenalty ?? 0.25,
           target_unique_driver_share: params.targetUniqueDriverShare ?? 0.60,
           continuity_preference: params.continuityPreference ?? 0,
+          continuity_block_duration: params.continuityBlockDuration ?? 0,
+          continuity_block_count: params.continuityBlockCount ?? 0,
+          continuity_gap_reach: params.continuityGapReach ?? 0,
         },
         tuning: {
           normalizationMode: params.normalizationMode ?? 'cross_type',

@@ -13,25 +13,15 @@ import CollapsibleSection from '../ui/CollapsibleSection'
  * Updates within 100ms of any parameter change (computed in HighlightContext).
  */
 export default memo(function HighlightMetrics() {
-  const { metrics, productionMetrics, targetDuration, videoScript, params, fixedSectionDuration } = useHighlight()
+  const { metrics, productionMetrics, targetDuration, params, fixedSectionDuration } = useHighlight()
   const { raceDuration } = useTimeline()
   const [metricsExpanded, setMetricsExpanded] = useLocalStorage('lrs:editing:metrics:expanded', true)
 
-  // Full production video duration: sum all edit segments (includes intro/outro sections).
-  // This matches the "X total" shown in the race script timeline.
+  // Use the live physical production timeline while tuning. A persisted script can
+  // lag behind the controls until Generate Script is clicked.
   const videoDuration = useMemo(() => {
-    if (!videoScript?.length) return (productionMetrics.duration || metrics.duration || 0) + (fixedSectionDuration || 0)
-    return videoScript
-      .filter(s => s.type !== 'transition')
-      .reduce((acc, s) => {
-        const rawDur  = Math.max(0, (s.end_time_seconds || 0) - (s.start_time_seconds || 0))
-        const padBef  = Math.max(0, Number(s.clip_padding       || 0))
-        const padAft  = Math.max(0, Number(s.clip_padding_after || 0))
-        // Bridges contribute 0 edit-time (instant cuts)
-        if (s.type === 'bridge') return acc
-        return acc + Math.max(1, rawDur + padBef + padAft)
-      }, 0)
-  }, [videoScript, metrics.duration, productionMetrics.duration, fixedSectionDuration])
+    return (productionMetrics.duration || metrics.duration || 0) + (fixedSectionDuration || 0)
+  }, [metrics.duration, productionMetrics.duration, fixedSectionDuration])
 
   const overTarget = targetDuration && videoDuration > targetDuration
   const underTarget = targetDuration && videoDuration < targetDuration * 0.9
@@ -59,8 +49,8 @@ export default memo(function HighlightMetrics() {
             <>
               <MetricRow
                 icon={Activity}
-                label="Sequences"
-                tooltip="Uninterrupted race sequences after continuity optimization"
+                label="Continuity blocks"
+                tooltip="Groups of distinct back-to-back events captured as uninterrupted takes"
                 value={`${productionMetrics.continuitySequenceCount || 0}`}
                 suffix={` / ${productionMetrics.hardCutCount || 0} cuts`}
               />

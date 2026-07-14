@@ -5,6 +5,7 @@ import { useIRacing } from '../../context/IRacingContext'
 import { useProject } from '../../context/ProjectContext'
 import { apiGet, apiPost } from '../../services/api'
 import { formatTime } from '../../utils/time'
+import { buildContinuityRuns } from '../../utils/highlight-continuity.js'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { useAuthoritativeReplayPlayhead } from '../../hooks/useAuthoritativeReplayPlayhead'
 import { useToast } from '../../context/ToastContext'
@@ -26,7 +27,9 @@ import ConfigurableTimelineTracks from '../ui/ConfigurableTimelineTracks'
  * Tracks (top → bottom):
  *   Section row  — coloured band per section (Intro / Qualifying / Race / Results)
  *   Camera track — iRacing camera group assigned to each clip
+ *   Focus track  — active driver within each clip
  *   Events track — clip blocks coloured by type / section
+ *   Flow track   — uninterrupted continuity groups; color changes mark cuts
  *   Tick ruler   — edit time (final video minutes:seconds)
  *
  * Execute Script drives iRacing replay through every segment in script order.
@@ -37,8 +40,8 @@ const SECTION_H    = 18   // section label row
 const CAM_H        = 34   // camera track
 const DRIVER_H     = 44   // driver focus track (extra height for sub-window bands)
 const EVT_H        = 46   // events track
+const FLOW_H       = 14   // uninterrupted continuity groups
 const TICK_H       = 24   // tick ruler
-const TOTAL_TRACK_H = SECTION_H + CAM_H + EVT_H + TICK_H
 const GUTTER_W     = 52
 const EDIT_PX_PER_SEC = 20  // pixels per second in edit time (fixed scale)
 
@@ -352,8 +355,8 @@ export default function HighlightTimeline({ onInspect }) {
       const padBefore = Math.max(0, Number(seg.clip_padding || 0))
       const padAfter = Math.max(0, Number(seg.clip_padding_after || 0))
       const clipStartTime = Math.max(0, rawStart - padBefore)
-      const clipEndTime = Math.max(clipStartTime + 1, rawEnd + padAfter)
-      const dur = Math.max(1, clipEndTime - clipStartTime)
+      const clipEndTime = Math.max(clipStartTime, rawEnd + padAfter)
+      const dur = Math.max(0, clipEndTime - clipStartTime)
       const editStart = cursor
       // Bridges are instant cuts — zero edit-time contribution
       const isBridge = seg.type === 'bridge'
@@ -380,6 +383,11 @@ export default function HighlightTimeline({ onInspect }) {
 
   const totalEditDuration = editSegments.length > 0
     ? editSegments[editSegments.length - 1].editEnd : 0
+
+  const continuityRuns = useMemo(
+    () => buildContinuityRuns(editSegments),
+    [editSegments],
+  )
 
   const inferredSessionNumBySegId = useMemo(() => {
     const parsedRaceSession = Number(raceSessionNum)
@@ -456,8 +464,8 @@ export default function HighlightTimeline({ onInspect }) {
   const activeContentW = baseContentW / Math.max(0.02, rangeWidth)
   const activePxPerSec = totalEditDuration > 0 ? activeContentW / totalEditDuration : EDIT_PX_PER_SEC
   // Dynamic height: clips track stretches to fill available height
-  const dynamicEvtH = Math.max(EVT_H, containerH > 0 ? containerH - SECTION_H - CAM_H - DRIVER_H - TICK_H : EVT_H)
-  const totalTrackH = SECTION_H + CAM_H + DRIVER_H + dynamicEvtH + TICK_H
+  const dynamicEvtH = Math.max(EVT_H, containerH > 0 ? containerH - SECTION_H - CAM_H - DRIVER_H - FLOW_H - TICK_H : EVT_H)
+  const totalTrackH = SECTION_H + CAM_H + DRIVER_H + dynamicEvtH + FLOW_H + TICK_H
 
   const toX = useCallback((t) => t * activePxPerSec, [activePxPerSec])
 
@@ -1691,7 +1699,7 @@ export default function HighlightTimeline({ onInspect }) {
                                   const relE = Math.min(1, (w.end_time   - clipStart) / clipDur)
                                   const chipW = Math.max(2, (relE - relS) * width)
                                   const chipL = relS * width
-                                  const [bg, fg] = WIN_COLORS[wi % WIN_COLORS.length]
+                                  const [bg, fg] = WIN_COLORS_DRV[wi % WIN_COLORS_DRV.length]
                                   const isWinActive = currentTime != null
                                     && currentTime >= w.start_time && currentTime <= w.end_time
                                   const wNames = (w.drivers || []).map(nameForCar).join('/')
@@ -1747,9 +1755,12 @@ export default function HighlightTimeline({ onInspect }) {
                           ? sectionMeta.label
                           : (EVENT_TYPE_LABELS[seg.event_type] || seg.event_type || 'Clip')
 
-                        const raceTimeLabel = seg.start_time_seconds != null
-                          ? formatTime(seg.start_time_seconds)
+                        const raceTimeLabel = seg.clipStartTime != null
+                          ? formatTime(seg.clipStartTime)
                           : null
+                        const raceTimeRangeLabel = raceTimeLabel && seg.clipEndTime != null
+                          ? `${raceTimeLabel} – ${formatTime(seg.clipEndTime)}`
+                          : raceTimeLabel
 
                         if (isTrueBridge) {
                           return (
@@ -1785,7 +1796,7 @@ export default function HighlightTimeline({ onInspect }) {
                             title={[
                               label,
                               seg.driver_names?.length > 0 ? `Drivers: ${seg.driver_names.join(', ')}` : null,
-                              raceTimeLabel ? `Race time: ${raceTimeLabel}` : null,
+                              raceTimeRangeLabel ? `Race time: ${raceTimeRangeLabel}` : null,
                               `Edit: ${formatTime(seg.editStart)} – ${formatTime(seg.editEnd)}`,
                               `Duration: ${fmtDur(seg.editDur)}`,
                               isFiller ? 'Context / filler clip' : null,
@@ -1819,6 +1830,36 @@ export default function HighlightTimeline({ onInspect }) {
                               </div>
                             )}
                           </div>
+                        )
+                      })}
+                    </div>
+                  ),
+                },
+                {
+                  key: 'flow',
+                  label: 'Flow',
+                  height: FLOW_H,
+                  render: ({ top, height }) => (
+                    <div className="absolute left-0 right-0 border-b border-border-subtle bg-bg-primary/35"
+                         style={{ top, height }}>
+                      {continuityRuns.map((run, index) => {
+                        const left = toX(run.editStart)
+                        const width = Math.max(3, toX(run.editEnd - run.editStart))
+                        return (
+                          <div
+                            key={`${run.groupKey}:${index}`}
+                            className="absolute"
+                            style={{
+                              left,
+                              width,
+                              top: 4,
+                              height: 6,
+                              backgroundColor: run.color,
+                              boxShadow: `0 0 5px ${run.color}55`,
+                              borderLeft: index > 0 ? '2px solid rgba(8,10,15,0.95)' : undefined,
+                            }}
+                            title={`Continuity ${index + 1}: ${run.clipCount} clip${run.clipCount === 1 ? '' : 's'} · ${fmtDur(run.duration)} uninterrupted`}
+                          />
                         )
                       })}
                     </div>

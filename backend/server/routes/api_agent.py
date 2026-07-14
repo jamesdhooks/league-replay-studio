@@ -69,10 +69,21 @@ class CaptureClipValidationRequest(BaseModel):
 class HighlightScriptRequest(BaseModel):
     target_duration: float = 720.0
     continuity_preference: int = 0
+    continuity_block_duration: int = 0
+    continuity_block_count: int = 0
+    continuity_gap_reach: int = 0
     weights: dict[str, int] = Field(default_factory=dict)
     min_severity: int = 0
     overrides: dict[str, str] = Field(default_factory=dict)
     section_config: dict[str, Any] = Field(default_factory=dict)
+    clip_padding: float = 2.0
+    clip_padding_after: float = 1.0
+    padding_by_type: dict[str, Any] = Field(default_factory=dict)
+    tuning: dict[str, Any] = Field(default_factory=dict)
+    camera_weights: dict[str, Any] = Field(default_factory=dict)
+    camera_recency_penalty: float = 0.5
+    camera_recency_decay: float = 30.0
+    dry_run: bool = False
 
 
 def _session_summary() -> dict[str, Any]:
@@ -216,6 +227,7 @@ async def get_agent_capabilities() -> dict[str, Any]:
             "capture_reset_with_trash": True,
             "obs_websocket_control": True,
             "continuity_aware_script_generation": True,
+            "highlight_script_dry_run": True,
         },
         "highlights": {
             "target_duration_scope": "final_video",
@@ -226,7 +238,17 @@ async def get_agent_capabilities() -> dict[str, Any]:
                 "maximum": 100,
                 "default": 0,
                 "retained_gaps_count_toward_target": True,
-                "script_segment_type": "continuity",
+                "target_fill_preserved": True,
+                "minimum_clip_duration_seconds": 6,
+                "max_groups_at_100": 3,
+                "selection_model": "anchor_lift+sequence_momentum+continuity_fill",
+                "script_segment_type": "event",
+                "continuity_group_field": "continuity_group_id",
+                "advanced_constraints": [
+                    "continuity_block_duration",
+                    "continuity_block_count",
+                    "continuity_gap_reach",
+                ],
             },
         },
         "capture": {
@@ -334,10 +356,20 @@ async def generate_agent_highlight_script(project_id: int, req: HighlightScriptR
             "target_duration": max(0.0, float(req.target_duration)),
             "min_severity": max(0, min(10, int(req.min_severity))),
             "continuity_preference": preference,
+            "continuity_block_duration": max(0, int(req.continuity_block_duration)),
+            "continuity_block_count": max(0, int(req.continuity_block_count)),
+            "continuity_gap_reach": max(0, int(req.continuity_gap_reach)),
         },
         overrides=req.overrides,
         section_config=req.section_config,
-        tuning={"continuityPreference": preference},
+        clip_padding=max(0.0, float(req.clip_padding)),
+        clip_padding_after=max(0.0, float(req.clip_padding_after)),
+        padding_by_type=req.padding_by_type,
+        tuning={**req.tuning, "continuityPreference": preference},
+        camera_weights=req.camera_weights,
+        camera_recency_penalty=max(0.0, min(1.0, float(req.camera_recency_penalty))),
+        camera_recency_decay=max(0.0, float(req.camera_recency_decay)),
+        persist=not req.dry_run,
     ))
 
 

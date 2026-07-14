@@ -799,7 +799,30 @@ async def start_script_capture(body: ScriptCaptureRequest):
                     ),
                 )
             if obs_control["recording"]:
-                raise HTTPException(status_code=409, detail="OBS is already recording; stop it before scripted capture")
+                # A prior interrupted capture can leave OBS recording even when
+                # LRS's in-memory worker is idle. Recover the recorder state
+                # through the configured WebSocket rather than making users
+                # manually stop OBS or risking overlap with a new clip.
+                from server.utils.obs_websocket import ObsWebSocketClient
+
+                try:
+                    obs_client = ObsWebSocketClient(
+                        host=str(settings_service.get("obs_websocket_host", "127.0.0.1")),
+                        port=int(settings_service.get("obs_websocket_port", 4455) or 4455),
+                        password=str(settings_service.get("obs_websocket_password", "")),
+                    )
+                    try:
+                        obs_client.request("StopRecord")
+                        if not obs_client.wait_for_recording_state(False):
+                            raise RuntimeError("OBS did not confirm its recording state stopped")
+                    finally:
+                        obs_client.close()
+                    logger.warning("[Capture API] Recovered stale OBS recording before scripted capture")
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"OBS has a stale recording that LRS could not stop safely: {exc}",
+                    ) from exc
 
     # Size the game window before replay/capture automation starts so the
     # recorder sees the intended client resolution from the first frame.
@@ -927,6 +950,26 @@ async def start_script_capture(body: ScriptCaptureRequest):
             clip_padding_after,
         )
 
+    # ── Reconcile persisted state with the exact script being captured ─────
+    # A previously locked state can belong to an older generated script.  If
+    # its IDs do not match this run, mark_capturing()/mark_captured() silently
+    # ignore the new IDs, leaving the UI reporting an incomplete capture after
+    # a successful recorder pass.  Compare first so capture state, filtering,
+    # validation, and the manifest all use the same canonical segment set.
+    state_sync = script_state_service.compare_and_update(project_dir, body.script)
+    command_log.record(
+        "capture-script-state-sync",
+        {
+            "project_id": body.project_id,
+            "total": state_sync.get("total", 0),
+            "retained": state_sync.get("retained", 0),
+            "invalidated": state_sync.get("invalidated", 0),
+            "new": state_sync.get("new", 0),
+        },
+        result="ok",
+        source="api_capture",
+    )
+
     # ── Apply capture mode filter ─────────────────────────────────────────
     filtered_script = script_state_service.filter_segments_by_mode(
         project_dir,
@@ -943,7 +986,7 @@ async def start_script_capture(body: ScriptCaptureRequest):
         }
         for segment in filtered_script
     ]
-    # Preserve transition segments between captured segments, but ensure
+
     # selected capture segments use the normalized runtime padding values.
     script = []
     filtered_by_id = {

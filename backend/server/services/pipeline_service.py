@@ -1523,10 +1523,13 @@ class PipelineService:
             self._current_run.error = None
             self._persist_run(self._current_run)
 
-            # Restart executor
+            # Release a paused executor before deciding whether a new thread is needed.
+            # A failure-action pause keeps the original executor alive while it waits.
+            self._stop_event.clear()
+            self._pause_event.clear()
+
+            # Restart executor only when there is no waiting executor to resume.
             if not self._executor_thread or not self._executor_thread.is_alive():
-                self._stop_event.clear()
-                self._pause_event.clear()
                 self._executor_thread = threading.Thread(
                     target=self._execute_pipeline,
                     name="PipelineExecutor",
@@ -1706,11 +1709,9 @@ class PipelineService:
                         self._broadcast("pipeline:failed", self._current_run.to_dict())
                         return
                     elif failure_action == FailureAction.PAUSE:
-                        # Wait for user intervention
-                        while self._pause_event.is_set() and not self._stop_event.is_set():
-                            time.sleep(0.1)
-                        if self._stop_event.is_set():
-                            return
+                        # A retry must start from the failed step, not let this
+                        # executor advance to later steps after being unpaused.
+                        return
 
             # All steps completed
             with self._lock:

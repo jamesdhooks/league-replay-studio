@@ -33,7 +33,7 @@ from server.utils.ffmpeg_builder import (
     get_video_duration,
     validate_output_file,
 )
-from server.utils.gpu_detection import find_ffmpeg, find_ffprobe
+from server.utils.gpu_detection import find_ffmpeg, find_ffprobe, get_best_encoder
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,9 @@ GAP_POLICY_FADE       = "fade_bridge"
 
 # Cap on generated black-clip duration (seconds) for fill_black policy
 FILL_BLACK_MAX_GAP_SECONDS = 30.0
-OVERLAY_COMPOSITE_TIMEOUT_SECONDS = 30.0
+# Dynamic Broadcast overlays can sample and render many 1080p frames. Keep a
+# finite watchdog, but allow a bounded five-minute budget per selected clip.
+OVERLAY_COMPOSITE_TIMEOUT_SECONDS = 300.0
 
 
 # ── Composition states ──────────────────────────────────────────────────────
@@ -198,6 +200,38 @@ def _sanitise_id(raw_id: str, max_len: int = 64) -> str:
     return re.sub(r"[^a-zA-Z0-9_\-]", "_", str(raw_id))[:max_len]
 
 
+def _composition_video_encode_args(
+    *,
+    quality: int,
+    cpu_preset: str,
+) -> tuple[list[str], dict[str, Any]]:
+    """Select a GPU-first H.264 encoder for offline composition media."""
+    encoder = get_best_encoder("h264")
+    codec = str(encoder.get("ffmpeg_codec") or "libx264")
+
+    if codec == "h264_nvenc":
+        return (
+            [
+                "-c:v", codec,
+                "-gpu", "0",
+                "-preset", "p5",
+                "-tune", "hq",
+                "-rc", "vbr",
+                "-cq", str(quality),
+                "-b:v", "0",
+            ],
+            encoder,
+        )
+    if codec == "h264_amf":
+        return (
+            ["-c:v", codec, "-quality", "balanced", "-rc", "cqp", "-qp_i", str(quality), "-qp_p", str(quality)],
+            encoder,
+        )
+    if codec == "h264_qsv":
+        return (["-c:v", codec, "-preset", "medium", "-global_quality", str(quality)], encoder)
+    return (["-c:v", "libx264", "-preset", cpu_preset, "-crf", str(quality)], encoder)
+
+
 # ── Composition Service ─────────────────────────────────────────────────────
 
 class CompositionService:
@@ -219,7 +253,26 @@ class CompositionService:
         self._broadcast_fn: Callable | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
 
-    # ── Properties ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _may_reuse_overlaid_clip(clip: dict[str, Any], overlay_config: dict[str, Any]) -> bool:
+        """Duration-only reuse is unsafe for paginated standings boards."""
+        return bool(
+            overlay_config.get("reuse_validated_overlays")
+            and clip.get("section") not in {"qualifying_results", "race_results"}
+        )
+
+    @staticmethod
+    def _overlay_focus_for_clip(clip: dict[str, Any]) -> int | None:
+        """Return an explicit focus only when the script deliberately locks it.
+
+        Race coverage follows `cam_car_idx` at each telemetry sample.  A static
+        driver is valid for hero clips or result boards only, never as an
+        accidental clip-wide race default.
+        """
+        focused = clip.get("focused_car_idx")
+        if clip.get("section") == "race" and not clip.get("lock_focus"):
+            return None
+        return int(focused) if focused is not None else None
 
     @property
     def status(self) -> dict[str, Any]:
@@ -335,6 +388,21 @@ class CompositionService:
                 {**clip, "project_dir": clip.get("project_dir") or enriched_project_dir}
                 for clip in clips_manifest
             ]
+
+        # Hard preflight gate: build the exact overlay data before any trim,
+        # render, or FFmpeg work can consume time.
+        effective_overlay_config = overlay_config or {}
+        if effective_overlay_config.get("template_id") or effective_overlay_config.get("per_section"):
+            from server.services.overlay_preflight_service import preflight_overlay_data
+            from server.utils.frame_data_builder import build_frame_data
+
+            overlay_preflight = preflight_overlay_data(clips_manifest, frame_builder=build_frame_data)
+            if not overlay_preflight["valid"]:
+                return {
+                    "success": False,
+                    "error": "Overlay preflight failed",
+                    "overlay_preflight": overlay_preflight,
+                }
 
         job_id = uuid.uuid4().hex[:12]
         job = CompositionJob(
@@ -537,6 +605,12 @@ class CompositionService:
         out_dir = Path(job.output_dir) / "trimmed"
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        # Normalize AV1 sources reused by several logical clips inside this
+        # composition job. This avoids repeated long-GOP decodes for each trim.
+        source_cache = self._prepare_reused_source_cache(job, ffmpeg_path, ffprobe_path)
+        if source_cache is None:
+            return None
+
         total = len(job.clips_manifest)
         results: list[dict[str, Any]] = []
 
@@ -560,6 +634,8 @@ class CompositionService:
                 results.append({**clip, "trimmed_path": None})
                 continue
 
+            trim_source_path = source_cache.get(clip_path, clip_path)
+
             # Calculate trim boundaries. Newer capture manifests provide exact
             # source offsets into the recorded file for each script segment.
             # Fall back to legacy duration-based trimming when offsets are absent.
@@ -574,7 +650,7 @@ class CompositionService:
             # plus any user-configured trim buffer.
             clip_duration: float | None = None
             if ffprobe_path:
-                clip_duration = get_video_duration(ffprobe_path, clip_path)
+                clip_duration = get_video_duration(ffprobe_path, trim_source_path)
 
             if source_offset_start is not None and source_offset_end is not None:
                 trim_ss = max(0.0, float(source_offset_start) + trim_start_buf)
@@ -594,22 +670,50 @@ class CompositionService:
             safe_id = _sanitise_id(seg_id)
             trimmed_path = str(out_dir / f"{safe_id}_trimmed.mp4")
 
-            # Stream-copy trims snap to keyframes and can produce zero-length
-            # outputs for short iRacing capture clips. Re-encode exact ranges so
-            # the manifest duration survives into the final composition.
+            # Accurate input-side seeks avoid decoding grouped AV1 clips from
+            # their beginning. Sparse keyframes can still make late offsets
+            # expensive, so the workflow scales the cap by source offset while
+            # retaining a finite, observable timeout for genuinely hung FFmpeg.
             trim_duration = max(0.1, trim_to - trim_ss)
+            trim_timeout_seconds = min(900, max(120, int(trim_ss * 2 + trim_duration * 3 + 60)))
+
+            # Explicit recovery opt-in: composition may reuse a prior trim only
+            # when ffprobe confirms that its duration exactly matches this
+            # manifest entry. This is disabled for normal jobs so a stale
+            # same-named file is never mistaken for newly-rendered media.
+            if job.trim_config.get("reuse_validated_trims") and ffprobe_path and Path(trimmed_path).is_file():
+                existing_duration = get_video_duration(ffprobe_path, trimmed_path)
+                if existing_duration and abs(existing_duration - trim_duration) <= 0.15:
+                    job.trimmed_clips.append(trimmed_path)
+                    results.append({**clip, "trimmed_path": trimmed_path})
+                    pct = ((idx + 1) / total) * 25
+                    job.progress_pct = pct
+                    self._log(
+                        job,
+                        "trim",
+                        f"Reusing duration-validated trim {seg_id} → {trimmed_path}",
+                        segment_id=seg_id,
+                        progress_pct=pct,
+                    )
+                    self._emit_progress(job, "trimming", idx, total)
+                    continue
             cmd = [
                 ffmpeg_path, "-hide_banner", "-loglevel", "warning", "-y",
-                "-i", clip_path,
                 "-ss", f"{trim_ss:.3f}",
+                "-i", trim_source_path,
                 "-t", f"{trim_duration:.3f}",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                 "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
                 trimmed_path,
             ]
 
+            self._log(
+                job, "trim",
+                f"Trimming {seg_id}: source_offset={trim_ss:.1f}s timeout={trim_timeout_seconds}s",
+                segment_id=seg_id,
+            )
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)  # noqa: S603
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=trim_timeout_seconds)  # noqa: S603
                 if result.returncode != 0:
                     err = result.stderr[:300] if result.stderr else f"FFmpeg exit code {result.returncode}"
                     self._log(job, "trim", f"FFmpeg trim failed for {seg_id}: {err}",
@@ -629,14 +733,79 @@ class CompositionService:
             self._log(job, "trim", f"Trimmed {seg_id} → {trimmed_path}", segment_id=seg_id, progress_pct=pct)
             self._emit_progress(job, "trimming", idx, total)
 
-        # Check that at least one clip was trimmed successfully
+        # A final replay must represent every selected manifest segment; a
+        # plausible subset is a failed composition, not a fallback output.
         valid = [r for r in results if r.get("trimmed_path")]
-        if not valid:
-            self._fail(job, "All clips failed to trim — nothing to compose")
+        if len(valid) != total:
+            self._fail(job, f"Trim incomplete: {len(valid)}/{total} clips trimmed")
             return None
 
         self._log(job, "trim", f"Trim complete: {len(valid)}/{total} clips trimmed")
         return results
+
+    def _prepare_reused_source_cache(
+        self,
+        job: CompositionJob,
+        ffmpeg_path: str,
+        ffprobe_path: str | None,
+    ) -> dict[str, str] | None:
+        """Normalize manifest sources shared by 3+ clips within this job."""
+        if not ffprobe_path:
+            return {}
+        usage: dict[str, int] = {}
+        for clip in job.clips_manifest:
+            try:
+                source = _safe_video_path(str(clip.get("path", "")))
+            except ValueError:
+                continue
+            usage[source] = usage.get(source, 0) + 1
+        shared = sorted(source for source, count in usage.items() if count >= 3)
+        if not shared:
+            return {}
+
+        cache_dir = Path(job.output_dir) / "source_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache: dict[str, str] = {}
+        for source in shared:
+            if self._is_cancelled(job):
+                return None
+            duration = get_video_duration(ffprobe_path, source)
+            if not duration or duration <= 0:
+                self._fail(job, f"Cannot determine duration for shared source {source}")
+                return None
+            cache_id = uuid.uuid5(uuid.NAMESPACE_URL, source).hex[:12]
+            cache_path = str(cache_dir / f"{_sanitise_id(Path(source).stem, 42)}_{cache_id}_mezzanine.mp4")
+            existing = get_video_duration(ffprobe_path, cache_path) if Path(cache_path).is_file() else None
+            if existing and abs(existing - duration) <= 1.0:
+                cache[source] = cache_path
+                self._log(job, "source_cache", f"Reusing validated source cache for {Path(source).name}")
+                continue
+
+            Path(cache_path).unlink(missing_ok=True)
+            self._log(job, "source_cache", f"Normalizing {Path(source).name} for {usage[source]} clips")
+            cmd = [
+                ffmpeg_path, "-hide_banner", "-loglevel", "warning", "-y", "-i", source,
+                "-map", "0:v:0", "-map", "0:a?",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "16",
+                "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",
+                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", cache_path,
+            ]
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=max(600, int(duration * 4 + 120)))  # noqa: S603
+            except subprocess.TimeoutExpired:
+                self._fail(job, f"Source-cache normalization timed out for {Path(source).name}")
+                return None
+            if result.returncode != 0:
+                detail = result.stderr[:500] if result.stderr else f"FFmpeg exit code {result.returncode}"
+                self._fail(job, f"Source-cache normalization failed for {Path(source).name}: {detail}")
+                return None
+            cached = get_video_duration(ffprobe_path, cache_path)
+            if not cached or abs(cached - duration) > 1.0:
+                self._fail(job, f"Source-cache duration mismatch for {Path(source).name}")
+                return None
+            cache[source] = cache_path
+            self._log(job, "source_cache", f"Normalized {Path(source).name} → {Path(cache_path).name}")
+        return cache
 
     # ── Step 2: Overlay ─────────────────────────────────────────────────────
 
@@ -699,6 +868,36 @@ class CompositionService:
             safe_id = _sanitise_id(seg_id)
             overlaid_path = str(out_dir / f"{safe_id}_overlaid.mp4")
 
+            # Explicit recovery opt-in: retain a previously rendered overlay
+            # only when ffprobe confirms it matches the selected trimmed clip.
+            # Normal jobs always render fresh overlay media.
+            if self._may_reuse_overlaid_clip(clip, job.overlay_config):
+                ffprobe_path = find_ffprobe()
+                trimmed_duration = get_video_duration(ffprobe_path, trimmed) if ffprobe_path else None
+                existing_duration = (
+                    get_video_duration(ffprobe_path, overlaid_path)
+                    if ffprobe_path and Path(overlaid_path).is_file()
+                    else None
+                )
+                if (
+                    trimmed_duration
+                    and existing_duration
+                    and abs(existing_duration - trimmed_duration) <= 0.15
+                ):
+                    clip["overlaid_path"] = overlaid_path
+                    job.overlaid_clips.append(overlaid_path)
+                    pct = 25 + ((idx + 1) / total) * 40
+                    job.progress_pct = pct
+                    self._log(
+                        job,
+                        "overlay",
+                        f"Reusing duration-validated overlay {seg_id} → {overlaid_path}",
+                        segment_id=seg_id,
+                        progress_pct=pct,
+                    )
+                    self._emit_progress(job, "overlaying", idx, total)
+                    continue
+
             self._log(
                 job,
                 "overlay",
@@ -708,10 +907,11 @@ class CompositionService:
             self._emit_progress(job, "overlaying", idx, total)
 
             # Build frame data for this clip's telemetry snapshot
+
             project_dir = clip.get("project_dir", "")
             series_name = clip.get("series_name", "")
             track_name = clip.get("track_name", "")
-            focused_car_idx = clip.get("focused_car_idx")
+            focused_car_idx = self._overlay_focus_for_clip(clip)
 
             frame_data = None
             if project_dir:
@@ -723,11 +923,26 @@ class CompositionService:
                         focused_car_idx=focused_car_idx,
                         series_name=series_name,
                         track_name=track_name,
+                        result_session_num=clip.get("result_session_num"),
+                        replay_session_num=clip.get("session_num"),
                     )
                 except Exception as exc:
                     logger.warning(
                         "[Composition] frame_data build failed for %s: %s", seg_id, exc
                     )
+
+            # Carry a driver identity that was proven by capture camera/car
+            # readback only for an explicit locked-focus repair clip.
+            verified_driver = str(clip.get("verified_driver_name") or "").strip()
+            if (
+                frame_data is not None
+                and section == "race"
+                and clip.get("lock_focus")
+                and verified_driver
+                and not str(frame_data.get("driver_name") or "").strip()
+            ):
+                frame_data["driver_name"] = verified_driver
+                frame_data["driver_name_source"] = "capture_verified_lock_focus"
 
             # Use synchronous composite_clip with a pre-rendered overlay PNG.
             # Since we're in a background thread, we run the async
@@ -860,6 +1075,21 @@ class CompositionService:
             overlay_engine.set_custom_template_dirs(template_dirs)
 
         async def _compose() -> str | None:
+            # The compositor invokes the shared engine directly, bypassing the
+            # interactive overlay route that normally initializes Playwright.
+            # A background composition must own this prerequisite and never
+            # depend on an operator opening the overlay UI first.
+            if overlay_engine and not overlay_engine.initialized:
+                init_result = await overlay_engine.initialize()
+                if not init_result.get("success"):
+                    if hasattr(compositor, "_set_last_diagnostics"):
+                        compositor._set_last_diagnostics({
+                            "error": init_result.get("error", "Overlay engine initialization failed"),
+                            "reason": "overlay_engine_init_failed",
+                            "template_id": template_id,
+                            "section": section,
+                        })
+                    return None
             return await compositor.render_and_composite(
                 clip_path=clip_path,
                 template_id=template_id,
@@ -1426,23 +1656,52 @@ class CompositionService:
             self._fail(job, f"Invalid output path: {exc}")
             return None
 
-        # Regenerate timestamps during concat.  Unlike the concat filter this
-        # accepts captures that do not all expose an audio stream.
-        self._log(job, "stitch", f"Re-encoding {len(clip_list)} files via concat demuxer to normalize timestamps")
+        # Regenerate timestamps during concat. Unlike the concat filter this
+        # accepts captures that do not all expose an audio stream. Estimate a
+        # bounded watchdog from real input duration: 6× realtime plus 15 min,
+        # clamped to 30 min–4 hr for slow but recoverable CRF-16 encodes.
+        input_duration_seconds = 0.0
+        if ffprobe_path:
+            input_duration_seconds = sum(
+                max(0.0, float(get_video_duration(ffprobe_path, clip_file) or 0.0))
+                for clip_file in clip_list
+            )
+        stitch_timeout_seconds = min(
+            14_400,
+            max(1_800, int(input_duration_seconds * 6 + 900)),
+        )
+        video_args, encoder = _composition_video_encode_args(quality=16, cpu_preset="medium")
+        self._log(
+            job,
+            "stitch",
+            (
+                f"Re-encoding {len(clip_list)} files via concat demuxer to normalize timestamps "
+                f"with {encoder.get('label', encoder.get('ffmpeg_codec'))} "
+                f"(input={input_duration_seconds:.1f}s timeout={stitch_timeout_seconds}s)"
+            ),
+        )
         cmd = [
             ffmpeg_path, "-hide_banner", "-loglevel", "warning", "-y",
             "-f", "concat", "-safe", "0", "-i", str(concat_list_path),
-            "-c:v", "libx264", "-preset", "medium", "-crf", "16",
+            *video_args,
             "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart",
             safe_output,
         ]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)  # noqa: S603
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=stitch_timeout_seconds,
+            )  # noqa: S603
             if result.returncode != 0:
                 self._fail(job, f"Re-encode stitch failed: {result.stderr[:300]}")
                 return None
         except subprocess.TimeoutExpired:
-            self._fail(job, "Re-encode stitch timed out (15 min limit)")
+            self._fail(
+                job,
+                f"Re-encode stitch timed out after {stitch_timeout_seconds}s",
+            )
             return None
         output_file = safe_output
 
@@ -1475,28 +1734,28 @@ class CompositionService:
         ffmpeg_path: str,
         output_path: str,
     ) -> str | None:
-        """Fallback stitch via the FFmpeg concat filter (re-encodes).
+        """Recover with concat-demuxer re-encoding, including video-only clips."""
+        concat_list_path = Path(job.output_dir) / f"concat_recovery_{job.job_id}.txt"
+        try:
+            with open(concat_list_path, "w", encoding="utf-8") as fh:
+                for clip_file in clip_list:
+                    escaped = str(Path(clip_file).resolve()).replace("'", "'\\''")
+                    fh.write(f"file '{escaped}'\n")
+        except OSError as exc:
+            self._fail(job, f"Cannot write recovery concat list: {exc}")
+            return None
 
-        Used when the concat demuxer fails due to stream incompatibility.
-        """
-        self._log(job, "stitch", "Re-encoding via concat filter (high quality, native size)")
-
-        # Build input args
-        input_args: list[str] = []
-        for clip_file in clip_list:
-            input_args.extend(["-i", str(Path(clip_file).resolve())])
-
-        n = len(clip_list)
-        # Build the concat filter
-        filter_inputs = "".join(f"[{i}:v:0][{i}:a:0]" for i in range(n))
-        filter_str = f"{filter_inputs}concat=n={n}:v=1:a=1[outv][outa]"
-
+        video_args, encoder = _composition_video_encode_args(quality=16, cpu_preset="medium")
+        self._log(
+            job,
+            "stitch",
+            "Recovery re-encode via concat demuxer with "
+            f"{encoder.get('label', encoder.get('ffmpeg_codec'))}",
+        )
         cmd = [
             ffmpeg_path, "-hide_banner", "-loglevel", "warning", "-y",
-            *input_args,
-            "-filter_complex", filter_str,
-            "-map", "[outv]", "-map", "[outa]",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "16",
+            "-f", "concat", "-safe", "0", "-i", str(concat_list_path),
+            *video_args,
             "-c:a", "aac", "-b:a", "256k",
             "-movflags", "+faststart",
             output_path,
@@ -1505,11 +1764,16 @@ class CompositionService:
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)  # noqa: S603
             if result.returncode != 0:
-                self._fail(job, f"Re-encode stitch failed: {result.stderr[:300]}")
+                self._fail(job, f"Recovery stitch failed: {result.stderr[:300]}")
                 return None
         except subprocess.TimeoutExpired:
-            self._fail(job, "Re-encode stitch timed out (15 min limit)")
+            self._fail(job, "Recovery stitch timed out (15 min limit)")
             return None
+        finally:
+            try:
+                concat_list_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
         return output_path
 

@@ -261,19 +261,43 @@
       "preferredDriversOnly": false,
       "ignoreIncidentsDuringFirstLap": false,
       "firstLapStickyPeriod": 0,
-      "lastLapStickyPeriod": 0,
+      "lastLapStickyPeriod": 20,
       "lateRaceThreshold": 0.9,
       "lateRaceMultiplier": 1.2,
       "pipThreshold": 7,
-      "maxRaceFinishes": 0,
-      "paddingBefore": 2,
+      "maxRaceFinishes": 4,
+      "paddingBefore": 4,
       "paddingAfter": 5,
       "paddingByType": {
         "race_start": {
           "after": 30
+        },
+        "incident": {
+          "after": 8
         }
       },
-      "cameraWeights": {},
+      "continuityPreference": 0,
+      "cameraWeights": {
+        "Gearbox": 0,
+        "LF Susp": 0,
+        "LR Susp": 0,
+        "Gyro": 0,
+        "RF Susp": 0,
+        "RR Susp": 0,
+        "Scenic": 0,
+        "TV Static": 0,
+        "TV Mixed": 0,
+        "Pit Lane": 0,
+        "Pit Lane 2": 0,
+        "Blimp": 0,
+        "Chase": 0,
+        "Far Chase": 0,
+        "Rear Chase": 0,
+        "Cockpit": 0,
+        "Roll Bar": 80,
+        "Nose": 80,
+        "Chopper": 60
+      },
       "cameraRecencyPenalty": 0.5,
       "cameraRecencyDecay": 30,
       "driverChangeProbability": 0.3,
@@ -301,7 +325,11 @@
         "fastest_lap": 0.05,
         "pit_stop": 0.03,
         "battle": 0.15
-      }
+      },
+      "driverCoverageStrength": 35,
+      "newDriverBoost": 1.4,
+      "repeatDriverPenalty": 0.25,
+      "targetUniqueDriverShare": 0.6
     },
     "section_config": {},
     "replay_mode": "highlights"

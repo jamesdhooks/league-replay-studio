@@ -67,6 +67,8 @@ backend/config.json
 
 # Build output
 backend/static/
+backend/static-next/
+frontend/.codex-build/
 node_modules/
 
 # Native capture build artifacts

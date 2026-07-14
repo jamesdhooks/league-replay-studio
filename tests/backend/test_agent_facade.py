@@ -96,6 +96,16 @@ def test_agent_capabilities_include_capture_validation_controls():
     assert capabilities["highlights"]["target_duration_scope"] == "final_video"
     assert capabilities["highlights"]["continuity"]["config_path"].endswith("continuityPreference")
     assert capabilities["highlights"]["continuity"]["retained_gaps_count_toward_target"] is True
+    assert capabilities["highlights"]["continuity"]["target_fill_preserved"] is True
+    assert capabilities["highlights"]["continuity"]["minimum_clip_duration_seconds"] == 6
+    assert capabilities["highlights"]["continuity"]["max_groups_at_100"] == 3
+    assert capabilities["highlights"]["continuity"]["script_segment_type"] == "event"
+    assert capabilities["highlights"]["continuity"]["continuity_group_field"] == "continuity_group_id"
+    assert capabilities["highlights"]["continuity"]["advanced_constraints"] == [
+        "continuity_block_duration",
+        "continuity_block_count",
+        "continuity_gap_reach",
+    ]
     assert validation["validator"] == "ffprobe+ffmpeg-decode"
     assert "retry_failed_clip_validation" in validation["config_keys"]
     assert validation["manual_actions"] == ["validate", "delete_and_reset_corrupt"]
@@ -114,12 +124,23 @@ def test_agent_highlight_generation_clamps_and_delegates(monkeypatch):
     monkeypatch.setattr(api_analysis, "generate_video_script_endpoint", fake_generate)
     result = asyncio.run(api_agent.generate_agent_highlight_script(
         7,
-        api_agent.HighlightScriptRequest(target_duration=300, continuity_preference=140),
+        api_agent.HighlightScriptRequest(
+            target_duration=300,
+            continuity_preference=140,
+            continuity_block_duration=75,
+            continuity_block_count=8,
+            continuity_gap_reach=35,
+            dry_run=True,
+        ),
     ))
 
     assert result["script"][0]["id"] == "prod_1"
     assert received["project_id"] == 7
     assert received["request"].constraints["continuity_preference"] == 100
+    assert received["request"].constraints["continuity_block_duration"] == 75
+    assert received["request"].constraints["continuity_block_count"] == 8
+    assert received["request"].constraints["continuity_gap_reach"] == 35
+    assert received["request"].persist is False
 
 
 

@@ -7,6 +7,7 @@ Run with: pytest tests/backend/test_scoring_engine.py -v
 
 import sys
 import os
+import pytest
 
 # Ensure the backend package is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -23,6 +24,7 @@ from backend.server.services.scoring_engine import (
     BUCKET_BOUNDARIES,
     REFERENCE_SPEED_MS,
 )
+from backend.server.services.scoring_engine.timeline import _continuity_settings
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -223,10 +225,33 @@ class TestTimelineAllocation:
 
 
 class TestContinuityPlanning:
-    def test_insert_continuity_retains_short_gap(self):
+    def test_continuity_settings_scale_to_three_long_runs(self):
+        settings = _continuity_settings({"continuity_preference": 100})
+
+        assert settings["max_gap"] == 180
+        assert settings["max_sequence_duration"] == 420
+        assert settings["max_sequences"] == 3
+
+    def test_balanced_continuity_targets_medium_distributed_blocks(self):
+        settings = _continuity_settings({"continuity_preference": 55})
+
+        assert settings["max_gap"] == 25
+        assert settings["preferred_sequence_duration"] == 60
+        assert settings["max_sequence_duration"] == 81
+        assert settings["preferred_sequences"] == 12
+
+    def test_insert_continuity_enforces_hard_clip_floor(self):
+        result = insert_continuity(
+            [{**make_event("overtake", start_time=10, end_time=11), "id": 1}],
+            {"continuity_preference": 100, "padding_before": 0, "padding_after": 0},
+        )
+
+        assert result[0]["duration"] == 6
+
+    def test_insert_continuity_keeps_events_distinct_and_joins_boundaries(self):
         timeline = [
-            {**make_event("battle", start_time=10, end_time=15), "id": 1},
-            {**make_event("overtake", start_time=20, end_time=25), "id": 2},
+            {**make_event("battle", start_time=10, end_time=20), "id": 1},
+            {**make_event("overtake", start_time=25, end_time=35), "id": 2},
         ]
         result = insert_continuity(timeline, {
             "continuity_preference": 100,
@@ -234,10 +259,10 @@ class TestContinuityPlanning:
             "padding_after": 0,
         })
 
-        continuity = [segment for segment in result if segment.get("type") == "continuity"]
-        assert len(continuity) == 1
-        assert continuity[0]["duration"] == 5
-        assert result[0]["continuity_group_id"] == result[-1]["continuity_group_id"]
+        assert len(result) == 2
+        assert all(segment.get("type") != "sequence" for segment in result)
+        assert result[0]["continuity_group_id"] == result[1]["continuity_group_id"]
+        assert result[0]["end_time_seconds"] == result[1]["start_time_seconds"]
 
     def test_insert_continuity_respects_remaining_target_budget(self):
         timeline = [
@@ -251,15 +276,15 @@ class TestContinuityPlanning:
             "target_duration": 12,
         })
 
-        assert not any(segment.get("type") == "continuity" for segment in result)
+        assert result[0]["continuity_group_id"] != result[1]["continuity_group_id"]
 
     def test_allocator_prefers_adjacent_candidate_within_target(self):
         anchor = {**make_event("leader_change", start_time=0, end_time=20), "id": 1,
                   "score": 10, "tier": "S", "bucket": "intro", "force_included": True}
         isolated = {**make_event("overtake", start_time=70, end_time=130), "id": 3,
-                    "score": 5, "tier": "B", "bucket": "late"}
+                    "score": 8, "tier": "A", "bucket": "late"}
         adjacent = {**make_event("overtake", start_time=25, end_time=85), "id": 2,
-                    "score": 5, "tier": "B", "bucket": "early"}
+                    "score": 3, "tier": "C", "bucket": "early"}
 
         result = allocate_timeline([anchor, isolated, adjacent], 100, {
             "continuity_preference": 100,
@@ -271,3 +296,21 @@ class TestContinuityPlanning:
 
         selected_ids = {event["id"] for event in result}
         assert selected_ids == {1, 2}
+
+    def test_continuity_backfill_reaches_target_without_new_runs(self):
+        timeline = [
+            {**make_event("battle", start_time=100, end_time=120), "id": 1},
+            {**make_event("overtake", start_time=500, end_time=520), "id": 2},
+        ]
+        result = insert_continuity(timeline, {
+            "continuity_preference": 100,
+            "padding_before": 0,
+            "padding_after": 0,
+            "target_duration": 180,
+            "race_duration": 700,
+        })
+
+        assert len(result) == 2
+        assert sum(segment["duration"] for segment in result) == 180
+        assert all(segment.get("type") != "sequence" for segment in result)
+        assert result[0]["continuity_group_id"] != result[1]["continuity_group_id"]

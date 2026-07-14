@@ -25,8 +25,9 @@ _ANALYSIS_SCHEMA = """
 -- Telemetry snapshots (one row per sample taken during 16× scan)
 CREATE TABLE IF NOT EXISTS race_ticks (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_time    REAL    NOT NULL,
-    replay_frame    INTEGER NOT NULL,
+    session_time       REAL    NOT NULL,
+    replay_session_num INTEGER NOT NULL DEFAULT 0,
+    replay_frame       INTEGER NOT NULL,
     session_state   INTEGER NOT NULL DEFAULT 0,
     race_laps       INTEGER NOT NULL DEFAULT 0,
     cam_car_idx     INTEGER NOT NULL DEFAULT 0,
@@ -66,7 +67,8 @@ CREATE TABLE IF NOT EXISTS race_events (
     auto_detected           INTEGER NOT NULL DEFAULT 1,
     user_modified           INTEGER NOT NULL DEFAULT 0,
     included_in_highlight   INTEGER NOT NULL DEFAULT 1,
-    metadata                TEXT    NOT NULL DEFAULT '{}'
+    metadata                TEXT    NOT NULL DEFAULT '{}',
+    replay_session_num      INTEGER NOT NULL DEFAULT 0
 );
 
 -- Lap completion markers
@@ -213,9 +215,19 @@ def init_analysis_db(project_dir: str) -> None:
             except sqlite3.OperationalError as exc:
                 logger.debug("car_states migration skip speed_ms: %s", exc)
 
+        # Migration: add replay session identity to detector events.
+        event_cols = [r[1] for r in conn.execute("PRAGMA table_info(race_events)").fetchall()]
+        if "replay_session_num" not in event_cols:
+            conn.execute("ALTER TABLE race_events ADD COLUMN replay_session_num INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_race_events_session_time "
+            "ON race_events(replay_session_num, start_time_seconds)"
+        )
+
         # Migration: add new race_ticks columns if missing
         rt_cols = [r[1] for r in conn.execute("PRAGMA table_info(race_ticks)").fetchall()]
         for col, ddl in [
+            ("replay_session_num", "INTEGER NOT NULL DEFAULT 0"),
             ("flag_yellow",    "INTEGER NOT NULL DEFAULT 0"),
             ("flag_red",       "INTEGER NOT NULL DEFAULT 0"),
             ("flag_checkered", "INTEGER NOT NULL DEFAULT 0"),
@@ -225,6 +237,14 @@ def init_analysis_db(project_dir: str) -> None:
                     conn.execute(f"ALTER TABLE race_ticks ADD COLUMN {col} {ddl}")
                 except sqlite3.OperationalError as exc:
                     logger.debug("race_ticks migration skip %s: %s", col, exc)
+
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_race_ticks_session_time "
+                "ON race_ticks(replay_session_num, session_time)"
+            )
+        except sqlite3.OperationalError as exc:
+            logger.debug("race_ticks session index migration skipped: %s", exc)
 
         # Migration: create incident_log table if not present (older DBs)
         existing_tables = {r[0] for r in conn.execute(
@@ -316,6 +336,21 @@ def clear_events_data(conn: sqlite3.Connection) -> None:
     logger.info("[AnalysisDB] Cleared event data")
 
 
+def assign_event_replay_sessions(conn: sqlite3.Connection, events: list[dict]) -> None:
+    """Stamp detector events with the replay session owning their global frame."""
+    for event in events:
+        frame = int(event.get("start_frame", 0) or 0)
+        if frame <= 0:
+            continue
+        row = conn.execute(
+            "SELECT replay_session_num FROM race_ticks "
+            "ORDER BY ABS(replay_frame - ?) ASC LIMIT 1",
+            (frame,),
+        ).fetchone()
+        if row:
+            event["replay_session_num"] = int(row["replay_session_num"])
+
+
 def insert_event(
     conn: sqlite3.Connection,
     event_type: str,
@@ -328,24 +363,18 @@ def insert_event(
     involved_drivers: list[int] | None = None,
     position: int | None = None,
     metadata: dict | None = None,
+    replay_session_num: int = 0,
 ) -> int:
     """Insert a single race event and return its ID."""
     cursor = conn.execute(
         """INSERT INTO race_events
            (event_type, start_time_seconds, end_time_seconds, start_frame, end_frame,
-            lap_number, severity, involved_drivers, position, metadata)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            lap_number, severity, involved_drivers, position, metadata, replay_session_num)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            event_type,
-            start_time,
-            end_time,
-            start_frame,
-            end_frame,
-            lap_number,
-            max(0, min(10, severity)),  # Clamp to 0–10
-            json.dumps(involved_drivers or []),
-            position,
-            json.dumps(metadata or {}),
+            event_type, start_time, end_time, start_frame, end_frame, lap_number,
+            max(0, min(10, severity)), json.dumps(involved_drivers or []),
+            position, json.dumps(metadata or {}), replay_session_num,
         ),
     )
     return cursor.lastrowid  # type: ignore[return-value]
@@ -360,24 +389,19 @@ def insert_events_batch(
         return 0
     rows = [
         (
-            e["event_type"],
-            e["start_time"],
-            e["end_time"],
-            e.get("start_frame", 0),
-            e.get("end_frame", 0),
-            e.get("lap_number"),
+            e["event_type"], e["start_time"], e["end_time"],
+            e.get("start_frame", 0), e.get("end_frame", 0), e.get("lap_number"),
             max(0, min(10, e.get("severity", 0))),
-            json.dumps(e.get("involved_drivers", [])),
-            e.get("position"),
-            json.dumps(e.get("metadata", {})),
+            json.dumps(e.get("involved_drivers", [])), e.get("position"),
+            json.dumps(e.get("metadata", {})), e.get("replay_session_num", 0),
         )
         for e in events
     ]
     conn.executemany(
         """INSERT INTO race_events
            (event_type, start_time_seconds, end_time_seconds, start_frame, end_frame,
-            lap_number, severity, involved_drivers, position, metadata)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            lap_number, severity, involved_drivers, position, metadata, replay_session_num)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         rows,
     )
     return len(rows)

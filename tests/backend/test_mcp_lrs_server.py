@@ -224,17 +224,28 @@ def test_mcp_generate_highlight_script_routes_continuity_payload(monkeypatch):
         return {"script": []}
 
     monkeypatch.setattr(mcp_lrs_server, "_request", fake_request)
-    run_async(mcp_lrs_server.generate_highlight_script(7, target_duration=300, continuity_preference=75))
+    run_async(mcp_lrs_server.generate_highlight_script(7, target_duration=300, continuity_preference=75, dry_run=True))
 
     assert calls == [(
         "POST",
         "/agent/projects/7/highlights/generate-script",
-        {
-            "target_duration": 300,
-            "continuity_preference": 75,
-            "weights": {},
+            {
+                "target_duration": 300,
+                "continuity_preference": 75,
+                "continuity_block_duration": 0,
+                "continuity_block_count": 0,
+                "continuity_gap_reach": 0,
+                "weights": {},
             "min_severity": 0,
             "overrides": {},
             "section_config": {},
+            "clip_padding": 2.0,
+            "clip_padding_after": 1.0,
+            "padding_by_type": {},
+            "tuning": {},
+            "camera_weights": {},
+            "camera_recency_penalty": 0.5,
+            "camera_recency_decay": 30.0,
+            "dry_run": True,
         },
     )]

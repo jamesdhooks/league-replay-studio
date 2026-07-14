@@ -155,6 +155,8 @@ def build_frame_data(
     focused_car_idx: Optional[int] = None,
     series_name: str = "",
     track_name: str = "",
+    result_session_num: Optional[int] = None,
+    replay_session_num: Optional[int] = None,
 ) -> dict[str, Any]:
     """Build a complete overlay ``frame_data`` dict from telemetry.
 
@@ -267,10 +269,11 @@ def build_frame_data(
         tick_row = conn.execute(
             """
             SELECT * FROM race_ticks
+            WHERE (? IS NULL OR replay_session_num = ?)
             ORDER BY ABS(session_time - ?) ASC
             LIMIT 1
             """,
-            (session_time,),
+            (replay_session_num, replay_session_num, session_time),
         ).fetchone()
 
         if not tick_row:
@@ -361,6 +364,7 @@ def build_frame_data(
             session_type_token: str,
             pick: str,
             time_field: str,
+            explicit_session_num: Optional[int] = None,
         ) -> list[dict[str, Any]]:
             if not has_session_results:
                 return []
@@ -372,7 +376,7 @@ def build_frame_data(
                 "practice": ["PRACTICE"],
             }
             priority_tokens = _TYPE_MAP.get(session_type_token.lower(), [session_type_token])
-            session_num = _resolve_session_num(priority_tokens, pick)
+            session_num = explicit_session_num if explicit_session_num is not None else _resolve_session_num(priority_tokens, pick)
             if session_num is None:
                 return []
 
@@ -591,11 +595,13 @@ def build_frame_data(
             session_type_token="qual",
             pick="first",
             time_field="fastest_time",
+            explicit_session_num=(result_session_num if section in {"qualifying", "qualifying_results"} else None),
         )
         final_authoritative = load_session_results_standings(
             session_type_token="race",
             pick="last",
             time_field="total_time",
+            explicit_session_num=(result_session_num if section in {"results", "race_results", "heat_results"} else None),
         )
 
         qualifying_tick_row = conn.execute(
@@ -627,7 +633,7 @@ def build_frame_data(
         section_standings = standings
         if section in {"qualifying", "qualifying_results"} and qualifying_standings:
             section_standings = qualifying_standings
-        elif section in {"results", "race_results"} and final_standings:
+        elif section in {"results", "race_results", "heat_results"} and final_standings:
             section_standings = final_standings
 
         # ── 6. Derive flag status ────────────────────────────────────────────

@@ -24,6 +24,7 @@ from .scoring import score_events
 from .timeline import (
     _apply_overrides,
     _compute_metrics,
+    _continuity_settings,
     allocate_timeline,
     insert_broll,
     insert_continuity,
@@ -32,6 +33,40 @@ from .timeline import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _enforce_timeline_budget(timeline: list[dict], target_duration: float) -> list[dict]:
+    """Keep an ordered, score-prioritized set of real capture segments within budget."""
+    if target_duration <= 0:
+        return list(timeline)
+
+    content = [segment for segment in timeline if segment.get("type") != "transition"]
+    def duration(segment: dict) -> float:
+        return max(0.0, float(segment.get("end_time_seconds", 0)) - float(segment.get("start_time_seconds", 0)))
+
+    anchors = [segment for segment in content if segment.get("force_included") or segment.get("event_type") in {"race_start", "race_finish"}]
+    selected: list[dict] = []
+    used = 0.0
+    for segment in sorted(anchors, key=lambda item: (item.get("start_time_seconds", 0), -float(item.get("score", 0)))):
+        segment_duration = duration(segment)
+        if used + segment_duration <= target_duration or not selected:
+            selected.append(segment)
+            used += segment_duration
+
+    selected_ids = {id(segment) for segment in selected}
+    for segment in sorted(content, key=lambda item: (-float(item.get("score", 0)), item.get("start_time_seconds", 0))):
+        if id(segment) in selected_ids:
+            continue
+        segment_duration = duration(segment)
+        if used + segment_duration <= target_duration:
+            selected.append(segment)
+            selected_ids.add(id(segment))
+            used += segment_duration
+
+    selected.sort(key=lambda item: item.get("start_time_seconds", 0))
+    if len(selected) < len(content):
+        logger.info("timeline budget enforced: retained %d/%d segments (%.1fs / %.1fs)", len(selected), len(content), used, target_duration)
+    return selected
 
 
 def generate_highlights(
@@ -80,8 +115,12 @@ def generate_highlights(
     # Stage 3: Allocate timeline (mutates constraints with "_diagnostics")
     alloc_constraints = dict(constraints)
     alloc_constraints.setdefault("num_drivers", num_drivers)  # needed for driver coverage rebalance
-    alloc_constraints["target_duration"] = target_duration
-    timeline = allocate_timeline(scored, target_duration, alloc_constraints)
+    alloc_constraints["race_duration"] = race_duration
+    continuity = _continuity_settings(alloc_constraints)
+    continuity_reserve = target_duration * 0.5 * (continuity["scale"] ** 1.5)
+    placement_target_duration = max(6.0, target_duration - continuity_reserve)
+    alloc_constraints["target_duration"] = placement_target_duration
+    timeline = allocate_timeline(scored, placement_target_duration, alloc_constraints)
     selection_diagnostics = alloc_constraints.get("_diagnostics", {})
 
     # Stage 4: Resolve conflicts
@@ -89,15 +128,28 @@ def generate_highlights(
     timeline = resolve_conflicts(timeline, pip_threshold)
 
     # Stage 5: Insert contextual bridge fillers for gaps
-    timeline = insert_broll(timeline, gap_threshold=0.05, contextual_events=scored, target_duration=target_duration)
+    timeline = insert_broll(
+        timeline,
+        gap_threshold=0.05,
+        contextual_events=scored,
+        target_duration=placement_target_duration,
+        max_context_per_gap=round(3 * (1.0 - continuity["scale"])),
+        allow_bridge_fill=not continuity["enabled"],
+    )
 
     # Stage 5b: Retain target-budgeted short gaps as uninterrupted race footage.
+    alloc_constraints["target_duration"] = target_duration
     timeline = insert_continuity(timeline, alloc_constraints)
 
-    # Stage 6: Insert transitions
+    # Stage 6: Merges and continuity expansion can make the real capture span
+    # exceed the earlier allocation estimate. Apply the final hard race budget
+    # before transitions so the generated script is safe to capture as-is.
+    timeline = _enforce_timeline_budget(timeline, target_duration)
+
+    # Stage 7: Insert transitions only between retained segments.
     timeline = insert_transitions(timeline)
 
-    # Stage 7: Compute metrics
+    # Stage 8: Compute metrics
     metrics = _compute_metrics(scored, timeline, target_duration, race_duration, num_drivers)
     if selection_diagnostics:
         metrics["selection_diagnostics"] = selection_diagnostics
@@ -179,13 +231,15 @@ def generate_video_script(
         if target_duration else target_duration
     )
 
-    # If highlights were already applied to DB, honor those flags when building
-    # the final script so selected events are not dropped by a fresh re-allocation.
-    # included_in_highlight == 1 -> highlight, == 0 -> exclude.
+    # Honor only deliberate timeline-editor inclusion/exclusion decisions.
+    # `included_in_highlight` defaults to 1 for every auto-detected event, so
+    # treating the raw flag as an override forces the entire analysis into a
+    # script and defeats target-duration allocation. `user_modified` is the
+    # schema-level signal that an editor intentionally changed the decision.
     applied_overrides: dict[str, str] = {}
     for evt in events:
         eid = evt.get("id")
-        if eid is None:
+        if eid is None or not evt.get("user_modified"):
             continue
         flag = evt.get("included_in_highlight")
         if flag == 1:
@@ -232,7 +286,8 @@ def generate_video_script(
                 "continuity_group_id": seg.get("continuityGroupId") or seg.get("continuity_group_id"),
                 "from_segment_id": seg.get("fromSegmentId") or seg.get("from_segment_id"),
                 "to_segment_id": seg.get("toSegmentId") or seg.get("to_segment_id"),
-                "padding_baked": seg_type == "continuity",
+                "continuity_segment_ids": seg.get("continuitySegmentIds") or seg.get("continuity_segment_ids") or [],
+                "padding_baked": seg_type == "sequence",
                 # Preserve PIP info
                 **({"pip": seg["pip"]} if seg.get("pip") else {}),
             })
@@ -483,15 +538,7 @@ def generate_video_script(
                     _is_new_event = _last_base_id is not None and _base_id != _last_base_id
                     _last_base_id = _base_id
 
-                    if seg.get("type") == "continuity" and _cam_last_chosen in _cam_names:
-                        others = sorted(
-                            (camera for camera in _cam_names if camera != _cam_last_chosen),
-                            key=lambda camera: camera_weights.get(camera, 0),
-                            reverse=True,
-                        )
-                        seg_entry["camera_preferences"] = [_cam_last_chosen, *others]
-                        seg_entry["hold_camera"] = True
-                    elif "camera_schedule" in seg_entry:
+                    if "camera_schedule" in seg_entry:
                         # ── Per-window camera + driver assignment ──────────────
                         involved_drivers_raw = seg.get("involved_drivers") or []
                         if isinstance(involved_drivers_raw, str):

@@ -799,7 +799,15 @@ class IRacingBridge:
                     if not d.get("is_spectator") and d.get("iracing_cust_id", 0) > 0
                 ]),
                 "sessions": [
-                    {"index": i, "type": s.get("SessionType", ""), "name": s.get("SessionName", "")}
+                    {
+                        "index": i,
+                        "type": s.get("SessionType", ""),
+                        "name": s.get("SessionName", ""),
+                        # Preserve completion evidence for heat-plan selection.
+                        # A heat with no ResultsPositions is not a completed
+                        # result-bearing ladder stage and must not generate a board.
+                        "has_results": bool(s.get("ResultsPositions") or []),
+                    }
                     for i, s in enumerate(sessions)
                 ],
                 "session_results": parsed_session_results,
