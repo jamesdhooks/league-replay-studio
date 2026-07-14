@@ -93,7 +93,13 @@ def test_agent_capabilities_include_capture_validation_controls():
     assert capabilities["features"]["capture_reset_with_trash"] is True
     assert capabilities["features"]["obs_websocket_control"] is True
     assert capabilities["features"]["continuity_aware_script_generation"] is True
+    assert capabilities["features"]["script_regeneration_capture_reconciliation"] is True
     assert capabilities["highlights"]["target_duration_scope"] == "final_video"
+    assert capabilities["highlights"]["regeneration"] == {
+        "dry_run_returns_impact": True,
+        "commit_archives_discarded_captures": True,
+        "shared_recordings_invalidate_as_a_unit": True,
+    }
     assert capabilities["highlights"]["continuity"]["config_path"].endswith("continuityPreference")
     assert capabilities["highlights"]["continuity"]["retained_gaps_count_toward_target"] is True
     assert capabilities["highlights"]["continuity"]["target_fill_preserved"] is True

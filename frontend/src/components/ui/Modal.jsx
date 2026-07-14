@@ -1,15 +1,16 @@
-import { useEffect, useRef } from 'react'
-import { AlertTriangle, Info, X } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { AlertTriangle, Info, Loader2, X } from 'lucide-react'
 
 /**
  * Modal dialog component — larger, friendlier, with better visual hierarchy.
  *
  * @param {Object} props
  * @param {string} props.title
- * @param {string} props.message
+ * @param {import('react').ReactNode} props.message
  * @param {'confirm' | 'info'} [props.variant='info']
  * @param {boolean} [props.danger=false]
  * @param {string} [props.confirmText='Confirm']
+ * @param {string} [props.confirmingText='Working...']
  * @param {string} [props.cancelText='Cancel']
  * @param {() => void} props.onConfirm
  * @param {() => void} props.onCancel
@@ -20,21 +21,23 @@ function Modal({
   variant = 'info',
   danger = false,
   confirmText = 'Confirm',
+  confirmingText = 'Working...',
   cancelText = 'Cancel',
   onConfirm,
   onCancel,
 }) {
   const overlayRef = useRef(null)
   const confirmRef = useRef(null)
+  const [confirming, setConfirming] = useState(false)
 
   // Close on Escape key
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (e.key === 'Escape') onCancel()
+      if (e.key === 'Escape' && !confirming) onCancel()
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [onCancel])
+  }, [confirming, onCancel])
 
   // Focus confirm button on mount
   useEffect(() => {
@@ -43,7 +46,17 @@ function Modal({
 
   // Close on backdrop click
   const handleBackdropClick = (e) => {
-    if (e.target === overlayRef.current) onCancel()
+    if (e.target === overlayRef.current && !confirming) onCancel()
+  }
+
+  const handleConfirm = async () => {
+    if (confirming) return
+    setConfirming(true)
+    try {
+      await onConfirm()
+    } finally {
+      setConfirming(false)
+    }
   }
 
   return (
@@ -71,6 +84,7 @@ function Modal({
           </div>
           <button
             onClick={onCancel}
+            disabled={confirming}
             className="p-2 rounded-xl hover:bg-surface-hover transition-all duration-150 cursor-pointer"
           >
             <X className="w-5 h-5 text-text-tertiary" />
@@ -78,8 +92,10 @@ function Modal({
         </div>
 
         {/* Body */}
-        <div className="px-6 py-5">
-          <p className="text-sm text-text-secondary whitespace-pre-wrap leading-relaxed">{message}</p>
+        <div className="max-h-[60vh] overflow-y-auto px-6 py-5">
+          {typeof message === 'string' ? (
+            <p className="text-sm text-text-secondary whitespace-pre-wrap leading-relaxed">{message}</p>
+          ) : message}
         </div>
 
         {/* Footer */}
@@ -87,6 +103,7 @@ function Modal({
           {variant === 'confirm' && (
             <button
               onClick={onCancel}
+              disabled={confirming}
               className="px-5 py-2.5 text-sm font-medium text-text-secondary
                          hover:text-text-primary hover:bg-surface-hover rounded-xl
                          transition-all duration-150 cursor-pointer"
@@ -96,15 +113,17 @@ function Modal({
           )}
           <button
             ref={confirmRef}
-            onClick={onConfirm}
+            onClick={handleConfirm}
+            disabled={confirming}
             className={`px-5 py-2.5 text-sm font-semibold rounded-xl transition-all duration-150
-                        cursor-pointer active:scale-[0.97] ${
+                        cursor-pointer active:scale-[0.97] disabled:cursor-wait disabled:opacity-70 ${
               danger
                 ? 'bg-danger hover:bg-danger/80 text-white'
                 : 'bg-accent hover:bg-accent-hover text-white shadow-glow-sm'
             }`}
           >
-            {confirmText}
+            {confirming && <Loader2 className="mr-2 inline h-4 w-4 animate-spin" />}
+            {confirming ? confirmingText : confirmText}
           </button>
         </div>
       </div>

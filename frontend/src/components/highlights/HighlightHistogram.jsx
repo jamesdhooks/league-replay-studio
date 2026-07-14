@@ -2,11 +2,10 @@ import { useMemo, useState, useCallback, useRef, useEffect } from 'react'
 import { useHighlight, EVENT_TYPE_LABELS } from '../../context/HighlightContext'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { useTimeline, EVENT_COLORS } from '../../context/TimelineContext'
-import { useToast } from '../../context/ToastContext'
 import { useIRacing } from '../../context/IRacingContext'
 import { useProject } from '../../context/ProjectContext'
 import { formatTime, formatDuration } from '../../utils/time'
-import { Columns3, ArrowRight, RotateCw, Download, FileText, Loader2, Zap } from 'lucide-react'
+import { Columns3, ArrowRight, RotateCw, FileText, Zap } from 'lucide-react'
 import { resolveTypePadding } from '../../utils/highlight-padding'
 import ScoringReportModal from './ScoringReportModal'
 import EventTile from './EventTile'
@@ -14,6 +13,7 @@ import ProductionColumn from './ProductionColumn'
 import RangeSlider from '../ui/RangeSlider'
 import { TimeGutter, TimeGutterH } from './TimeGutter'
 import CollapsiblePanelHeader from '../ui/CollapsiblePanelHeader'
+import ScriptGenerationButton from './ScriptGenerationButton'
 
 /**
  * HighlightHistogram — Unified score histogram + result timeline.
@@ -53,7 +53,6 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
   } = useHighlight()
   const { activeProject } = useProject()
   const { raceDuration, selectedEventId, setSelectedEventId, playheadTime, seekTo } = useTimeline()
-  const { showInfo, showSuccess, showError } = useToast()
   const { sessionData } = useIRacing()
   const [hoveredId, setHoveredId] = useState(null)
   const [compress, setCompress] = useState(false)
@@ -83,7 +82,7 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
   // Auto-generate: silently regenerate script whenever productionTimeline changes
   useEffect(() => {
     if (isFirstAutoRender.current) { isFirstAutoRender.current = false; return }
-    if (!autoGenerate || !projectId || serverScoring) return
+    if (!autoGenerate || hasExistingScript || !projectId || serverScoring) return
     clearTimeout(autoGenDebounce.current)
     autoGenDebounce.current = setTimeout(async () => {
       try {
@@ -93,18 +92,6 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
     }, 1500)
     return () => clearTimeout(autoGenDebounce.current)
   }, [productionTimeline]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleApply = useCallback(async () => {
-    if (!projectId) return
-    try {
-      showInfo('Generating race script...')
-      await applyHighlights(projectId)
-      await generateVideoScript(projectId, { cameras: sessionData?.cameras })
-      showSuccess('Race script generated')
-    } catch {
-      showError('Failed to generate race script')
-    }
-  }, [projectId, applyHighlights, generateVideoScript, showInfo, showSuccess, showError, sessionData?.cameras])
 
   // Resizable split between histogram and chosen events
   const [chosenWidth, setChosenWidth] = useLocalStorage('lrs:editing:chosenWidth', 200)
@@ -358,26 +345,17 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
             </button>
             <button
               onClick={() => setAutoGenerate(v => !v)}
-              title={autoGenerate ? 'Auto-generate on — click to disable' : 'Auto-generate script on changes'}
+              disabled={hasExistingScript}
+              title={hasExistingScript ? 'Existing scripts require review before re-generation' : (autoGenerate ? 'Auto-generate on — click to disable' : 'Auto-generate script on changes')}
               className={`p-1.5 rounded transition-colors ${
                 autoGenerate
                   ? 'text-accent bg-accent/15 hover:bg-accent/25'
                   : 'text-text-tertiary hover:text-text-secondary hover:bg-bg-primary/50'
-              }`}
+              } disabled:cursor-not-allowed disabled:opacity-40`}
             >
               <Zap className="w-3.5 h-3.5" />
             </button>
-            <button
-              onClick={handleApply}
-              disabled={serverScoring}
-              className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium
-                         bg-accent hover:bg-accent-hover disabled:opacity-60 text-white rounded transition-colors"
-            >
-              {serverScoring ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-              {serverScoring
-                ? (hasExistingScript ? 'Re-Generating...' : 'Generating...')
-                : (hasExistingScript ? 'Re-Generate Script' : 'Generate Script')}
-            </button>
+            <ScriptGenerationButton projectId={projectId} hasExistingScript={hasExistingScript} />
           </div>
         ) : null}
       />

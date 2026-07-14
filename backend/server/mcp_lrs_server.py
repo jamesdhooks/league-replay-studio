@@ -375,7 +375,12 @@ async def generate_highlight_script(
     camera_recency_decay: float = 30.0,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Generate a target-filled script; set dry_run=True to inspect it without replacing project state."""
+    """Generate a target-filled script.
+
+    Set dry_run=True to inspect the candidate and regeneration_impact without
+    replacing project state. A committed regeneration archives captures tied to
+    discarded events; events sharing one recording are invalidated together.
+    """
     return await _request(
         "POST",
         f"/agent/projects/{project_id}/highlights/generate-script",

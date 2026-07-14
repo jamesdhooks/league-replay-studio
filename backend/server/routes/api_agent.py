@@ -229,9 +229,15 @@ async def get_agent_capabilities() -> dict[str, Any]:
             "obs_websocket_control": True,
             "continuity_aware_script_generation": True,
             "highlight_script_dry_run": True,
+            "script_regeneration_capture_reconciliation": True,
         },
         "highlights": {
             "target_duration_scope": "final_video",
+            "regeneration": {
+                "dry_run_returns_impact": True,
+                "commit_archives_discarded_captures": True,
+                "shared_recordings_invalidate_as_a_unit": True,
+            },
             "continuity": {
                 "config_path": "highlight_config.params.continuityPreference",
                 "api_constraint": "continuity_preference",

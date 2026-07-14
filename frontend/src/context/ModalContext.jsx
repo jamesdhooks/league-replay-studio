@@ -39,9 +39,10 @@ export function ModalProvider({ children }) {
         <Modal
           title={modal.title}
           message={modal.message}
-          variant={modal.variant || 'info'}
+          variant={modal.variant || modal.type || 'info'}
           danger={modal.danger || false}
           confirmText={modal.confirmText || 'Confirm'}
+          confirmingText={modal.confirmingText || 'Working...'}
           cancelText={modal.cancelText || 'Cancel'}
           onConfirm={async () => {
             if (modal.onConfirm) await modal.onConfirm()

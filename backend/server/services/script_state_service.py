@@ -226,6 +226,154 @@ class ScriptStateService:
 
     # ── Script Regeneration / Hash Comparison ───────────────────────────────
 
+    @staticmethod
+    def _uncaptured_segment_state(seg: dict, seg_hash: str) -> dict:
+        return {
+            "hash": seg_hash,
+            "capture_state": CAPTURE_UNCAPTURED,
+            "clip_path": None,
+            "section": seg.get("section", "race"),
+            "start_time": seg.get("start_time_seconds", 0),
+            "end_time": seg.get("end_time_seconds", 0),
+            "event_type": seg.get("event_type", seg.get("type", "")),
+            "segment_type": seg.get("type", ""),
+            "is_pip": bool(seg.get("pip")),
+        }
+
+    def preview_compare(self, project_dir: str, new_script: list[dict]) -> dict:
+        """Describe regeneration impact without changing capture state or files."""
+        state = self.load_state(project_dir)
+        return self._build_regeneration_plan(state, new_script)
+
+    def _build_regeneration_plan(self, state: dict, new_script: list[dict]) -> dict:
+        old_segments = state.get("segments", {})
+        candidate_segments: dict[str, dict] = {}
+        candidate_hashes: dict[str, str] = {}
+
+        for seg in new_script:
+            if seg.get("type") in {"transition", "bridge"}:
+                continue
+            seg_id = str(seg.get("id", seg.get("segment_id", "")))
+            if not seg_id:
+                continue
+            candidate_segments[seg_id] = seg
+            candidate_hashes[seg_id] = _segment_hash(seg)
+
+        candidate_ids = set(candidate_segments)
+        captured_ids = {
+            str(seg_id)
+            for seg_id, info in old_segments.items()
+            if info.get("capture_state") == CAPTURE_CAPTURED
+        }
+        changed_ids = {
+            seg_id for seg_id in captured_ids & candidate_ids
+            if old_segments[seg_id].get("hash") != candidate_hashes[seg_id]
+        }
+        removed_ids = captured_ids - candidate_ids
+        directly_discarded = changed_ids | removed_ids
+
+        captured_ids_by_path: dict[str, set[str]] = {}
+        for seg_id in captured_ids:
+            clip_path = str(old_segments[seg_id].get("clip_path") or "").strip()
+            if clip_path:
+                captured_ids_by_path.setdefault(clip_path, set()).add(seg_id)
+
+        discarded_ids = set(directly_discarded)
+        for seg_id in directly_discarded:
+            clip_path = str(old_segments[seg_id].get("clip_path") or "").strip()
+            if clip_path:
+                discarded_ids.update(captured_ids_by_path.get(clip_path, set()))
+
+        collateral_ids = discarded_ids - directly_discarded
+        retained_ids = {
+            seg_id for seg_id in captured_ids & candidate_ids
+            if seg_id not in discarded_ids
+            and old_segments[seg_id].get("hash") == candidate_hashes[seg_id]
+        }
+        new_ids = candidate_ids - set(old_segments)
+        existing_uncaptured_ids = {
+            seg_id for seg_id in candidate_ids & set(old_segments)
+            if seg_id not in captured_ids
+        }
+        removed_uncaptured_ids = {
+            str(seg_id) for seg_id, info in old_segments.items()
+            if str(seg_id) not in candidate_ids
+            and info.get("capture_state") != CAPTURE_CAPTURED
+        }
+
+        discarded_clips = []
+        discarded_bytes = 0
+        discarded_duration = 0.0
+        for clip_path, linked_ids in captured_ids_by_path.items():
+            affected_ids = linked_ids & discarded_ids
+            if not affected_ids:
+                continue
+            path = Path(clip_path)
+            try:
+                size_bytes = path.stat().st_size if path.exists() else 0
+            except OSError:
+                size_bytes = 0
+            starts = [float(old_segments[seg_id].get("start_time", 0) or 0) for seg_id in linked_ids]
+            ends = [float(old_segments[seg_id].get("end_time", 0) or 0) for seg_id in linked_ids]
+            duration_seconds = max(0.0, max(ends, default=0.0) - min(starts, default=0.0))
+            reasons = []
+            if affected_ids & changed_ids:
+                reasons.append("changed")
+            if affected_ids & removed_ids:
+                reasons.append("removed")
+            if linked_ids & collateral_ids:
+                reasons.append("shared_recording")
+            discarded_clips.append({
+                "clip_path": clip_path,
+                "file_name": path.name,
+                "size_bytes": size_bytes,
+                "duration_seconds": round(duration_seconds, 3),
+                "segment_ids": sorted(linked_ids),
+                "reasons": reasons,
+            })
+            discarded_bytes += size_bytes
+            discarded_duration += duration_seconds
+
+        discarded_segment_details = []
+        for seg_id in sorted(discarded_ids):
+            info = old_segments[seg_id]
+            reason = (
+                "changed" if seg_id in changed_ids
+                else "removed" if seg_id in removed_ids
+                else "shared_recording"
+            )
+            discarded_segment_details.append({
+                "segment_id": seg_id,
+                "reason": reason,
+                "section": info.get("section", "race"),
+                "event_type": info.get("event_type", info.get("segment_type", "")),
+                "clip_path": info.get("clip_path"),
+            })
+
+        to_capture_ids = candidate_ids - retained_ids
+        return {
+            "existing_total": len(old_segments),
+            "captured_before": len(captured_ids),
+            "retained": len(retained_ids),
+            "invalidated": len(discarded_ids),
+            "new": len(new_ids | existing_uncaptured_ids),
+            "total": len(candidate_segments),
+            "to_capture": len(to_capture_ids),
+            "retained_segment_ids": sorted(retained_ids),
+            "changed_segment_ids": sorted(changed_ids),
+            "removed_segment_ids": sorted(removed_ids),
+            "collateral_segment_ids": sorted(collateral_ids),
+            "discarded_segment_ids": sorted(discarded_ids),
+            "new_segment_ids": sorted(new_ids),
+            "existing_uncaptured_segment_ids": sorted(existing_uncaptured_ids),
+            "removed_uncaptured_segment_ids": sorted(removed_uncaptured_ids),
+            "discarded_segments": discarded_segment_details,
+            "discarded_clip_count": len(discarded_clips),
+            "discarded_bytes": discarded_bytes,
+            "discarded_duration_seconds": round(discarded_duration, 3),
+            "discarded_clips": discarded_clips,
+        }
+
     def compare_and_update(self, project_dir: str, new_script: list[dict]) -> dict:
         """Compare a new script against the locked state.
 
@@ -241,76 +389,55 @@ class ScriptStateService:
         """
         state = self.load_state(project_dir)
         old_segments = state.get("segments", {})
-        new_segments = {}
-        retained = 0
-        invalidated = 0
-        new_count = 0
+        plan = self._build_regeneration_plan(state, new_script)
+        discarded_ids = set(plan["discarded_segment_ids"])
+        retained_ids = set(plan["retained_segment_ids"])
+        changed_ids = set(plan["changed_segment_ids"])
 
-        # Build new segment map
-        new_ids = set()
+        archived_clip_count = 0
+        for clip in plan["discarded_clips"]:
+            linked_ids = clip["segment_ids"]
+            representative_id = next(
+                (seg_id for seg_id in linked_ids if seg_id in discarded_ids),
+                linked_ids[0],
+            )
+            reason = "script_changed" if any(
+                seg_id in changed_ids for seg_id in linked_ids
+            ) else "segment_removed"
+            if self._trash_clip(
+                project_dir,
+                state,
+                representative_id,
+                old_segments[representative_id],
+                reason,
+                linked_segment_ids=linked_ids,
+            ):
+                archived_clip_count += 1
+
+        new_segments = {}
         for seg in new_script:
             if seg.get("type") in {"transition", "bridge"}:
                 continue
-            seg_id = seg.get("id", seg.get("segment_id", ""))
+            seg_id = str(seg.get("id", seg.get("segment_id", "")))
             if not seg_id:
                 continue
-            new_ids.add(seg_id)
             seg_hash = _segment_hash(seg)
-            existing = old_segments.get(seg_id, {})
-
-            if existing.get("hash") == seg_hash and existing.get("capture_state") == CAPTURE_CAPTURED:
-                # Hash matches — retain clip
-                new_segments[seg_id] = existing
-                retained += 1
-            elif existing.get("capture_state") == CAPTURE_CAPTURED:
-                # Hash changed — invalidate
-                self._trash_clip(project_dir, state, seg_id, existing, "script_changed")
-                new_segments[seg_id] = {
-                    "hash": seg_hash,
-                    "capture_state": CAPTURE_UNCAPTURED,
-                    "clip_path": None,
-                    "section": seg.get("section", "race"),
-                    "start_time": seg.get("start_time_seconds", 0),
-                    "end_time": seg.get("end_time_seconds", 0),
-                    "event_type": seg.get("event_type", seg.get("type", "")),
-                    "segment_type": seg.get("type", ""),
-                    "is_pip": bool(seg.get("pip")),
-                }
-                invalidated += 1
+            if seg_id in retained_ids:
+                new_segments[seg_id] = old_segments[seg_id]
             else:
-                # New or previously uncaptured segment
-                new_segments[seg_id] = {
-                    "hash": seg_hash,
-                    "capture_state": CAPTURE_UNCAPTURED,
-                    "clip_path": None,
-                    "section": seg.get("section", "race"),
-                    "start_time": seg.get("start_time_seconds", 0),
-                    "end_time": seg.get("end_time_seconds", 0),
-                    "event_type": seg.get("event_type", seg.get("type", "")),
-                    "segment_type": seg.get("type", ""),
-                    "is_pip": bool(seg.get("pip")),
-                }
-                new_count += 1
-
-        # Segments removed from new script
-        for seg_id, info in old_segments.items():
-            if seg_id not in new_ids and info.get("capture_state") == CAPTURE_CAPTURED:
-                self._trash_clip(project_dir, state, seg_id, info, "segment_removed")
-                invalidated += 1
+                new_segments[seg_id] = self._uncaptured_segment_state(seg, seg_hash)
 
         state["segments"] = new_segments
         self.save_state(project_dir, state)
 
         result = {
-            "retained": retained,
-            "invalidated": invalidated,
-            "new": new_count,
-            "total": len(new_segments),
+            **plan,
+            "archived_clip_count": archived_clip_count,
             "state": state,
         }
         logger.info(
-            "[ScriptState] Compare: retained=%d, invalidated=%d, new=%d",
-            retained, invalidated, new_count,
+            "[ScriptState] Compare: retained=%d invalidated=%d new=%d archived_clips=%d",
+            result["retained"], result["invalidated"], result["new"], archived_clip_count,
         )
         return result
 
@@ -703,7 +830,15 @@ class ScriptStateService:
 
     # ── Trash Bin ───────────────────────────────────────────────────────────
 
-    def _trash_clip(self, project_dir: str, state: dict, segment_id: str, seg_info: dict, reason: str) -> bool:
+    def _trash_clip(
+        self,
+        project_dir: str,
+        state: dict,
+        segment_id: str,
+        seg_info: dict,
+        reason: str,
+        linked_segment_ids: list[str] | None = None,
+    ) -> bool:
         """Move a clip to the trash directory."""
         clip_path = seg_info.get("clip_path")
         if not clip_path:
@@ -728,6 +863,7 @@ class ScriptStateService:
             shutil.move(str(src), str(dest))
             state.setdefault("trash", []).append({
                 "segment_id": segment_id,
+                "segment_ids": sorted(set(linked_segment_ids or [segment_id])),
                 "original_path": clip_path,
                 "trash_path": str(dest),
                 "invalidated_at": time.time(),

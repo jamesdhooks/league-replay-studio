@@ -268,6 +268,25 @@ class TestCaptureState:
 # ── Hash Comparison (Regeneration) ───────────────────────────────────────────
 
 class TestCompareAndUpdate:
+    def test_preview_reports_loss_without_mutating_files_or_state(self, svc, project_dir, sample_script):
+        svc.lock_script(project_dir, sample_script)
+        clip_path = os.path.join(project_dir, "clips", "seg_1.mp4")
+        with open(clip_path, "wb") as clip:
+            clip.write(b"capture-data")
+        svc.mark_captured(project_dir, "seg_1", clip_path)
+        modified_script = [dict(s) for s in sample_script]
+        modified_script[0]["driver_name"] = "Lando"
+
+        result = svc.preview_compare(project_dir, modified_script)
+
+        assert result["invalidated"] == 1
+        assert result["changed_segment_ids"] == ["seg_1"]
+        assert result["discarded_clip_count"] == 1
+        assert result["discarded_bytes"] == len(b"capture-data")
+        assert os.path.exists(clip_path)
+        assert svc.get_segment_states(project_dir)["seg_1"]["capture_state"] == CAPTURE_CAPTURED
+        assert svc.get_trash(project_dir) == []
+
     def test_no_changes_retains_all(self, svc, project_dir, sample_script):
         svc.lock_script(project_dir, sample_script)
         svc.mark_captured(project_dir, "seg_1", "/clips/seg_1.mp4")
@@ -310,6 +329,29 @@ class TestCompareAndUpdate:
         short_script = [s for s in sample_script if s["id"] != "seg_2"]
         result = svc.compare_and_update(project_dir, short_script)
         assert result["invalidated"] == 1
+
+    def test_changed_event_invalidates_entire_shared_recording(self, svc, project_dir, sample_script):
+        svc.lock_script(project_dir, sample_script)
+        clip_path = os.path.join(project_dir, "clips", "shared.mp4")
+        with open(clip_path, "wb") as clip:
+            clip.write(b"shared-capture")
+        svc.mark_captured(project_dir, "seg_1", clip_path)
+        svc.mark_captured(project_dir, "seg_2", clip_path)
+        modified_script = [dict(s) for s in sample_script]
+        modified_script[0]["driver_name"] = "Lando"
+
+        result = svc.compare_and_update(project_dir, modified_script)
+        state = svc.get_segment_states(project_dir)
+        trash = svc.get_trash(project_dir)
+
+        assert result["invalidated"] == 2
+        assert result["changed_segment_ids"] == ["seg_1"]
+        assert result["collateral_segment_ids"] == ["seg_2"]
+        assert result["archived_clip_count"] == 1
+        assert state["seg_1"]["capture_state"] == CAPTURE_UNCAPTURED
+        assert state["seg_2"]["capture_state"] == CAPTURE_UNCAPTURED
+        assert len(trash) == 1
+        assert trash[0]["segment_ids"] == ["seg_1", "seg_2"]
 
 
 # ── Capture Range / Filtering ────────────────────────────────────────────────

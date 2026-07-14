@@ -2,12 +2,11 @@ import { useState, useEffect, useRef } from 'react'
 import { useHighlight } from '../../context/HighlightContext'
 import { useIRacing } from '../../context/IRacingContext'
 import { useProject } from '../../context/ProjectContext'
-import { useToast } from '../../context/ToastContext'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
 import {
-  Download, GitCompare,
-  ToggleRight, Loader2, Zap,
+  GitCompare, ToggleRight, Zap,
 } from 'lucide-react'
+import ScriptGenerationButton from './ScriptGenerationButton'
 
 /**
  * HighlightConfigBar — Compact toolbar for A/B compare and save/apply.
@@ -25,7 +24,6 @@ export default function HighlightConfigBar({ projectId }) {
   } = useHighlight()
   const { activeProject } = useProject()
   const { sessionData } = useIRacing()
-  const { showInfo, showSuccess, showError } = useToast()
   const [autoGenerate, setAutoGenerate] = useLocalStorage('lrs:highlights:autoGenerate', false)
   const autoGenDebounce = useRef(null)
   const isFirstRender = useRef(true)
@@ -48,7 +46,7 @@ export default function HighlightConfigBar({ projectId }) {
       isFirstRender.current = false
       return
     }
-    if (!autoGenerate || !projectId || serverScoring) return
+    if (!autoGenerate || hasExistingScript || !projectId || serverScoring) return
     clearTimeout(autoGenDebounce.current)
     autoGenDebounce.current = setTimeout(async () => {
       try {
@@ -60,17 +58,6 @@ export default function HighlightConfigBar({ projectId }) {
     }, 1500)
     return () => clearTimeout(autoGenDebounce.current)
   }, [productionTimeline]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleApply = async () => {
-    try {
-      showInfo('Generating race script...')
-      await applyHighlights(projectId)
-      await generateVideoScript(projectId, { cameras: sessionData?.cameras })
-      showSuccess('Race script generated')
-    } catch {
-      showError('Failed to generate race script')
-    }
-  }
 
   return (
     <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border bg-bg-tertiary shrink-0">
@@ -123,26 +110,17 @@ export default function HighlightConfigBar({ projectId }) {
       {/* Auto-generate toggle + Apply button */}
       <button
         onClick={() => setAutoGenerate(v => !v)}
-        title={autoGenerate ? 'Auto-generate on (click to disable)' : 'Auto-generate script on changes'}
+        disabled={hasExistingScript}
+        title={hasExistingScript ? 'Existing scripts require review before re-generation' : (autoGenerate ? 'Auto-generate on (click to disable)' : 'Auto-generate script on changes')}
         className={`p-1.5 rounded transition-colors ${
           autoGenerate
             ? 'text-accent bg-accent/15 hover:bg-accent/25'
             : 'text-text-tertiary hover:text-text-secondary hover:bg-bg-primary/50'
-        }`}
+        } disabled:cursor-not-allowed disabled:opacity-40`}
       >
         <Zap className="w-3.5 h-3.5" />
       </button>
-      <button
-        onClick={handleApply}
-        disabled={serverScoring}
-        className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium
-                   bg-accent hover:bg-accent-hover text-white rounded transition-colors disabled:opacity-60"
-      >
-        {serverScoring ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-        {serverScoring
-          ? (hasExistingScript ? 'Re-Generating...' : 'Generating...')
-          : (hasExistingScript ? 'Re-Generate Script' : 'Generate Script')}
-      </button>
+      <ScriptGenerationButton projectId={projectId} hasExistingScript={hasExistingScript} />
     </div>
   )
 }

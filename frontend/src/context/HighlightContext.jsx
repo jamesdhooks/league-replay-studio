@@ -545,8 +545,9 @@ export function HighlightProvider({ children }) {
         camera_recency_penalty: params.cameraRecencyPenalty ?? 0.5,
         camera_recency_decay: params.cameraRecencyDecay ?? 30.0,
         production_timeline: productionTimeline?.timeline || [],
+        persist: opts.persist !== false,
       })
-      if (result.script) {
+      if (result.script && opts.persist !== false) {
         const pid = projectId
         _setScriptProjectId(pid)
         setVideoScript(result.script)
@@ -558,20 +559,8 @@ export function HighlightProvider({ children }) {
             sections: result.sections || [],
           }))
         } catch { /* storage full — non-fatal */ }
-        
-        // ── Auto-save script to project ──────────────────────────────
-        // Ensure the generated script is persisted to the project so it survives app reload
-        try {
-          await apiPut(`/projects/${pid}`, {
-            script: result.script,
-            script_generated_at: new Date().toISOString(),
-          })
-        } catch (err) {
-          console.error('[Highlights] Failed to persist script to project:', err)
-          // Non-fatal — script is still in memory and localStorage
-        }
       }
-      if (result.scored_events) {
+      if (result.scored_events && opts.persist !== false) {
         setServerScoredEvents(result.scored_events)
         setServerMetrics(result.metrics || null)
       }

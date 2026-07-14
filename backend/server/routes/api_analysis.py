@@ -2068,11 +2068,20 @@ async def generate_video_script_endpoint(project_id: int, body: VideoScriptReque
                 race_session_num,
             )
 
+            from server.services.script_state_service import script_state_service
+
+            generated_script = result.get("script", [])
+            regeneration_impact = (
+                script_state_service.compare_and_update(project_dir, generated_script)
+                if body.persist
+                else script_state_service.preview_compare(project_dir, generated_script)
+            )
+
             # Persist only committed scripts. Dry-runs must remain inspectable
             # without replacing a known-good capture plan.
             if body.persist:
                 project_service.save_project_metadata(project_id, {
-                    "script": result.get("script", []),
+                    "script": generated_script,
                     "script_sections": result.get("sections", []),
                     "script_generated_at": datetime.now(timezone.utc).isoformat(),
                 })
@@ -2080,6 +2089,10 @@ async def generate_video_script_endpoint(project_id: int, body: VideoScriptReque
             return {
                 "project_id": project_id,
                 "dry_run": not body.persist,
+                "regeneration_impact": {
+                    key: value for key, value in regeneration_impact.items()
+                    if key != "state"
+                },
                 **result,
             }
         finally:
