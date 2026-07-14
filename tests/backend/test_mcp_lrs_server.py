@@ -235,6 +235,7 @@ def test_mcp_generate_highlight_script_routes_continuity_payload(monkeypatch):
                 "continuity_block_duration": 0,
                 "continuity_block_count": 0,
                 "continuity_gap_reach": 0,
+                "continuity_event_diversity": 0,
                 "weights": {},
             "min_severity": 0,
             "overrides": {},

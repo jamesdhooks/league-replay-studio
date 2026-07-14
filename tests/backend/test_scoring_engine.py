@@ -240,6 +240,15 @@ class TestContinuityPlanning:
         assert settings["max_sequence_duration"] == 81
         assert settings["preferred_sequences"] == 12
 
+    def test_continuity_event_diversity_is_bounded(self):
+        low = _continuity_settings({"continuity_event_diversity": -10})
+        high = _continuity_settings({"continuity_event_diversity": 140})
+
+        assert low["event_diversity"] == 0
+        assert low["event_diversity_scale"] == 0
+        assert high["event_diversity"] == 100
+        assert high["event_diversity_scale"] == 1
+
     def test_insert_continuity_enforces_hard_clip_floor(self):
         result = insert_continuity(
             [{**make_event("overtake", start_time=10, end_time=11), "id": 1}],
@@ -296,6 +305,59 @@ class TestContinuityPlanning:
 
         selected_ids = {event["id"] for event in result}
         assert selected_ids == {1, 2}
+
+    def test_allocator_uses_block_variety_to_prefer_a_new_event_type(self):
+        anchor = {**make_event("battle", severity=10, start_time=0, end_time=20), "id": 1,
+                  "score": 10, "tier": "S", "bucket": "intro", "force_included": True}
+        repeated = {**make_event("battle", severity=10, start_time=25, end_time=85), "id": 2,
+                    "score": 15, "tier": "A", "bucket": "early"}
+        varied = {**make_event("overtake", severity=5, start_time=25, end_time=85), "id": 3,
+                  "score": 5, "tier": "B", "bucket": "early"}
+        base_constraints = {
+            "continuity_preference": 100,
+            "padding_before": 0,
+            "padding_after": 0,
+            "diversity_strength": 0,
+            "driver_coverage_strength": 0,
+            "mix_max": {"battle": 1, "overtake": 1},
+        }
+
+        score_first = allocate_timeline(
+            [anchor, repeated, varied], 85,
+            {**base_constraints, "continuity_event_diversity": 0},
+        )
+        mixed = allocate_timeline(
+            [anchor, repeated, varied], 85,
+            {**base_constraints, "continuity_event_diversity": 100},
+        )
+
+        assert {event["id"] for event in score_first} == {1, 2}
+        assert {event["id"] for event in mixed} == {1, 3}
+
+    def test_insert_continuity_prefers_a_mixed_type_join(self):
+        timeline = [
+            {**make_event("battle", start_time=0, end_time=10), "id": 1},
+            {**make_event("battle", start_time=12, end_time=22), "id": 2},
+            {**make_event("incident", start_time=27, end_time=37), "id": 3},
+        ]
+        base_constraints = {
+            "continuity_preference": 100,
+            "padding_before": 0,
+            "padding_after": 0,
+            "target_duration": 35,
+        }
+
+        score_first = insert_continuity(
+            timeline, {**base_constraints, "continuity_event_diversity": 0}
+        )
+        mixed = insert_continuity(
+            timeline, {**base_constraints, "continuity_event_diversity": 100}
+        )
+
+        assert score_first[0]["continuity_group_id"] == score_first[1]["continuity_group_id"]
+        assert score_first[1]["continuity_group_id"] != score_first[2]["continuity_group_id"]
+        assert mixed[0]["continuity_group_id"] != mixed[1]["continuity_group_id"]
+        assert mixed[1]["continuity_group_id"] == mixed[2]["continuity_group_id"]
 
     def test_continuity_backfill_reaches_target_without_new_runs(self):
         timeline = [

@@ -511,6 +511,22 @@ export default function HighlightWeightSliders() {
               onChange={v => setParams(p => ({ ...p, continuityGapReach: v }))}
               labelWidth="7rem"
             />
+            <LabeledSlider
+              label="Block Variety"
+              tooltip="Prefer continuity blocks containing a mix of event types. This affects the event mix within each block, not the overall reel mix."
+              value={params.continuityEventDiversity ?? 0}
+              min={0} max={100} step={5}
+              format={v => {
+                if (v === 0) return 'Score-first'
+                if (v <= 25) return 'Light variety'
+                if (v <= 60) return 'Balanced mix'
+                if (v <= 85) return 'Varied'
+                return 'Rich mix'
+              }}
+              tickFormat={v => v}
+              onChange={v => setParams(p => ({ ...p, continuityEventDiversity: v }))}
+              labelWidth="7rem"
+            />
 
             <ControlGroupLabel>Battle selection</ControlGroupLabel>
             {/* Battle sticky period */}

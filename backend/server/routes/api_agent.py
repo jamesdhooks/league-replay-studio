@@ -72,6 +72,7 @@ class HighlightScriptRequest(BaseModel):
     continuity_block_duration: int = 0
     continuity_block_count: int = 0
     continuity_gap_reach: int = 0
+    continuity_event_diversity: int = 0
     weights: dict[str, int] = Field(default_factory=dict)
     min_severity: int = 0
     overrides: dict[str, str] = Field(default_factory=dict)
@@ -241,13 +242,14 @@ async def get_agent_capabilities() -> dict[str, Any]:
                 "target_fill_preserved": True,
                 "minimum_clip_duration_seconds": 6,
                 "max_groups_at_100": 3,
-                "selection_model": "anchor_lift+sequence_momentum+continuity_fill",
+                "selection_model": "anchor_lift+sequence_momentum+block_variety+continuity_fill",
                 "script_segment_type": "event",
                 "continuity_group_field": "continuity_group_id",
                 "advanced_constraints": [
                     "continuity_block_duration",
                     "continuity_block_count",
                     "continuity_gap_reach",
+                    "continuity_event_diversity",
                 ],
             },
         },
@@ -359,6 +361,9 @@ async def generate_agent_highlight_script(project_id: int, req: HighlightScriptR
             "continuity_block_duration": max(0, int(req.continuity_block_duration)),
             "continuity_block_count": max(0, int(req.continuity_block_count)),
             "continuity_gap_reach": max(0, int(req.continuity_gap_reach)),
+            "continuity_event_diversity": max(
+                0, min(100, int(req.continuity_event_diversity))
+            ),
         },
         overrides=req.overrides,
         section_config=req.section_config,

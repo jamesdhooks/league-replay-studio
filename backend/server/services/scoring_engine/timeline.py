@@ -195,6 +195,10 @@ def _continuity_settings(constraints: Optional[dict] = None) -> dict:
     constraints = constraints or {}
     preference = max(0.0, min(100.0, float(constraints.get("continuity_preference", 0) or 0)))
     scale = preference / 100.0
+    event_diversity = max(
+        0.0,
+        min(100.0, float(constraints.get("continuity_event_diversity", 0) or 0)),
+    )
     automatic_sequences = round(_continuity_curve(scale, [
         (0, 18), (0.25, 13), (0.55, 12), (0.7, 8), (0.85, 5), (1, 3),
     ]))
@@ -214,6 +218,8 @@ def _continuity_settings(constraints: Optional[dict] = None) -> dict:
     return {
         "preference": preference,
         "scale": scale,
+        "event_diversity": event_diversity,
+        "event_diversity_scale": event_diversity / 100.0,
         "enabled": preference > 0,
         "max_gap": (
             max(1.0, float(constraints.get("continuity_gap_reach", 0) or 0))
@@ -679,8 +685,26 @@ def allocate_timeline(
                 sequence_momentum = score_reference * continuity["scale"] * min(
                     1.5, math.log2(1 + len(connected_anchors)) / 2
                 ) * run_saturation
+                candidate_type = evt.get("event_type", "unknown")
+                same_type_count = sum(
+                    1 for anchor in connected_anchors
+                    if anchor.get("event_type", "unknown") == candidate_type
+                )
+                block_novelty = (
+                    1.0
+                    if same_type_count == 0
+                    else -min(1.0, same_type_count / max(len(connected_anchors), 1))
+                )
+                block_variety_lift = (
+                    score_reference
+                    * 3
+                    * continuity["scale"]
+                    * continuity["event_diversity_scale"]
+                    * coverage["quality"]
+                    * block_novelty
+                )
                 result += score_reference * 2 * continuity["scale"] * coverage["quality"]
-                result += anchor_lift + sequence_momentum
+                result += anchor_lift + sequence_momentum + block_variety_lift
                 result -= score_reference * 2 * continuity["scale"] * run_overage
             else:
                 evt_start, evt_end = _evt_window(evt, constraints)
@@ -998,6 +1022,7 @@ def allocate_timeline(
         "total_duration": total_dur,
         "target_duration": target_duration,
         "continuity_preference": continuity["preference"],
+        "continuity_event_diversity": continuity["event_diversity"],
         "continuity_max_gap": round(continuity["max_gap"], 2),
         "continuity_max_sequence_duration": round(continuity["max_sequence_duration"], 1),
         "continuity_max_sequences": continuity["max_sequences"],
@@ -1079,6 +1104,7 @@ def insert_continuity(timeline: list[dict], constraints: Optional[dict] = None) 
             "segments": [dict(segment)],
             "start": float(segment["start_time_seconds"]),
             "end": float(segment["end_time_seconds"]),
+            "event_types": {segment.get("event_type", "unknown")},
         }
         for segment in expanded
     ]
@@ -1100,7 +1126,17 @@ def insert_continuity(timeline: list[dict], constraints: Optional[dict] = None) 
                 (combined_span - settings["preferred_sequence_duration"])
                 / max(settings["preferred_sequence_duration"], 1.0),
             )
-            priority = gap / max(settings["max_gap"], 0.001) + over_preferred * 2
+            shared_types = len(left["event_types"] & right["event_types"])
+            union_types = left["event_types"] | right["event_types"]
+            type_distance = 1.0 - shared_types / len(union_types) if union_types else 0.0
+            priority = (
+                gap / max(settings["max_gap"], 0.001)
+                + over_preferred * 2
+                - settings["scale"]
+                * settings["event_diversity_scale"]
+                * type_distance
+                * 0.75
+            )
             if priority < best_priority:
                 best_index = index
                 best_priority = priority
@@ -1118,6 +1154,7 @@ def insert_continuity(timeline: list[dict], constraints: Optional[dict] = None) 
             "segments": [*left["segments"], *right["segments"]],
             "start": left["start"],
             "end": right["end"],
+            "event_types": left["event_types"] | right["event_types"],
         }]
         budget_remaining -= best_gap
         grouping_gap_budget -= best_gap

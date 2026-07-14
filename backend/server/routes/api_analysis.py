@@ -1838,6 +1838,10 @@ async def generate_video_script_endpoint(project_id: int, body: VideoScriptReque
         0.0,
         min(100.0, float(body.constraints.get("continuity_preference", 0) or 0)),
     )
+    body.constraints["continuity_event_diversity"] = max(
+        0.0,
+        min(100.0, float(body.constraints.get("continuity_event_diversity", 0) or 0)),
+    )
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")

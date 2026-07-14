@@ -99,12 +99,14 @@ def test_agent_capabilities_include_capture_validation_controls():
     assert capabilities["highlights"]["continuity"]["target_fill_preserved"] is True
     assert capabilities["highlights"]["continuity"]["minimum_clip_duration_seconds"] == 6
     assert capabilities["highlights"]["continuity"]["max_groups_at_100"] == 3
+    assert "block_variety" in capabilities["highlights"]["continuity"]["selection_model"]
     assert capabilities["highlights"]["continuity"]["script_segment_type"] == "event"
     assert capabilities["highlights"]["continuity"]["continuity_group_field"] == "continuity_group_id"
     assert capabilities["highlights"]["continuity"]["advanced_constraints"] == [
         "continuity_block_duration",
         "continuity_block_count",
         "continuity_gap_reach",
+        "continuity_event_diversity",
     ]
     assert validation["validator"] == "ffprobe+ffmpeg-decode"
     assert "retry_failed_clip_validation" in validation["config_keys"]
@@ -130,6 +132,7 @@ def test_agent_highlight_generation_clamps_and_delegates(monkeypatch):
             continuity_block_duration=75,
             continuity_block_count=8,
             continuity_gap_reach=35,
+            continuity_event_diversity=140,
             dry_run=True,
         ),
     ))
@@ -140,6 +143,7 @@ def test_agent_highlight_generation_clamps_and_delegates(monkeypatch):
     assert received["request"].constraints["continuity_block_duration"] == 75
     assert received["request"].constraints["continuity_block_count"] == 8
     assert received["request"].constraints["continuity_gap_reach"] == 35
+    assert received["request"].constraints["continuity_event_diversity"] == 100
     assert received["request"].persist is False
 
 

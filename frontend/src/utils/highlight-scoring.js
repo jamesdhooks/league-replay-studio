@@ -80,6 +80,7 @@ function continuityCurve(scale, points) {
 export function getContinuitySettings(params = {}) {
   const preference = Math.max(0, Math.min(100, Number(params.continuityPreference ?? 0)))
   const scale = preference / 100
+  const eventDiversity = Math.max(0, Math.min(100, Number(params.continuityEventDiversity ?? 0)))
   const automaticSequences = Math.round(continuityCurve(scale, [
     [0, 18], [0.25, 13], [0.55, 12], [0.7, 8], [0.85, 5], [1, 3],
   ]))
@@ -98,6 +99,8 @@ export function getContinuitySettings(params = {}) {
   return {
     preference,
     scale,
+    eventDiversity,
+    eventDiversityScale: eventDiversity / 100,
     enabled: preference > 0,
     maxGap: Number(params.continuityGapReach) > 0
       ? Math.max(1, Number(params.continuityGapReach))
@@ -770,9 +773,22 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
           const sequenceMomentum = scoreReference * continuity.scale
             * Math.min(1.5, Math.log2(1 + connectedAnchors.length) / 2)
             * runSaturation
+          const candidateType = evt.event_type || 'unknown'
+          const sameTypeCount = connectedAnchors.filter(
+            anchor => (anchor.event_type || 'unknown') === candidateType,
+          ).length
+          const blockNovelty = sameTypeCount === 0
+            ? 1
+            : -Math.min(1, sameTypeCount / Math.max(connectedAnchors.length, 1))
+          const blockVarietyLift = scoreReference * 3
+            * continuity.scale
+            * continuity.eventDiversityScale
+            * coverage.connectionQuality
+            * blockNovelty
           eff += scoreReference * 2 * continuity.scale * coverage.connectionQuality
             + anchorLift
             + sequenceMomentum
+            + blockVarietyLift
             - scoreReference * 2 * continuity.scale * runOverage
         } else {
           const eventCenter = (Number(evt.start_time_seconds || 0) + Number(evt.end_time_seconds || 0)) / 2
@@ -986,6 +1002,7 @@ export function computeHighlightSelection(events, weights, targetDuration, minSe
     driverTargetMet,
     driverTargetUniqueShare: params.targetUniqueDriverShare ?? 0.60,
     continuityPreference: continuity.preference,
+    continuityEventDiversity: continuity.eventDiversity,
     continuityMaxGap: Math.round(continuity.maxGap * 100) / 100,
     continuityMaxSequenceDuration: Math.round(continuity.maxSequenceDuration * 10) / 10,
     continuityMaxSequences: continuity.maxSequences,
@@ -1469,6 +1486,7 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
     segments: [{ ...segment }],
     start: segment.clipStart,
     end: segment.clipEnd,
+    eventTypes: new Set([segment.event_type || 'unknown']),
   }))
 
   // Global agglomerative grouping avoids the left-to-right rich-get-richer
@@ -1489,7 +1507,12 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
         (combinedSpan - continuity.preferredSequenceDuration)
           / Math.max(continuity.preferredSequenceDuration, 1),
       )
-      const priority = gap / Math.max(continuity.maxGap, 0.001) + overPreferred * 2
+      const sharedTypes = [...left.eventTypes].filter(type => right.eventTypes.has(type)).length
+      const unionTypes = new Set([...left.eventTypes, ...right.eventTypes])
+      const typeDistance = unionTypes.size > 0 ? 1 - sharedTypes / unionTypes.size : 0
+      const priority = gap / Math.max(continuity.maxGap, 0.001)
+        + overPreferred * 2
+        - continuity.scale * continuity.eventDiversityScale * typeDistance * 0.75
       if (priority < bestPriority) {
         bestIndex = index
         bestPriority = priority
@@ -1507,6 +1530,7 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
       segments: [...left.segments, ...right.segments],
       start: left.start,
       end: right.end,
+      eventTypes: new Set([...left.eventTypes, ...right.eventTypes]),
     })
     retainedContinuityDuration += bestGap
     continuityBudgetRemaining -= bestGap
@@ -1761,6 +1785,7 @@ export function buildProductionTimeline(selection, targetDuration, params, raceD
     driverCount: allPlacedDrivers.size,
     segmentCount: finalTimeline.length,
     continuityPreference: continuity.preference,
+    continuityEventDiversity: continuity.eventDiversity,
     continuitySequenceCount: timeline.length ? continuityGroupIndex : 0,
     continuityDuration: Math.round(retainedContinuityDuration * 10) / 10,
     hardCutCount,

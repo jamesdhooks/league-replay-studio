@@ -35,12 +35,15 @@ describe('continuity-aware highlight planning', () => {
       continuityBlockDuration: 75,
       continuityBlockCount: 8,
       continuityGapReach: 35,
+      continuityEventDiversity: 65,
     })).toMatchObject({
       preferredSequenceDuration: 75,
       maxSequenceDuration: 101.25,
       preferredSequences: 8,
       maxSequences: 10,
       maxGap: 35,
+      eventDiversity: 65,
+      eventDiversityScale: 0.65,
     })
   })
 
@@ -149,6 +152,73 @@ describe('continuity-aware highlight planning', () => {
     expect(selection.selectedIds).toContain(1)
     expect(selection.selectedIds).toContain(2)
     expect(selection.selectedIds).not.toContain(3)
+  })
+
+  it('uses block variety to prefer a new event type inside a continuity run', () => {
+    const events = [
+      event(1, 'battle', 0, 20, 10),
+      { ...event(2, 'battle', 25, 85, 10), position: 1 },
+      { ...event(3, 'overtake', 25, 85, 2), position: 20 },
+    ]
+    const baseParams = {
+      paddingBefore: 0,
+      paddingAfter: 0,
+      continuityPreference: 100,
+      diversityStrength: 0,
+      driverCoverageStrength: 0,
+      lateRaceMultiplier: 1,
+      mixMax: { battle: 1, overtake: 1 },
+    }
+    const scoreFirst = computeHighlightSelection(
+      events,
+      { battle: 100, overtake: 10 },
+      85,
+      0,
+      { '1': 'highlight' },
+      100,
+      [],
+      { ...baseParams, continuityEventDiversity: 0 },
+    )
+    const varied = computeHighlightSelection(
+      events,
+      { battle: 100, overtake: 10 },
+      85,
+      0,
+      { '1': 'highlight' },
+      100,
+      [],
+      { ...baseParams, continuityEventDiversity: 100 },
+    )
+
+    expect(scoreFirst.selectedIds).toContain(2)
+    expect(scoreFirst.selectedIds).not.toContain(3)
+    expect(varied.selectedIds).toContain(3)
+    expect(varied.selectedIds).not.toContain(2)
+  })
+
+  it('uses block variety to prefer a mixed-type continuity join', () => {
+    const scoredEvents = [
+      { ...event(1, 'battle', 0, 6), inclusion: 'highlight', score: 8, tier: 'A', bucket: 'intro' },
+      { ...event(2, 'battle', 8, 14), inclusion: 'highlight', score: 7, tier: 'A', bucket: 'intro' },
+      { ...event(3, 'incident', 19, 25), inclusion: 'highlight', score: 6, tier: 'B', bucket: 'early' },
+    ]
+    const selection = { scoredEvents, fullVideoIds: [], metrics: {} }
+    const base = { paddingBefore: 0, paddingAfter: 0, continuityPreference: 55, pipThreshold: 9 }
+    const scoreFirst = buildProductionTimeline(selection, 24, {
+      ...base,
+      continuityEventDiversity: 0,
+    }, 100)
+    const varied = buildProductionTimeline(selection, 24, {
+      ...base,
+      continuityEventDiversity: 100,
+    }, 100)
+    const scoreFirstClips = scoreFirst.timeline.filter(segment => segment.type !== 'bridge')
+    const variedClips = varied.timeline.filter(segment => segment.type !== 'bridge')
+
+    expect(scoreFirstClips[0].continuityGroupId).toBe(scoreFirstClips[1].continuityGroupId)
+    expect(scoreFirstClips[1].continuityGroupId).not.toBe(scoreFirstClips[2].continuityGroupId)
+    expect(variedClips[0].continuityGroupId).not.toBe(variedClips[1].continuityGroupId)
+    expect(variedClips[1].continuityGroupId).toBe(variedClips[2].continuityGroupId)
   })
 
   it('fills the target by extending existing runs without adding cuts', () => {
