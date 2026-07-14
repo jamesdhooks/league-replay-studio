@@ -748,6 +748,50 @@ class TestCameraScheduleTiming:
         # Only the first entry (offset=1s) should have been fired
         assert len(schedule_entries) == 1
 
+    def test_persisted_timeline_schedule_executes_camera_and_driver_changes(self):
+        """The absolute schedule schema saved by script generation must execute."""
+        clock = FakeClock(0.0)
+        bridge = make_iracing_bridge(cam_group=1, cam_car_idx=3)
+        engine = make_engine(clock=clock, clip_padding=2.0)
+
+        segment = {
+            "id": "persisted-schedule",
+            "section": "race",
+            "type": "event",
+            "start_time_seconds": 100.0,
+            "end_time_seconds": 112.0,
+            "camera_preferences": ["TV1"],
+            "involved_drivers": [3],
+            "camera_schedule": [
+                {
+                    "start": 100.0,
+                    "end": 105.0,
+                    "camera": "TV1",
+                    "driver_idx": 3,
+                },
+                {
+                    "start": 105.0,
+                    "end": 112.0,
+                    "camera": "Cockpit",
+                    "driver_idx": 7,
+                },
+            ],
+        }
+
+        engine.capture_script(
+            script=[segment],
+            iracing_bridge=bridge,
+            capture_engine=make_capture_engine(),
+        )
+
+        assert (7, 2) in [call.args for call in bridge.cam_switch_car.call_args_list]
+        schedule_entries = [
+            entry for entry in engine.capture_log
+            if entry["action"] == "camera_schedule" and entry["success"]
+        ]
+        assert [entry["extra"]["offset"] for entry in schedule_entries] == [0.0, 5.0]
+        assert "camera=Cockpit car_idx=7" in schedule_entries[-1]["detail"]
+
     def test_contiguous_segment_uses_zero_pre_roll(self):
         """For a contiguous segment, pre_roll=0, so offset_seconds is measured
         directly from the start of the wait."""

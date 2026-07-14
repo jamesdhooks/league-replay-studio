@@ -1724,22 +1724,43 @@ class ScriptCaptureEngine:
                 new recording pass this equals the clip padding; for a contiguous
                 segment it is 0.
             segment: The segment dict, which may contain a ``camera_schedule``
-                list of ``{offset_seconds, camera_name|camera_group, car_idx}``.
+                list. Persisted scripts use absolute ``start`` values with
+                ``camera``/``driver_idx``; older callers may provide relative
+                ``offset_seconds`` values with ``camera_name``/``car_idx``.
             iracing_bridge: iRacing bridge for camera commands.
             cam_name_to_num: Mapping of camera name → group number.
         """
         schedule = segment.get("camera_schedule") or []
         seg_id = segment.get("id", "unknown")
 
-        # Sort entries; skip any whose fire time is at or beyond the end of the wait.
+        # Normalize the persisted script contract at the execution boundary so
+        # timeline windows and legacy relative schedule entries behave alike.
         entries = sorted(
-            [e for e in schedule if isinstance(e, dict)],
-            key=lambda e: e.get("offset_seconds", 0),
+            [
+                self._normalize_camera_schedule_entry(segment, entry)
+                for entry in schedule
+                if isinstance(entry, dict)
+            ],
+            key=lambda entry: entry["offset_seconds"],
         )
-        valid_entries = [
-            e for e in entries
-            if pre_roll + e.get("offset_seconds", 0) < total_wait
-        ]
+        valid_entries = []
+        for entry in entries:
+            has_target = (
+                entry.get("camera_name")
+                or entry.get("camera_group") is not None
+                or entry.get("car_idx") is not None
+            )
+            if not has_target:
+                self._log_entry(
+                    seg_id,
+                    "camera_schedule",
+                    "Ignoring scheduled switch with no camera or driver target",
+                    success=False,
+                    extra={"schedule_entry": entry},
+                )
+                continue
+            if pre_roll + entry["offset_seconds"] < total_wait:
+                valid_entries.append(entry)
 
         elapsed = 0.0
         for entry in valid_entries:
@@ -1763,6 +1784,38 @@ class ScriptCaptureEngine:
                 remaining, lambda: self._cancelled,
                 _now=self._now, _sleep=self._sleep,
             )
+
+    @staticmethod
+    def _normalize_camera_schedule_entry(segment: dict, entry: dict) -> dict:
+        """Return one camera schedule entry in the executor's relative schema."""
+        raw_offset = entry.get("offset_seconds")
+        if raw_offset is None:
+            try:
+                segment_start = float(segment.get("start_time_seconds", 0) or 0)
+                raw_offset = float(entry.get("start", segment_start)) - segment_start
+            except (TypeError, ValueError):
+                raw_offset = 0.0
+
+        try:
+            offset = max(0.0, float(raw_offset))
+        except (TypeError, ValueError):
+            offset = 0.0
+
+        raw_car_idx = entry.get("car_idx")
+        if raw_car_idx is None:
+            raw_car_idx = entry.get("driver_idx")
+        try:
+            car_idx = int(raw_car_idx) if raw_car_idx is not None else None
+        except (TypeError, ValueError):
+            car_idx = None
+
+        return {
+            **entry,
+            "offset_seconds": offset,
+            "camera_name": entry.get("camera_name") or entry.get("camera"),
+            "camera_group": entry.get("camera_group"),
+            "car_idx": car_idx,
+        }
 
     def _fire_schedule_entry(
         self,
