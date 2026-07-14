@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useHighlight } from '../../context/HighlightContext'
 import { useIRacing } from '../../context/IRacingContext'
+import { useProject } from '../../context/ProjectContext'
 import { useToast } from '../../context/ToastContext'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
 import {
@@ -19,12 +20,26 @@ export default function HighlightConfigBar({ projectId }) {
     generateVideoScript,
     serverScoring,
     productionTimeline,
+    videoScript,
+    scriptProjectId,
   } = useHighlight()
+  const { activeProject } = useProject()
   const { sessionData } = useIRacing()
   const { showInfo, showSuccess, showError } = useToast()
   const [autoGenerate, setAutoGenerate] = useLocalStorage('lrs:highlights:autoGenerate', false)
   const autoGenDebounce = useRef(null)
   const isFirstRender = useRef(true)
+  const hasExistingScript = (
+    activeProject?.id === projectId
+    && (
+      (Array.isArray(activeProject.script) && activeProject.script.length > 0)
+      || Boolean(activeProject.script_generated_at)
+    )
+  ) || (
+    scriptProjectId === projectId
+    && Array.isArray(videoScript)
+    && videoScript.length > 0
+  )
 
   // Auto-generate: silently regenerate script whenever productionTimeline changes
   useEffect(() => {
@@ -124,7 +139,9 @@ export default function HighlightConfigBar({ projectId }) {
                    bg-accent hover:bg-accent-hover text-white rounded transition-colors disabled:opacity-60"
       >
         {serverScoring ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-        {serverScoring ? 'Generating...' : 'Generate Script'}
+        {serverScoring
+          ? (hasExistingScript ? 'Re-Generating...' : 'Generating...')
+          : (hasExistingScript ? 'Re-Generate Script' : 'Generate Script')}
       </button>
     </div>
   )

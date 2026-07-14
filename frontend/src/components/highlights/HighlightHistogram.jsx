@@ -4,6 +4,7 @@ import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { useTimeline, EVENT_COLORS } from '../../context/TimelineContext'
 import { useToast } from '../../context/ToastContext'
 import { useIRacing } from '../../context/IRacingContext'
+import { useProject } from '../../context/ProjectContext'
 import { formatTime, formatDuration } from '../../utils/time'
 import { Columns3, ArrowRight, RotateCw, Download, FileText, Loader2, Zap } from 'lucide-react'
 import { resolveTypePadding } from '../../utils/highlight-padding'
@@ -46,7 +47,11 @@ function scoreToBucket(score) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function HighlightHistogram({ onInspect, projectId, collapsed, onToggle, eventsLoaded = false }) {
-  const { selection, productionTimeline, metrics, toggleOverride, applyHighlights, generateVideoScript, params, serverScoring } = useHighlight()
+  const {
+    selection, productionTimeline, metrics, toggleOverride, applyHighlights,
+    generateVideoScript, params, serverScoring, videoScript, scriptProjectId,
+  } = useHighlight()
+  const { activeProject } = useProject()
   const { raceDuration, selectedEventId, setSelectedEventId, playheadTime, seekTo } = useTimeline()
   const { showInfo, showSuccess, showError } = useToast()
   const { sessionData } = useIRacing()
@@ -63,6 +68,17 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
   const [showReport, setShowReport] = useState(false)
   const [activeTypes, setActiveTypes] = useState(null)  // null = all types visible
   const scrollRef = useRef(null)
+  const hasExistingScript = (
+    activeProject?.id === projectId
+    && (
+      (Array.isArray(activeProject.script) && activeProject.script.length > 0)
+      || Boolean(activeProject.script_generated_at)
+    )
+  ) || (
+    scriptProjectId === projectId
+    && Array.isArray(videoScript)
+    && videoScript.length > 0
+  )
 
   // Auto-generate: silently regenerate script whenever productionTimeline changes
   useEffect(() => {
@@ -358,7 +374,9 @@ export default function HighlightHistogram({ onInspect, projectId, collapsed, on
                          bg-accent hover:bg-accent-hover disabled:opacity-60 text-white rounded transition-colors"
             >
               {serverScoring ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-              {serverScoring ? 'Generating...' : 'Generate Script'}
+              {serverScoring
+                ? (hasExistingScript ? 'Re-Generating...' : 'Generating...')
+                : (hasExistingScript ? 'Re-Generate Script' : 'Generate Script')}
             </button>
           </div>
         ) : null}
